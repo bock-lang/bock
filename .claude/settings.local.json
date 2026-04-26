@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Edit(compiler/**)",
+      "Edit(extensions/**)",
+      "Edit(examples/**)",
+      "Edit(website/**)",
+      "Edit(stdlib/**)",
+      "Edit(tools/**)",
+      "Edit(docs/**)",
+      "Edit(STATUS.md)",
+      "Edit(CLAUDE.md)",
+      "Edit(CHANGELOG.md)"
+    ]
+  }
+}
