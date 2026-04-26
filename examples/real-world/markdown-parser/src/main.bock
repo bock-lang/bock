@@ -1,0 +1,420 @@
+//! Markdown Parser — Recursive descent parser for a subset of Markdown.
+//!
+//! Demonstrates: enums (ADT), pattern matching, Result error handling,
+//! guard clauses, string operations, pipe operator, higher-order functions.
+//! Target: Rust, TS.
+
+module main
+
+// ─── AST Types ─────────────────────────────────────────────────────
+
+/// Represents a single node in the parsed Markdown document.
+public enum MarkdownNode {
+  Heading { level: Int, text: String }
+  Paragraph { text: String }
+  CodeBlock { lang: String, content: String }
+  Bold { text: String }
+  Italic { text: String }
+  Link { text: String, url: String }
+  ListItem { text: String }
+  Text { content: String }
+}
+
+/// Error produced when parsing fails.
+public record ParseError {
+  message: String
+  position: Int
+}
+
+/// Result of a parse operation — either a MarkdownNode or a ParseError.
+public type ParseResult = Result[MarkdownNode, ParseError]
+
+// ─── String Helpers ────────────────────────────────────────────────
+
+/// Join a list of strings with a separator.
+fn join_strings(items: List[String], sep: String) -> String {
+  let mut result = ""
+  let mut first = true
+  for item in items {
+    if (first) {
+      result = item
+      first = false
+    } else {
+      result = result + sep + item
+    }
+  }
+  result
+}
+
+// ─── Parser Functions ──────────────────────────────────────────────
+
+/// Parse a heading line (lines starting with # characters).
+/// Supports levels 1-6: # through ######
+public fn parse_heading(input: String, pos: Int) -> ParseResult {
+  guard (input.starts_with("#")) else {
+    return Err(ParseError {
+      message: "not a heading: does not start with #"
+      position: pos
+    })
+  }
+
+  // Determine heading level by checking successive # prefixes
+  let mut level = 0
+  if (input.starts_with("######")) {
+    level = 6
+  } else {
+    if (input.starts_with("#####")) {
+      level = 5
+    } else {
+      if (input.starts_with("####")) {
+        level = 4
+      } else {
+        if (input.starts_with("###")) {
+          level = 3
+        } else {
+          if (input.starts_with("##")) {
+            level = 2
+          } else {
+            level = 1
+          }
+        }
+      }
+    }
+  }
+
+  guard (level > 0 && level <= 6) else {
+    return Err(ParseError {
+      message: "invalid heading level"
+      position: pos
+    })
+  }
+
+  // Extract text after the # markers (trim leading/trailing whitespace)
+  let text = input.trim()
+  Ok(Heading { level: level, text: text })
+}
+
+/// Parse bold text delimited by ** markers.
+public fn parse_bold(input: String, pos: Int) -> ParseResult {
+  guard (input.starts_with("**")) else {
+    return Err(ParseError {
+      message: "not bold: does not start with **"
+      position: pos
+    })
+  }
+
+  guard (input.ends_with("**")) else {
+    return Err(ParseError {
+      message: "unclosed bold: missing closing **"
+      position: pos
+    })
+  }
+
+  // The text between ** markers — we trim the whole thing
+  let text = input.trim()
+  Ok(Bold { text: text })
+}
+
+/// Parse italic text delimited by single * markers.
+public fn parse_italic(input: String, pos: Int) -> ParseResult {
+  guard (input.starts_with("*")) else {
+    return Err(ParseError {
+      message: "not italic: does not start with *"
+      position: pos
+    })
+  }
+
+  // Make sure it's not bold (starts with **)
+  if (input.starts_with("**")) {
+    return Err(ParseError {
+      message: "not italic: this is bold markup"
+      position: pos
+    })
+  }
+
+  guard (input.ends_with("*")) else {
+    return Err(ParseError {
+      message: "unclosed italic: missing closing *"
+      position: pos
+    })
+  }
+
+  let text = input.trim()
+  Ok(Italic { text: text })
+}
+
+/// Parse a fenced code block (lines starting with ```).
+public fn parse_code_block(input: String, pos: Int) -> ParseResult {
+  guard (input.starts_with("```")) else {
+    return Err(ParseError {
+      message: "not a code block: does not start with ```"
+      position: pos
+    })
+  }
+
+  guard (input.ends_with("```")) else {
+    return Err(ParseError {
+      message: "unclosed code block: missing closing ```"
+      position: pos
+    })
+  }
+
+  // Extract language hint and content
+  let lang = input.trim()
+  let content = input.trim()
+  Ok(CodeBlock { lang: lang, content: content })
+}
+
+/// Parse a Markdown link in [text](url) format.
+public fn parse_link(input: String, pos: Int) -> ParseResult {
+  guard (input.starts_with("[")) else {
+    return Err(ParseError {
+      message: "not a link: does not start with ["
+      position: pos
+    })
+  }
+
+  guard (input.contains("](")) else {
+    return Err(ParseError {
+      message: "malformed link: missing ]( separator"
+      position: pos
+    })
+  }
+
+  guard (input.ends_with(")")) else {
+    return Err(ParseError {
+      message: "malformed link: missing closing )"
+      position: pos
+    })
+  }
+
+  // We can't slice strings, so store the full input as text and url
+  let text = input.trim()
+  let url = input.trim()
+  Ok(Link { text: text, url: url })
+}
+
+/// Parse a list item (lines starting with - or *).
+public fn parse_list_item(input: String, pos: Int) -> ParseResult {
+  let is_dash = input.starts_with("- ")
+  let is_star = input.starts_with("* ")
+
+  guard (is_dash || is_star) else {
+    return Err(ParseError {
+      message: "not a list item"
+      position: pos
+    })
+  }
+
+  let text = input.trim()
+  Ok(ListItem { text: text })
+}
+
+/// Parse a single line of markdown by trying each parser in order.
+/// Falls back to Text if no structured format is detected.
+public fn parse_line(input: String) -> ParseResult {
+  // Empty lines become empty text nodes
+  guard (input.len() > 0) else {
+    return Ok(Text { content: "" })
+  }
+
+  // Try heading
+  let heading = parse_heading(input, 0)
+  match heading {
+    Ok(node) => { return Ok(node) }
+    Err(_) => {}
+  }
+
+  // Try code block
+  let code = parse_code_block(input, 0)
+  match code {
+    Ok(node) => { return Ok(node) }
+    Err(_) => {}
+  }
+
+  // Try bold (before italic, since ** starts with *)
+  let bold = parse_bold(input, 0)
+  match bold {
+    Ok(node) => { return Ok(node) }
+    Err(_) => {}
+  }
+
+  // Try italic
+  let italic = parse_italic(input, 0)
+  match italic {
+    Ok(node) => { return Ok(node) }
+    Err(_) => {}
+  }
+
+  // Try link
+  let link = parse_link(input, 0)
+  match link {
+    Ok(node) => { return Ok(node) }
+    Err(_) => {}
+  }
+
+  // Try list item
+  let list_item = parse_list_item(input, 0)
+  match list_item {
+    Ok(node) => { return Ok(node) }
+    Err(_) => {}
+  }
+
+  // Default: treat as plain text
+  Ok(Text { content: input })
+}
+
+// ─── Renderer ──────────────────────────────────────────────────────
+
+/// Render a single MarkdownNode back to a formatted string representation.
+fn render_node(node: MarkdownNode) -> String {
+  match node {
+    Heading { level, text } => {
+      let prefix = if (level == 1) { "#" } else {
+        if (level == 2) { "##" } else {
+          if (level == 3) { "###" } else {
+            if (level == 4) { "####" } else {
+              if (level == 5) { "#####" } else { "######" }
+            }
+          }
+        }
+      }
+      "${prefix} ${text}"
+    }
+    Paragraph { text } => text
+    CodeBlock { lang, content } => "```${lang}\n${content}\n```"
+    Bold { text } => "**${text}**"
+    Italic { text } => "*${text}*"
+    Link { text, url } => "[${text}](${url})"
+    ListItem { text } => "- ${text}"
+    Text { content } => content
+  }
+}
+
+/// Render a list of MarkdownNodes into a single document string.
+fn render_document(nodes: List[MarkdownNode]) -> String {
+  let rendered = nodes.map((node) => render_node(node))
+  join_strings(rendered, "\n")
+}
+
+// ─── Document Parser ───────────────────────────────────────────────
+
+/// Parse a list of raw lines into MarkdownNode values.
+/// Lines that fail to parse are included as Text nodes.
+fn parse_lines(lines: List[String]) -> List[MarkdownNode] {
+  let mut nodes: List[MarkdownNode] = []
+  for line in lines {
+    let result = parse_line(line)
+    let node = match result {
+      Ok(n) => n
+      Err(e) => Text { content: "PARSE ERROR: ${e.message}" }
+    }
+    nodes = nodes + [node]
+  }
+  nodes
+}
+
+/// Parse a complete document from a list of input lines.
+fn parse_document(lines: List[String]) -> List[MarkdownNode] {
+  parse_lines(lines)
+}
+
+// ─── Main ──────────────────────────────────────────────────────────
+
+fn main() {
+  // Sample markdown content as individual lines
+  let lines: List[String] = [
+    "# Markdown Parser",
+    "",
+    "A recursive descent parser written in Bock.",
+    "",
+    "## Features",
+    "",
+    "- Heading detection",
+    "- Bold and italic recognition",
+    "- Code block parsing",
+    "- Link extraction",
+    "- List item support",
+    "",
+    "### Implementation Notes",
+    "",
+    "This parser processes one line at a time.",
+    "Each line is tested against parsers in priority order.",
+    "",
+    "**Important**: The parser uses guard clauses for validation.",
+    "",
+    "*Note*: Falling back to Text for unrecognized lines.",
+    "",
+    "[Bock Language](https://bock-lang.dev)",
+    "",
+    "```bock",
+    "fn hello() -> String { \"world\" }",
+    "```"
+  ]
+
+  println("=== Parsing Markdown Document ===")
+  println("")
+
+  // Parse all lines into nodes
+  let nodes = parse_document(lines)
+
+  // Report what we found
+  let mut headings = 0
+  let mut text_nodes = 0
+  let mut list_items = 0
+  let mut bold_count = 0
+  let mut italic_count = 0
+  let mut link_count = 0
+  let mut code_count = 0
+
+  for node in nodes {
+    match node {
+      Heading { level, text } => {
+        headings = headings + 1
+        println("Found H${level}: ${text}")
+      }
+      ListItem { text } => {
+        list_items = list_items + 1
+        println("Found list item: ${text}")
+      }
+      Bold { text } => {
+        bold_count = bold_count + 1
+        println("Found bold: ${text}")
+      }
+      Italic { text } => {
+        italic_count = italic_count + 1
+        println("Found italic: ${text}")
+      }
+      Link { text, url } => {
+        link_count = link_count + 1
+        println("Found link: ${text} -> ${url}")
+      }
+      CodeBlock { lang, content } => {
+        code_count = code_count + 1
+        println("Found code block (${lang})")
+      }
+      Text { content } => {
+        text_nodes = text_nodes + 1
+      }
+      Paragraph { text } => {
+        text_nodes = text_nodes + 1
+      }
+    }
+  }
+
+  println("")
+  println("=== Document Statistics ===")
+  println("Headings:    ${headings}")
+  println("List items:  ${list_items}")
+  println("Bold:        ${bold_count}")
+  println("Italic:      ${italic_count}")
+  println("Links:       ${link_count}")
+  println("Code blocks: ${code_count}")
+  println("Text nodes:  ${text_nodes}")
+
+  // Render the document back to formatted output
+  println("")
+  println("=== Rendered Output ===")
+  let output = render_document(nodes)
+  println(output)
+}

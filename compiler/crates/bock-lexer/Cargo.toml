@@ -1,0 +1,8 @@
+[package]
+name = "bock-lexer"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+bock-source.workspace = true
+bock-errors.workspace = true

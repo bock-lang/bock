@@ -1,0 +1,6 @@
+[project]
+name = "systems-allocator"
+version = "0.1.0"
+
+[strictness]
+default = "sketch"

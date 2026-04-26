@@ -1,0 +1,60 @@
+//! Inventory System — Domain models.
+//!
+//! Demonstrates: records, enums, impl blocks, cross-file exports.
+
+module models
+
+/// Product category classification.
+public enum Category {
+  Electronics
+  Clothing
+  Food
+  Books
+  Other
+}
+
+/// A product in the inventory.
+@managed
+public record Product {
+  id: Int
+  name: String
+  category: Category
+  price: Float
+  quantity: Int
+}
+
+impl Product {
+  /// Whether the product is in stock.
+  public fn in_stock(self) -> Bool {
+    self.quantity > 0
+  }
+
+  /// Total value of this product's stock.
+  public fn stock_value(self) -> Float {
+    self.price * self.quantity.to_float()
+  }
+
+  /// Display string for this product.
+  public fn display(self) -> String {
+    "${self.name} (x${self.quantity}) @ $${self.price}"
+  }
+}
+
+/// Summary of inventory state.
+@managed
+public record InventorySummary {
+  total_products: Int
+  total_value: Float
+  out_of_stock: Int
+}
+
+/// Returns the category name as a string.
+public fn category_name(cat: Category) -> String {
+  match cat {
+    Electronics => "Electronics"
+    Clothing => "Clothing"
+    Food => "Food"
+    Books => "Books"
+    Other => "Other"
+  }
+}

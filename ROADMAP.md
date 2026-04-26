@@ -5,40 +5,78 @@ the repo, see [`STATUS.md`](STATUS.md).
 
 ## Current Phase
 
-**M.3 — Repository scaffold.** Establish the project structure,
-contributor docs, and CI surface in an empty repo. No compiler
-content yet.
+**M.4 — Compiler migration.** Complete. The compiler crates,
+stdlib, conformance suite, examples, spec, extension, and docs
+have all been ported from the internal `aura-dev` working tree
+into this repository under the Bock identity.
 
-## Next Up
+## v1.0 — Public Release
 
-**M.4 — Compiler migration.** Port compiler crates, stdlib, VS Code
-extension, language spec, and conformance tests from the prior
-working tree, renamed under the `bock` identity.
+**Theme:** Ship what's already done. Verify, polish, announce.
 
-## v1.0 Release Criteria
+- Property claims locked in:
+  - "One language, many targets" — codegen parity across JS, TS,
+    Python, Rust, Go on the example projects.
+  - "Effects on every function" — effect inference + reporting in
+    the CLI and editor.
+  - "Targeted output, not a runtime" — generated code is idiomatic
+    in each target with no Bock-specific runtime.
+- CI live on GitHub Actions: build + test + clippy + fmt + mdbook.
+- VS Code extension published to the marketplace.
+- `bock` binary released via crates.io and GitHub Releases.
+- Documentation site deployed.
+- Announcement post.
 
-- Stable language specification (frozen surface syntax + semantics)
-- Conformance suite at 100% pass on supported targets
-- Targets at parity: JS, TS, Python, Rust, Go
-- Stdlib coverage for I/O, collections, async, errors, time
-- VS Code extension with diagnostics, completion, hover, format
-- Documentation site live with tutorial, reference, and stdlib docs
-- `bock` binary distributed via crates.io and GitHub Releases
-- Effect system fully checked across all targets
-- Module system stable across files and packages
-- AI provider primitives in stdlib (per spec §17.8)
+**Acceptance criteria:**
+- Conformance suite passes on every supported target.
+- All 20 example projects `bock check`, `bock build`, and (where
+  applicable) `bock test` clean on at least JS + Python + Rust.
+- `cargo clippy --workspace -- -D warnings` clean.
 
-## v1.1 Planned Features
+## v1.1 — Editor and Tooling Polish
 
-- Incremental compilation with persistent cache
-- Language server protocol implementation (decoupled from VS Code)
-- Additional codegen targets (candidates: Swift, Kotlin, C#)
-- Package registry and dependency resolution
-- Macro system (syntactic, hygienic)
+**Theme:** Make the editor a delight; close interpreter gaps.
 
-## v2 Vision
+- AIR tree view in the VS Code extension (visualize the
+  intermediate representation per file).
+- Target preview (live transpile-and-show in side panel).
+- Standalone language server (LSP), decoupled from the VS Code
+  extension so other editors can consume it.
+- Incremental compilation with persistent build cache.
+- Diagnostics quick-fixes (error → suggested edit).
+- Hover-card improvements: effect set, target equivalence per
+  symbol.
 
-- Self-hosting compiler (Bock written in Bock)
-- Native target via LLVM backend
-- WebAssembly target with first-class browser bindings
-- Distributed type-checking for monorepo scale
+## v1.2 — Closing Deferred Loose Ends
+
+**Theme:** Finish the items deferred from v1.0.
+
+- **Cancel runtime.** Wire cooperative cancellation through the
+  interpreter and into each codegen target.
+- **AUDIT-006.** Address the outstanding implementation audit
+  finding.
+- **`std.time.SystemClock` live impl.** Replace the stub with a
+  per-target live clock that still respects the deterministic
+  test path.
+- Documentation depth: complete the language-guide stubs left
+  brief in v1.0.
+
+## v2 — Ecosystem Growth
+
+**Theme:** From compiler to ecosystem.
+
+- Stdlib expansion: HTTP server primitives, structured logging,
+  config loading, async streaming.
+- Additional codegen targets (candidates: Swift, Kotlin, C#) — one
+  at a time, evaluated against current generation patterns.
+- Package registry and dependency resolution beyond the local
+  lockfile.
+- Macro system (syntactic, hygienic).
+- Self-hosting: compile the Bock compiler itself with Bock.
+- Native compilation via LLVM backend.
+- WebAssembly target with first-class browser bindings.
+- Distributed type-checking for monorepo scale.
+
+The order of v2 items is intentionally not fixed; individual items
+will graduate to versioned milestones as designs solidify and
+contributor capacity allows.

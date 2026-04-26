@@ -1,0 +1,113 @@
+//! Tests for the Markdown parser.
+
+module parser_test
+
+use main.*
+
+// ─── Heading Tests ─────────────────────────────────────────────────
+
+@test
+fn test_heading_level_1() {
+  let result = parse_heading("# Title", 0)
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_heading_level_3() {
+  let result = parse_heading("### Subsection", 0)
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_heading_rejects_plain_text() {
+  let result = parse_heading("Not a heading", 0)
+  expect(result).to_be_err()
+}
+
+// ─── Bold Tests ────────────────────────────────────────────────────
+
+@test
+fn test_bold_valid() {
+  let result = parse_bold("**strong**", 0)
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_bold_unclosed() {
+  let result = parse_bold("**not closed", 0)
+  expect(result).to_be_err()
+}
+
+@test
+fn test_bold_rejects_plain() {
+  let result = parse_bold("not bold", 0)
+  expect(result).to_be_err()
+}
+
+// ─── Italic Tests ──────────────────────────────────────────────────
+
+@test
+fn test_italic_valid() {
+  let result = parse_italic("*emphasis*", 0)
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_italic_rejects_bold() {
+  let result = parse_italic("**bold**", 0)
+  expect(result).to_be_err()
+}
+
+// ─── Link Tests ────────────────────────────────────────────────────
+
+@test
+fn test_link_valid() {
+  let result = parse_link("[Bock](https://bock-lang.dev)", 0)
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_link_malformed() {
+  let result = parse_link("[broken link", 0)
+  expect(result).to_be_err()
+}
+
+// ─── List Item Tests ───────────────────────────────────────────────
+
+@test
+fn test_list_item_dash() {
+  let result = parse_list_item("- item one", 0)
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_list_item_star() {
+  let result = parse_list_item("* item two", 0)
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_list_item_rejects_plain() {
+  let result = parse_list_item("plain text", 0)
+  expect(result).to_be_err()
+}
+
+// ─── parse_line Dispatch Tests ─────────────────────────────────────
+
+@test
+fn test_parse_line_empty() {
+  let result = parse_line("")
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_parse_line_heading() {
+  let result = parse_line("## Features")
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_parse_line_fallback_to_text() {
+  let result = parse_line("Just a normal sentence.")
+  expect(result).to_be_ok()
+}

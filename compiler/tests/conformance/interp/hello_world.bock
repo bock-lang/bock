@@ -1,0 +1,3 @@
+// TEST: interpreter_output_hello
+// EXPECT: output "hello world"
+fn main() { println("hello world") }

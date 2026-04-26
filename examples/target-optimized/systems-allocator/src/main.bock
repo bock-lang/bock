@@ -1,0 +1,294 @@
+//! Systems Allocator — Pool-based memory allocator with ownership semantics.
+//!
+//! Demonstrates: ownership, move semantics, mut params, Result types,
+//! traits, pattern matching, for loops, list operations.
+//! Target: Rust. NO @managed anywhere — ownership is real.
+
+module main
+
+// ─── Memory Block ─────────────────────────────────────────────────
+
+/// A single allocated memory block with an id, size, and data payload.
+public record Block {
+  id: Int
+  size: Int
+  data: String
+}
+
+/// Trait for types that can report their allocation size.
+public trait Allocatable {
+  fn alloc_size(self) -> Int
+}
+
+impl Allocatable for Block {
+  public fn alloc_size(self) -> Int {
+    self.size
+  }
+}
+
+impl Block {
+  /// Format block as a human-readable summary.
+  public fn describe(self) -> String {
+    "Block #${self.id} (${self.size} bytes)"
+  }
+}
+
+// ─── Pool Allocator ───────────────────────────────────────────────
+
+/// A fixed-capacity pool that manages a collection of memory blocks.
+/// Ownership of the pool transfers on every operation — the caller
+/// must rebind after allocate/deallocate.
+public record Pool {
+  blocks: List[Block]
+  capacity: Int
+  next_id: Int
+  total_allocated: Int
+}
+
+/// Create a new empty pool with the given block capacity.
+public fn create_pool(capacity: Int) -> Pool {
+  Pool {
+    blocks: []
+    capacity: capacity
+    next_id: 1
+    total_allocated: 0
+  }
+}
+
+/// Allocate a new block from the pool.
+/// Returns Ok(Pool) with the updated pool on success,
+/// or Err(String) if the pool is full.
+///
+/// Ownership: caller passes `mut pool` — pool moves in,
+/// new pool moves out via Result.
+public fn allocate(mut pool: Pool, size: Int) -> Result[Pool, String] {
+  if (pool.blocks.len() >= pool.capacity) {
+    Err("Pool exhausted: ${pool.blocks.len()}/${pool.capacity} blocks in use")
+  } else if (size <= 0) {
+    Err("Invalid block size: ${size}")
+  } else {
+    let block = Block {
+      id: pool.next_id
+      size: size
+      data: "block_${pool.next_id}"
+    }
+    let new_blocks = pool.blocks + [block]
+    Ok(Pool {
+      blocks: new_blocks
+      capacity: pool.capacity
+      next_id: pool.next_id + 1
+      total_allocated: pool.total_allocated + size
+    })
+  }
+}
+
+/// Remove a block by id, returning the updated pool.
+/// If the block doesn't exist, the pool is returned unchanged.
+public fn deallocate(mut pool: Pool, block_id: Int) -> Pool {
+  let remaining = pool.blocks.filter((b) => b.id != block_id)
+  let removed_count = pool.blocks.len() - remaining.len()
+  // Recalculate total from remaining blocks
+  let mut new_total = 0
+  for b in remaining {
+    new_total = new_total + b.size
+  }
+  Pool {
+    blocks: remaining
+    capacity: pool.capacity
+    next_id: pool.next_id
+    total_allocated: new_total
+  }
+}
+
+/// Search for a block by id. Prints details if found.
+public fn lookup_block(pool: Pool, block_id: Int) -> Bool {
+  let matches = pool.blocks.filter((b) => b.id == block_id)
+  if (matches.len() > 0) {
+    // Use for loop to access filtered blocks — .first() returns
+    // Optional with unresolved inner type for method dispatch
+    for b in matches {
+      println("Found: Block #${b.id} (${b.size} bytes)")
+    }
+    true
+  } else {
+    println("Block #${block_id} not found")
+    false
+  }
+}
+
+// ─── Pool Statistics ──────────────────────────────────────────────
+
+/// Format pool usage as a human-readable summary.
+public fn pool_usage(pool: Pool) -> String {
+  let used = pool.blocks.len()
+  let free = pool.capacity - used
+  "Pool: ${used}/${pool.capacity} blocks used (${free} free), ${pool.total_allocated} bytes allocated"
+}
+
+/// Check if the pool has room for at least one more block.
+public fn has_capacity(pool: Pool) -> Bool {
+  pool.blocks.len() < pool.capacity
+}
+
+/// List all block ids currently in the pool.
+public fn block_ids(pool: Pool) -> List[Int] {
+  pool.blocks.map((b) => b.id)
+}
+
+/// Deallocate all blocks, returning an empty pool.
+public fn clear_pool(mut pool: Pool) -> Pool {
+  Pool {
+    blocks: []
+    capacity: pool.capacity
+    next_id: pool.next_id
+    total_allocated: 0
+  }
+}
+
+// ─── Demo Helpers ─────────────────────────────────────────────────
+
+/// Demonstrate basic allocation — allocate three blocks and show usage.
+fn demo_allocate() -> Pool {
+  let mut pool = create_pool(5)
+  println(pool_usage(pool))
+
+  // Allocate blocks one at a time — pool ownership transfers each time.
+  // After: pool = allocate(mut pool, ...), the old pool is consumed.
+  match allocate(mut pool, 64) {
+    Ok(p) => {
+      pool = p
+      println("Allocated 64 bytes")
+    }
+    Err(e) => println("Error: ${e}")
+  }
+
+  match allocate(mut pool, 128) {
+    Ok(p) => {
+      pool = p
+      println("Allocated 128 bytes")
+    }
+    Err(e) => println("Error: ${e}")
+  }
+
+  match allocate(mut pool, 32) {
+    Ok(p) => {
+      pool = p
+      println("Allocated 32 bytes")
+    }
+    Err(e) => println("Error: ${e}")
+  }
+
+  println("")
+  println(pool_usage(pool))
+  pool
+}
+
+/// Show block details and trait methods on the pool's blocks.
+fn demo_inspect(pool: Pool) -> Void {
+  println("Current blocks:")
+  for b in pool.blocks {
+    println("  ${b.describe()}")
+  }
+
+  // Trait method — alloc_size
+  println("")
+  println("Block sizes via Allocatable trait:")
+  for b in pool.blocks {
+    println("  #${b.id} alloc_size = ${b.alloc_size()}")
+  }
+
+  // Find a specific block
+  println("")
+  let _found = lookup_block(pool, 2)
+}
+
+/// Demonstrate deallocation and re-allocation.
+fn demo_dealloc_and_reuse(mut pool: Pool) -> Pool {
+  // Deallocate block #2 — ownership transfers
+  pool = deallocate(mut pool, 2)
+  println("After deallocating block #2:")
+  println(pool_usage(pool))
+  for b in pool.blocks {
+    println("  ${b.describe()}")
+  }
+
+  // Re-allocate freed capacity with new blocks
+  println("")
+  println("Filling remaining capacity...")
+  match allocate(mut pool, 16) {
+    Ok(p) => {
+      pool = p
+      println("Allocated 16 bytes")
+    }
+    Err(e) => println("Error: ${e}")
+  }
+  match allocate(mut pool, 24) {
+    Ok(p) => {
+      pool = p
+      println("Allocated 24 bytes")
+    }
+    Err(e) => println("Error: ${e}")
+  }
+  match allocate(mut pool, 8) {
+    Ok(p) => {
+      pool = p
+      println("Allocated 8 bytes")
+    }
+    Err(e) => println("Error: ${e}")
+  }
+  println(pool_usage(pool))
+  pool
+}
+
+/// Demonstrate capacity limits and cleanup.
+fn demo_limits(mut pool: Pool) -> Void {
+  println("Attempting allocation beyond capacity...")
+  match allocate(mut pool, 256) {
+    Ok(p) => {
+      pool = p
+      println("Unexpected success")
+    }
+    Err(e) => println("Expected error: ${e}")
+  }
+
+  // Clear everything
+  pool = clear_pool(mut pool)
+  println("")
+  println("After clearing:")
+  println(pool_usage(pool))
+}
+
+// ─── Main ─────────────────────────────────────────────────────────
+
+fn main() {
+  println("=== Systems Allocator Demo ===")
+  println("")
+
+  // Phase 1: Allocate blocks
+  let mut pool = demo_allocate()
+
+  // Phase 2: Inspect blocks and traits
+  println("")
+  demo_inspect(pool)
+
+  // Phase 3: Deallocate and re-allocate
+  println("")
+  pool = demo_dealloc_and_reuse(mut pool)
+
+  // Phase 4: Capacity limits
+  println("")
+  demo_limits(mut pool)
+
+  // Ownership semantics demonstration (commented — would fail to compile):
+  // let p1 = create_pool(2)
+  // let r = allocate(mut p1, 10)  // p1 is moved into allocate
+  // println(pool_usage(p1))       // ERROR: p1 was moved!
+  //
+  // This is the key insight: after passing `mut pool` to allocate,
+  // the original binding is consumed. You MUST rebind from the Result.
+  // On Rust targets, this maps directly to ownership transfer.
+  // On JS/TS targets, this is erased — GC handles it.
+
+  println("")
+  println("=== Demo Complete ===")
+}

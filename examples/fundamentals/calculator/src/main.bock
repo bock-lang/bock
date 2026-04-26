@@ -1,0 +1,78 @@
+//! Calculator — Enum-based arithmetic with Result error handling.
+//!
+//! Demonstrates: enums, match, Result[T, E], Ok/Err, functions.
+//! Target: JS, Python.
+
+/// The four basic arithmetic operations.
+enum Op {
+  Add,
+  Sub,
+  Mul,
+  Div
+}
+
+/// Returns a human-readable name for an operation.
+fn op_name(op: Op) -> String {
+  match op {
+    Add => "+"
+    Sub => "-"
+    Mul => "*"
+    Div => "/"
+  }
+}
+
+/// Evaluates a binary arithmetic expression.
+/// Returns Err for division by zero.
+fn eval(op: Op, a: Float, b: Float) -> Result[Float, String] {
+  match op {
+    Add => Ok(a + b)
+    Sub => Ok(a - b)
+    Mul => Ok(a * b)
+    Div => {
+      if (b == 0.0) { Err("Division by zero") } else { Ok(a / b) }
+    }
+  }
+}
+
+/// Formats a computation and its result for display.
+fn format_expr(op: Op, a: Float, b: Float, result: Result[Float, String]) -> String {
+  let symbol = op_name(op)
+  match result {
+    Ok(value) => "${a} ${symbol} ${b} = ${value}"
+    Err(msg) => "${a} ${symbol} ${b} => Error: ${msg}"
+  }
+}
+
+/// Evaluates and prints a single computation.
+fn show(op: Op, a: Float, b: Float) -> Void {
+  let result = eval(op, a, b)
+  println(format_expr(op, a, b, result))
+}
+
+fn main() {
+  println("=== Bock Calculator ===")
+
+  // Basic operations
+  show(Add, 10.0, 5.0)
+  show(Sub, 10.0, 5.0)
+  show(Mul, 10.0, 5.0)
+  show(Div, 10.0, 5.0)
+
+  // Division by zero — returns Err, no crash
+  show(Div, 42.0, 0.0)
+
+  // Chained computation: (3 + 4) * 2
+  println("")
+  println("Chained: (3 + 4) * 2")
+  let step1 = eval(Add, 3.0, 4.0)
+  match step1 {
+    Ok(sum) => {
+      let step2 = eval(Mul, sum, 2.0)
+      match step2 {
+        Ok(product) => println("= ${product}")
+        Err(e) => println("Error: ${e}")
+      }
+    }
+    Err(e) => println("Error: ${e}")
+  }
+}

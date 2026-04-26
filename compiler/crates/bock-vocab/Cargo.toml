@@ -1,0 +1,21 @@
+[package]
+name = "bock-vocab"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "bock-dump-vocab"
+path = "src/bin/dump_vocab.rs"
+
+[dependencies]
+bock-errors.workspace = true
+bock-lexer.workspace = true
+bock-air.workspace = true
+bock-types.workspace = true
+bock-interp.workspace = true
+bock-core.workspace = true
+bock-codegen.workspace = true
+bock-ai.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap.workspace = true

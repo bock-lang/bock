@@ -1,0 +1,261 @@
+//! Type Zoo — Comprehensive type system demonstration.
+//!
+//! Demonstrates: primitives, generics, traits, Fn types, type aliases,
+//! Optional/Result, tuples, collections, method chains, pipe, compose.
+//! Target: TS, Rust.
+
+module main
+
+// --- Primitive types ---
+
+/// Exercises all primitive types and basic operations.
+fn primitives() -> Void {
+  let i: Int = 42
+  let f: Float = 3.14
+  let b: Bool = true
+  let s: String = "hello"
+  let c: Char = 'A'
+
+  // Arithmetic
+  let sum = i + 8
+  let product = f * 2.0
+  let power = 2 ** 10
+
+  // Comparison and logical
+  let check = i > 0 && b
+  let either = i == 42 || f < 1.0
+
+  // String interpolation
+  println("int=${i} float=${f} bool=${b} char=${c}")
+  println("sum=${sum} product=${product} power=${power}")
+}
+
+// --- Generic functions ---
+
+/// Identity function — returns its argument unchanged.
+public fn identity[T](x: T) -> T { x }
+
+/// Returns the first of two values.
+public fn first_of[A, B](a: A, b: B) -> A { a }
+
+// --- Generic records ---
+
+/// A generic pair holding two values of different types.
+public record Pair[A, B] {
+  first: A
+  second: B
+}
+
+impl Pair {
+  /// Swaps the elements, returning a new Pair.
+  public fn swap(self) -> Pair[B, A] {
+    Pair { first: self.second, second: self.first }
+  }
+}
+
+/// A generic wrapper around a single value.
+public record Box[T] {
+  value: T
+}
+
+impl Box {
+  /// Applies a function to the inner value.
+  public fn map[U](self, f: Fn(T) -> U) -> Box[U] {
+    Box { value: f(self.value) }
+  }
+}
+
+// --- Trait bounds ---
+
+/// Demonstrates a trait-bounded generic function.
+public fn max_of[T: Comparable](a: T, b: T) -> T {
+  if (a > b) { a } else { b }
+}
+
+// --- Traits and impl ---
+
+/// A trait for things that can describe themselves.
+public trait Describable {
+  fn describe(self) -> String
+}
+
+public record Color {
+  r: Int
+  g: Int
+  b: Int
+}
+
+impl Describable for Color {
+  public fn describe(self) -> String {
+    "rgb(${self.r}, ${self.g}, ${self.b})"
+  }
+}
+
+// --- Function types (higher-order) ---
+
+/// Applies a function to a value.
+public fn apply(f: Fn(Int) -> Int, x: Int) -> Int { f(x) }
+
+/// Applies a function twice.
+public fn apply_twice(f: Fn(Int) -> Int, x: Int) -> Int {
+  f(f(x))
+}
+
+/// Composes two Int->Int functions.
+public fn compose_int(f: Fn(Int) -> Int, g: Fn(Int) -> Int) -> Fn(Int) -> Int {
+  (x) => f(g(x))
+}
+
+// --- Type aliases ---
+
+public type UserId = String
+public type Predicate = Fn(Int) -> Bool
+public type StringPair = Pair[String, String]
+
+/// Uses type aliases in signatures.
+public fn find_user(id: UserId) -> Optional[UserId] {
+  if (id == "") { None } else { Some(id) }
+}
+
+public fn count_matching(items: List[Int], pred: Predicate) -> Int {
+  items.filter(pred).len()
+}
+
+// --- Optional and Result ---
+
+/// Demonstrates Option chaining with match.
+public fn describe_optional(opt: Optional[Int]) -> String {
+  match opt {
+    Some(n) if (n > 0) => "positive: ${n}"
+    Some(n) => "non-positive: ${n}"
+    None => "absent"
+  }
+}
+
+/// Demonstrates Result with ? propagation.
+public fn safe_divide(a: Float, b: Float) -> Result[Float, String] {
+  if (b == 0.0) { Err("division by zero") } else { Ok(a / b) }
+}
+
+public fn chained_divide(x: Float) -> Result[Float, String] {
+  let half = safe_divide(x, 2.0)?
+  let quarter = safe_divide(half, 2.0)?
+  Ok(quarter)
+}
+
+// --- Tuples ---
+
+/// Returns a tuple of stats about a list.
+public fn stats(items: List[Int]) -> (Int, Int) {
+  let count = items.len()
+  let total = items.len()
+  (count, total)
+}
+
+// --- Collections ---
+
+/// Demonstrates collection literals and basic methods.
+public fn collections_demo() -> Void {
+  let list = [10, 20, 30, 40, 50]
+  let map = {"name": "Bock", "version": "0.1"}
+  let set = #{"alpha", "beta", "gamma"}
+
+  let n = list.len()
+  let keys = map.keys()
+  let has = set.len()
+
+  println("list len=${n} map keys=${keys} set size=${has}")
+
+  // List concatenation
+  let extended = list + [60, 70]
+  println("extended len=${extended.len()}")
+}
+
+// --- Method chains ---
+
+/// Demonstrates filter/map chains on lists.
+public fn chain_demo() -> Void {
+  let numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+  // Filter evens, then double them
+  let result = numbers
+    .filter((n) => n % 2 == 0)
+    .map((n) => n * 2)
+
+  println("chained result len=${result.len()}")
+}
+
+// --- Pipe and composition ---
+
+public fn double(x: Int) -> Int { x * 2 }
+public fn increment(x: Int) -> Int { x + 1 }
+
+public fn pipe_demo() -> Void {
+  // Pipe operator
+  let piped = 5 |> double
+
+  // Function composition
+  let transform = double >> increment
+  println("piped=${piped}")
+}
+
+// --- Main ---
+
+fn main() {
+  println("=== Type Zoo ===")
+
+  // Primitives
+  primitives()
+
+  // Generics
+  let n = identity(42)
+  let s = identity("hello")
+  let f = first_of(1, "two")
+  println("identity(42)=${n} identity(hello)=${s} first_of=${f}")
+
+  // Generic records
+  let pair = Pair { first: 1, second: "one" }
+  println("pair: ${pair.first}, ${pair.second}")
+  let swapped = pair.swap()
+  println("swapped: ${swapped.first}, ${swapped.second}")
+
+  // Trait bound
+  let bigger = max_of(10, 20)
+  println("max_of(10,20)=${bigger}")
+
+  // Trait impl
+  let color = Color { r: 255, g: 128, b: 0 }
+  println("color: ${color.describe()}")
+
+  // Higher-order functions
+  let doubled = apply((x) => x * 2, 21)
+  let quad = apply_twice((x) => x * 2, 3)
+  println("apply doubled=${doubled} apply_twice=${quad}")
+
+  // Type aliases
+  let user = find_user("alice")
+  let evens = count_matching([1, 2, 3, 4, 5], (x) => x % 2 == 0)
+  println("find_user=some evens=${evens}")
+
+  // Optional / Result
+  println(describe_optional(Some(42)))
+  println(describe_optional(None))
+  let div_result = chained_divide(100.0)
+  match div_result {
+    Ok(v) => println("chained_divide(100)=${v}")
+    Err(e) => println("error: ${e}")
+  }
+
+  // Tuples
+  let (count, total) = stats([1, 2, 3])
+  println("stats: count=${count} total=${total}")
+
+  // Collections
+  collections_demo()
+
+  // Method chains
+  chain_demo()
+
+  // Pipe and compose
+  pipe_demo()
+}

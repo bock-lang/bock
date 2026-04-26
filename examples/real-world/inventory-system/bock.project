@@ -1,0 +1,10 @@
+[project]
+name = "inventory-system"
+version = "0.1.0"
+
+[strictness]
+default = "sketch"
+
+[targets]
+primary = "js"
+additional = ["ts", "python", "rust", "go"]

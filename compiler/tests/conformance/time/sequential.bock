@@ -1,0 +1,12 @@
+// TEST: time_sequential_sleeps
+// EXPECT: no_errors
+async fn main() {
+  let start = Instant.now()
+  await sleep(Duration.millis(50))
+  await sleep(Duration.millis(50))
+  await sleep(Duration.millis(50))
+  let elapsed = start.elapsed().as_millis()
+  assert(elapsed >= 140)
+  assert(elapsed < 300)
+  println("sequential: ok (${elapsed}ms)")
+}

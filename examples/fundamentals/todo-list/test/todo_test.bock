@@ -1,0 +1,45 @@
+module todo_test
+
+use main.{Todo, TodoList, count_where}
+
+// --- Tests ---
+
+@test
+fn test_add_todo() {
+  let list = TodoList { items: [], next_id: 1 }
+  let list = list.add("First task")
+  expect(list.items.len()).to_equal(1)
+  expect(list.next_id).to_equal(2)
+}
+
+@test
+fn test_complete_todo() {
+  let todo = Todo { id: 1, title: "Task", done: false }
+  let completed = todo.complete()
+  expect(completed.done).to_equal(true)
+  expect(completed.title).to_equal("Task")
+  expect(completed.id).to_equal(1)
+}
+
+@test
+fn test_pending_filter() {
+  let list = TodoList { items: [], next_id: 1 }
+  let list = list.add("Task A")
+  let list = list.add("Task B")
+  let list = list.complete_by_id(1)
+  expect(list.pending().len()).to_equal(1)
+  expect(list.completed().len()).to_equal(1)
+}
+
+@test
+fn test_count_where() {
+  let list = TodoList { items: [], next_id: 1 }
+  let list = list.add("A")
+  let list = list.add("B")
+  let list = list.add("C")
+  let list = list.complete_by_id(2)
+  let done = count_where(list.items, (t) => t.done == true)
+  let pending = count_where(list.items, (t) => t.done == false)
+  expect(done).to_equal(1)
+  expect(pending).to_equal(2)
+}

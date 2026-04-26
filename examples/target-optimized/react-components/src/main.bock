@@ -1,0 +1,279 @@
+//! React Components — UI component library with event handling.
+//!
+//! Demonstrates: classes, traits, @managed, lambdas, Fn types,
+//! list rendering with map, form state with Map collection.
+//! Target: JS, TS. Everything @managed — GC semantics throughout.
+
+// ─── Component Trait ──────────────────────────────────────────────
+
+/// Base trait that all renderable UI components implement.
+trait Component {
+  fn render(self) -> String
+}
+
+// ─── Button Class ─────────────────────────────────────────────────
+
+/// Interactive button with label and click handler.
+class Button {
+  label: String
+  on_click: Fn() -> Void
+}
+
+impl Button {
+  fn render(self) -> String {
+    "<button onclick>${self.label}</button>"
+  }
+
+  fn click(self) -> Void {
+    let handler = self.on_click
+    handler()
+  }
+}
+
+impl Component for Button {
+  fn render(self) -> String {
+    self.render()
+  }
+}
+
+// ─── Input Field ──────────────────────────────────────────────────
+
+/// Text input with a name, placeholder, and current value.
+record InputField {
+  name: String
+  placeholder: String
+  value: String
+}
+
+impl Component for InputField {
+  fn render(self) -> String {
+    "<input name=\"${self.name}\" placeholder=\"${self.placeholder}\" value=\"${self.value}\" />"
+  }
+}
+
+// ─── Form State ───────────────────────────────────────────────────
+
+/// Mutable form state holding field values and submission status.
+@managed
+record FormState {
+  fields: Map[String, String]
+  submitted: Bool
+  error: Optional[String]
+}
+
+/// Create a new form with empty fields.
+@managed
+fn create_form() -> FormState {
+  FormState {
+    fields: {"name": "", "email": "", "message": ""}
+    submitted: false
+    error: None
+  }
+}
+
+/// Update a single field in the form state, returning a new state.
+@managed
+fn update_field(state: FormState, key: String, value: String) -> FormState {
+  // Since Map has no mutation methods, we rebuild with known keys.
+  // In a real app this would use a mutable map on JS/TS targets.
+  let name_val = if (key == "name") { value } else {
+    match state.fields.get("name") {
+      Some(v) => v
+      None => ""
+    }
+  }
+  let email_val = if (key == "email") { value } else {
+    match state.fields.get("email") {
+      Some(v) => v
+      None => ""
+    }
+  }
+  let msg_val = if (key == "message") { value } else {
+    match state.fields.get("message") {
+      Some(v) => v
+      None => ""
+    }
+  }
+  FormState {
+    fields: {"name": name_val, "email": email_val, "message": msg_val}
+    submitted: state.submitted
+    error: state.error
+  }
+}
+
+/// Validate and submit the form. Returns Ok on success, Err with message.
+@managed
+fn submit(state: FormState) -> Result[FormState, String] {
+  let name = match state.fields.get("name") {
+    Some(v) => v
+    None => ""
+  }
+  let email = match state.fields.get("email") {
+    Some(v) => v
+    None => ""
+  }
+  if (name.is_empty()) {
+    Err("Name is required")
+  } else if (email.is_empty()) {
+    Err("Email is required")
+  } else {
+    Ok(FormState {
+      fields: state.fields
+      submitted: true
+      error: None
+    })
+  }
+}
+
+// ─── Event Handling ───────────────────────────────────────────────
+
+/// Type alias for event handler callbacks.
+type EventHandler = Fn() -> Void
+
+/// Register and immediately invoke a click handler.
+fn on_click(handler: EventHandler) -> Void {
+  handler()
+}
+
+/// Wrap a handler with logging before and after execution.
+@managed
+fn with_logging(name: String, handler: EventHandler) -> EventHandler {
+  () => {
+    println("[event] ${name} triggered")
+    handler()
+    println("[event] ${name} completed")
+  }
+}
+
+// ─── List Rendering ───────────────────────────────────────────────
+
+/// Render a list of strings as HTML list items.
+@managed
+fn render_items(items: List[String]) -> List[String] {
+  items.map((item) => "<li>${item}</li>")
+}
+
+/// Render navigation links from a list of labels.
+@managed
+fn render_nav(links: List[String]) -> String {
+  let items = links.map((link) => "<a href=\"#\">${link}</a>")
+  let mut html = "<nav>"
+  for item in items {
+    html = html + item
+  }
+  html + "</nav>"
+}
+
+// ─── Component Composition ────────────────────────────────────────
+
+/// A card wrapping a title, body text, and an action button.
+record Card {
+  title: String
+  body: String
+  action_label: String
+}
+
+impl Component for Card {
+  fn render(self) -> String {
+    let header = "<h2>${self.title}</h2>"
+    let content = "<p>${self.body}</p>"
+    let button = "<button>${self.action_label}</button>"
+    "<div class=\"card\">${header}${content}${button}</div>"
+  }
+}
+
+/// A page layout with a header, navigation, and list of cards.
+record Page {
+  title: String
+  nav_links: List[String]
+  cards: List[Card]
+}
+
+impl Page {
+  @managed
+  fn render(self) -> String {
+    let header = "<h1>${self.title}</h1>"
+    let nav = render_nav(self.nav_links)
+    let mut content = ""
+    for card in self.cards {
+      content = content + card.render()
+    }
+    "<div class=\"page\">${header}${nav}${content}</div>"
+  }
+}
+
+// ─── Main ─────────────────────────────────────────────────────────
+
+@managed
+fn main() {
+  println("=== React Components Demo ===")
+  println("")
+
+  // Button with click handler
+  let btn = Button {
+    label: "Submit"
+    on_click: () => println("Form submitted!")
+  }
+  println("Button: ${btn.render()}")
+  btn.click()
+  println("")
+
+  // Event handling with logging wrapper
+  let handler = with_logging("save", () => println("Saving data..."))
+  on_click(handler)
+  println("")
+
+  // Form state management
+  let mut form = create_form()
+  form = update_field(form, "name", "Alice")
+  form = update_field(form, "email", "alice@example.com")
+  form = update_field(form, "message", "Hello!")
+
+  println("Form fields:")
+  let keys = form.fields.keys()
+  for k in keys {
+    match form.fields.get(k) {
+      Some(v) => println("  ${k}: ${v}")
+      None => {}
+    }
+  }
+
+  // Submit form
+  match submit(form) {
+    Ok(submitted) => println("Form submitted successfully!")
+    Err(e) => println("Validation error: ${e}")
+  }
+  println("")
+
+  // List rendering
+  let menu = ["Home", "About", "Contact", "Blog"]
+  let items = render_items(menu)
+  println("Menu items:")
+  for item in items {
+    println("  ${item}")
+  }
+  println("")
+
+  // Card components
+  let cards = [
+    Card { title: "Welcome", body: "Get started with Bock", action_label: "Learn More" },
+    Card { title: "Features", body: "Explore the effect system", action_label: "Discover" },
+    Card { title: "Deploy", body: "Target any platform", action_label: "Ship It" }
+  ]
+  println("Cards:")
+  for card in cards {
+    println("  ${card.render()}")
+  }
+  println("")
+
+  // Full page layout
+  let page = Page {
+    title: "Bock Dashboard"
+    nav_links: ["Home", "Settings", "Profile"]
+    cards: [
+      Card { title: "Status", body: "All systems operational", action_label: "Details" }
+    ]
+  }
+  println("Page:")
+  println(page.render())
+}

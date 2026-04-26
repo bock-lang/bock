@@ -1,0 +1,6 @@
+[project]
+name = "microservice"
+version = "0.1.0"
+
+[strictness]
+default = "development"

@@ -1,0 +1,10 @@
+[package]
+name = "bock-parser"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+bock-lexer.workspace = true
+bock-ast.workspace = true
+bock-source.workspace = true
+bock-errors.workspace = true

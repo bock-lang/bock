@@ -1,0 +1,203 @@
+//! Data Pipeline — Transformation pipeline showcasing pipes and composition.
+//!
+//! Demonstrates: pipe operator, function composition, higher-order functions,
+//! records, lambdas, list methods, pure functional transforms.
+//! Target: Python, TS.
+
+module main
+
+// ─── Data Types ────────────────────────────────────────────────────
+
+/// A single data point with a name, numeric value, and category tag.
+public record DataPoint {
+  name: String
+  value: Float
+  category: String
+}
+
+/// Aggregated summary statistics for a collection of data points.
+public record Summary {
+  count: Int
+  total: Float
+  average: Float
+}
+
+/// A labeled report combining a title with formatted output.
+public record Report {
+  title: String
+  body: String
+}
+
+// ─── Transform Functions (pure, composable) ────────────────────────
+
+/// Normalize all values in the dataset to [0, 1] range by dividing
+/// each value by the maximum. Returns data unchanged if max is zero.
+@managed
+public fn normalize(data: List[DataPoint]) -> List[DataPoint] {
+  let mut max_val = 0.0
+  for dp in data {
+    if (dp.value > max_val) {
+      max_val = dp.value
+    }
+  }
+  if (max_val > 0.0) {
+    data.map((dp) => DataPoint {
+      name: dp.name
+      value: dp.value / max_val
+      category: dp.category
+    })
+  } else {
+    data
+  }
+}
+
+/// Scale all values by a constant factor.
+@managed
+public fn scale(factor: Float, data: List[DataPoint]) -> List[DataPoint] {
+  data.map((dp) => DataPoint {
+    name: dp.name
+    value: dp.value * factor
+    category: dp.category
+  })
+}
+
+/// Return a function that filters data points by category.
+/// Demonstrates higher-order function returning Fn type.
+public fn filter_category(cat: String) -> Fn(List[DataPoint]) -> List[DataPoint] {
+  (data) => data.filter((dp) => dp.category == cat)
+}
+
+/// Remove data points with zero or negative values.
+public fn remove_invalid(data: List[DataPoint]) -> List[DataPoint] {
+  data.filter((dp) => dp.value > 0.0)
+}
+
+/// Compute aggregate summary statistics for a dataset.
+public fn compute_summary(data: List[DataPoint]) -> Summary {
+  let mut total = 0.0
+  let mut count = 0
+  let mut fcount = 0.0
+  for dp in data {
+    total = total + dp.value
+    count = count + 1
+    fcount = fcount + 1.0
+  }
+  let avg = if (fcount > 0.0) { total / fcount } else { 0.0 }
+  Summary { count: count, total: total, average: avg }
+}
+
+/// Format a summary into a human-readable string.
+public fn format_summary(s: Summary) -> String {
+  "Items: ${s.count}, Total: ${s.total}, Average: ${s.average}"
+}
+
+/// Format a list of data points into a readable listing.
+@managed
+public fn format_data(data: List[DataPoint]) -> String {
+  let mut result = ""
+  let mut first = true
+  for dp in data {
+    if (first) {
+      result = "  ${dp.name}: ${dp.value} [${dp.category}]"
+      first = false
+    } else {
+      result = result + "\n  ${dp.name}: ${dp.value} [${dp.category}]"
+    }
+  }
+  result
+}
+
+// ─── Pipeline Construction ─────────────────────────────────────────
+
+/// Build a full report by composing normalize, summarize, and format.
+/// Uses the >> composition operator to create a reusable pipeline.
+public fn build_report_pipeline() -> Fn(List[DataPoint]) -> String {
+  normalize >> compute_summary >> format_summary
+}
+
+/// Apply any pipeline function to data and wrap it in a Report.
+public fn apply_pipeline(title: String, data: List[DataPoint], pipeline: Fn(List[DataPoint]) -> String) -> Report {
+  let body = pipeline(data)
+  Report { title: title, body: body }
+}
+
+/// Print a report to the console.
+public fn print_report(report: Report) -> Void {
+  println("--- ${report.title} ---")
+  println(report.body)
+  println("")
+}
+
+// ─── Main ──────────────────────────────────────────────────────────
+
+@managed
+fn main() {
+  // Sample dataset
+  let data: List[DataPoint] = [
+    DataPoint { name: "alpha", value: 10.0, category: "sensor" },
+    DataPoint { name: "beta", value: 25.0, category: "sensor" },
+    DataPoint { name: "gamma", value: 5.0, category: "manual" },
+    DataPoint { name: "delta", value: 40.0, category: "sensor" },
+    DataPoint { name: "epsilon", value: 15.0, category: "manual" },
+    DataPoint { name: "zeta", value: 0.0, category: "sensor" },
+    DataPoint { name: "eta", value: 30.0, category: "manual" }
+  ]
+
+  println("=== Data Pipeline Demo ===")
+  println("")
+
+  // 1. Pipe operator: step-by-step transform
+  println("--- Raw Data Summary ---")
+  let raw_summary = data |> compute_summary |> format_summary
+  println(raw_summary)
+  println("")
+
+  // 2. Pipe with remove_invalid + normalize
+  println("--- Cleaned + Normalized ---")
+  let cleaned = data |> remove_invalid |> normalize
+  let cleaned_listing = format_data(cleaned)
+  println(cleaned_listing)
+  println("")
+
+  // 3. Higher-order filter by category
+  let sensor_filter = filter_category("sensor")
+  let manual_filter = filter_category("manual")
+
+  let sensor_data = sensor_filter(data)
+  let manual_data = manual_filter(data)
+
+  println("--- Sensor Data Summary ---")
+  let sensor_summary = sensor_data |> remove_invalid |> compute_summary |> format_summary
+  println(sensor_summary)
+  println("")
+
+  println("--- Manual Data Summary ---")
+  let manual_summary = manual_data |> compute_summary |> format_summary
+  println(manual_summary)
+  println("")
+
+  // 4. Function composition: build a reusable pipeline
+  let report_pipeline = build_report_pipeline()
+
+  // Apply the composed pipeline to different datasets
+  let full_report = apply_pipeline("Full Dataset Report", data, report_pipeline)
+  print_report(full_report)
+
+  let sensor_report = apply_pipeline("Sensor Report", sensor_data, report_pipeline)
+  print_report(sensor_report)
+
+  let manual_report = apply_pipeline("Manual Report", manual_data, report_pipeline)
+  print_report(manual_report)
+
+  // 5. Inline composition with pipes
+  println("--- Scaled Sensor Summary ---")
+  let scaled_result = sensor_data
+    |> remove_invalid
+    |> normalize
+    |> compute_summary
+    |> format_summary
+  println(scaled_result)
+
+  println("")
+  println("=== Pipeline Complete ===")
+}

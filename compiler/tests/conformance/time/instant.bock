@@ -1,0 +1,17 @@
+// TEST: time_instant_arithmetic
+// EXPECT: no_errors
+async fn main() {
+  let t1 = Instant.now()
+  await sleep(Duration.millis(10))
+  let t2 = Instant.now()
+
+  let diff = t2 - t1
+  assert(diff.as_millis() >= 10)
+
+  let future = t1 + Duration.seconds(1)
+  let back = future - Duration.seconds(1)
+  let gap = back - t1
+  assert(gap.abs().as_millis() < 1)
+
+  println("instant: ok")
+}

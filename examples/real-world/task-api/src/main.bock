@@ -1,0 +1,263 @@
+//! Task API — Effect-based API demonstrating Bock's dependency injection pattern.
+//!
+//! Demonstrates: effects as DI, handling blocks, impl for effects, enums,
+//! records, Result error handling, pattern matching, annotations.
+//! Target: Go, JS.
+
+module main
+
+// ─── Models ────────────────────────────────────────────────────────
+
+/// Priority levels for tasks, from low to critical.
+public enum Priority { Low, Medium, High, Critical }
+
+/// Lifecycle status of a task.
+public enum Status { Pending, InProgress, Done, Cancelled }
+
+/// A task with an id, title, priority, and current status.
+public record Task {
+  id: Int
+  title: String
+  priority: Priority
+  status: Status
+}
+
+// ─── Effects ───────────────────────────────────────────────────────
+
+/// Storage effect for persisting and retrieving tasks.
+public effect TaskStorage {
+  fn save_task(task: Task) -> Result[Void, String]
+  fn find_task(id: Int) -> Result[Task, String]
+  fn all_tasks() -> List[Task]
+}
+
+/// Logging effect for recording API operations.
+public effect Logger {
+  fn log(msg: String) -> Void
+}
+
+/// Composite effect for the full API surface.
+public effect ApiEffects = TaskStorage + Logger
+
+// ─── Pure Helpers ──────────────────────────────────────────────────
+
+/// Filter a list of tasks to only those with Pending status.
+public fn list_pending(tasks: List[Task]) -> List[Task] {
+  tasks.filter((task) => match task.status {
+    Pending => true
+    _ => false
+  })
+}
+
+/// Filter a list of tasks to only those with High or Critical priority.
+public fn list_urgent(tasks: List[Task]) -> List[Task] {
+  tasks.filter((task) => match task.priority {
+    High => true
+    Critical => true
+    _ => false
+  })
+}
+
+/// Format a task priority as a string label.
+public fn priority_label(p: Priority) -> String {
+  match p {
+    Low => "LOW"
+    Medium => "MED"
+    High => "HIGH"
+    Critical => "CRIT"
+  }
+}
+
+/// Format a task status as a string label.
+public fn status_label(s: Status) -> String {
+  match s {
+    Pending => "PENDING"
+    InProgress => "IN_PROGRESS"
+    Done => "DONE"
+    Cancelled => "CANCELLED"
+  }
+}
+
+/// Format a task as a human-readable string.
+public fn format_task(task: Task) -> String {
+  "[${priority_label(task.priority)}] ${task.title} (${status_label(task.status)})"
+}
+
+// ─── API Functions ─────────────────────────────────────────────────
+
+/// Create a new task with the given title and priority.
+/// Returns the newly created task or an error string.
+@managed
+@requires(Capability.Storage)
+public fn create_task(id: Int, title: String, priority: Priority) -> Result[Task, String]
+  with TaskStorage, Logger
+{
+  log("Creating task: ${title}")
+  let task = Task {
+    id: id
+    title: title
+    priority: priority
+    status: Pending
+  }
+  save_task(task)?
+  log("Task ${id} created successfully")
+  Ok(task)
+}
+
+/// Mark a task as done by looking it up and saving the updated version.
+@managed
+public fn complete_task(id: Int) -> Result[Task, String]
+  with TaskStorage, Logger
+{
+  log("Completing task ${id}")
+  let task = find_task(id)?
+  let completed = Task {
+    id: task.id
+    title: task.title
+    priority: task.priority
+    status: Done
+  }
+  save_task(completed)?
+  log("Task ${id} marked as done")
+  Ok(completed)
+}
+
+/// Cancel a task by id. Returns the cancelled task or an error.
+@managed
+public fn cancel_task(id: Int) -> Result[Task, String]
+  with TaskStorage, Logger
+{
+  log("Cancelling task ${id}")
+  let task = find_task(id)?
+  let cancelled = Task {
+    id: task.id
+    title: task.title
+    priority: task.priority
+    status: Cancelled
+  }
+  save_task(cancelled)?
+  log("Task ${id} cancelled")
+  Ok(cancelled)
+}
+
+/// Retrieve all tasks and filter to pending only.
+public fn get_pending_tasks() -> List[Task] with TaskStorage {
+  let all = all_tasks()
+  list_pending(all)
+}
+
+/// Retrieve all tasks and filter to urgent only.
+public fn get_urgent_tasks() -> List[Task] with TaskStorage {
+  let all = all_tasks()
+  list_urgent(all)
+}
+
+// ─── Handler Implementations ───────────────────────────────────────
+
+/// In-memory storage handler. Effect impl methods receive the handler
+/// instance; storage is backed by the tasks field.
+public record MemoryStore {
+  tasks: List[Task]
+}
+
+impl TaskStorage for MemoryStore {
+  public fn save_task(task: Task) -> Result[Void, String] {
+    Ok(())
+  }
+
+  public fn find_task(id: Int) -> Result[Task, String] {
+    Err("not found")
+  }
+
+  public fn all_tasks() -> List[Task] {
+    []
+  }
+}
+
+/// Console-based logger that prints messages with a prefix.
+public record ConsoleLogger {}
+
+impl Logger for ConsoleLogger {
+  public fn log(msg: String) -> Void {
+    println("[LOG] ${msg}")
+  }
+}
+
+// ─── Demo Runner ───────────────────────────────────────────────────
+
+/// Run the full API demo. Separated from main so it can declare
+/// effect requirements via `with` clauses.
+public fn run_demo() -> Void with TaskStorage, Logger {
+  println("=== Task API Demo ===")
+  println("")
+
+  // Create tasks through the API
+  let result1 = create_task(1, "Design API schema", High)
+  match result1 {
+    Ok(task) => println("Created: ${format_task(task)}")
+    Err(e) => println("Error: ${e}")
+  }
+
+  let result2 = create_task(2, "Write unit tests", Medium)
+  match result2 {
+    Ok(task) => println("Created: ${format_task(task)}")
+    Err(e) => println("Error: ${e}")
+  }
+
+  let result3 = create_task(3, "Deploy to staging", Critical)
+  match result3 {
+    Ok(task) => println("Created: ${format_task(task)}")
+    Err(e) => println("Error: ${e}")
+  }
+
+  let result4 = create_task(4, "Update changelog", Low)
+  match result4 {
+    Ok(task) => println("Created: ${format_task(task)}")
+    Err(e) => println("Error: ${e}")
+  }
+
+  // Complete a task
+  println("")
+  let completed = complete_task(1)
+  match completed {
+    Ok(task) => println("Completed: ${format_task(task)}")
+    Err(e) => println("Could not complete: ${e}")
+  }
+
+  // Cancel a task
+  let cancelled = cancel_task(4)
+  match cancelled {
+    Ok(task) => println("Cancelled: ${format_task(task)}")
+    Err(e) => println("Could not cancel: ${e}")
+  }
+
+  // List pending tasks
+  println("")
+  let pending = get_pending_tasks()
+  println("=== Pending Tasks (${pending.len()}) ===")
+  for task in pending {
+    println("  ${format_task(task)}")
+  }
+
+  // List urgent tasks
+  let urgent = get_urgent_tasks()
+  println("")
+  println("=== Urgent Tasks (${urgent.len()}) ===")
+  for task in urgent {
+    println("  ${format_task(task)}")
+  }
+
+  println("")
+  println("=== Demo Complete ===")
+}
+
+// ─── Main ──────────────────────────────────────────────────────────
+
+fn main() {
+  let store = MemoryStore { tasks: [] }
+  let logger = ConsoleLogger {}
+
+  handling (TaskStorage with store, Logger with logger) {
+    run_demo()
+  }
+}

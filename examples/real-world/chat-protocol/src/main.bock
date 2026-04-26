@@ -1,0 +1,223 @@
+//! Chat Protocol — Message protocol demonstrating enum-heavy design.
+//!
+//! Demonstrates: enums (ADT), pattern matching, traits, effects,
+//! Result error handling, guard clauses, @concurrent annotation.
+//! Target: Rust, Go.
+
+module main
+
+// ─── Message Types ────────────────────────────────────────────────
+
+/// The type of a chat message.
+public enum MessageType { Text, Image, System, Ack }
+
+/// A chat message with sender, type, content, and timestamp.
+public record Message {
+  id: Int
+  sender: String
+  msg_type: MessageType
+  content: String
+  timestamp: Int
+}
+
+// ─── Protocol Functions ───────────────────────────────────────────
+
+/// Convert a MessageType to its wire-format tag.
+public fn type_tag(t: MessageType) -> String {
+  match t {
+    Text => "TEXT"
+    Image => "IMAGE"
+    System => "SYSTEM"
+    Ack => "ACK"
+  }
+}
+
+/// Encode a message into a wire-format string.
+/// Format: TAG|id|sender|timestamp|content
+@managed
+public fn encode(msg: Message) -> String {
+  let tag = type_tag(msg.msg_type)
+  "${tag}|${msg.id}|${msg.sender}|${msg.timestamp}|${msg.content}"
+}
+
+/// Decode a raw wire-format string into a Message.
+/// Validates prefix and returns an error for unknown types.
+public fn decode(raw: String) -> Result[Message, String] {
+  guard (raw.len() > 0) else {
+    return Err("empty input")
+  }
+
+  // Determine message type from prefix
+  let msg_type = if (raw.starts_with("TEXT|")) {
+    Text
+  } else {
+    if (raw.starts_with("IMAGE|")) {
+      Image
+    } else {
+      if (raw.starts_with("SYSTEM|")) {
+        System
+      } else {
+        if (raw.starts_with("ACK|")) {
+          Ack
+        } else {
+          return Err("unknown message type prefix")
+        }
+      }
+    }
+  }
+
+  // We cannot split strings, so return a placeholder message
+  // preserving the raw content and detected type
+  Ok(Message {
+    id: 0
+    sender: "decoded"
+    msg_type: msg_type
+    content: raw
+    timestamp: 0
+  })
+}
+
+/// Check whether a message is a system message.
+public fn is_system_message(msg: Message) -> Bool {
+  match msg.msg_type {
+    System => true
+    _ => false
+  }
+}
+
+/// Filter a list of messages to only those from a specific sender.
+public fn filter_by_sender(msgs: List[Message], sender: String) -> List[Message] {
+  msgs.filter((m) => m.sender == sender)
+}
+
+/// Filter a list of messages to only those of a given type.
+public fn filter_by_type(msgs: List[Message], msg_type: MessageType) -> List[Message] {
+  msgs.filter((m) => match m.msg_type {
+    Text => match msg_type { Text => true, _ => false }
+    Image => match msg_type { Image => true, _ => false }
+    System => match msg_type { System => true, _ => false }
+    Ack => match msg_type { Ack => true, _ => false }
+  })
+}
+
+// ─── Trait ────────────────────────────────────────────────────────
+
+/// Serializable trait for converting values to string representation.
+public trait Serializable {
+  fn serialize(self) -> String
+}
+
+impl Serializable for Message {
+  public fn serialize(self) -> String {
+    let tag = type_tag(self.msg_type)
+    "[${tag}] ${self.sender}@${self.timestamp}: ${self.content}"
+  }
+}
+
+// ─── Effect ───────────────────────────────────────────────────────
+
+/// Channel effect for sending and receiving messages.
+public effect Channel {
+  fn send(msg: Message) -> Void
+  fn receive() -> Message
+}
+
+/// Dispatch a list of messages through the Channel effect.
+@concurrent
+public fn dispatch(msgs: List[Message]) -> Void with Channel {
+  for msg in msgs {
+    send(msg)
+  }
+}
+
+/// Stub channel handler for demonstration purposes.
+public record StubChannel {}
+
+impl Channel for StubChannel {
+  public fn send(msg: Message) -> Void {
+    println("  [channel] sent: ${msg.content}")
+  }
+  public fn receive() -> Message {
+    Message { id: 0, sender: "stub", msg_type: Text, content: "", timestamp: 0 }
+  }
+}
+
+// ─── Main ─────────────────────────────────────────────────────────
+
+@managed
+fn main() {
+  println("=== Chat Protocol Demo ===")
+  println("")
+
+  // Create sample messages
+  let messages: List[Message] = [
+    Message { id: 1, sender: "alice", msg_type: Text, content: "Hello everyone!", timestamp: 1000 },
+    Message { id: 2, sender: "bob", msg_type: Text, content: "Hi Alice!", timestamp: 1001 },
+    Message { id: 3, sender: "system", msg_type: System, content: "bob joined the chat", timestamp: 999 },
+    Message { id: 4, sender: "alice", msg_type: Image, content: "photo.png", timestamp: 1002 },
+    Message { id: 5, sender: "bob", msg_type: Ack, content: "ack:1", timestamp: 1003 }
+  ]
+
+  // Encode messages
+  println("--- Encoded Messages ---")
+  for msg in messages {
+    let encoded = encode(msg)
+    println("  ${encoded}")
+  }
+
+  // Decode a message
+  println("")
+  println("--- Decode Round-Trip ---")
+  let test_raw = "TEXT|1|alice|1000|Hello everyone!"
+  let decoded = decode(test_raw)
+  match decoded {
+    Ok(msg) => println("  Decoded OK: type=${type_tag(msg.msg_type)}, content=${msg.content}")
+    Err(e) => println("  Decode error: ${e}")
+  }
+
+  // Test decode failure
+  let bad_raw = "UNKNOWN|data"
+  let bad_decoded = decode(bad_raw)
+  match bad_decoded {
+    Ok(_) => println("  Unexpected success")
+    Err(e) => println("  Expected error: ${e}")
+  }
+
+  // Filter by sender
+  let alice_msgs = filter_by_sender(messages, "alice")
+  println("")
+  println("--- Alice's Messages (${alice_msgs.len()}) ---")
+  for msg in alice_msgs {
+    println("  ${msg.serialize()}")
+  }
+
+  // Filter system messages
+  let system_msgs = filter_by_type(messages, System)
+  println("")
+  println("--- System Messages (${system_msgs.len()}) ---")
+  for msg in system_msgs {
+    println("  ${msg.serialize()}")
+  }
+
+  // Check system message detection
+  let first = messages.first()
+  match first {
+    Some(msg) => {
+      let is_sys = is_system_message(msg)
+      println("")
+      println("Is first message system? ${is_sys}")
+    }
+    None => {}
+  }
+
+  // Dispatch through Channel effect
+  println("")
+  println("--- Channel Dispatch ---")
+  let ch = StubChannel {}
+  handling (Channel with ch) {
+    dispatch(messages)
+  }
+
+  println("")
+  println("=== Done ===")
+}

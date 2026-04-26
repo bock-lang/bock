@@ -1,0 +1,6 @@
+[project]
+name = "markdown-parser"
+version = "0.1.0"
+
+[strictness]
+default = "development"

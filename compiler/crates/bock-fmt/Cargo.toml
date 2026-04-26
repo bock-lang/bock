@@ -1,0 +1,11 @@
+[package]
+name = "bock-fmt"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+bock-ast.workspace = true
+bock-lexer.workspace = true
+bock-parser.workspace = true
+bock-source.workspace = true
+bock-errors.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "bock-lsp"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["io-std", "rt-multi-thread", "macros", "sync"] }
+dashmap = "5"
+bock-errors.workspace = true
+bock-source.workspace = true
+bock-lexer.workspace = true
+bock-parser.workspace = true
+bock-ast.workspace = true
+bock-air.workspace = true
+bock-types.workspace = true

@@ -1,0 +1,95 @@
+//! ML Data Prep Tests — Verifies transforms, statistics, and pipelines.
+
+module transform_test
+
+use main.*
+
+// ─── Tests ────────────────────────────────────────────────────────
+
+@test
+fn test_normalize() {
+  let data = [2.0, 4.0, 8.0]
+  let result = normalize(data)
+  // 8.0 is max → [0.25, 0.5, 1.0]
+  expect(result.len()).to_equal(3)
+}
+
+@test
+fn test_normalize_zeros() {
+  let data = [0.0, 0.0, 0.0]
+  let result = normalize(data)
+  // All zeros → returned unchanged
+  expect(result.len()).to_equal(3)
+}
+
+@test
+fn test_scale() {
+  let data = [1.0, 2.0, 3.0]
+  let result = scale(data, 10.0)
+  expect(result.len()).to_equal(3)
+}
+
+@test
+fn test_fill_missing() {
+  let data = [1.0, 0.0, 3.0, 0.0]
+  let result = fill_missing(data, 5.0)
+  // Zeros replaced with 5.0
+  expect(result.len()).to_equal(4)
+}
+
+@test
+fn test_clip() {
+  let data = [0.1, 0.5, 0.9, 1.5]
+  let result = clip(data, 0.2, 1.0)
+  // 0.1 → 0.2, 1.5 → 1.0, rest unchanged
+  expect(result.len()).to_equal(4)
+}
+
+@test
+fn test_square() {
+  let data = [2.0, 3.0, 4.0]
+  let result = square(data)
+  expect(result.len()).to_equal(3)
+}
+
+@test
+fn test_compute_mean() {
+  let data = [2.0, 4.0, 6.0]
+  let mean = compute_mean(data)
+  // mean = 12.0 / 3.0 = 4.0
+  expect(mean).to_equal(4.0)
+}
+
+@test
+@managed
+fn test_compute_stats() {
+  let data = [1.0, 5.0, 3.0, 8.0, 2.0]
+  let stats = compute_stats(data)
+  expect(stats.count).to_equal(5)
+  expect(stats.min).to_equal(1.0)
+  expect(stats.max).to_equal(8.0)
+}
+
+@test
+fn test_composition() {
+  let data = [2.0, 4.0, 8.0]
+  // normalize >> square: first normalize to [0.25, 0.5, 1.0], then square
+  let prep = normalize >> square
+  let result = prep(data)
+  expect(result.len()).to_equal(3)
+}
+
+@test
+@managed
+fn test_pipeline_on_dataset() {
+  let ds = Dataset {
+    rows: [
+      DataRow { features: [0.0, 4.0], label: "a" },
+      DataRow { features: [2.0, 0.0], label: "b" }
+    ]
+    columns: ["x", "y"]
+  }
+  let fill_fn = (d: List[Float]) => fill_missing(d, 1.0)
+  let filled = transform_features(ds, fill_fn)
+  expect(filled.rows.len()).to_equal(2)
+}

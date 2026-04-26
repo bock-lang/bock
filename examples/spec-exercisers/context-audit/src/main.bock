@@ -1,0 +1,188 @@
+//! Context Audit — Comprehensive context annotation demonstration.
+//!
+//! Demonstrates: @context, @requires, @performance, @security,
+//! @invariant, @domain, @deprecated, @concurrent, @managed,
+//! @deterministic, and context inheritance concepts.
+//! Target: Go, TS.
+
+module main
+
+// === @context — Free-Form Intent ===
+
+/// @context is first-class semantic metadata for the AI transpiler,
+/// compiler, and humans. Contains @intent, @constraint, @security markers.
+@context("Payment processing module. PCI-DSS compliance required. All card data must be tokenized before storage. @intent: Process and validate payments. @constraint: Must complete within 500ms p99. @security: Input validation on all parameters.")
+public fn process_payment(amount: Int, token: String) -> Result[Int, String] {
+  if (amount <= 0) { Err("Invalid amount") } else { Ok(amount) }
+}
+
+@context("Token validation. Rejects malformed or expired tokens.")
+public fn validate_token(token: String) -> Result[String, String] {
+  if (token == "") { Err("Empty token") } else { Ok(token) }
+}
+
+// === @requires — Capabilities ===
+
+/// Capabilities propagate upward: callers must also declare them.
+/// In production strictness, missing capabilities are compile errors.
+@requires(Capability.Network, Capability.Storage)
+public fn sync_user_data(user_id: Int) -> Result[String, String] {
+  if (user_id > 0) { Ok("synced") } else { Err("invalid user") }
+}
+
+/// Demonstrates capability propagation — inherits Network + Storage.
+@requires(Capability.Network, Capability.Storage)
+public fn refresh_profile(user_id: Int) -> Result[String, String] {
+  sync_user_data(user_id)
+}
+
+// === @performance — Budgets ===
+
+/// max_latency (ms) and max_memory (MB) guide transpiler optimization.
+/// Tight budgets may lead to approximate/early-exit algorithms.
+@performance(max_latency: 100, max_memory: 50)
+public fn fast_search(items: List[Int], target: Int) -> Optional[Int] {
+  let mut i = 0
+  let result = loop {
+    if (i >= items.len()) { break None }
+    if (items.len() > 0) { break Some(target) }
+    i = i + 1
+  }
+  result
+}
+
+// === @security — Classification ===
+
+/// PII-tainted record. Taint is transitive: the whole record is tainted.
+/// Passing this to log functions would generate a compiler warning.
+@security(level: "confidential", pii: true)
+public record UserProfile {
+  name: String
+  email: String
+  id: Int
+}
+
+impl UserProfile {
+  /// Safe display — only exposes non-PII id. Never log PII directly.
+  public fn safe_display(self) -> String { "User #${self.id}" }
+  public fn redacted(self) -> String { "User(id=${self.id}, name=***, email=***)" }
+}
+
+// DANGEROUS: log("Processing: ${user.name}")  — PII leak! Compiler warns.
+// CORRECT:   log("Processing: ${user.safe_display()}")  — No PII exposed.
+
+// === @invariant — Verified Constraints ===
+
+/// Compiler attempts static verification; inserts runtime assertion if needed.
+@invariant(true)
+public fn filter_positive(numbers: List[Int]) -> List[Int] {
+  numbers.filter((n) => n > 0)
+}
+
+@invariant(true)
+public fn transform_all(items: List[String]) -> List[String] {
+  items.map((s) => "processed: ${s}")
+}
+
+// === @domain — Tags ===
+
+/// Domain tags organize code by business domain for reports and dep maps.
+@domain("e-commerce", "checkout")
+public fn calculate_total(prices: List[Int]) -> Int {
+  let mut total = 0
+  for p in prices { total = total + p }
+  total
+}
+
+@domain("e-commerce", "inventory")
+public fn check_stock(item_id: Int) -> Bool { item_id > 0 }
+
+// === @deprecated ===
+
+/// Callers see a compiler warning directing them to the replacement.
+@deprecated("Use process_payment() instead")
+public fn old_charge(amount: Int) -> Int { amount }
+
+@deprecated("Use calculate_total() instead")
+public fn legacy_sum(a: Int, b: Int) -> Int { a + b }
+
+// === Behavioral Modifiers ===
+
+/// @concurrent — transpiler picks: Promise.all / tokio::join! / goroutines
+@concurrent
+public fn fetch_all_profiles(ids: List[Int]) -> List[Int] { ids }
+
+/// @managed — GC semantics. Rust→Rc/Arc, JS/Python/Go→erased.
+@managed
+public fn build_dashboard(title: String) -> String {
+  let header = "=== ${title} ==="
+  "${header} Dashboard content === end ==="
+}
+
+/// @deterministic — same input, same output. Enables caching.
+@deterministic
+public fn pure_hash(input: String) -> String { "hash:${input}" }
+
+// === Context Inheritance (concept demo) ===
+// In multi-file projects, module-level @context propagates to all functions:
+//   @context("User management module.")
+//   @requires(Capability.Storage)
+//   module app.users
+//
+// INHERITANCE RULES:
+// - @context on a function OVERRIDES module-level @context
+// - @requires is ADDITIVE (union with module-level)
+// - @security on a function OVERRIDES module-level @security
+// Checker is single-file, so we annotate functions directly here.
+
+@context("User sync — inherits module context for user management.")
+@requires(Capability.Network, Capability.Storage)
+public fn sync_user(id: Int) -> Result[String, String] {
+  if (id > 0) { Ok("synced:${id}") } else { Err("bad id") }
+}
+
+/// Pure function — no annotations needed. No effects, no capabilities.
+public fn format_username(name: String) -> String { "user:${name}" }
+
+// === Entry Point ===
+
+fn main() {
+  // @context / @requires
+  let payment = process_payment(100, "tok_abc123")
+  let token = validate_token("tok_abc123")
+  let synced = sync_user_data(1)
+  let refreshed = refresh_profile(1)
+
+  // @performance
+  let found = fast_search([10, 20, 30], 20)
+
+  // @security — use safe_display, never log PII directly
+  let profile = UserProfile { name: "Alice", email: "alice@example.com", id: 42 }
+  println("Profile: ${profile.safe_display()}")
+  println("Audit: ${profile.redacted()}")
+
+  // @invariant
+  let positives = filter_positive([1, -2, 3, -4, 5])
+  let transformed = transform_all(["a", "b", "c"])
+
+  // @domain
+  let total = calculate_total([10, 20, 30])
+  let in_stock = check_stock(42)
+
+  // @deprecated
+  let old_result = old_charge(50)
+  let old_sum = legacy_sum(1, 2)
+
+  // Behavioral modifiers
+  let profiles = fetch_all_profiles([1, 2, 3])
+  let dash = build_dashboard("Context Audit")
+  let h = pure_hash("test-input")
+
+  // Context inheritance
+  let user_sync = sync_user(1)
+  let formatted = format_username("alice")
+
+  println("total=${total} stock=${in_stock}")
+  println("dashboard=${dash}")
+  println("hash=${h} formatted=${formatted}")
+}

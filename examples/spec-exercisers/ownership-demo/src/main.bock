@@ -1,0 +1,278 @@
+//! Ownership Demo — Bock's ownership model without lifetimes.
+//!
+//! Demonstrates: move semantics, implicit borrow, mutable borrow,
+//! @managed escape hatch, guard + ownership, match with Never,
+//! and common ownership pitfalls (as commented-out examples).
+//! Target: Rust.
+
+// === Supporting Types ===
+
+record Resource {
+  name: String
+  data: List[Int]
+}
+
+impl Resource {
+  fn describe(self) -> String {
+    "Resource(${self.name}, len=${self.data.len()})"
+  }
+}
+
+enum ParseResult {
+  Parsed(String),
+  Failed(String)
+}
+
+// === Move Semantics ===
+
+/// Values move on assignment. After a move, the original binding is
+/// no longer usable. This is how Bock prevents use-after-free.
+fn move_basics() -> Void {
+  println("--- Move Semantics ---")
+
+  // Simple move: ownership transfers from `a` to `b`
+  let a = [1, 2, 3]
+  let b = a
+  // `a` is now moved — it cannot be used again.
+  // let c = a  // ERROR: `a` was moved to `b`
+
+  // `b` owns the list, we can use it freely
+  println("b has ${b.len()} items")
+
+  // Move through a chain of bindings
+  let x = Resource { name: "config", data: [10, 20] }
+  let y = x
+  // `x` is moved to `y`
+  let z = y
+  // `y` is moved to `z`
+  println("z = ${z.describe()}")
+  // Only `z` is live — `x` and `y` are both consumed
+}
+
+// === Implicit Borrow ===
+
+/// Functions that only read their argument borrow implicitly.
+/// The caller retains ownership — no move occurs.
+fn count_items(items: List[Int]) -> Int {
+  items.len()
+}
+
+fn describe_resource(r: Resource) -> String {
+  r.describe()
+}
+
+fn implicit_borrow_demo() -> Void {
+  println("--- Implicit Borrow ---")
+
+  let data = [10, 20, 30, 40, 50]
+
+  // `count_items` borrows `data` — no move
+  let n = count_items(data)
+  println("count = ${n}")
+
+  // `data` is still usable after the borrow
+  let n2 = count_items(data)
+  println("count again = ${n2}")
+
+  // Multiple borrows in sequence — all fine
+  let n3 = data.len()
+  println("and once more = ${n3}")
+
+  // Records borrow the same way
+  let res = Resource { name: "db", data: [1, 2, 3] }
+  let desc = describe_resource(res)
+  println("desc = ${desc}")
+  // `res` still usable after implicit borrow
+  let desc2 = describe_resource(res)
+  println("desc again = ${desc2}")
+}
+
+// === Mutable Borrow ===
+
+/// `mut` on a parameter means the function may modify the value.
+/// The caller must pass with `mut` to acknowledge the mutation.
+fn append_item(mut items: List[Int], value: Int) -> List[Int] {
+  items = items + [value]
+  items
+}
+
+fn double_all(mut items: List[Int]) -> List[Int] {
+  items = items.map((x) => x * 2)
+  items
+}
+
+fn mutable_borrow_demo() -> Void {
+  println("--- Mutable Borrow ---")
+
+  let mut nums = [1, 2, 3]
+  let result = append_item(mut nums, 4)
+  println("appended: len=${result.len()}")
+
+  let mut vals = [10, 20, 30]
+  let doubled = double_all(mut vals)
+  println("doubled: len=${doubled.len()}")
+}
+
+// === @managed Escape Hatch ===
+
+/// @managed suppresses ownership/move checking entirely.
+/// Everything inside uses GC semantics — references can be
+/// shared freely. On Rust targets, this maps to Rc/Arc.
+/// On GC targets (JS, Python, Go), it's erased.
+@managed
+fn build_report() -> String {
+  let title = "Quarterly Report"
+  let header = "=== ${title} ==="
+
+  // In @managed, we can use `title` multiple times freely
+  // even after it would normally be moved
+  let section1 = "Section 1 of ${title}"
+  let section2 = "Section 2 of ${title}"
+  let footer = "End of ${title}"
+
+  "${header} | ${section1} | ${section2} | ${footer}"
+}
+
+@managed
+fn build_ui_tree() -> String {
+  // @managed is ideal for UI code where many components
+  // reference shared state
+  let app_name = "Bock App"
+  let theme = "dark"
+
+  let header = "Header: ${app_name} (${theme})"
+  let sidebar = "Sidebar: ${app_name} nav"
+  let content = "Content: ${app_name} main"
+  let footer = "Footer: ${app_name} v1.0"
+
+  "${header} | ${sidebar} | ${content} | ${footer}"
+}
+
+fn managed_demo() -> Void {
+  println("--- @managed Escape Hatch ---")
+
+  let report = build_report()
+  println("report: ${report}")
+
+  let ui = build_ui_tree()
+  println("ui: ${ui}")
+}
+
+// === Guard + Ownership ===
+
+/// Guard with let-pattern: the bound variable is available after
+/// the guard succeeds. The else branch must diverge (return/break).
+fn validate(input: String) -> Result[String, String] {
+  if (input == "") { Err("empty input") } else { Ok(input) }
+}
+
+fn guard_ownership_demo() -> Void {
+  println("--- Guard + Ownership ---")
+
+  // Guard binds `val` on success — safe to use after guard
+  guard (let Ok(val) = validate("hello")) else {
+    return
+  }
+  println("validated: ${val}")
+
+  // Guard with failing condition diverges via return
+  guard (let Ok(val2) = validate("world")) else {
+    return
+  }
+  println("also validated: ${val2}")
+}
+
+// === Match with Never ===
+
+/// When a match arm returns/breaks, its type is Never.
+/// Never unifies with any type, so mixed arms work.
+fn classify(n: Int) -> String {
+  let label = match n {
+    0 => "zero"
+    1 => "one"
+    _ => { return "bailed out early" }
+  }
+  // If we get here, n was 0 or 1
+  "classified as: ${label}"
+}
+
+fn find_first_positive(items: List[Int]) -> String {
+  let result = match items {
+    [] => { return "empty list" }
+    [first, ..rest] => first
+  }
+  "first element: ${result}"
+}
+
+fn never_demo() -> Void {
+  println("--- Match with Never ---")
+
+  println(classify(0))
+  println(classify(1))
+  println(classify(42))
+  println(find_first_positive([]))
+  println(find_first_positive([7, 8, 9]))
+}
+
+// === What Would Fail ===
+// These are COMMENTED OUT because they would be ownership errors.
+// They demonstrate the rules the checker enforces.
+
+fn would_fail_examples() -> Void {
+  println("--- What Would Fail (commented-out examples) ---")
+
+  // Example 1: Use after move
+  // let x = [1, 2, 3]
+  // let y = x          // x moves to y
+  // println(x.len())   // ERROR: x was moved
+
+  // Example 2: Move into collection, then reuse
+  // let item = Resource { name: "a", data: [1] }
+  // let list = [item]   // item moves into the list literal
+  // println(item.name)  // ERROR: item was moved into list
+  // Workaround: use @managed or restructure to avoid reuse
+
+  // Example 3: Double move
+  // let a = [10, 20]
+  // let b = a           // a moves to b
+  // let c = a           // ERROR: a was already moved to b
+
+  // Example 4: Move in one branch, use after
+  // let data = [1, 2, 3]
+  // if (true) {
+  //   let moved = data  // data moves here
+  // }
+  // println(data.len()) // ERROR: data may have been moved
+
+  println("(See source comments for ownership error examples)")
+}
+
+// === Main ===
+
+fn main() {
+  println("=== Ownership Demo ===")
+  println("")
+
+  move_basics()
+  println("")
+
+  implicit_borrow_demo()
+  println("")
+
+  mutable_borrow_demo()
+  println("")
+
+  managed_demo()
+  println("")
+
+  guard_ownership_demo()
+  println("")
+
+  never_demo()
+  println("")
+
+  would_fail_examples()
+
+  println("")
+  println("=== Ownership Demo Complete ===")
+}

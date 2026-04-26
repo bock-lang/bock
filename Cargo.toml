@@ -2,24 +2,44 @@
 resolver = "2"
 members = [
     "compiler/crates/*",
+    "compiler/tests",
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/bocklang/bock"
 authors = ["Bock Language Contributors"]
 rust-version = "1.75"
 
-[workspace.lints.rust]
-unsafe_code = "forbid"
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+ariadne = "0.4"
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+regex = "1"
+pretty_assertions = "1"
 
-[workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "warn"
-expect_used = "warn"
+# Internal crates
+bock-errors = { path = "compiler/crates/bock-errors" }
+bock-source = { path = "compiler/crates/bock-source" }
+bock-lexer = { path = "compiler/crates/bock-lexer" }
+bock-ast = { path = "compiler/crates/bock-ast" }
+bock-parser = { path = "compiler/crates/bock-parser" }
+bock-air = { path = "compiler/crates/bock-air" }
+bock-types = { path = "compiler/crates/bock-types" }
+bock-interp = { path = "compiler/crates/bock-interp" }
+bock-core = { path = "compiler/crates/bock-core" }
+bock-fmt = { path = "compiler/crates/bock-fmt" }
+bock-ai = { path = "compiler/crates/bock-ai" }
+bock-codegen = { path = "compiler/crates/bock-codegen" }
+bock-build = { path = "compiler/crates/bock-build" }
+bock-pkg = { path = "compiler/crates/bock-pkg" }
+bock-cli = { path = "compiler/crates/bock-cli" }
+bock-lsp = { path = "compiler/crates/bock-lsp" }
+bock-vocab = { path = "compiler/crates/bock-vocab" }
 
 [profile.release]
 lto = "thin"

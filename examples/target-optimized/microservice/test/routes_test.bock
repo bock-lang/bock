@@ -1,0 +1,122 @@
+//! Microservice Tests — Verifies routing, handlers, and effect-based DI.
+
+module routes_test
+
+use main.*
+
+// ─── Mock Handlers ────────────────────────────────────────────────
+
+record MockDb {}
+impl Database for MockDb {
+  fn db_query(sql: String) -> Result[String, String] {
+    Ok("mock-users")
+  }
+  fn db_execute(sql: String) -> Result[String, String] {
+    Ok("mock-created")
+  }
+}
+
+record FailDb {}
+impl Database for FailDb {
+  fn db_query(sql: String) -> Result[String, String] {
+    Err("connection refused")
+  }
+  fn db_execute(sql: String) -> Result[String, String] {
+    Err("connection refused")
+  }
+}
+
+record MockAuth {}
+impl Auth for MockAuth {
+  fn verify_token(token: String) -> Bool {
+    token == "valid"
+  }
+  fn get_user_role(token: String) -> String {
+    "user"
+  }
+}
+
+record NoopLogger {}
+impl Logger for NoopLogger {
+  fn log(level: String, message: String) -> Void {
+    // Silently discard — test output stays clean
+  }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────
+
+@test
+fn test_route_health() {
+  let req = Request { method: "GET", path: "/health", body: "", token: "" }
+  let route = match_route(req)
+  expect(route_name(route)).to_equal("GET /health")
+}
+
+@test
+fn test_route_get_users() {
+  let req = Request { method: "GET", path: "/users", body: "", token: "" }
+  let route = match_route(req)
+  expect(route_name(route)).to_equal("GET /users")
+}
+
+@test
+fn test_route_get_user_by_id() {
+  let req = Request { method: "GET", path: "/users/42", body: "", token: "" }
+  let route = match_route(req)
+  expect(route_name(route)).to_equal("GET /users/42")
+}
+
+@test
+fn test_route_create_user() {
+  let req = Request { method: "POST", path: "/users", body: "", token: "" }
+  let route = match_route(req)
+  expect(route_name(route)).to_equal("POST /users")
+}
+
+@test
+fn test_route_not_found() {
+  let req = Request { method: "GET", path: "/unknown", body: "", token: "" }
+  let route = match_route(req)
+  expect(route_name(route)).to_equal("NOT_FOUND")
+}
+
+@test
+fn test_health_handler() {
+  let resp = handle_health()
+  expect(resp.status).to_equal(200)
+  expect(resp.body).to_equal("ok")
+}
+
+@test
+fn test_get_users_handler() {
+  handling (Database with MockDb {}, Logger with NoopLogger {}) {
+    let resp = handle_get_users()
+    expect(resp.status).to_equal(200)
+    expect(resp.body).to_equal("mock-users")
+  }
+}
+
+@test
+fn test_get_users_db_failure() {
+  handling (Database with FailDb {}, Logger with NoopLogger {}) {
+    let resp = handle_get_users()
+    expect(resp.status).to_equal(500)
+  }
+}
+
+@test
+fn test_create_user_authorized() {
+  handling (Database with MockDb {}, Auth with MockAuth {}, Logger with NoopLogger {}) {
+    let resp = handle_create_user("name=Alice", "valid")
+    expect(resp.status).to_equal(201)
+    expect(resp.body).to_equal("mock-created")
+  }
+}
+
+@test
+fn test_create_user_unauthorized() {
+  handling (Database with MockDb {}, Auth with MockAuth {}, Logger with NoopLogger {}) {
+    let resp = handle_create_user("name=Evil", "bad-token")
+    expect(resp.status).to_equal(401)
+  }
+}

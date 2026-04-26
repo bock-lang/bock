@@ -1,0 +1,17 @@
+// TEST: time_concurrent_sleeps
+// EXPECT: no_errors
+async fn main() {
+  let start = Instant.now()
+
+  let a = sleep(Duration.millis(100))
+  let b = sleep(Duration.millis(100))
+  let c = sleep(Duration.millis(100))
+
+  await a
+  await b
+  await c
+
+  let elapsed = start.elapsed().as_millis()
+  assert(elapsed < 200)
+  println("concurrent: ok (${elapsed}ms)")
+}

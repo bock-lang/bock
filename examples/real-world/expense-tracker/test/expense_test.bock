@@ -1,0 +1,80 @@
+//! Tests for the expense tracker.
+
+module expense_test
+
+use main.*
+
+// ─── Test Data ────────────────────────────────────────────────────
+
+@managed
+fn sample_expenses() -> List[Expense] {
+  [
+    Expense { id: 1, amount: 50.0, category: Food, description: "Groceries", date: "2026-03-01" },
+    Expense { id: 2, amount: 100.0, category: Housing, description: "Rent", date: "2026-03-01" },
+    Expense { id: 3, amount: 25.0, category: Transport, description: "Bus", date: "2026-03-02" },
+    Expense { id: 4, amount: 10.0, category: Food, description: "Coffee", date: "2026-03-03" }
+  ]
+}
+
+// ─── Tests ────────────────────────────────────────────────────────
+
+@test
+@managed
+fn test_add_expense() {
+  let expenses = sample_expenses()
+  let updated = add_expense(expenses, Expense {
+    id: 5, amount: 20.0, category: Entertainment
+    description: "Movie", date: "2026-03-04"
+  })
+  expect(updated.len()).to_equal(5)
+}
+
+@test
+@managed
+fn test_remove_expense() {
+  let expenses = sample_expenses()
+  let updated = remove_expense(expenses, 2)
+  expect(updated.len()).to_equal(3)
+}
+
+@test
+@managed
+fn test_remove_nonexistent() {
+  let expenses = sample_expenses()
+  let updated = remove_expense(expenses, 999)
+  expect(updated.len()).to_equal(4)
+}
+
+@test
+@managed
+fn test_find_by_category() {
+  let expenses = sample_expenses()
+  let food = find_by_category(expenses, Food)
+  expect(food.len()).to_equal(2)
+}
+
+@test
+@managed
+fn test_find_by_category_empty() {
+  let expenses = sample_expenses()
+  let ent = find_by_category(expenses, Entertainment)
+  expect(ent.len()).to_equal(0)
+}
+
+@test
+@managed
+fn test_total_spending() {
+  let expenses = sample_expenses()
+  let total = total_spending(expenses)
+  expect(total).to_equal(185.0)
+}
+
+@test
+@managed
+fn test_generate_report_count() {
+  let expenses = sample_expenses()
+  let report = generate_report(expenses)
+  expect(report.count).to_equal(4)
+}
+
+fn main() { }

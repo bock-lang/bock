@@ -1,0 +1,11 @@
+// TEST: function_typed_parameter_callable
+// EXPECT: no errors
+fn apply(f: Fn(Int) -> Int, x: Int) -> Int {
+  f(x)
+}
+
+fn double(x: Int) -> Int { x * 2 }
+
+fn main() {
+  let result = apply(double, 5)
+}

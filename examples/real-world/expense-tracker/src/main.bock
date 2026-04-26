@@ -1,0 +1,203 @@
+//! Expense Tracker — Personal finance app with category-based reporting.
+//!
+//! Demonstrates: enums, records, pattern matching, Map collection,
+//! list operations, higher-order functions, string interpolation.
+//! Target: Python, JS.
+
+module main
+
+// ─── Models ───────────────────────────────────────────────────────
+
+/// Spending categories for classifying expenses.
+public enum Category { Food, Transport, Housing, Entertainment, Utilities, Other }
+
+/// A single expense entry with amount, category, and metadata.
+public record Expense {
+  id: Int
+  amount: Float
+  category: Category
+  description: String
+  date: String
+}
+
+/// Aggregated spending report with totals and category breakdown.
+public record Report {
+  total: Float
+  by_category: Map[String, Float]
+  count: Int
+}
+
+// ─── Category Helpers ─────────────────────────────────────────────
+
+/// Convert a Category enum value to its display name.
+public fn category_name(cat: Category) -> String {
+  match cat {
+    Food => "Food"
+    Transport => "Transport"
+    Housing => "Housing"
+    Entertainment => "Entertainment"
+    Utilities => "Utilities"
+    Other => "Other"
+  }
+}
+
+/// Check whether two categories match by comparing each variant.
+public fn is_category(expense: Expense, cat: Category) -> Bool {
+  match expense.category {
+    Food => match cat { Food => true, _ => false }
+    Transport => match cat { Transport => true, _ => false }
+    Housing => match cat { Housing => true, _ => false }
+    Entertainment => match cat { Entertainment => true, _ => false }
+    Utilities => match cat { Utilities => true, _ => false }
+    Other => match cat { Other => true, _ => false }
+  }
+}
+
+// ─── Store Operations ─────────────────────────────────────────────
+
+/// Add an expense to the store, returning the updated list.
+public fn add_expense(expenses: List[Expense], expense: Expense) -> List[Expense] {
+  expenses + [expense]
+}
+
+/// Remove an expense by id, keeping all others.
+public fn remove_expense(expenses: List[Expense], id: Int) -> List[Expense] {
+  expenses.filter((e) => e.id != id)
+}
+
+/// Filter expenses to only those matching a given category.
+public fn find_by_category(expenses: List[Expense], cat: Category) -> List[Expense] {
+  expenses.filter((e) => is_category(e, cat))
+}
+
+// ─── Reporting ────────────────────────────────────────────────────
+
+/// Compute the total spending across all expenses.
+public fn total_spending(expenses: List[Expense]) -> Float {
+  let mut total = 0.0
+  for e in expenses {
+    total = total + e.amount
+  }
+  total
+}
+
+/// Sum expenses matching a specific category.
+public fn category_total(expenses: List[Expense], cat: Category) -> Float {
+  let mut total = 0.0
+  for e in expenses {
+    if (is_category(e, cat)) {
+      total = total + e.amount
+    }
+  }
+  total
+}
+
+/// Build a map of category name to total spending for each category.
+@managed
+public fn spending_by_category(expenses: List[Expense]) -> Map[String, Float] {
+  let food = category_total(expenses, Food)
+  let transport = category_total(expenses, Transport)
+  let housing = category_total(expenses, Housing)
+  let entertainment = category_total(expenses, Entertainment)
+  let utilities = category_total(expenses, Utilities)
+  let other = category_total(expenses, Other)
+  {
+    "Food": food,
+    "Transport": transport,
+    "Housing": housing,
+    "Entertainment": entertainment,
+    "Utilities": utilities,
+    "Other": other
+  }
+}
+
+/// Generate a full spending report from a list of expenses.
+@managed
+public fn generate_report(expenses: List[Expense]) -> Report {
+  let total = total_spending(expenses)
+  let by_cat = spending_by_category(expenses)
+  let count = expenses.len()
+  Report { total: total, by_category: by_cat, count: count }
+}
+
+/// Format a report as a human-readable string.
+public fn format_report(report: Report) -> String {
+  let header = "=== Expense Report ==="
+  let summary = "Total: ${report.total} | Items: ${report.count}"
+  let cat_keys = report.by_category.keys()
+  let mut lines = header + "\n" + summary
+  for key in cat_keys {
+    let val = report.by_category.get(key)
+    match val {
+      Some(amount) => {
+        lines = lines + "\n  ${key}: ${amount}"
+      }
+      None => {}
+    }
+  }
+  lines
+}
+
+// ─── Main ─────────────────────────────────────────────────────────
+
+@managed
+fn main() {
+  println("=== Expense Tracker Demo ===")
+  println("")
+
+  // Build up a store of expenses
+  let mut expenses: List[Expense] = []
+
+  expenses = add_expense(expenses, Expense {
+    id: 1, amount: 45.50, category: Food
+    description: "Grocery shopping", date: "2026-03-01"
+  })
+  expenses = add_expense(expenses, Expense {
+    id: 2, amount: 120.00, category: Housing
+    description: "Electric bill", date: "2026-03-02"
+  })
+  expenses = add_expense(expenses, Expense {
+    id: 3, amount: 30.00, category: Transport
+    description: "Bus pass", date: "2026-03-03"
+  })
+  expenses = add_expense(expenses, Expense {
+    id: 4, amount: 15.99, category: Entertainment
+    description: "Movie ticket", date: "2026-03-05"
+  })
+  expenses = add_expense(expenses, Expense {
+    id: 5, amount: 60.00, category: Utilities
+    description: "Internet service", date: "2026-03-06"
+  })
+  expenses = add_expense(expenses, Expense {
+    id: 6, amount: 22.75, category: Food
+    description: "Lunch out", date: "2026-03-07"
+  })
+
+  // Show all expenses
+  println("All expenses (${expenses.len()}):")
+  for e in expenses {
+    println("  #${e.id} ${e.description}: ${e.amount} [${category_name(e.category)}]")
+  }
+
+  // Remove an expense and show updated count
+  expenses = remove_expense(expenses, 4)
+  println("")
+  println("After removing #4: ${expenses.len()} expenses")
+
+  // Filter by category
+  let food_items = find_by_category(expenses, Food)
+  println("")
+  println("Food expenses (${food_items.len()}):")
+  for e in food_items {
+    println("  ${e.description}: ${e.amount}")
+  }
+
+  // Generate and print report
+  let report = generate_report(expenses)
+  println("")
+  let formatted = format_report(report)
+  println(formatted)
+
+  println("")
+  println("=== Done ===")
+}

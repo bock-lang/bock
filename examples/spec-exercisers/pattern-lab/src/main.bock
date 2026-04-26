@@ -1,0 +1,284 @@
+//! Pattern Lab — Comprehensive pattern matching demonstration.
+//!
+//! Demonstrates: wildcard, binding, mutable binding, literal, constructor,
+//! record destructure, tuple, list, or-pattern, guard, range, rest,
+//! nested, Never unification, if-let.
+//! Target: Rust, Python.
+
+module main
+
+// --- Supporting types ---
+
+public record Point {
+  x: Int
+  y: Int
+}
+
+public enum Direction {
+  North,
+  South,
+  East,
+  West
+}
+
+public enum Shape {
+  Circle(Float),
+  Rect(Float, Float),
+  Dot
+}
+
+// --- Wildcard pattern ---
+
+public fn classify_wildcard(n: Int) -> String {
+  match n {
+    0 => "zero"
+    _ => "other"
+  }
+}
+
+// --- Binding pattern ---
+
+public fn echo_binding(n: Int) -> String {
+  match n {
+    x => "got ${x}"
+  }
+}
+
+// --- Mutable binding pattern ---
+
+public fn mutate_binding(n: Int) -> Int {
+  match n {
+    mut x => {
+      x = x + 1
+      x
+    }
+  }
+}
+
+// --- Literal patterns ---
+
+public fn classify_literal(n: Int) -> String {
+  match n {
+    0 => "zero"
+    1 => "one"
+    42 => "answer"
+    _ => "something else"
+  }
+}
+
+public fn classify_string(s: String) -> String {
+  match s {
+    "hello" => "greeting"
+    "bye" => "farewell"
+    _ => "unknown"
+  }
+}
+
+public fn classify_bool(b: Bool) -> String {
+  match b {
+    true => "yes"
+    false => "no"
+  }
+}
+
+// --- Constructor patterns (Optional / Result) ---
+
+public fn unwrap_optional(opt: Optional[Int]) -> String {
+  match opt {
+    Some(x) => "value: ${x}"
+    None => "absent"
+  }
+}
+
+public fn unwrap_result(res: Result[Int, String]) -> String {
+  match res {
+    Ok(v) => "ok: ${v}"
+    Err(e) => "err: ${e}"
+  }
+}
+
+// --- Record destructure patterns ---
+
+public fn describe_point(p: Point) -> String {
+  match p {
+    Point { x: 0, y: 0 } => "origin"
+    Point { x: 0, y } => "on y-axis at ${y}"
+    Point { x, y: 0 } => "on x-axis at ${x}"
+    Point { x, y } => "at (${x}, ${y})"
+  }
+}
+
+// --- Tuple patterns ---
+
+public fn describe_tuple(t: (Int, String)) -> String {
+  match t {
+    (0, _) => "starts with zero"
+    (n, s) => "${n}: ${s}"
+  }
+}
+
+// --- List patterns ---
+
+public fn describe_list(items: List[Int]) -> String {
+  match items {
+    [] => "empty"
+    [only] => "single: ${only}"
+    [first, ..rest] => "head=${first} rest_len=${rest.len()}"
+  }
+}
+
+// --- Or-pattern ---
+
+public fn classify_direction(d: Direction) -> String {
+  match d {
+    North | South => "vertical"
+    East | West => "horizontal"
+  }
+}
+
+// --- Guard pattern ---
+
+public fn classify_guarded(n: Int) -> String {
+  match n {
+    n if (n < 0) => "negative"
+    n if (n == 0) => "zero"
+    n if (n > 100) => "large"
+    n => "small positive: ${n}"
+  }
+}
+
+// --- Range pattern ---
+
+public fn classify_range(n: Int) -> String {
+  match n {
+    1..10 => "single digit"
+    10..100 => "two digits"
+    100..1000 => "three digits"
+    _ => "out of range"
+  }
+}
+
+// --- Record rest pattern ---
+
+public fn get_x(p: Point) -> String {
+  match p {
+    Point { x, .. } => "x=${x}"
+  }
+}
+
+// --- Nested pattern ---
+
+public fn nested_unwrap(val: Optional[Result[Int, String]]) -> String {
+  match val {
+    Some(Ok(n)) => "got ${n}"
+    Some(Err(e)) => "error: ${e}"
+    None => "nothing"
+  }
+}
+
+public fn deeply_nested(val: Optional[Result[(Int, Int), String]]) -> String {
+  match val {
+    Some(Ok((a, b))) => "pair: ${a}, ${b}"
+    Some(Err(e)) => "error: ${e}"
+    None => "nothing"
+  }
+}
+
+// --- Match with return (Never unifies) ---
+
+public fn with_early_return(n: Int) -> String {
+  let label = match n {
+    0 => "zero"
+    1 => "one"
+    _ => { return "bailed out" }
+  }
+  "label: ${label}"
+}
+
+// --- If-let ---
+
+public fn try_find(id: Int) -> Optional[String] {
+  if (id > 0) { Some("item-${id}") } else { None }
+}
+
+public fn if_let_demo(id: Int) -> String {
+  if (let Some(name) = try_find(id)) {
+    "found: ${name}"
+  } else {
+    "not found"
+  }
+}
+
+// --- Main: exercise every pattern ---
+
+fn main() {
+  println("=== Pattern Lab ===")
+
+  // Wildcard
+  println("wildcard(0): ${classify_wildcard(0)}")
+  println("wildcard(7): ${classify_wildcard(7)}")
+
+  // Binding
+  println("binding(42): ${echo_binding(42)}")
+
+  // Mutable binding
+  println("mutate(5): ${mutate_binding(5)}")
+
+  // Literals
+  println("literal(42): ${classify_literal(42)}")
+  println("literal(99): ${classify_literal(99)}")
+  println("string(hello): ${classify_string("hello")}")
+  println("bool(true): ${classify_bool(true)}")
+
+  // Constructor
+  println("optional(Some(10)): ${unwrap_optional(Some(10))}")
+  println("optional(None): ${unwrap_optional(None)}")
+  println("result(Ok(1)): ${unwrap_result(Ok(1))}")
+  println("result(Err): ${unwrap_result(Err("fail"))}")
+
+  // Record destructure
+  println("point(0,0): ${describe_point(Point { x: 0, y: 0 })}")
+  println("point(0,5): ${describe_point(Point { x: 0, y: 5 })}")
+  println("point(3,4): ${describe_point(Point { x: 3, y: 4 })}")
+
+  // Tuple
+  println("tuple(0,hi): ${describe_tuple((0, "hi"))}")
+  println("tuple(1,ok): ${describe_tuple((1, "ok"))}")
+
+  // List
+  println("list([]): ${describe_list([])}")
+  println("list([7]): ${describe_list([7])}")
+  println("list([1,2,3]): ${describe_list([1, 2, 3])}")
+
+  // Or-pattern
+  println("dir(North): ${classify_direction(North)}")
+  println("dir(East): ${classify_direction(East)}")
+
+  // Guard
+  println("guard(-5): ${classify_guarded(-5)}")
+  println("guard(0): ${classify_guarded(0)}")
+  println("guard(200): ${classify_guarded(200)}")
+  println("guard(50): ${classify_guarded(50)}")
+
+  // Range
+  println("range(5): ${classify_range(5)}")
+  println("range(42): ${classify_range(42)}")
+  println("range(500): ${classify_range(500)}")
+
+  // Record rest
+  println("rest: ${get_x(Point { x: 7, y: 99 })}")
+
+  // Nested
+  println("nested(Some(Ok(42))): ${nested_unwrap(Some(Ok(42)))}")
+  println("nested(Some(Err)): ${nested_unwrap(Some(Err("bad")))}")
+  println("nested(None): ${nested_unwrap(None)}")
+  println("deep(Some(Ok((1,2)))): ${deeply_nested(Some(Ok((1, 2))))}")
+
+  // Never unification
+  println("early_return(0): ${with_early_return(0)}")
+  println("early_return(99): ${with_early_return(99)}")
+
+  // If-let
+  println("if_let(5): ${if_let_demo(5)}")
+  println("if_let(-1): ${if_let_demo(-1)}")
+}

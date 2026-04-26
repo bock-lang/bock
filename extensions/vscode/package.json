@@ -1,0 +1,385 @@
+{
+  "name": "bock-lang",
+  "displayName": "Bock Language",
+  "description": "Official VS Code extension for the Bock programming language — syntax, LSP, spec panel, and decision manifest UI.",
+  "version": "0.1.0",
+  "publisher": "bock-lang",
+  "license": "MIT",
+  "icon": "assets/icon.png",
+  "galleryBanner": {
+    "color": "#1B1F3B",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bock-lang/bock.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bock-lang/bock/issues"
+  },
+  "homepage": "https://github.com/bock-lang/bock#readme",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Visualization"
+  ],
+  "keywords": [
+    "bock",
+    "bock-lang",
+    "language",
+    "compiler",
+    "transpiler",
+    "lsp",
+    "effects",
+    "spec"
+  ],
+  "activationEvents": [
+    "onLanguage:bock",
+    "workspaceContains:**/bock.project",
+    "workspaceContains:**/*.bock"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "bock",
+        "aliases": [
+          "Bock",
+          "bock"
+        ],
+        "extensions": [
+          ".bock"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "bock",
+        "scopeName": "source.bock",
+        "path": "./syntaxes/bock.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Bock",
+      "properties": {
+        "bock.lspPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Explicit path to the `bock` binary. If empty, the extension searches `PATH`."
+        },
+        "bock.specPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Local override for the Bock spec directory. If empty, the bundled `assets/spec/` is used."
+        },
+        "bock.hover.showSpecLinks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include clickable spec section links in hover popups."
+        },
+        "bock.effects.autoRender": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically render the effect flow diagram when hovering over effectful functions."
+        },
+        "bock.decisions.showUnpinnedBadge": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a badge on the Decisions view when unpinned runtime decisions exist."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "bock.showSpec",
+        "title": "Show Spec",
+        "category": "Bock"
+      },
+      {
+        "command": "bock.showDecisions",
+        "title": "Show Decisions",
+        "category": "Bock"
+      },
+      {
+        "command": "bock.explainError",
+        "title": "Explain Error at Cursor",
+        "category": "Bock"
+      },
+      {
+        "command": "bock.showEffectFlow",
+        "title": "Show Effect Flow for Function",
+        "category": "Bock"
+      },
+      {
+        "command": "bock.pinDecision",
+        "title": "Pin Decision",
+        "category": "Bock",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "bock.unpinDecision",
+        "title": "Unpin Decision",
+        "category": "Bock",
+        "icon": "$(pinned)"
+      },
+      {
+        "command": "bock.overrideDecision",
+        "title": "Override Decision",
+        "category": "Bock",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "bock.promoteDecision",
+        "title": "Promote Runtime Decision to Build",
+        "category": "Bock",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "bock.refreshVocab",
+        "title": "Refresh Vocabulary",
+        "category": "Bock",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "bock.openSpecAt",
+        "title": "Open Spec at Section…",
+        "category": "Bock"
+      },
+      {
+        "command": "bock.annotations.refresh",
+        "title": "Refresh Annotations",
+        "category": "Bock",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "bock.annotations.showUsage",
+        "title": "Show Annotation Usage Analysis",
+        "category": "Bock"
+      },
+      {
+        "command": "bock.decisions.refresh",
+        "title": "Refresh Decisions",
+        "category": "Bock",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "bock.decisions.filter",
+        "title": "Filter Decisions",
+        "category": "Bock",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "bock.decisions.scopeBuild",
+        "title": "Show Build Decisions",
+        "category": "Bock",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "bock.decisions.scopeRuntime",
+        "title": "Show Runtime Decisions",
+        "category": "Bock",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "bock.decisions.scopeAll",
+        "title": "Show All Decisions",
+        "category": "Bock",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "bock.decisions.showDetail",
+        "title": "Show Decision Details",
+        "category": "Bock",
+        "icon": "$(info)"
+      },
+      {
+        "command": "bock.decisions.pinAllBuild",
+        "title": "Pin All Build Decisions",
+        "category": "Bock"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "bock",
+          "title": "Bock",
+          "icon": "$(book)"
+        }
+      ]
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "bock.annotations",
+          "name": "Bock Annotations",
+          "when": "workspaceHasBockFiles"
+        },
+        {
+          "id": "bock.decisions",
+          "name": "Bock Decisions",
+          "when": "workspaceHasBockFiles"
+        }
+      ],
+      "bock": [
+        {
+          "type": "webview",
+          "id": "bock.effectsView",
+          "name": "Effect Flow"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "bock.showEffectFlow",
+          "when": "editorLangId == bock",
+          "group": "bock@1"
+        },
+        {
+          "command": "bock.explainError",
+          "when": "editorLangId == bock",
+          "group": "bock@2"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "bock.annotations.refresh",
+          "when": "view == bock.annotations",
+          "group": "navigation"
+        },
+        {
+          "command": "bock.decisions.scopeRuntime",
+          "when": "view == bock.decisions && bock.decisions.scope == build",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bock.decisions.scopeAll",
+          "when": "view == bock.decisions && bock.decisions.scope == runtime",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bock.decisions.scopeBuild",
+          "when": "view == bock.decisions && bock.decisions.scope == all",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bock.decisions.filter",
+          "when": "view == bock.decisions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "bock.decisions.refresh",
+          "when": "view == bock.decisions",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "bock.annotations.showUsage",
+          "when": "view == bock.annotations && viewItem == annotationGroup",
+          "group": "bock@1"
+        },
+        {
+          "command": "bock.pinDecision",
+          "when": "view == bock.decisions && viewItem =~ /^unpinnedDecision/",
+          "group": "inline@1"
+        },
+        {
+          "command": "bock.unpinDecision",
+          "when": "view == bock.decisions && viewItem =~ /^pinnedDecision/",
+          "group": "inline@1"
+        },
+        {
+          "command": "bock.overrideDecision",
+          "when": "view == bock.decisions && viewItem =~ /Decision/",
+          "group": "inline@2"
+        },
+        {
+          "command": "bock.promoteDecision",
+          "when": "view == bock.decisions && viewItem =~ /runtimeDecision/",
+          "group": "inline@3"
+        },
+        {
+          "command": "bock.decisions.showDetail",
+          "when": "view == bock.decisions && viewItem =~ /Decision/",
+          "group": "bock@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "bock.pinDecision",
+          "when": "false"
+        },
+        {
+          "command": "bock.unpinDecision",
+          "when": "false"
+        },
+        {
+          "command": "bock.overrideDecision",
+          "when": "false"
+        },
+        {
+          "command": "bock.promoteDecision",
+          "when": "false"
+        },
+        {
+          "command": "bock.annotations.refresh",
+          "when": "false"
+        },
+        {
+          "command": "bock.annotations.showUsage",
+          "when": "false"
+        },
+        {
+          "command": "bock.decisions.refresh",
+          "when": "false"
+        },
+        {
+          "command": "bock.decisions.filter",
+          "when": "false"
+        },
+        {
+          "command": "bock.decisions.showDetail",
+          "when": "false"
+        },
+        {
+          "command": "bock.decisions.scopeBuild",
+          "when": "false"
+        },
+        {
+          "command": "bock.decisions.scopeRuntime",
+          "when": "false"
+        },
+        {
+          "command": "bock.decisions.scopeAll",
+          "when": "false"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "node esbuild.js --production",
+    "typecheck": "tsc --noEmit",
+    "publish": "vsce publish"
+  },
+  "dependencies": {
+    "marked": "^11.1.1",
+    "mermaid": "^11.14.0",
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.9.1",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.3"
+  }
+}

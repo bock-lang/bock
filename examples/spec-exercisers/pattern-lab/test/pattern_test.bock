@@ -1,0 +1,117 @@
+//! Tests for Pattern Lab — verifying each pattern type.
+
+module pattern_test
+
+use main.*
+
+// --- Test-only helpers ---
+
+fn try_find(id: Int) -> Optional[String] {
+  if (id > 0) { Some("item-${id}") } else { None }
+}
+
+// --- Tests ---
+
+@test
+fn test_wildcard() {
+  expect(classify_wildcard(0)).to_equal("zero")
+  expect(classify_wildcard(99)).to_equal("other")
+}
+
+@test
+fn test_binding() {
+  expect(echo_binding(7)).to_equal("got 7")
+}
+
+@test
+fn test_mutable_binding() {
+  expect(mutate_binding(5)).to_equal(6)
+  expect(mutate_binding(0)).to_equal(1)
+}
+
+@test
+fn test_literal() {
+  expect(classify_literal(0)).to_equal("zero")
+  expect(classify_literal(42)).to_equal("answer")
+  expect(classify_literal(99)).to_equal("something else")
+  expect(classify_bool(true)).to_equal("yes")
+  expect(classify_bool(false)).to_equal("no")
+}
+
+@test
+fn test_constructor() {
+  expect(unwrap_optional(Some(10))).to_equal("value: 10")
+  expect(unwrap_optional(None)).to_equal("absent")
+}
+
+@test
+fn test_record_destructure() {
+  expect(describe_point(Point { x: 0, y: 0 })).to_equal("origin")
+  expect(describe_point(Point { x: 0, y: 5 })).to_equal("on y-axis at 5")
+  expect(describe_point(Point { x: 3, y: 0 })).to_equal("on x-axis at 3")
+  expect(describe_point(Point { x: 3, y: 4 })).to_equal("at (3, 4)")
+}
+
+@test
+fn test_tuple_pattern() {
+  let t = (1, 2)
+  let (a, b) = t
+  expect(a).to_equal(1)
+  expect(b).to_equal(2)
+}
+
+@test
+fn test_list_pattern() {
+  expect(describe_list([])).to_equal("empty")
+  expect(describe_list([7])).to_equal("single: 7")
+  expect(describe_list([1, 2, 3])).to_equal("head=1 rest_len=2")
+}
+
+@test
+fn test_or_pattern() {
+  expect(classify_direction(North)).to_equal("vertical")
+  expect(classify_direction(South)).to_equal("vertical")
+  expect(classify_direction(East)).to_equal("horizontal")
+}
+
+@test
+fn test_guard() {
+  expect(classify_guarded(-5)).to_equal("negative")
+  expect(classify_guarded(0)).to_equal("zero")
+  expect(classify_guarded(200)).to_equal("large")
+  expect(classify_guarded(50)).to_equal("small positive: 50")
+}
+
+@test
+fn test_range_pattern() {
+  expect(classify_range(5)).to_equal("single digit")
+  expect(classify_range(42)).to_equal("two digits")
+  expect(classify_range(9999)).to_equal("out of range")
+}
+
+@test
+fn test_record_rest() {
+  let p = Point { x: 7, y: 99 }
+  match p {
+    Point { x, .. } => expect(x).to_equal(7)
+  }
+}
+
+@test
+fn test_nested() {
+  expect(nested_unwrap(Some(Ok(42)))).to_equal("got 42")
+  expect(nested_unwrap(Some(Err("bad")))).to_equal("error: bad")
+  expect(nested_unwrap(None)).to_equal("nothing")
+}
+
+@test
+fn test_if_let() {
+  if (let Some(name) = try_find(5)) {
+    expect(name).to_equal("item-5")
+  }
+  let missing = try_find(-1)
+  match missing {
+    Some(_) => expect(true).to_equal(false)
+    None => expect(true).to_equal(true)
+  }
+}

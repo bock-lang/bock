@@ -1,0 +1,30 @@
+//! FizzBuzz — Classic exercise with for loops and conditionals.
+//!
+//! Demonstrates: const, for..in range, if/else if/else, modulo, functions.
+//! Target: all.
+
+/// Divisor for "Fizz".
+const FIZZ_NUM: Int = 3
+
+/// Divisor for "Buzz".
+const BUZZ_NUM: Int = 5
+
+/// Returns the FizzBuzz label for a given number.
+fn fizzbuzz(n: Int) -> String {
+  if (n % (FIZZ_NUM * BUZZ_NUM) == 0) {
+    "FizzBuzz"
+  } else if (n % FIZZ_NUM == 0) {
+    "Fizz"
+  } else if (n % BUZZ_NUM == 0) {
+    "Buzz"
+  } else {
+    "${n}"
+  }
+}
+
+fn main() {
+  let limit = 100
+  for i in 1..=limit {
+    println(fizzbuzz(i))
+  }
+}

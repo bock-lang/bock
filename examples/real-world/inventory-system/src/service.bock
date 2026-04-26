@@ -1,0 +1,52 @@
+//! Inventory System — Service layer.
+//!
+//! Demonstrates: cross-file imports, higher-order functions, list operations.
+
+module service
+
+use models.*
+
+/// Finds all products matching a given category.
+public fn find_by_category(products: List[Product], cat: Category) -> List[Product] {
+  products.filter((p) => category_name(p.category) == category_name(cat))
+}
+
+/// Finds all products that are out of stock.
+public fn find_out_of_stock(products: List[Product]) -> List[Product] {
+  products.filter((p) => p.in_stock() == false)
+}
+
+/// Finds all products that are in stock.
+public fn find_in_stock(products: List[Product]) -> List[Product] {
+  products.filter((p) => p.in_stock())
+}
+
+/// Computes the total value of all products in the list.
+public fn total_value(products: List[Product]) -> Float {
+  let values = products.map((p) => p.stock_value())
+  values.fold(0.0, (acc, v) => acc + v)
+}
+
+/// Builds a summary of the inventory.
+public fn summarize(products: List[Product]) -> InventorySummary {
+  let total = products.len()
+  let value = total_value(products)
+  let oos = find_out_of_stock(products).len()
+  InventorySummary { total_products: total, total_value: value, out_of_stock: oos }
+}
+
+/// Formats a summary for display.
+public fn format_summary(summary: InventorySummary) -> String {
+  "Inventory: ${summary.total_products} products, $${summary.total_value} total value, ${summary.out_of_stock} out of stock"
+}
+
+/// Restocks a product by adding the given quantity.
+public fn restock(product: Product, amount: Int) -> Product {
+  Product {
+    id: product.id,
+    name: product.name,
+    category: product.category,
+    price: product.price,
+    quantity: product.quantity + amount
+  }
+}

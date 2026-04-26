@@ -1,0 +1,22 @@
+[package]
+name = "bock-codegen"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+bock-air.workspace = true
+bock-ast.workspace = true
+bock-types.workspace = true
+bock-source.workspace = true
+bock-errors.workspace = true
+bock-ai.workspace = true
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+tempfile = "3"
+async-trait = "0.1"

@@ -1,0 +1,97 @@
+//! Tests for the chat protocol.
+
+module protocol_test
+
+use main.*
+
+// ─── Tests ────────────────────────────────────────────────────────
+
+@test
+@managed
+fn test_encode_text_message() {
+  let msg = Message {
+    id: 1, sender: "alice", msg_type: Text
+    content: "hello", timestamp: 1000
+  }
+  let encoded = encode(msg)
+  expect(encoded.starts_with("TEXT|")).to_equal(true)
+}
+
+@test
+@managed
+fn test_encode_system_message() {
+  let msg = Message {
+    id: 2, sender: "system", msg_type: System
+    content: "user joined", timestamp: 500
+  }
+  let encoded = encode(msg)
+  expect(encoded.starts_with("SYSTEM|")).to_equal(true)
+}
+
+@test
+fn test_decode_text_success() {
+  let result = decode("TEXT|1|alice|1000|hello")
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_decode_image_success() {
+  let result = decode("IMAGE|2|bob|1001|photo.png")
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_decode_empty_input() {
+  let result = decode("")
+  expect(result).to_be_err()
+}
+
+@test
+fn test_decode_unknown_prefix() {
+  let result = decode("UNKNOWN|data")
+  expect(result).to_be_err()
+}
+
+@test
+@managed
+fn test_is_system_message_true() {
+  let msg = Message {
+    id: 1, sender: "system", msg_type: System
+    content: "joined", timestamp: 0
+  }
+  expect(is_system_message(msg)).to_equal(true)
+}
+
+@test
+@managed
+fn test_is_system_message_false() {
+  let msg = Message {
+    id: 1, sender: "alice", msg_type: Text
+    content: "hi", timestamp: 0
+  }
+  expect(is_system_message(msg)).to_equal(false)
+}
+
+@test
+@managed
+fn test_filter_by_sender() {
+  let msgs: List[Message] = [
+    Message { id: 1, sender: "alice", msg_type: Text, content: "a", timestamp: 0 },
+    Message { id: 2, sender: "bob", msg_type: Text, content: "b", timestamp: 0 },
+    Message { id: 3, sender: "alice", msg_type: Image, content: "c", timestamp: 0 }
+  ]
+  let alice_msgs = filter_by_sender(msgs, "alice")
+  expect(alice_msgs.len()).to_equal(2)
+}
+
+@test
+@managed
+fn test_filter_by_sender_no_match() {
+  let msgs: List[Message] = [
+    Message { id: 1, sender: "alice", msg_type: Text, content: "a", timestamp: 0 }
+  ]
+  let result = filter_by_sender(msgs, "charlie")
+  expect(result.len()).to_equal(0)
+}
+
+fn main() { }

@@ -1,0 +1,7 @@
+[package]
+name = "bock-source"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+bock-errors.workspace = true

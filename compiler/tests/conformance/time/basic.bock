@@ -1,0 +1,26 @@
+// TEST: time_duration_basic
+// EXPECT: output "basic: ok"
+fn main() {
+  let d1 = Duration.millis(500)
+  let d2 = Duration.seconds(1)
+  let total = d1 + d2
+  assert(total.as_millis() == 1500)
+
+  let diff = d2 - d1
+  assert(diff.as_millis() == 500)
+
+  let double = d1 * 2
+  assert(double.as_millis() == 1000)
+
+  let half = d2 / 2
+  assert(half.as_millis() == 500)
+
+  let z = Duration.zero()
+  assert(z.is_zero())
+
+  let neg = d1 - d2
+  assert(neg.is_negative())
+  assert(neg.abs().as_millis() == 500)
+
+  println("basic: ok")
+}

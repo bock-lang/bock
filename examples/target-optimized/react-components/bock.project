@@ -1,0 +1,6 @@
+[project]
+name = "react-components"
+version = "0.1.0"
+
+[strictness]
+default = "sketch"
