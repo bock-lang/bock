@@ -13,8 +13,8 @@ create-missing = false
 [output.html]
 default-theme = "rust"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://github.com/bocklang/bock"
-edit-url-template = "https://github.com/bocklang/bock/edit/main/docs/{path}"
+git-repository-url = "https://github.com/bock-lang/bock"
+edit-url-template = "https://github.com/bock-lang/bock/edit/main/docs/{path}"
 site-url = "/docs/"
 
 [output.html.search]

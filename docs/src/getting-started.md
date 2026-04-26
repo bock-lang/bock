@@ -12,7 +12,7 @@ Bock currently ships from source. You will need:
 Build the compiler:
 
 ```bash
-git clone https://github.com/bocklang/bock
+git clone https://github.com/bock-lang/bock
 cd bock
 cargo build --release
 # The CLI is at ./target/release/bock
