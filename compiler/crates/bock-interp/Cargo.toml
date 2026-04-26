@@ -1,0 +1,14 @@
+[package]
+name = "bock-interp"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+bock-air.workspace = true
+bock-ast.workspace = true
+bock-types.workspace = true
+bock-errors.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+async-recursion = "1"
+futures = "0.3"

@@ -1,0 +1,9 @@
+[package]
+name = "bock-types"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+bock-air.workspace = true
+bock-ast.workspace = true
+bock-errors.workspace = true
