@@ -18,8 +18,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  detect:
+    name: detect content
+    runs-on: ubuntu-latest
+    outputs:
+      has_docs: ${{ steps.probe.outputs.has_docs }}
+      has_website: ${{ steps.probe.outputs.has_website }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: probe
+        shell: bash
+        run: |
+          if [ -f docs/src/SUMMARY.md ]; then
+            echo "has_docs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_docs=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f website/package.json ]; then
+            echo "has_website=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_website=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build-docs:
     name: build mdbook
+    needs: detect
+    if: needs.detect.outputs.has_docs == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +58,8 @@ jobs:
 
   build-website:
     name: build website
+    needs: detect
+    if: needs.detect.outputs.has_website == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +77,8 @@ jobs:
   deploy:
     name: deploy
     runs-on: ubuntu-latest
-    needs: [build-docs, build-website]
+    needs: [detect, build-docs, build-website]
+    if: needs.detect.outputs.has_docs == 'true' && needs.detect.outputs.has_website == 'true'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
