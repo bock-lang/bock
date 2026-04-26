@@ -11,8 +11,38 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  detect:
+    name: detect content
+    runs-on: ubuntu-latest
+    outputs:
+      has_crates: ${{ steps.probe.outputs.has_crates }}
+      has_extension: ${{ steps.probe.outputs.has_extension }}
+      has_docs: ${{ steps.probe.outputs.has_docs }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: probe
+        shell: bash
+        run: |
+          if compgen -G "compiler/crates/*/Cargo.toml" > /dev/null; then
+            echo "has_crates=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_crates=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f extensions/vscode/package.json ]; then
+            echo "has_extension=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_extension=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f docs/src/SUMMARY.md ]; then
+            echo "has_docs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_docs=false" >> "$GITHUB_OUTPUT"
+          fi
+
   fmt:
     name: rustfmt
+    needs: detect
+    if: needs.detect.outputs.has_crates == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +53,8 @@ jobs:
 
   clippy:
     name: clippy
+    needs: detect
+    if: needs.detect.outputs.has_crates == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +66,8 @@ jobs:
 
   test:
     name: test (${{ matrix.os }} / ${{ matrix.toolchain }})
+    needs: detect
+    if: needs.detect.outputs.has_crates == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -50,6 +84,8 @@ jobs:
 
   doc:
     name: cargo doc
+    needs: detect
+    if: needs.detect.outputs.has_crates == 'true'
     runs-on: ubuntu-latest
     env:
       RUSTDOCFLAGS: -D warnings
@@ -61,6 +97,8 @@ jobs:
 
   extension:
     name: vscode extension
+    needs: detect
+    if: needs.detect.outputs.has_extension == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -78,6 +116,8 @@ jobs:
 
   docs:
     name: mdbook
+    needs: detect
+    if: needs.detect.outputs.has_docs == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
