@@ -3,7 +3,7 @@ name = "bock-test-harness"
 edition = "2021"
 version = "0.1.0"
 authors = ["Bock Contributors"]
-license = "MIT OR Apache-2.0"
+license = "MIT"
 description = "Spec conformance test infrastructure for the Bock compiler"
 
 [lib]
