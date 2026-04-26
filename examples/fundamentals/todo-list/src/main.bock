@@ -1,0 +1,103 @@
+//! Todo List — Records, impl blocks, higher-order functions, and list operations.
+//!
+//! Demonstrates: record, impl, method chaining, List operations,
+//! filter, Fn type parameters, if-expression, string interpolation.
+//! Target: TS, Python.
+
+module main
+
+/// A single todo item.
+public record Todo {
+  id: Int
+  title: String
+  done: Bool
+}
+
+impl Todo {
+  /// Returns a new Todo with done set to true.
+  public fn complete(self) -> Todo {
+    Todo { id: self.id, title: self.title, done: true }
+  }
+
+  /// Formats the todo for display: [x] or [ ] prefix.
+  public fn display(self) -> String {
+    let status = if (self.done) { "x" } else { " " }
+    "[${status}] #${self.id}: ${self.title}"
+  }
+}
+
+/// A list of todos with auto-incrementing IDs.
+public record TodoList {
+  items: List[Todo]
+  next_id: Int
+}
+
+impl TodoList {
+  /// Adds a new incomplete todo and returns the updated list.
+  public fn add(self, title: String) -> TodoList {
+    let todo = Todo { id: self.next_id, title: title, done: false }
+    TodoList { items: self.items + [todo], next_id: self.next_id + 1 }
+  }
+
+  /// Returns only the incomplete todos.
+  public fn pending(self) -> List[Todo] {
+    self.items.filter((t) => t.done == false)
+  }
+
+  /// Returns only the completed todos.
+  public fn completed(self) -> List[Todo] {
+    self.items.filter((t) => t.done == true)
+  }
+
+  /// Marks the todo with the given ID as complete.
+  public fn complete_by_id(self, target_id: Int) -> TodoList {
+    let updated = self.items.map((t) => {
+      if (t.id == target_id) { t.complete() } else { t }
+    })
+    TodoList { items: updated, next_id: self.next_id }
+  }
+}
+
+/// Counts how many todos satisfy a predicate.
+public fn count_where(todos: List[Todo], pred: Fn(Todo) -> Bool) -> Int {
+  todos.filter(pred).len()
+}
+
+/// Prints each todo in a list.
+fn print_todos(label: String, todos: List[Todo]) -> Void {
+  println("--- ${label} ---")
+  for todo in todos {
+    println(todo.display())
+  }
+}
+
+fn main() {
+  // Create a new empty todo list (direct record construction)
+  let list = TodoList { items: [], next_id: 1 }
+
+  // Add several todos
+  let list = list.add("Buy groceries")
+  let list = list.add("Write Bock examples")
+  let list = list.add("Review pull request")
+  let list = list.add("Update documentation")
+
+  // Display all items
+  print_todos("All Todos", list.items)
+
+  // Complete some todos
+  let list = list.complete_by_id(1)
+  let list = list.complete_by_id(3)
+
+  // Show pending and completed separately
+  println("")
+  print_todos("Pending", list.pending())
+  println("")
+  print_todos("Completed", list.completed())
+
+  // Use higher-order count_where
+  let total = list.items.len()
+  let done_count = count_where(list.items, (t) => t.done == true)
+  let pending_count = count_where(list.items, (t) => t.done == false)
+  println("")
+  println("Summary: ${done_count}/${total} done, ${pending_count} remaining")
+}

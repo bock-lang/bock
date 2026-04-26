@@ -1,0 +1,303 @@
+//! Microservice — HTTP request router with effect-based dependency injection.
+//!
+//! Demonstrates: effects, @concurrent, @requires, traits, enums,
+//! pattern matching, handling blocks, effect-based DI.
+//! Target: Go. Leans into Go strengths: goroutines via @concurrent,
+//! interface-style effects, explicit error handling.
+
+module main
+
+// ─── Models ───────────────────────────────────────────────────────
+
+/// An incoming HTTP request with method, path, and body.
+public record Request {
+  method: String
+  path: String
+  body: String
+  token: String
+}
+
+/// An HTTP response with status code and body.
+public record Response {
+  status: Int
+  body: String
+}
+
+/// Route variants parsed from request method and path.
+public enum Route {
+  GetUsers
+  GetUser { id: String }
+  CreateUser
+  DeleteUser { id: String }
+  HealthCheck
+  NotFound
+}
+
+// ─── Effects ──────────────────────────────────────────────────────
+
+/// Database operations for querying and persisting data.
+public effect Database {
+  fn db_query(sql: String) -> Result[String, String]
+  fn db_execute(sql: String) -> Result[String, String]
+}
+
+/// Authentication and authorization checks.
+public effect Auth {
+  fn verify_token(token: String) -> Bool
+  fn get_user_role(token: String) -> String
+}
+
+/// Structured logging for request tracing.
+public effect Logger {
+  fn log(level: String, message: String) -> Void
+}
+
+/// Composite effect for the full service stack.
+public effect ServiceStack = Database + Auth + Logger
+
+// ─── Route Matching ───────────────────────────────────────────────
+
+/// Parse a Request into a Route by matching method and path.
+public fn match_route(req: Request) -> Route {
+  if (req.method == "GET" && req.path == "/health") {
+    HealthCheck
+  } else if (req.method == "GET" && req.path == "/users") {
+    GetUsers
+  } else if (req.method == "GET" && req.path.starts_with("/users/")) {
+    // Extract id from path suffix
+    let id = req.path.slice(7, req.path.len())
+    GetUser { id: id }
+  } else if (req.method == "POST" && req.path == "/users") {
+    CreateUser
+  } else if (req.method == "DELETE" && req.path.starts_with("/users/")) {
+    let id = req.path.slice(7, req.path.len())
+    DeleteUser { id: id }
+  } else {
+    NotFound
+  }
+}
+
+// ─── Route Helpers ────────────────────────────────────────────────
+
+/// Format a Route enum as a human-readable string.
+public fn route_name(route: Route) -> String {
+  match route {
+    GetUsers => "GET /users"
+    GetUser { id } => "GET /users/${id}"
+    CreateUser => "POST /users"
+    DeleteUser { id } => "DELETE /users/${id}"
+    HealthCheck => "GET /health"
+    NotFound => "NOT_FOUND"
+  }
+}
+
+// ─── Handlers ─────────────────────────────────────────────────────
+
+/// Health check handler — no effects needed.
+public fn handle_health() -> Response {
+  Response { status: 200, body: "ok" }
+}
+
+/// List all users from the database.
+public fn handle_get_users() -> Response with Database, Logger {
+  log("info", "Fetching all users")
+  match db_query("SELECT * FROM users") {
+    Ok(data) => {
+      log("info", "Query returned users")
+      Response { status: 200, body: data }
+    }
+    Err(e) => {
+      log("error", "Database error: ${e}")
+      Response { status: 500, body: "Internal server error" }
+    }
+  }
+}
+
+/// Get a single user by id.
+public fn handle_get_user(id: String) -> Response with Database, Logger {
+  log("info", "Fetching user ${id}")
+  match db_query("SELECT * FROM users WHERE id = ${id}") {
+    Ok(data) => Response { status: 200, body: data }
+    Err(e) => {
+      log("error", "User lookup failed: ${e}")
+      Response { status: 404, body: "User not found" }
+    }
+  }
+}
+
+/// Create a new user (requires auth).
+public fn handle_create_user(body: String, token: String) -> Response with Database, Auth, Logger {
+  let authorized = verify_token(token)
+  if (authorized) {
+    let role = get_user_role(token)
+    log("info", "User creation by role: ${role}")
+    match db_execute("INSERT INTO users VALUES (${body})") {
+      Ok(result) => {
+        log("info", "User created: ${result}")
+        Response { status: 201, body: result }
+      }
+      Err(e) => {
+        log("error", "Create failed: ${e}")
+        Response { status: 500, body: "Failed to create user" }
+      }
+    }
+  } else {
+    log("warn", "Unauthorized create attempt")
+    Response { status: 401, body: "Unauthorized" }
+  }
+}
+
+/// Delete a user by id (requires auth).
+public fn handle_delete_user(id: String, token: String) -> Response with Database, Auth, Logger {
+  let authorized = verify_token(token)
+  if (authorized) {
+    let role = get_user_role(token)
+    if (role == "admin") {
+      match db_execute("DELETE FROM users WHERE id = ${id}") {
+        Ok(result) => {
+          log("info", "Deleted user ${id}")
+          Response { status: 200, body: "Deleted" }
+        }
+        Err(e) => {
+          log("error", "Delete failed: ${e}")
+          Response { status: 500, body: "Delete failed" }
+        }
+      }
+    } else {
+      log("warn", "Non-admin delete attempt by ${role}")
+      Response { status: 403, body: "Forbidden: admin role required" }
+    }
+  } else {
+    Response { status: 401, body: "Unauthorized" }
+  }
+}
+
+// ─── Request Dispatcher ───────────────────────────────────────────
+
+/// Route a request to the appropriate handler.
+@concurrent
+@requires(Capability.Network, Capability.Storage)
+public fn dispatch(req: Request) -> Response with Database, Auth, Logger {
+  let route = match_route(req)
+  log("info", "Dispatching: ${route_name(route)}")
+
+  match route {
+    HealthCheck => handle_health()
+    GetUsers => handle_get_users()
+    GetUser { id } => handle_get_user(id)
+    CreateUser => handle_create_user(req.body, req.token)
+    DeleteUser { id } => handle_delete_user(id, req.token)
+    NotFound => Response { status: 404, body: "Not found" }
+  }
+}
+
+// ─── Handler Implementations ──────────────────────────────────────
+
+/// In-memory database handler backed by fixed responses.
+record PostgresDb {}
+impl Database for PostgresDb {
+  fn db_query(sql: String) -> Result[String, String] {
+    if (sql.contains("users")) {
+      Ok("[{\"id\": 1, \"name\": \"Alice\"}, {\"id\": 2, \"name\": \"Bob\"}]")
+    } else {
+      Err("Table not found")
+    }
+  }
+
+  fn db_execute(sql: String) -> Result[String, String] {
+    if (sql.contains("INSERT")) {
+      Ok("created: 1 row")
+    } else if (sql.contains("DELETE")) {
+      Ok("deleted: 1 row")
+    } else {
+      Err("Unknown operation")
+    }
+  }
+}
+
+/// Token-based auth handler.
+record TokenAuth {}
+impl Auth for TokenAuth {
+  fn verify_token(token: String) -> Bool {
+    token == "valid-token" || token == "admin-token"
+  }
+
+  fn get_user_role(token: String) -> String {
+    if (token == "admin-token") { "admin" } else { "user" }
+  }
+}
+
+/// Console logger that prints formatted log lines.
+record ConsoleLogger {}
+impl Logger for ConsoleLogger {
+  fn log(level: String, message: String) -> Void {
+    println("[${level}] ${message}")
+  }
+}
+
+// ─── Response Helpers ─────────────────────────────────────────────
+
+/// Print a response in a formatted way.
+fn print_response(label: String, resp: Response) -> Void {
+  println("${label} => ${resp.status}: ${resp.body}")
+}
+
+// ─── Main ─────────────────────────────────────────────────────────
+
+fn main() {
+  println("=== Microservice Demo ===")
+  println("")
+
+  // Wire up effect handlers
+  handling (Database with PostgresDb {}, Auth with TokenAuth {}, Logger with ConsoleLogger {}) {
+    // Health check
+    let health_req = Request { method: "GET", path: "/health", body: "", token: "" }
+    let health_resp = dispatch(health_req)
+    print_response("Health", health_resp)
+    println("")
+
+    // List users
+    let list_req = Request { method: "GET", path: "/users", body: "", token: "valid-token" }
+    let list_resp = dispatch(list_req)
+    print_response("List Users", list_resp)
+    println("")
+
+    // Get single user
+    let get_req = Request { method: "GET", path: "/users/42", body: "", token: "valid-token" }
+    let get_resp = dispatch(get_req)
+    print_response("Get User", get_resp)
+    println("")
+
+    // Create user (authorized)
+    let create_req = Request { method: "POST", path: "/users", body: "name=Charlie", token: "valid-token" }
+    let create_resp = dispatch(create_req)
+    print_response("Create User", create_resp)
+    println("")
+
+    // Create user (unauthorized)
+    let bad_req = Request { method: "POST", path: "/users", body: "name=Evil", token: "bad-token" }
+    let bad_resp = dispatch(bad_req)
+    print_response("Create (unauth)", bad_resp)
+    println("")
+
+    // Delete user (admin)
+    let del_req = Request { method: "DELETE", path: "/users/1", body: "", token: "admin-token" }
+    let del_resp = dispatch(del_req)
+    print_response("Delete (admin)", del_resp)
+    println("")
+
+    // Delete user (non-admin)
+    let del_req2 = Request { method: "DELETE", path: "/users/1", body: "", token: "valid-token" }
+    let del_resp2 = dispatch(del_req2)
+    print_response("Delete (user)", del_resp2)
+    println("")
+
+    // Not found
+    let nf_req = Request { method: "GET", path: "/unknown", body: "", token: "" }
+    let nf_resp = dispatch(nf_req)
+    print_response("Not Found", nf_resp)
+  }
+
+  println("")
+  println("=== Demo Complete ===")
+}

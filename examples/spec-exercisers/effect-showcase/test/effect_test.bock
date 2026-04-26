@@ -1,0 +1,78 @@
+//! Tests for the Effect Showcase — verifying effect behavior under
+//! different handler configurations.
+
+module effect_test
+
+use main.*
+
+// --- Test-only helpers ---
+
+fn log_msg(msg: String) -> Void with Logger {
+  log(msg)
+}
+
+// --- Tests ---
+
+@test
+fn test_process_with_mock_handlers() {
+  handling (Logger with MockLogger {}, Clock with MockClock {}) {
+    let result = process("test-data")
+    // MockClock returns 9999, so timestamp is deterministic
+    expect(result).to_equal("processed:test-data@9999")
+  }
+}
+
+@test
+fn test_process_with_system_clock() {
+  handling (Logger with MockLogger {}, Clock with SystemClock {}) {
+    let result = process("sys-data")
+    // SystemClock returns 1000
+    expect(result).to_equal("processed:sys-data@1000")
+  }
+}
+
+@test
+fn test_load_with_mock_storage() {
+  handling (Logger with MockLogger {}, Storage with MockStorage {}) {
+    let result = load_with_log("test-key")
+    match result {
+      Some(v) => expect(v).to_equal("mock-test-key")
+      None => expect(true).to_equal(false)
+    }
+  }
+}
+
+@test
+fn test_load_with_memory_storage() {
+  handling (Logger with MockLogger {}, Storage with MemoryStorage {}) {
+    let result = load_with_log("my-key")
+    match result {
+      Some(v) => expect(v).to_equal("value-for-my-key")
+      None => expect(true).to_equal(false)
+    }
+  }
+}
+
+@test
+fn test_nested_handling_override() {
+  // Outer provides SystemClock (now=1000), inner provides MockClock (now=9999)
+  handling (Logger with MockLogger {}, Clock with SystemClock {}) {
+    let outer_result = process("outer")
+    expect(outer_result).to_equal("processed:outer@1000")
+
+    handling (Clock with MockClock {}) {
+      let inner_result = process("inner")
+      // Inner handling overrides Clock
+      expect(inner_result).to_equal("processed:inner@9999")
+    }
+  }
+}
+
+@test
+fn test_effectful_function_with_logger() {
+  // Verifies that handling provides the Logger effect correctly
+  handling (Logger with ConsoleLogger {}) {
+    log_msg("test message")
+    expect(true).to_equal(true)
+  }
+}

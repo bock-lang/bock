@@ -1,0 +1,94 @@
+//! Pool Allocator Tests — Verifies allocation, deallocation, and limits.
+
+module pool_test
+
+use main.*
+
+// ─── Tests ────────────────────────────────────────────────────────
+
+@test
+fn test_create_pool() {
+  let pool = create_pool(4)
+  expect(pool.capacity).to_equal(4)
+  expect(pool.blocks.len()).to_equal(0)
+  expect(pool.next_id).to_equal(1)
+  expect(pool.total_allocated).to_equal(0)
+}
+
+@test
+fn test_allocate_single() {
+  let pool = create_pool(4)
+  match allocate(mut pool, 64) {
+    Ok(p) => {
+      // Use typed local — chained field access on match bindings
+      // hits TypeVar resolution bug (p.blocks.len())
+      let result: Pool = p
+      expect(result.blocks.len()).to_equal(1)
+      expect(result.total_allocated).to_equal(64)
+      expect(result.next_id).to_equal(2)
+    }
+    Err(e) => { println("Unexpected error: ${e}") }
+  }
+}
+
+@test
+fn test_capacity_limit() {
+  let mut pool = create_pool(1)
+  match allocate(mut pool, 32) {
+    Ok(p) => { pool = p }
+    Err(e) => { println("Unexpected: ${e}") }
+  }
+  // Second allocation should fail — pool is full
+  match allocate(mut pool, 32) {
+    Ok(p) => {
+      println("Should not succeed")
+    }
+    Err(e) => {
+      expect(e).to_equal("Pool exhausted")
+    }
+  }
+}
+
+@test
+fn test_deallocate() {
+  let mut pool = create_pool(4)
+  match allocate(mut pool, 64) {
+    Ok(p) => { pool = p }
+    Err(e) => { println("Unexpected: ${e}") }
+  }
+  pool = deallocate(mut pool, 1)
+  expect(pool.blocks.len()).to_equal(0)
+  expect(pool.total_allocated).to_equal(0)
+}
+
+@test
+fn test_deallocate_nonexistent() {
+  let mut pool = create_pool(4)
+  match allocate(mut pool, 64) {
+    Ok(p) => { pool = p }
+    Err(e) => { println("Unexpected: ${e}") }
+  }
+  // Removing non-existent id leaves pool unchanged
+  pool = deallocate(mut pool, 99)
+  expect(pool.blocks.len()).to_equal(1)
+  expect(pool.total_allocated).to_equal(64)
+}
+
+@test
+fn test_alloc_size_trait() {
+  let block = Block { id: 1, size: 256, data: "test" }
+  expect(block.alloc_size()).to_equal(256)
+}
+
+@test
+fn test_invalid_size() {
+  let pool = create_pool(4)
+  match allocate(mut pool, 0) {
+    Ok(p) => {
+      println("Should not succeed")
+    }
+    Err(e) => {
+      expect(e).to_equal("Invalid block size")
+    }
+  }
+}

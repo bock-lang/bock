@@ -1,0 +1,59 @@
+//! Tests for context-audit — verifies annotated functions behave correctly.
+
+module context_test
+
+use main.*
+
+@test
+fn test_payment_success() {
+  expect(process_payment(100, "tok_valid")).to_equal(Ok(100))
+}
+
+@test
+fn test_payment_invalid_amount() {
+  expect(process_payment(0, "tok_valid")).to_equal(Err("Invalid amount"))
+}
+
+@test
+fn test_token_validation() {
+  expect(validate_token("tok_abc")).to_equal(Ok("tok_abc"))
+  expect(validate_token("")).to_equal(Err("Empty token"))
+}
+
+@test
+fn test_sync_user_data() {
+  expect(sync_user_data(1)).to_equal(Ok("synced"))
+  expect(sync_user_data(0)).to_equal(Err("invalid user"))
+}
+
+@test
+fn test_search_finds_target() {
+  expect(fast_search([10, 20, 30], 20)).to_equal(Some(20))
+}
+
+@test
+fn test_user_profile_safe_display() {
+  let u = UserProfile { name: "Alice", email: "a@b.com", id: 7 }
+  expect(u.safe_display()).to_equal("User #7")
+}
+
+@test
+fn test_filter_positive() {
+  expect(filter_positive([1, -2, 3, -4]).len()).to_equal(2)
+}
+
+@test
+fn test_calculate_total() {
+  expect(calculate_total([10, 20, 30])).to_equal(60)
+}
+
+@test
+fn test_pure_hash_deterministic() {
+  expect(pure_hash("x")).to_equal(pure_hash("x"))
+  expect(pure_hash("x")).to_equal("hash:x")
+}
+
+@test
+fn test_managed_dashboard() {
+  expect(build_dashboard("Test")).to_equal("Test dashboard")
+}

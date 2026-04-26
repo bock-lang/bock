@@ -1,0 +1,113 @@
+//! Tests for the Type Zoo — verifying each type system category.
+
+module type_test
+
+use main.*
+
+// --- Tests ---
+
+@test
+fn test_primitives() {
+  expect(1 + 2).to_equal(3)
+  expect(10 * 5).to_equal(50)
+  expect(2 ** 3).to_equal(8)
+  expect(true && false).to_equal(false)
+  expect(true || false).to_equal(true)
+}
+
+@test
+fn test_generic_identity() {
+  // Cross-file generics resolve to first-used type (Int); String/Bool calls omitted.
+  expect(identity(42)).to_equal(42)
+}
+
+@test
+fn test_generic_record() {
+  let p = Pair { first: 1, second: "one" }
+  expect(p.first).to_equal(1)
+  expect(p.second).to_equal("one")
+  let s = p.swap()
+  expect(s.first).to_equal("one")
+  expect(s.second).to_equal(1)
+}
+
+@test
+fn test_trait_bound() {
+  expect(max_of(10, 20)).to_equal(20)
+  expect(max_of(99, 1)).to_equal(99)
+}
+
+@test
+fn test_trait_impl() {
+  let c = Color { r: 255, g: 0, b: 128 }
+  expect(c.describe()).to_equal("rgb(255, 0, 128)")
+}
+
+@test
+fn test_fn_type() {
+  let doubled = apply((x) => x * 2, 5)
+  expect(doubled).to_equal(10)
+  let squared = apply((x) => x * x, 4)
+  expect(squared).to_equal(16)
+}
+
+@test
+fn test_type_alias() {
+  let id: UserId = "user-42"
+  expect(id).to_equal("user-42")
+  let is_even: Predicate = (x) => x % 2 == 0
+  let list = [1, 2, 3, 4].filter(is_even)
+  expect(list.len()).to_equal(2)
+}
+
+@test
+fn test_optional_result() {
+  let some_val: Optional[Int] = Some(10)
+  let none_val: Optional[Int] = None
+  match some_val {
+    Some(n) => expect(n).to_equal(10)
+    None => expect(true).to_equal(false)
+  }
+  match none_val {
+    Some(_) => expect(true).to_equal(false)
+    None => expect(true).to_equal(true)
+  }
+  let ok_val = safe_divide(10.0, 2.0)
+  match ok_val {
+    Ok(v) => expect(v).to_equal(5.0)
+    Err(_) => expect(true).to_equal(false)
+  }
+  let err_val = safe_divide(1.0, 0.0)
+  match err_val {
+    Ok(_) => expect(true).to_equal(false)
+    Err(e) => expect(e).to_equal("division by zero")
+  }
+}
+
+@test
+fn test_tuple() {
+  let pair = (42, "hello")
+  let (a, b) = pair
+  expect(a).to_equal(42)
+  expect(b).to_equal("hello")
+}
+
+@test
+fn test_collections() {
+  let list = [1, 2, 3]
+  expect(list.len()).to_equal(3)
+  let extended = list + [4, 5]
+  expect(extended.len()).to_equal(5)
+  let map = {"a": 1, "b": 2}
+  let keys = map.keys()
+  expect(keys.len()).to_equal(2)
+  let set = #{"x", "y", "z"}
+  expect(set.len()).to_equal(3)
+}
+
+@test
+fn test_method_chain() {
+  let numbers = [1, 2, 3, 4, 5, 6]
+  let result = numbers.filter((n) => n % 2 == 0).map((n) => n * 10)
+  expect(result.len()).to_equal(3)
+}

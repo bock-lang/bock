@@ -1,0 +1,36 @@
+//! Hello World — The simplest possible Bock program.
+//!
+//! Demonstrates: functions, string interpolation, println.
+//! Target: all.
+
+/// Greets a person by name.
+fn greet(name: String) -> String {
+  "Hello, ${name}!"
+}
+
+/// Builds a welcome banner with a title and subtitle.
+fn banner(title: String, subtitle: String) -> String {
+  "=== ${title} === ${subtitle}"
+}
+
+fn main() {
+  // Simple string output
+  println("Hello, World!")
+
+  // String interpolation with a variable
+  let name = "Bock"
+  println("Welcome to ${name}!")
+
+  // Function call with string return
+  println(greet("World"))
+  println(greet("Bock Developer"))
+
+  // Using a helper to build formatted output
+  let heading = banner("Bock Language", "Simple. Declarative. Powerful.")
+  println(heading)
+
+  // Multiple interpolations in one string
+  let language = "Bock"
+  let version = "0.1.0"
+  println("${language} v${version} — ready to go!")
+}

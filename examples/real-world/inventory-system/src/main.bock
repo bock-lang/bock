@@ -1,0 +1,54 @@
+//! Inventory System — Main entry point.
+//!
+//! A multi-module example demonstrating real cross-file imports.
+//! Three modules: models (types), service (logic), main (entry point).
+//! Builds and runs on all targets: JS, TS, Python, Rust, Go.
+
+module main
+
+use models.*
+use service.*
+
+fn main() {
+  // Build initial inventory
+  let products = [
+    Product { id: 1, name: "Laptop", category: Electronics, price: 999.99, quantity: 5 },
+    Product { id: 2, name: "T-Shirt", category: Clothing, price: 19.99, quantity: 100 },
+    Product { id: 3, name: "Rice", category: Food, price: 4.50, quantity: 0 },
+    Product { id: 4, name: "Novel", category: Books, price: 12.99, quantity: 25 },
+    Product { id: 5, name: "Headphones", category: Electronics, price: 49.99, quantity: 0 }
+  ]
+
+  // Display all products
+  println("=== Inventory ===")
+  for p in products {
+    println(p.display())
+  }
+
+  // Show summary
+  let summary = summarize(products)
+  println("")
+  println(format_summary(summary))
+
+  // Find electronics
+  let electronics = find_by_category(products, Electronics)
+  println("")
+  println("=== Electronics (${electronics.len()}) ===")
+  for p in electronics {
+    println(p.display())
+  }
+
+  // Find out of stock items
+  let oos = find_out_of_stock(products)
+  println("")
+  println("=== Out of Stock (${oos.len()}) ===")
+  for p in oos {
+    println(p.display())
+  }
+
+  // Restock rice
+  let rice = Product { id: 3, name: "Rice", category: Food, price: 4.50, quantity: 0 }
+  let restocked = restock(rice, 50)
+  println("")
+  println("Restocked: ${restocked.display()}")
+}

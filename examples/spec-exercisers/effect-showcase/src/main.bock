@@ -1,0 +1,250 @@
+//! Effect Showcase — Comprehensive effect system demonstration.
+//!
+//! Demonstrates: effect definitions, multi-operation effects, composite effects,
+//! handler implementations, mock handlers, effectful functions, module-level
+//! handle, handling blocks, nested handling, three-layer resolution.
+//! Target: Go, JS.
+
+module main
+
+// === Effect Definitions ===
+
+/// A simple logging effect with one operation.
+public effect Logger {
+  fn log(message: String) -> Void
+}
+
+/// A clock effect with multiple operations.
+public effect Clock {
+  fn now() -> Int
+  fn sleep(ms: Int) -> Void
+}
+
+/// A storage effect for key-value persistence.
+public effect Storage {
+  fn read(key: String) -> Optional[String]
+  fn write(key: String, value: String) -> Void
+}
+
+// === Composite Effect ===
+
+/// Groups Logger and Clock for convenience.
+public effect AppEffects = Logger + Clock
+
+// === Production Handlers ===
+
+/// Logs messages to the console with a [LOG] prefix.
+public record ConsoleLogger {}
+
+impl Logger for ConsoleLogger {
+  public fn log(message: String) -> Void {
+    println("[LOG] ${message}")
+  }
+}
+
+/// Logs messages with an [INFO] prefix.
+public record InfoLogger {}
+
+impl Logger for InfoLogger {
+  public fn log(message: String) -> Void {
+    println("[INFO] ${message}")
+  }
+}
+
+/// A system clock returning simulated timestamps.
+public record SystemClock {}
+
+impl Clock for SystemClock {
+  public fn now() -> Int { 1000 }
+  public fn sleep(ms: Int) -> Void {
+    println("sleeping ${ms}ms")
+  }
+}
+
+/// In-memory key-value storage handler.
+public record MemoryStorage {}
+
+impl Storage for MemoryStorage {
+  public fn read(key: String) -> Optional[String] {
+    Some("value-for-${key}")
+  }
+  public fn write(key: String, value: String) -> Void {
+    println("stored ${key}=${value}")
+  }
+}
+
+// === Mock Handlers (for testing) ===
+
+/// A mock logger that silently discards messages.
+public record MockLogger {}
+
+impl Logger for MockLogger {
+  public fn log(message: String) -> Void {
+    // Silent — discards all log messages for test isolation
+  }
+}
+
+/// A mock clock with a fixed time for deterministic tests.
+public record MockClock {}
+
+impl Clock for MockClock {
+  public fn now() -> Int { 9999 }
+  public fn sleep(ms: Int) -> Void {
+    // No-op in tests — no actual delay
+  }
+}
+
+/// A mock storage returning predetermined values.
+public record MockStorage {}
+
+impl Storage for MockStorage {
+  public fn read(key: String) -> Optional[String] {
+    Some("mock-${key}")
+  }
+  public fn write(key: String, value: String) -> Void {
+    // No-op in tests — nothing persisted
+  }
+}
+
+// === Effectful Functions ===
+
+/// Processes data using Logger and Clock effects.
+/// Demonstrates a function using a composite effect.
+public fn process(data: String) -> String with AppEffects {
+  let t = now()
+  log("Processing '${data}' at time=${t}")
+  sleep(10)
+  log("Done processing '${data}'")
+  "processed:${data}@${t}"
+}
+
+/// Formats a timestamped log entry. Uses only Logger.
+public fn log_timestamped(msg: String, timestamp: Int) -> Void with Logger {
+  log("[${timestamp}] ${msg}")
+}
+
+/// Saves data to storage with logging.
+/// Demonstrates combining independent effects.
+public fn save_with_log(key: String, value: String) -> Void with Logger, Storage {
+  log("Saving ${key}")
+  write(key, value)
+  log("Saved ${key}=${value}")
+}
+
+/// Loads data from storage with logging.
+public fn load_with_log(key: String) -> Optional[String] with Logger, Storage {
+  log("Loading ${key}")
+  let result = read(key)
+  log("Loaded ${key}")
+  result
+}
+
+/// Runs a full pipeline: load, process, save.
+/// Demonstrates function composition across multiple effects.
+public fn pipeline(key: String) -> String with Logger, Clock, Storage {
+  log("Pipeline starting for '${key}'")
+  let raw = read(key)
+  let data = match raw {
+    Some(v) => v
+    None => "default"
+  }
+  let t = now()
+  log("Processing at ${t}")
+  let result = "result-${data}"
+  write(key, result)
+  log("Pipeline complete for '${key}'")
+  result
+}
+
+// === Module-Level Handle (Layer 2) ===
+
+/// Default handler for Logger at the module level.
+/// Any function in this module using Logger will get ConsoleLogger
+/// unless overridden by a local handling block.
+public handle Logger with ConsoleLogger {}
+
+// === Main: Demonstrate Three-Layer Resolution ===
+
+fn main() {
+  println("=== Effect Showcase ===")
+  println("")
+
+  // --- Layer 2 (module-level) resolution ---
+  // Logger resolves to ConsoleLogger from the module-level handle.
+  println("--- Module-level Logger (Layer 2) ---")
+  log_timestamped("Module-level logging works", 1000)
+
+  println("")
+
+  // --- Layer 1 (local handling) overrides Layer 2 ---
+  println("--- Local handling overrides (Layer 1 > Layer 2) ---")
+  handling (Logger with InfoLogger {}, Clock with SystemClock {}) {
+    let result = process("batch-A")
+    println("Result: ${result}")
+  }
+
+  println("")
+
+  // --- Multi-effect handling block ---
+  println("--- Multi-effect handling ---")
+  handling (Logger with ConsoleLogger {}, Clock with SystemClock {}, Storage with MemoryStorage {}) {
+    save_with_log("user-1", "Alice")
+    let loaded = load_with_log("user-1")
+    match loaded {
+      Some(v) => println("Found: ${v}")
+      None => println("Not found")
+    }
+  }
+
+  println("")
+
+  // --- Full pipeline with all three effects ---
+  println("--- Full pipeline ---")
+  handling (Logger with InfoLogger {}, Clock with SystemClock {}, Storage with MemoryStorage {}) {
+    let out = pipeline("data-key")
+    println("Pipeline output: ${out}")
+  }
+
+  println("")
+
+  // --- Nested handling blocks ---
+  // Inner block overrides Logger from outer block.
+  // Demonstrates Layer 1 nesting: innermost wins.
+  println("--- Nested handling (inner overrides outer) ---")
+  handling (Clock with SystemClock {}) {
+    handling (Logger with ConsoleLogger {}) {
+      log_timestamped("Outer logger active", 5000)
+
+      handling (Logger with InfoLogger {}) {
+        log_timestamped("Inner logger active", 5001)
+      }
+
+      log_timestamped("Back to outer logger", 5002)
+    }
+  }
+
+  println("")
+
+  // --- Mock handlers for test isolation ---
+  // MockLogger discards output, MockClock returns fixed time.
+  // This is the pattern used in @test functions.
+  println("--- Mock handlers (test isolation) ---")
+  handling (Logger with MockLogger {}, Clock with MockClock {}) {
+    let mock_result = process("mock-data")
+    // MockLogger suppressed all log output — only this prints:
+    println("Mock result: ${mock_result}")
+  }
+
+  println("")
+
+  // --- Combining mock and real handlers ---
+  println("--- Mixed mock/real handlers ---")
+  handling (Logger with ConsoleLogger {}, Clock with MockClock {}) {
+    // Real logging with mock clock
+    let mixed = process("mixed-data")
+    println("Mixed result: ${mixed}")
+  }
+
+  println("")
+  println("=== Effect Showcase Complete ===")
+}

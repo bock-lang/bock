@@ -1,0 +1,89 @@
+//! Tests for the data pipeline transforms and composition.
+
+module pipeline_test
+
+use main.*
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+@test
+fn test_compute_summary_basic() {
+  let data: List[DataPoint] = [
+    DataPoint { name: "a", value: 10.0, category: "x" },
+    DataPoint { name: "b", value: 20.0, category: "x" },
+    DataPoint { name: "c", value: 30.0, category: "y" }
+  ]
+  let summary = compute_summary(data)
+  expect(summary.count).to_equal(3)
+}
+
+@test
+fn test_compute_summary_empty() {
+  let data: List[DataPoint] = []
+  let summary = compute_summary(data)
+  expect(summary.count).to_equal(0)
+}
+
+@test
+fn test_remove_invalid_filters_zero() {
+  let data: List[DataPoint] = [
+    DataPoint { name: "good", value: 5.0, category: "x" },
+    DataPoint { name: "zero", value: 0.0, category: "x" },
+    DataPoint { name: "also_good", value: 3.0, category: "y" }
+  ]
+  let valid = remove_invalid(data)
+  expect(valid.len()).to_equal(2)
+}
+
+@test
+fn test_filter_category() {
+  let data: List[DataPoint] = [
+    DataPoint { name: "a", value: 1.0, category: "sensor" },
+    DataPoint { name: "b", value: 2.0, category: "manual" },
+    DataPoint { name: "c", value: 3.0, category: "sensor" }
+  ]
+  let sensor_filter = filter_category("sensor")
+  let sensors = sensor_filter(data)
+  expect(sensors.len()).to_equal(2)
+}
+
+@test
+fn test_normalize_scales_to_one() {
+  let data: List[DataPoint] = [
+    DataPoint { name: "small", value: 25.0, category: "x" },
+    DataPoint { name: "big", value: 100.0, category: "x" }
+  ]
+  let normed = normalize(data)
+  expect(normed.len()).to_equal(2)
+}
+
+@test
+fn test_normalize_empty() {
+  let data: List[DataPoint] = []
+  let normed = normalize(data)
+  expect(normed.len()).to_equal(0)
+}
+
+@test
+fn test_pipe_chain() {
+  let data: List[DataPoint] = [
+    DataPoint { name: "a", value: 10.0, category: "x" },
+    DataPoint { name: "b", value: 0.0, category: "x" },
+    DataPoint { name: "c", value: 20.0, category: "y" }
+  ]
+  let result = data |> remove_invalid |> compute_summary
+  expect(result.count).to_equal(2)
+}
+
+@test
+fn test_composed_pipeline() {
+  let pipeline = normalize >> compute_summary >> format_summary
+  let data: List[DataPoint] = [
+    DataPoint { name: "x", value: 50.0, category: "a" },
+    DataPoint { name: "y", value: 100.0, category: "b" }
+  ]
+  let result = pipeline(data)
+  expect(result.len() > 0).to_equal(true)
+}
+
+fn main() { }

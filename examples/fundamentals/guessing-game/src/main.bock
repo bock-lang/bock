@@ -1,0 +1,71 @@
+//! Guessing Game — Loop-based game logic with guard and match.
+//!
+//! Demonstrates: loop, break, guard (let-pattern), enum, match,
+//! Result, todo() placeholders, function composition.
+//! Target: Rust, Go.
+
+/// Placeholder: would use platform RNG to generate a random number.
+fn random_number(min: Int, max: Int) -> Int { todo() }
+
+/// Placeholder: would read a line from stdin.
+fn read_line() -> String { todo() }
+
+/// Placeholder: would parse a string to an integer.
+fn parse_int(s: String) -> Result[Int, String] { todo() }
+
+/// Represents the result of comparing two values.
+enum Ordering {
+  Less,
+  Equal,
+  Greater
+}
+
+/// Compares two integers, returning their ordering.
+fn compare(a: Int, b: Int) -> Ordering {
+  if (a < b) { Less } else if (a == b) { Equal } else { Greater }
+}
+
+/// Returns a hint message based on the ordering.
+fn hint(ord: Ordering) -> String {
+  match ord {
+    Less => "Too low! Try a higher number."
+    Equal => "Correct! You got it!"
+    Greater => "Too high! Try a lower number."
+  }
+}
+
+/// Runs one round of the guessing game.
+fn play() -> Void {
+  let target = random_number(1, 100)
+  let mut attempts = 0
+
+  println("I'm thinking of a number between 1 and 100.")
+
+  loop {
+    println("Enter your guess:")
+    let input = read_line()
+
+    // Guard validates input — if parse fails, skip this iteration
+    guard (let Ok(guess) = parse_int(input)) else {
+      println("Please enter a valid number.")
+      continue
+    }
+
+    attempts = attempts + 1
+    let ord = compare(guess, target)
+    println(hint(ord))
+
+    match ord {
+      Equal => {
+        println("You guessed it in ${attempts} attempts!")
+        break
+      }
+      _ => println("Try again...")
+    }
+  }
+}
+
+fn main() {
+  println("=== Bock Guessing Game ===")
+  play()
+}

@@ -1,0 +1,100 @@
+//! Tests for the Task API.
+
+module api_test
+
+use main.*
+
+// ─── Mock Handlers ─────────────────────────────────────────────────
+
+/// Silent logger for tests — discards all messages.
+record TestLogger {}
+
+impl Logger for TestLogger {
+  fn log(msg: String) -> Void { }
+}
+
+/// Test storage that returns predefined data.
+record TestStore {
+  tasks: List[Task]
+}
+
+impl TaskStorage for TestStore {
+  fn save_task(task: Task) -> Result[Void, String] {
+    Ok(())
+  }
+
+  fn find_task(id: Int) -> Result[Task, String] {
+    Err("not found in test store")
+  }
+
+  fn all_tasks() -> List[Task] {
+    []
+  }
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────
+
+@test
+fn test_create_task() {
+  let store = TestStore { tasks: [] }
+  let logger = TestLogger {}
+  handling (TaskStorage with store, Logger with logger) {
+    let result = create_task(1, "Test task", Medium)
+    expect(result).to_be_ok()
+  }
+}
+
+@test
+fn test_create_task_with_priority() {
+  let store = TestStore { tasks: [] }
+  let logger = TestLogger {}
+  handling (TaskStorage with store, Logger with logger) {
+    let result = create_task(10, "Critical bug", Critical)
+    expect(result).to_be_ok()
+  }
+}
+
+@test
+fn test_complete_nonexistent_task() {
+  let store = TestStore { tasks: [] }
+  let logger = TestLogger {}
+  handling (TaskStorage with store, Logger with logger) {
+    let result = complete_task(999)
+    expect(result).to_be_err()
+  }
+}
+
+@test
+fn test_list_pending_filters_correctly() {
+  let tasks: List[Task] = [
+    Task { id: 1, title: "Pending one", priority: Low, status: Pending },
+    Task { id: 2, title: "Done one", priority: Low, status: Done },
+    Task { id: 3, title: "Pending two", priority: High, status: Pending }
+  ]
+  let pending = list_pending(tasks)
+  expect(pending.len()).to_equal(2)
+}
+
+@test
+fn test_list_pending_empty_when_all_done() {
+  let tasks: List[Task] = [
+    Task { id: 1, title: "Done", priority: Low, status: Done },
+    Task { id: 2, title: "Cancelled", priority: Medium, status: Cancelled }
+  ]
+  let pending = list_pending(tasks)
+  expect(pending.len()).to_equal(0)
+}
+
+@test
+fn test_list_urgent_filters_high_and_critical() {
+  let tasks: List[Task] = [
+    Task { id: 1, title: "Low task", priority: Low, status: Pending },
+    Task { id: 2, title: "High task", priority: High, status: Pending },
+    Task { id: 3, title: "Critical task", priority: Critical, status: Pending },
+    Task { id: 4, title: "Medium task", priority: Medium, status: Pending }
+  ]
+  let urgent = list_urgent(tasks)
+  expect(urgent.len()).to_equal(2)
+}
+
+fn main() { }

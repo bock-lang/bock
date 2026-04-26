@@ -1,0 +1,441 @@
+//! Bock Language Showcase
+//!
+//! One language. Every platform. AI-native transpilation.
+//! This file demonstrates what makes Bock different.
+
+module showcase
+
+// ─────────────────────────────────────────────────────────
+// 1. EFFECTS: Declare what your code NEEDS, not how it works
+// ─────────────────────────────────────────────────────────
+
+/// Effects replace dependency injection, mocking frameworks,
+/// and service locators — with a single language feature.
+
+effect Database {
+  fn query(sql: String) -> Result[List[String], String]
+  fn execute(sql: String) -> Result[Void, String]
+}
+
+effect Logger {
+  fn log(level: String, message: String) -> Void
+}
+
+effect Clock {
+  fn now() -> Int
+}
+
+/// Composite effects — name a bundle, use it everywhere.
+effect ServiceStack = Database + Logger + Clock
+
+
+// ─────────────────────────────────────────────────────────
+// 2. CONTEXT: Code that documents itself — for humans AND AI
+// ─────────────────────────────────────────────────────────
+
+/// Context isn't comments. It's structured metadata that the
+/// compiler verifies and the AI transpiler uses for decisions.
+
+@context("""
+  Order processing pipeline.
+  @intent: Validate, price, and fulfill customer orders.
+  @constraint: Must complete within 200ms p99.
+  @security: All payment data must be tokenized.
+  @related: app.inventory, app.payments
+""")
+
+@security(level: "confidential", pii: true)
+record Customer {
+  id: String
+  name: String
+  email: String
+  tier: CustomerTier
+}
+
+enum CustomerTier { Standard, Premium, Enterprise }
+
+@derive(Equatable)
+enum OrderStatus {
+  Pending
+  Validated
+  Priced { total: Float }
+  Fulfilled { tracking: String }
+  Failed { reason: String }
+}
+
+record Order {
+  id: String
+  customer: Customer
+  items: List[LineItem]
+  status: OrderStatus
+}
+
+record LineItem {
+  sku: String
+  name: String
+  quantity: Int
+  unit_price: Float
+}
+
+
+// ─────────────────────────────────────────────────────────
+// 3. CAPABILITIES: The compiler knows what your code touches
+// ─────────────────────────────────────────────────────────
+
+/// @requires propagates through the call graph. If process_order
+/// needs Network and Storage, every caller inherits that requirement.
+/// In production mode, missing capabilities are compile errors.
+
+@requires(Capability.Network, Capability.Storage)
+@performance(max_latency: 200, max_memory: 50)
+public fn process_order(order: Order) -> Result[Order, String]
+  with ServiceStack
+{
+  log("info", "Processing order ${order.id}")
+
+  // Guard: flat validation, no nesting
+  guard (order.items.len() > 0) else {
+    return Err("Order has no items")
+  }
+
+  let validated = validate_order(order)?
+  let priced = calculate_total(validated)
+  let fulfilled = fulfill(priced)?
+
+  log("info", "Order ${fulfilled.id} complete")
+  Ok(fulfilled)
+}
+
+
+// ─────────────────────────────────────────────────────────
+// 4. PIPES & COMPOSITION: Data flows, don't nest
+// ─────────────────────────────────────────────────────────
+
+/// Pipes replace nested calls. Composition builds reusable pipelines.
+/// Read left-to-right, not inside-out.
+
+fn summarize_order(order: Order) -> String {
+  let total = order.items
+    |> compute_subtotals
+    |> apply_tier_discount(order.customer.tier)
+
+  let item_count = order.items.len()
+  "Order ${order.id}: ${item_count} items, total $$${total}"
+}
+
+fn compute_subtotals(items: List[LineItem]) -> Float {
+  let mut total = 0.0
+  for item in items {
+    total = total + item.unit_price * item.quantity
+  }
+  total
+}
+
+fn apply_tier_discount(tier: CustomerTier, subtotal: Float) -> Float {
+  let discount = match tier {
+    Standard => 0.0
+    Premium => 0.1
+    Enterprise => 0.2
+  }
+  subtotal * (1.0 - discount)
+}
+
+/// Function composition: build a pipeline, pass it around, call it later.
+fn build_report_pipeline() -> Fn(String) -> String {
+  let normalize = (s: String) => s.trim()
+  let tag = (s: String) => "[REPORT] ${s}"
+  normalize >> tag
+}
+
+
+// ─────────────────────────────────────────────────────────
+// 5. PATTERN MATCHING: Destructure anything, exhaustively
+// ─────────────────────────────────────────────────────────
+
+/// Patterns work on enums, records, tuples, lists, and nest arbitrarily.
+/// The compiler warns on non-exhaustive matches in development,
+/// errors in production.
+
+fn describe_status(order: Order) -> String {
+  match order.status {
+    Pending => "Awaiting processing"
+    Validated => "Validated, calculating price"
+    Priced { total } => "Ready to ship — $$${total}"
+    Fulfilled { tracking } => "Shipped: ${tracking}"
+    Failed { reason } => "FAILED: ${reason}"
+  }
+}
+
+fn classify_items(items: List[LineItem]) -> String {
+  match items {
+    [] => "Empty order"
+    [only] => "Single item: ${only.name}"
+    [first, ..rest] => "${first.name} and ${rest.len()} more"
+  }
+}
+
+fn check_result(result: Result[Order, String]) -> String {
+  match result {
+    Ok(order) => match order.status {
+      Fulfilled { tracking } => "Success: ${tracking}"
+      _ => "In progress: ${order.id}"
+    }
+    Err(reason) => "Error: ${reason}"
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────
+// 6. EFFECTS IN ACTION: Swap implementations, zero code changes
+// ─────────────────────────────────────────────────────────
+
+/// Production handlers talk to real infrastructure.
+/// Test handlers are pure, deterministic, inspectable.
+
+record ProductionDb {}
+impl Database for ProductionDb {
+  fn query(sql: String) -> Result[List[String], String] {
+    log("debug", "SQL: ${sql}")
+    Ok(["result"])
+  }
+  fn execute(sql: String) -> Result[Void, String] {
+    log("debug", "EXEC: ${sql}")
+    Ok(())
+  }
+}
+
+record TestDb { responses: List[String] }
+impl Database for TestDb {
+  fn query(sql: String) -> Result[List[String], String] {
+    Ok(self.responses)
+  }
+  fn execute(sql: String) -> Result[Void, String] { Ok(()) }
+}
+
+record ConsoleLogger {}
+impl Logger for ConsoleLogger {
+  fn log(level: String, message: String) -> Void {
+    println("[${level}] ${message}")
+  }
+}
+
+record SystemClock {}
+impl Clock for SystemClock {
+  fn now() -> Int { 1711843200 }
+}
+
+
+// ─────────────────────────────────────────────────────────
+// 7. HANDLING BLOCKS: Dependency injection as a language feature
+// ─────────────────────────────────────────────────────────
+
+/// No frameworks. No containers. No reflection.
+/// Just declare which handlers you want, scope them to a block.
+
+fn run_production(order: Order) -> Result[Order, String] {
+  handling (
+    Database with ProductionDb {},
+    Logger with ConsoleLogger {},
+    Clock with SystemClock {}
+  ) {
+    process_order(order)
+  }
+}
+
+fn run_test(order: Order) -> Result[Order, String] {
+  handling (
+    Database with TestDb { responses: ["mock-tracking-123"] },
+    Logger with ConsoleLogger {},
+    Clock with SystemClock {}
+  ) {
+    process_order(order)
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────
+// 8. OWNERSHIP WITHOUT LIFETIMES: Safety without ceremony
+// ─────────────────────────────────────────────────────────
+
+/// Bock tracks ownership like Rust — but without lifetime annotations.
+/// Values move by default. The compiler infers everything.
+
+fn demonstrate_ownership() -> String {
+  let data = ["sensitive", "payload"]
+  let processed = transform_data(data)
+  // data is moved — can't accidentally use stale reference
+  // let leaked = data   // ← compile error: moved
+  processed
+}
+
+fn transform_data(input: List[String]) -> String {
+  let result = input.map((s) => "[${s}]")
+  "Processed ${result.len()} items"
+}
+
+/// @managed opts out when you don't need ownership tracking.
+/// UI code, prototypes, scripts — GC semantics, zero friction.
+@managed
+fn build_dashboard() -> String {
+  let header = "Dashboard"
+  let nav = header
+  let title = header
+  let subtitle = header
+  "${nav} | ${title} — ${subtitle}"
+}
+
+
+// ─────────────────────────────────────────────────────────
+// 9. INVARIANTS & VERIFICATION: Contracts in the type system
+// ─────────────────────────────────────────────────────────
+
+/// @invariant declares what must be true. The compiler attempts
+/// static verification; runtime assertion as fallback.
+
+@invariant(true)
+fn validate_order(order: Order) -> Result[Order, String] {
+  guard (order.items.len() > 0) else {
+    return Err("No items")
+  }
+  for item in order.items {
+    guard (item.quantity > 0) else {
+      return Err("Invalid quantity for ${item.name}")
+    }
+    guard (item.unit_price > 0.0) else {
+      return Err("Invalid price for ${item.name}")
+    }
+  }
+  let validated = Order {
+    id: order.id,
+    customer: order.customer,
+    items: order.items,
+    status: Validated
+  }
+  Ok(validated)
+}
+
+
+// ─────────────────────────────────────────────────────────
+// 10. TESTING: First-class, effect-aware, zero boilerplate
+// ─────────────────────────────────────────────────────────
+
+/// Tests use handling blocks to inject mocks.
+/// No mocking library. No test doubles framework.
+/// The effect system IS the testing infrastructure.
+
+@test
+fn test_valid_order_processes() {
+  let customer = Customer {
+    id: "C001",
+    name: "Alice",
+    email: "alice@example.com",
+    tier: Premium
+  }
+  let order = Order {
+    id: "ORD-42",
+    customer: customer,
+    items: [
+      LineItem { sku: "A1", name: "Widget", quantity: 2, unit_price: 25.0 },
+      LineItem { sku: "B2", name: "Gadget", quantity: 1, unit_price: 99.0 }
+    ],
+    status: Pending
+  }
+  let result = run_test(order)
+  expect(result).to_be_ok()
+}
+
+@test
+fn test_empty_order_rejected() {
+  let customer = Customer {
+    id: "C002",
+    name: "Bob",
+    email: "bob@example.com",
+    tier: Standard
+  }
+  let order = Order {
+    id: "ORD-43",
+    customer: customer,
+    items: [],
+    status: Pending
+  }
+  let result = run_test(order)
+  expect(result).to_be_err()
+}
+
+@test
+fn test_premium_discount_applied() {
+  let items = [
+    LineItem { sku: "X1", name: "Pro Widget", quantity: 1, unit_price: 100.0 }
+  ]
+  let total = items
+    |> compute_subtotals
+    |> apply_tier_discount(Premium)
+  expect(total).to_equal(90.0)
+}
+
+
+// ─────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────
+
+@managed
+fn calculate_total(order: Order) -> Order {
+  let mut total = 0.0
+  for item in order.items {
+    total = total + item.unit_price * item.quantity
+  }
+  Order {
+    id: order.id,
+    customer: order.customer,
+    items: order.items,
+    status: Priced { total: total }
+  }
+}
+
+@managed
+fn fulfill(order: Order) -> Result[Order, String] with Database {
+  let result = execute("INSERT INTO orders ...")?
+  Ok(Order {
+    id: order.id,
+    customer: order.customer,
+    items: order.items,
+    status: Fulfilled { tracking: "TRK-${order.id}" }
+  })
+}
+
+
+// ─────────────────────────────────────────────────────────
+// ENTRY POINT
+// ─────────────────────────────────────────────────────────
+
+fn main() {
+  let customer = Customer {
+    id: "C100",
+    name: "Showcase Corp",
+    email: "dev@showcase.com",
+    tier: Enterprise
+  }
+  let order = Order {
+    id: "ORD-2026",
+    customer: customer,
+    items: [
+      LineItem { sku: "BOCK-01", name: "Compiler License", quantity: 1, unit_price: 500.0 },
+      LineItem { sku: "BOCK-02", name: "IDE Plugin", quantity: 5, unit_price: 50.0 },
+      LineItem { sku: "BOCK-03", name: "Support Package", quantity: 1, unit_price: 200.0 }
+    ],
+    status: Pending
+  }
+
+  println("─── Bock Language Showcase ───")
+  println("")
+  println(classify_items(order.items))
+  println(summarize_order(order))
+  println("")
+
+  let result = run_production(order)
+  println(check_result(result))
+  println("")
+
+  let report = build_report_pipeline()
+  println(report("  Order processing complete  "))
+}

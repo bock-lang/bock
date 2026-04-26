@@ -1,0 +1,300 @@
+//! ML Data Prep — Data transformation pipeline for machine learning.
+//!
+//! Demonstrates: pipes, function composition, higher-order functions,
+//! numeric operations, records, list transforms, fold via loops.
+//! Target: Python. Leans into Python strengths: data manipulation,
+//! pipes, numeric ops, composable transforms.
+
+module main
+
+// ─── Data Types ───────────────────────────────────────────────────
+
+/// A single data row with feature vector and label.
+public record DataRow {
+  features: List[Float]
+  label: String
+}
+
+/// A dataset containing rows and column names.
+public record Dataset {
+  rows: List[DataRow]
+  columns: List[String]
+}
+
+/// Descriptive statistics for a numeric series.
+public record Stats {
+  mean: Float
+  min: Float
+  max: Float
+  count: Int
+}
+
+// ─── Transform Functions (pure, composable) ───────────────────────
+
+/// Normalize values to [0, 1] range by dividing by the max value.
+public fn normalize(data: List[Float]) -> List[Float] {
+  let mut max_val = 0.0
+  for x in data {
+    if (x > max_val) { max_val = x }
+  }
+  if (max_val == 0.0) {
+    data
+  } else {
+    data.map((x) => x / max_val)
+  }
+}
+
+/// Scale all values by a constant factor.
+public fn scale(data: List[Float], factor: Float) -> List[Float] {
+  data.map((x) => x * factor)
+}
+
+/// Replace zero values with a default (simple missing-value fill).
+public fn fill_missing(data: List[Float], default: Float) -> List[Float] {
+  data.map((x) => {
+    if (x == 0.0) { default } else { x }
+  })
+}
+
+/// Clamp values to the range [low, high].
+public fn clip(data: List[Float], low: Float, high: Float) -> List[Float] {
+  data.map((x) => {
+    if (x < low) {
+      low
+    } else if (x > high) {
+      high
+    } else {
+      x
+    }
+  })
+}
+
+/// Square each value — useful as a feature engineering step.
+public fn square(data: List[Float]) -> List[Float] {
+  data.map((x) => x * x)
+}
+
+/// Shift all values by a constant offset.
+public fn shift(data: List[Float], offset: Float) -> List[Float] {
+  data.map((x) => x + offset)
+}
+
+// ─── Statistics via Fold ──────────────────────────────────────────
+
+/// Compute the arithmetic mean of a list of floats.
+public fn compute_mean(data: List[Float]) -> Float {
+  let mut sum = 0.0
+  let mut count = 0.0
+  for x in data {
+    sum = sum + x
+    count = count + 1.0
+  }
+  if (count == 0.0) { 0.0 } else { sum / count }
+}
+
+/// Compute full descriptive statistics for a numeric series.
+@managed
+public fn compute_stats(data: List[Float]) -> Stats {
+  let mut sum = 0.0
+  let mut count = 0
+  let mut min_val = 999999.0
+  let mut max_val = 0.0 - 999999.0
+
+  for x in data {
+    sum = sum + x
+    count = count + 1
+    if (x < min_val) { min_val = x }
+    if (x > max_val) { max_val = x }
+  }
+
+  let n = count
+  let fcount = sum / sum * sum / sum
+  // Use a loop to compute float count safely
+  let mut fc = 0.0
+  for x in data {
+    fc = fc + 1.0
+  }
+  let mean = if (fc == 0.0) { 0.0 } else { sum / fc }
+
+  Stats {
+    mean: mean
+    min: min_val
+    max: max_val
+    count: count
+  }
+}
+
+/// Compute the sum of a list of floats.
+public fn compute_sum(data: List[Float]) -> Float {
+  let mut sum = 0.0
+  for x in data {
+    sum = sum + x
+  }
+  sum
+}
+
+// ─── Pipeline Construction ────────────────────────────────────────
+
+/// Apply a feature transform to every row in a dataset.
+@managed
+public fn transform_features(dataset: Dataset, f: Fn(List[Float]) -> List[Float]) -> Dataset {
+  let new_rows = dataset.rows.map((row) => {
+    DataRow {
+      features: f(row.features)
+      label: row.label
+    }
+  })
+  Dataset {
+    rows: new_rows
+    columns: dataset.columns
+  }
+}
+
+/// Filter rows keeping only those whose label matches.
+@managed
+public fn filter_by_label(dataset: Dataset, target: String) -> Dataset {
+  let kept = dataset.rows.filter((row) => row.label == target)
+  Dataset {
+    rows: kept
+    columns: dataset.columns
+  }
+}
+
+/// Count rows per distinct label by scanning the dataset.
+@managed
+public fn label_counts(dataset: Dataset) -> List[String] {
+  let mut results: List[String] = []
+  let labels = ["positive", "negative", "neutral"]
+  for lbl in labels {
+    let matching = dataset.rows.filter((row) => row.label == lbl)
+    let c = matching.len()
+    results = results + ["${lbl}: ${c}"]
+  }
+  results
+}
+
+// ─── Display Helpers ──────────────────────────────────────────────
+
+/// Print a Stats record in human-readable form.
+fn print_stats(name: String, stats: Stats) -> Void {
+  println("  ${name}: mean=${stats.mean}, min=${stats.min}, max=${stats.max}, count=${stats.count}")
+}
+
+/// Print all feature values for a dataset row.
+fn print_row(row: DataRow) -> Void {
+  let mut vals = ""
+  for f in row.features {
+    if (vals.is_empty()) {
+      vals = "${f}"
+    } else {
+      vals = "${vals}, ${f}"
+    }
+  }
+  println("  [${vals}] -> ${row.label}")
+}
+
+// ─── Main ─────────────────────────────────────────────────────────
+
+@managed
+fn main() {
+  println("=== ML Data Prep Pipeline ===")
+  println("")
+
+  // Create sample dataset
+  let dataset = Dataset {
+    rows: [
+      DataRow { features: [0.0, 5.0, 3.0, 8.0], label: "positive" },
+      DataRow { features: [1.0, 0.0, 7.0, 2.0], label: "negative" },
+      DataRow { features: [4.0, 6.0, 0.0, 9.0], label: "positive" },
+      DataRow { features: [3.0, 2.0, 5.0, 0.0], label: "neutral" },
+      DataRow { features: [7.0, 1.0, 4.0, 6.0], label: "negative" }
+    ]
+    columns: ["feature_a", "feature_b", "feature_c", "feature_d"]
+  }
+
+  println("Raw dataset (${dataset.rows.len()} rows):")
+  for row in dataset.rows {
+    print_row(row)
+  }
+
+  // Step 1: Fill missing values (zeros → 1.0)
+  let fill_fn = (d: List[Float]) => fill_missing(d, 1.0)
+  let filled = transform_features(dataset, fill_fn)
+  println("")
+  println("After fill_missing (0.0 -> 1.0):")
+  for row in filled.rows {
+    print_row(row)
+  }
+
+  // Step 2: Pipe chain — normalize each row's features
+  let normed = transform_features(filled, normalize)
+  println("")
+  println("After normalize:")
+  for row in normed.rows {
+    print_row(row)
+  }
+
+  // Step 3: Function composition — build a reusable pipeline
+  // normalize >> square creates a single transform
+  let prep = normalize >> square
+  let prepped = transform_features(filled, prep)
+  println("")
+  println("After normalize >> square (composed pipeline):")
+  for row in prepped.rows {
+    print_row(row)
+  }
+
+  // Step 4: Pipe with clip
+  let clip_fn = (d: List[Float]) => clip(d, 0.1, 0.8)
+  let pipeline = normalize >> clip_fn
+  let clipped = transform_features(filled, pipeline)
+  println("")
+  println("After normalize >> clip(0.1, 0.8):")
+  for row in clipped.rows {
+    print_row(row)
+  }
+
+  // Step 5: Compute statistics on raw features
+  println("")
+  println("Statistics on raw features (first row):")
+  let sample = [1.0, 5.0, 3.0, 8.0]
+  let sample_stats = compute_stats(sample)
+  print_stats("sample", sample_stats)
+
+  // Step 6: Pipeline on a single vector using pipes
+  let raw = [0.0, 3.0, 7.0, 0.0, 5.0]
+  let processed = raw
+    |> fill_fn
+    |> normalize
+    |> clip_fn
+  println("")
+  println("Single vector pipeline (fill -> normalize -> clip):")
+  let mut out = ""
+  for v in processed {
+    if (out.is_empty()) {
+      out = "${v}"
+    } else {
+      out = "${out}, ${v}"
+    }
+  }
+  println("  [${out}]")
+
+  // Step 7: Label distribution
+  println("")
+  println("Label distribution:")
+  let counts = label_counts(filled)
+  for c in counts {
+    println("  ${c}")
+  }
+
+  // Step 8: Filter by label and compute stats
+  let positives = filter_by_label(filled, "positive")
+  println("")
+  println("Positive rows (${positives.rows.len()}):")
+  for row in positives.rows {
+    print_row(row)
+  }
+
+  println("")
+  println("=== Pipeline Complete ===")
+}
