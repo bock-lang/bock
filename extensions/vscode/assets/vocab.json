@@ -1,0 +1,1756 @@
+{
+  "version": "0.1.0",
+  "language": {
+    "keywords": [
+      {
+        "name": "fn",
+        "category": "declaration",
+        "spec_ref": "§1.4"
+      },
+      {
+        "name": "let",
+        "category": "declaration",
+        "spec_ref": "§1.4"
+      },
+      {
+        "name": "mut",
+        "category": "modifier",
+        "spec_ref": "§3"
+      },
+      {
+        "name": "const",
+        "category": "declaration",
+        "spec_ref": "§1.4"
+      },
+      {
+        "name": "if",
+        "category": "control-flow",
+        "spec_ref": "§5"
+      },
+      {
+        "name": "else",
+        "category": "control-flow",
+        "spec_ref": "§5"
+      },
+      {
+        "name": "match",
+        "category": "control-flow",
+        "spec_ref": "§7"
+      },
+      {
+        "name": "for",
+        "category": "control-flow",
+        "spec_ref": "§6"
+      },
+      {
+        "name": "in",
+        "category": "control-flow",
+        "spec_ref": "§6"
+      },
+      {
+        "name": "while",
+        "category": "control-flow",
+        "spec_ref": "§6"
+      },
+      {
+        "name": "loop",
+        "category": "control-flow",
+        "spec_ref": "§6"
+      },
+      {
+        "name": "break",
+        "category": "control-flow",
+        "spec_ref": "§6"
+      },
+      {
+        "name": "continue",
+        "category": "control-flow",
+        "spec_ref": "§6"
+      },
+      {
+        "name": "return",
+        "category": "control-flow",
+        "spec_ref": "§6"
+      },
+      {
+        "name": "guard",
+        "category": "control-flow",
+        "spec_ref": "§6"
+      },
+      {
+        "name": "with",
+        "category": "effects",
+        "spec_ref": "§8"
+      },
+      {
+        "name": "handling",
+        "category": "effects",
+        "spec_ref": "§8"
+      },
+      {
+        "name": "handle",
+        "category": "effects",
+        "spec_ref": "§8"
+      },
+      {
+        "name": "record",
+        "category": "declaration",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "enum",
+        "category": "declaration",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "class",
+        "category": "declaration",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "trait",
+        "category": "declaration",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "impl",
+        "category": "declaration",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "self",
+        "category": "keyword",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "Self",
+        "category": "type",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "module",
+        "category": "declaration",
+        "spec_ref": "§10"
+      },
+      {
+        "name": "use",
+        "category": "declaration",
+        "spec_ref": "§10"
+      },
+      {
+        "name": "public",
+        "category": "visibility",
+        "spec_ref": "§10"
+      },
+      {
+        "name": "internal",
+        "category": "visibility",
+        "spec_ref": "§10"
+      },
+      {
+        "name": "native",
+        "category": "modifier",
+        "spec_ref": "§13"
+      },
+      {
+        "name": "async",
+        "category": "effects",
+        "spec_ref": "§8"
+      },
+      {
+        "name": "await",
+        "category": "effects",
+        "spec_ref": "§8"
+      },
+      {
+        "name": "effect",
+        "category": "effects",
+        "spec_ref": "§8"
+      },
+      {
+        "name": "platform",
+        "category": "declaration",
+        "spec_ref": "§13"
+      },
+      {
+        "name": "where",
+        "category": "declaration",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "type",
+        "category": "declaration",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "true",
+        "category": "literal",
+        "spec_ref": "§1.3"
+      },
+      {
+        "name": "false",
+        "category": "literal",
+        "spec_ref": "§1.3"
+      },
+      {
+        "name": "Ok",
+        "category": "constructor",
+        "spec_ref": "§6.3"
+      },
+      {
+        "name": "Err",
+        "category": "constructor",
+        "spec_ref": "§6.3"
+      },
+      {
+        "name": "Some",
+        "category": "constructor",
+        "spec_ref": "§6.3"
+      },
+      {
+        "name": "None",
+        "category": "constructor",
+        "spec_ref": "§6.3"
+      },
+      {
+        "name": "property",
+        "category": "declaration",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "forall",
+        "category": "type",
+        "spec_ref": "§4"
+      },
+      {
+        "name": "unreachable",
+        "category": "keyword",
+        "spec_ref": "§6"
+      },
+      {
+        "name": "is",
+        "category": "operator",
+        "spec_ref": "§7"
+      }
+    ],
+    "operators": [
+      {
+        "symbol": "=",
+        "precedence": 1,
+        "associativity": "right",
+        "kind": "assignment",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "+=",
+        "precedence": 1,
+        "associativity": "right",
+        "kind": "assignment",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "-=",
+        "precedence": 1,
+        "associativity": "right",
+        "kind": "assignment",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "*=",
+        "precedence": 1,
+        "associativity": "right",
+        "kind": "assignment",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "/=",
+        "precedence": 1,
+        "associativity": "right",
+        "kind": "assignment",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "%=",
+        "precedence": 1,
+        "associativity": "right",
+        "kind": "assignment",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "|>",
+        "precedence": 2,
+        "associativity": "left",
+        "kind": "pipe",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": ">>",
+        "precedence": 3,
+        "associativity": "left",
+        "kind": "compose",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "..",
+        "precedence": 4,
+        "associativity": "none",
+        "kind": "range",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "..=",
+        "precedence": 4,
+        "associativity": "none",
+        "kind": "range",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "||",
+        "precedence": 5,
+        "associativity": "left",
+        "kind": "logical",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "&&",
+        "precedence": 6,
+        "associativity": "left",
+        "kind": "logical",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "==",
+        "precedence": 7,
+        "associativity": "none",
+        "kind": "comparison",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "!=",
+        "precedence": 7,
+        "associativity": "none",
+        "kind": "comparison",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "<",
+        "precedence": 7,
+        "associativity": "none",
+        "kind": "comparison",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": ">",
+        "precedence": 7,
+        "associativity": "none",
+        "kind": "comparison",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "<=",
+        "precedence": 7,
+        "associativity": "none",
+        "kind": "comparison",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": ">=",
+        "precedence": 7,
+        "associativity": "none",
+        "kind": "comparison",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "|",
+        "precedence": 8,
+        "associativity": "left",
+        "kind": "bitwise",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "^",
+        "precedence": 9,
+        "associativity": "left",
+        "kind": "bitwise",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "&",
+        "precedence": 10,
+        "associativity": "left",
+        "kind": "bitwise",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "+",
+        "precedence": 11,
+        "associativity": "left",
+        "kind": "arithmetic",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "-",
+        "precedence": 11,
+        "associativity": "left",
+        "kind": "arithmetic",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "*",
+        "precedence": 12,
+        "associativity": "left",
+        "kind": "arithmetic",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "/",
+        "precedence": 12,
+        "associativity": "left",
+        "kind": "arithmetic",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "%",
+        "precedence": 12,
+        "associativity": "left",
+        "kind": "arithmetic",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "**",
+        "precedence": 13,
+        "associativity": "right",
+        "kind": "arithmetic",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "!",
+        "precedence": 14,
+        "associativity": "right",
+        "kind": "unary",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "~",
+        "precedence": 14,
+        "associativity": "right",
+        "kind": "unary",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "?",
+        "precedence": 15,
+        "associativity": "left",
+        "kind": "postfix",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": ".",
+        "precedence": 15,
+        "associativity": "left",
+        "kind": "access",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": "=>",
+        "associativity": "none",
+        "kind": "punctuation"
+      },
+      {
+        "symbol": "->",
+        "associativity": "none",
+        "kind": "punctuation"
+      },
+      {
+        "symbol": "<<",
+        "precedence": 10,
+        "associativity": "left",
+        "kind": "bitwise",
+        "spec_ref": "§5.1"
+      },
+      {
+        "symbol": ":",
+        "associativity": "none",
+        "kind": "punctuation"
+      },
+      {
+        "symbol": ";",
+        "associativity": "none",
+        "kind": "punctuation"
+      },
+      {
+        "symbol": ",",
+        "associativity": "none",
+        "kind": "punctuation"
+      },
+      {
+        "symbol": "@",
+        "associativity": "none",
+        "kind": "annotation"
+      },
+      {
+        "symbol": "#",
+        "associativity": "none",
+        "kind": "attribute"
+      },
+      {
+        "symbol": "_",
+        "associativity": "none",
+        "kind": "wildcard"
+      }
+    ],
+    "annotations": [
+      {
+        "name": "managed",
+        "params": "",
+        "purpose": "Suppress ownership and move-checking for the annotated item.",
+        "spec_ref": "§3.6"
+      },
+      {
+        "name": "derive",
+        "params": "trait,...",
+        "purpose": "Auto-derive trait implementations for a record or enum.",
+        "spec_ref": "§4.7"
+      },
+      {
+        "name": "test",
+        "params": "",
+        "purpose": "Mark a function as a unit test discovered by `bock test`.",
+        "spec_ref": "§16.2"
+      },
+      {
+        "name": "requires",
+        "params": "capability,...",
+        "purpose": "Declare the capabilities this function requires.",
+        "spec_ref": "§9"
+      },
+      {
+        "name": "performance",
+        "params": "max_latency, max_allocations",
+        "purpose": "Declare performance budgets enforced by the context pass.",
+        "spec_ref": "§9"
+      }
+    ],
+    "strictness_levels": [
+      {
+        "name": "sketch",
+        "description": "Lenient mode: effects and capabilities are inferred; no diagnostics.",
+        "spec_ref": "§8.4"
+      },
+      {
+        "name": "development",
+        "description": "Public items must declare effects; private items are not checked.",
+        "spec_ref": "§8.4"
+      },
+      {
+        "name": "production",
+        "description": "Every function must declare its effects and capabilities.",
+        "spec_ref": "§8.4"
+      }
+    ],
+    "primitive_types": [
+      {
+        "name": "Int",
+        "spec_ref": "§2.1"
+      },
+      {
+        "name": "Float",
+        "spec_ref": "§2.1"
+      },
+      {
+        "name": "Bool",
+        "spec_ref": "§2.1"
+      },
+      {
+        "name": "String",
+        "spec_ref": "§2.1"
+      },
+      {
+        "name": "Char",
+        "spec_ref": "§2.1"
+      },
+      {
+        "name": "Void",
+        "spec_ref": "§2.1"
+      },
+      {
+        "name": "Never",
+        "spec_ref": "§2.1"
+      }
+    ],
+    "prelude_types": [
+      {
+        "name": "Int",
+        "kind": "type",
+        "signature": "Int"
+      },
+      {
+        "name": "Float",
+        "kind": "type",
+        "signature": "Float"
+      },
+      {
+        "name": "Bool",
+        "kind": "type",
+        "signature": "Bool"
+      },
+      {
+        "name": "String",
+        "kind": "type",
+        "signature": "String"
+      },
+      {
+        "name": "Char",
+        "kind": "type",
+        "signature": "Char"
+      },
+      {
+        "name": "Void",
+        "kind": "type",
+        "signature": "Void"
+      },
+      {
+        "name": "Never",
+        "kind": "type",
+        "signature": "Never"
+      },
+      {
+        "name": "Optional",
+        "kind": "type",
+        "signature": "Optional"
+      },
+      {
+        "name": "Result",
+        "kind": "type",
+        "signature": "Result"
+      },
+      {
+        "name": "List",
+        "kind": "type",
+        "signature": "List"
+      },
+      {
+        "name": "Map",
+        "kind": "type",
+        "signature": "Map"
+      },
+      {
+        "name": "Set",
+        "kind": "type",
+        "signature": "Set"
+      },
+      {
+        "name": "Fn",
+        "kind": "type",
+        "signature": "Fn"
+      },
+      {
+        "name": "Duration",
+        "kind": "type",
+        "signature": "Duration"
+      },
+      {
+        "name": "Instant",
+        "kind": "type",
+        "signature": "Instant"
+      },
+      {
+        "name": "Channel",
+        "kind": "type",
+        "signature": "Channel"
+      }
+    ],
+    "prelude_functions": [
+      {
+        "name": "print",
+        "kind": "function",
+        "signature": "print(..)"
+      },
+      {
+        "name": "println",
+        "kind": "function",
+        "signature": "println(..)"
+      },
+      {
+        "name": "debug",
+        "kind": "function",
+        "signature": "debug(..)"
+      },
+      {
+        "name": "assert",
+        "kind": "function",
+        "signature": "assert(..)"
+      },
+      {
+        "name": "expect",
+        "kind": "function",
+        "signature": "expect(..)"
+      },
+      {
+        "name": "todo",
+        "kind": "function",
+        "signature": "todo(..)"
+      },
+      {
+        "name": "unreachable",
+        "kind": "function",
+        "signature": "unreachable(..)"
+      },
+      {
+        "name": "sleep",
+        "kind": "function",
+        "signature": "sleep(..)"
+      },
+      {
+        "name": "spawn",
+        "kind": "function",
+        "signature": "spawn(..)"
+      }
+    ],
+    "prelude_traits": [
+      {
+        "name": "Comparable",
+        "kind": "trait",
+        "signature": "Comparable"
+      },
+      {
+        "name": "Equatable",
+        "kind": "trait",
+        "signature": "Equatable"
+      },
+      {
+        "name": "Hashable",
+        "kind": "trait",
+        "signature": "Hashable"
+      },
+      {
+        "name": "Displayable",
+        "kind": "trait",
+        "signature": "Displayable"
+      },
+      {
+        "name": "Iterator",
+        "kind": "trait",
+        "signature": "Iterator"
+      },
+      {
+        "name": "Iterable",
+        "kind": "trait",
+        "signature": "Iterable"
+      },
+      {
+        "name": "Into",
+        "kind": "trait",
+        "signature": "Into"
+      },
+      {
+        "name": "From",
+        "kind": "trait",
+        "signature": "From"
+      }
+    ],
+    "prelude_constructors": [
+      {
+        "name": "Some",
+        "kind": "constructor",
+        "signature": "Some"
+      },
+      {
+        "name": "None",
+        "kind": "constructor",
+        "signature": "None"
+      },
+      {
+        "name": "Ok",
+        "kind": "constructor",
+        "signature": "Ok"
+      },
+      {
+        "name": "Err",
+        "kind": "constructor",
+        "signature": "Err"
+      }
+    ]
+  },
+  "stdlib": {
+    "modules": [
+      {
+        "path": "core.primitives",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.1"
+      },
+      {
+        "path": "core.collections",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.2"
+      },
+      {
+        "path": "core.option_result",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.3"
+      },
+      {
+        "path": "core.iterator",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.4"
+      },
+      {
+        "path": "core.string_builder",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.5"
+      },
+      {
+        "path": "core.time",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.6"
+      },
+      {
+        "path": "core.concurrency",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.7"
+      },
+      {
+        "path": "core.effect",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.8"
+      },
+      {
+        "path": "core.error",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.9"
+      },
+      {
+        "path": "core.math",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.10"
+      },
+      {
+        "path": "core.memory",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.11"
+      },
+      {
+        "path": "core.test",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.12"
+      },
+      {
+        "path": "core.traits",
+        "types": [],
+        "functions": [],
+        "effects": [],
+        "traits": [],
+        "spec_ref": "§14.13"
+      }
+    ],
+    "builtin_methods": [
+      {
+        "receiver": "Bool",
+        "methods": [
+          "compare",
+          "display",
+          "equals",
+          "hash_code",
+          "negate",
+          "to_int",
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Channel",
+        "methods": [
+          "close",
+          "recv",
+          "send",
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Char",
+        "methods": [
+          "compare",
+          "display",
+          "equals",
+          "hash_code",
+          "is_alpha",
+          "is_digit",
+          "is_whitespace",
+          "to_int",
+          "to_lower",
+          "to_string",
+          "to_upper"
+        ]
+      },
+      {
+        "receiver": "Duration",
+        "methods": [
+          "abs",
+          "add",
+          "as_millis",
+          "as_nanos",
+          "as_seconds",
+          "compare",
+          "display",
+          "div",
+          "equals",
+          "hash_code",
+          "is_negative",
+          "is_zero",
+          "mul",
+          "negate",
+          "sub",
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Enum",
+        "methods": [
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Float",
+        "methods": [
+          "abs",
+          "add",
+          "ceil",
+          "clamp",
+          "compare",
+          "display",
+          "div",
+          "equals",
+          "floor",
+          "hash_code",
+          "is_infinite",
+          "is_nan",
+          "max",
+          "min",
+          "mul",
+          "negate",
+          "pow",
+          "rem",
+          "round",
+          "sqrt",
+          "sub",
+          "to_int",
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Function",
+        "methods": [
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Instant",
+        "methods": [
+          "add",
+          "compare",
+          "display",
+          "duration_since",
+          "elapsed",
+          "equals",
+          "sub",
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Int",
+        "methods": [
+          "abs",
+          "add",
+          "clamp",
+          "compare",
+          "display",
+          "div",
+          "equals",
+          "hash_code",
+          "max",
+          "min",
+          "mul",
+          "negate",
+          "pow",
+          "rem",
+          "shift_left",
+          "shift_right",
+          "sub",
+          "to_float",
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Iterator",
+        "methods": [
+          "chain",
+          "collect",
+          "enumerate",
+          "filter",
+          "map",
+          "next",
+          "skip",
+          "take",
+          "to_string",
+          "zip"
+        ]
+      },
+      {
+        "receiver": "List",
+        "methods": [
+          "all",
+          "any",
+          "compare",
+          "concat",
+          "contains",
+          "count",
+          "dedup",
+          "display",
+          "enumerate",
+          "equals",
+          "filter",
+          "find",
+          "first",
+          "flat_map",
+          "flatten",
+          "fold",
+          "for_each",
+          "get",
+          "hash_code",
+          "index_of",
+          "insert",
+          "is_empty",
+          "iter",
+          "join",
+          "last",
+          "len",
+          "map",
+          "pop",
+          "push",
+          "reduce",
+          "remove",
+          "reverse",
+          "skip",
+          "slice",
+          "sort",
+          "take",
+          "to_set",
+          "to_string",
+          "zip"
+        ]
+      },
+      {
+        "receiver": "Map",
+        "methods": [
+          "compare",
+          "contains_key",
+          "delete",
+          "display",
+          "entries",
+          "equals",
+          "filter",
+          "for_each",
+          "get",
+          "hash_code",
+          "is_empty",
+          "iter",
+          "keys",
+          "len",
+          "map_values",
+          "merge",
+          "set",
+          "to_list",
+          "to_string",
+          "values"
+        ]
+      },
+      {
+        "receiver": "Optional",
+        "methods": [
+          "display",
+          "equals",
+          "flat_map",
+          "is_none",
+          "is_some",
+          "map",
+          "to_string",
+          "unwrap",
+          "unwrap_or"
+        ]
+      },
+      {
+        "receiver": "Range",
+        "methods": [
+          "iter",
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Record",
+        "methods": [
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Result",
+        "methods": [
+          "display",
+          "equals",
+          "is_err",
+          "is_ok",
+          "map",
+          "map_err",
+          "to_string",
+          "unwrap",
+          "unwrap_or"
+        ]
+      },
+      {
+        "receiver": "Set",
+        "methods": [
+          "add",
+          "compare",
+          "contains",
+          "difference",
+          "display",
+          "equals",
+          "filter",
+          "for_each",
+          "hash_code",
+          "intersection",
+          "is_disjoint",
+          "is_empty",
+          "is_subset",
+          "is_superset",
+          "iter",
+          "len",
+          "map",
+          "remove",
+          "symmetric_difference",
+          "to_list",
+          "to_string",
+          "union"
+        ]
+      },
+      {
+        "receiver": "String",
+        "methods": [
+          "add",
+          "byte_len",
+          "bytes",
+          "char_at",
+          "chars",
+          "compare",
+          "contains",
+          "display",
+          "ends_with",
+          "equals",
+          "format",
+          "hash_code",
+          "index_of",
+          "is_empty",
+          "join",
+          "len",
+          "pad_end",
+          "pad_start",
+          "regex_find",
+          "regex_match",
+          "regex_replace",
+          "repeat",
+          "replace",
+          "reverse",
+          "slice",
+          "split",
+          "starts_with",
+          "substring",
+          "to_lower",
+          "to_string",
+          "to_upper",
+          "trim",
+          "trim_end",
+          "trim_start"
+        ]
+      },
+      {
+        "receiver": "StringBuilder",
+        "methods": [
+          "append",
+          "build",
+          "clear",
+          "len",
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Tuple",
+        "methods": [
+          "to_string"
+        ]
+      },
+      {
+        "receiver": "Void",
+        "methods": [
+          "to_string"
+        ]
+      }
+    ],
+    "builtin_globals": [
+      "Channel.new",
+      "Duration.hours",
+      "Duration.micros",
+      "Duration.millis",
+      "Duration.minutes",
+      "Duration.nanos",
+      "Duration.seconds",
+      "Duration.zero",
+      "Instant.now",
+      "StringBuilder",
+      "assert",
+      "debug",
+      "print",
+      "println",
+      "sleep",
+      "spawn",
+      "todo",
+      "unreachable"
+    ]
+  },
+  "diagnostics": {
+    "codes": [
+      {
+        "code": "E1001",
+        "severity": "error",
+        "summary": "Unexpected character in source.",
+        "description": "The lexer encountered a character it does not recognize as part of any valid token.",
+        "spec_refs": [
+          "§1"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1002",
+        "severity": "error",
+        "summary": "Unterminated string literal.",
+        "description": "A string literal was opened but never closed before end of input.",
+        "spec_refs": [
+          "§1.3"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1003",
+        "severity": "error",
+        "summary": "Invalid escape sequence in string.",
+        "description": "An escape sequence in a string literal is not one of the recognized forms.",
+        "spec_refs": [
+          "§1.3"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1004",
+        "severity": "error",
+        "summary": "Invalid character literal.",
+        "description": "A character literal is empty, contains more than one character, or has an invalid escape.",
+        "spec_refs": [
+          "§1.3"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1005",
+        "severity": "error",
+        "summary": "Invalid digit for numeric literal.",
+        "description": "A digit was found that is outside the range of the declared numeric base.",
+        "spec_refs": [
+          "§1.3"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1006",
+        "severity": "error",
+        "summary": "Unterminated block comment.",
+        "description": "A `/* ... */` block comment was opened but never closed before end of input.",
+        "spec_refs": [
+          "§1.2"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W1001",
+        "severity": "warning",
+        "summary": "Unused import.",
+        "description": "An import was declared but never referenced.",
+        "spec_refs": [
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1005 (module)",
+        "severity": "error",
+        "summary": "Module not found.",
+        "description": "An imported module could not be located by the module registry.",
+        "spec_refs": [
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1006 (module)",
+        "severity": "error",
+        "summary": "Symbol not found in module.",
+        "description": "A `use` path names a module that exists but does not export the requested symbol.",
+        "spec_refs": [
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1007",
+        "severity": "error",
+        "summary": "Symbol is not visible.",
+        "description": "The referenced symbol exists but is private; declare it `public` to export it.",
+        "spec_refs": [
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2000",
+        "severity": "error",
+        "summary": "Parse error at top level.",
+        "description": "The parser encountered unexpected input while reading a top-level item.",
+        "spec_refs": [
+          "§11"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2001",
+        "severity": "error",
+        "summary": "Unexpected token.",
+        "description": "The next token did not match any alternative at the current grammar position.",
+        "spec_refs": [
+          "§11"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2002",
+        "severity": "error",
+        "summary": "Missing expected token.",
+        "description": "The parser required a specific token here and found something else.",
+        "spec_refs": [
+          "§11"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2010",
+        "severity": "error",
+        "summary": "Invalid declaration.",
+        "description": "A top-level declaration has malformed structure.",
+        "spec_refs": [
+          "§4"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2020",
+        "severity": "error",
+        "summary": "Invalid expression.",
+        "description": "An expression could not be parsed due to malformed structure.",
+        "spec_refs": [
+          "§5"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2021",
+        "severity": "error",
+        "summary": "Invalid pattern.",
+        "description": "A pattern in a `match` or `let` binding could not be parsed.",
+        "spec_refs": [
+          "§7"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2022",
+        "severity": "error",
+        "summary": "Invalid type expression.",
+        "description": "A type annotation could not be parsed as a valid type expression.",
+        "spec_refs": [
+          "§2"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2030",
+        "severity": "error",
+        "summary": "Invalid lambda parameter list.",
+        "description": "Lambda parameters must be parenthesized; single-identifier forms are not accepted.",
+        "spec_refs": [
+          "§5"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2040",
+        "severity": "error",
+        "summary": "Invalid generic parameter list.",
+        "description": "A generic parameter list is malformed.",
+        "spec_refs": [
+          "§4.5"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2050",
+        "severity": "error",
+        "summary": "Invalid use declaration.",
+        "description": "A `use` import is malformed.",
+        "spec_refs": [
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2060",
+        "severity": "error",
+        "summary": "Invalid attribute / annotation.",
+        "description": "An `@annotation` or `#attribute` could not be parsed.",
+        "spec_refs": [
+          "§4.7"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2070",
+        "severity": "error",
+        "summary": "Invalid match arm.",
+        "description": "A match arm is malformed; each arm is `pattern => expression`.",
+        "spec_refs": [
+          "§7"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2090",
+        "severity": "error",
+        "summary": "Invalid effect declaration.",
+        "description": "An `effect` declaration or `with` clause is malformed.",
+        "spec_refs": [
+          "§8"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4001",
+        "severity": "error",
+        "summary": "Type mismatch.",
+        "description": "Expected and actual types do not unify.",
+        "spec_refs": [
+          "§2"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4002",
+        "severity": "error",
+        "summary": "Undefined variable.",
+        "description": "A name referenced in an expression has no binding in scope.",
+        "spec_refs": [
+          "§2"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4003",
+        "severity": "error",
+        "summary": "Arity mismatch in call.",
+        "description": "The number of arguments does not match the callee's parameter count.",
+        "spec_refs": [
+          "§5"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4004",
+        "severity": "error",
+        "summary": "Value is not callable.",
+        "description": "An expression of non-function type was used in a call position.",
+        "spec_refs": [
+          "§5"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4005",
+        "severity": "error",
+        "summary": "`where` clause predicate failed.",
+        "description": "A refined-type predicate could not be satisfied.",
+        "spec_refs": [
+          "§2"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4010",
+        "severity": "error",
+        "summary": "Overlapping trait implementations.",
+        "description": "Two `impl` blocks apply to the same type and violate coherence.",
+        "spec_refs": [
+          "§4.4"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E5001",
+        "severity": "error",
+        "summary": "Use after move.",
+        "description": "A value was used after it had been moved into another binding or call.",
+        "spec_refs": [
+          "§3"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E5002",
+        "severity": "error",
+        "summary": "Mutable borrow of non-mut binding.",
+        "description": "The callee takes a `mut` borrow but the binding was not declared `mut`.",
+        "spec_refs": [
+          "§3"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E5003",
+        "severity": "error",
+        "summary": "Value moved inside loop.",
+        "description": "The loop body moves a value captured from outside, which would move it more than once.",
+        "spec_refs": [
+          "§3"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E6001",
+        "severity": "error",
+        "summary": "Undeclared effect.",
+        "description": "A function uses an algebraic effect that is not in its declared `with` clause.",
+        "spec_refs": [
+          "§8"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W6002",
+        "severity": "warning",
+        "summary": "Public function has undeclared effect (development mode).",
+        "description": "A public function uses an effect that is not in its declared `with` clause. Promotes to error in production strictness.",
+        "spec_refs": [
+          "§8"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E6003",
+        "severity": "error",
+        "summary": "Propagated effect not declared.",
+        "description": "A called function has an effect that the caller does not declare or handle.",
+        "spec_refs": [
+          "§8"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W6004",
+        "severity": "warning",
+        "summary": "Public function propagates undeclared effect (development mode).",
+        "description": "A public function calls a function whose effects escape its declared clause.",
+        "spec_refs": [
+          "§8"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E7001",
+        "severity": "error",
+        "summary": "Missing capability.",
+        "description": "A function requires a capability that is not granted by the caller.",
+        "spec_refs": [
+          "§9"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W7002",
+        "severity": "warning",
+        "summary": "Public function requires uninstalled capability (development mode).",
+        "description": "A public function's required capability is not present in the caller's capability set.",
+        "spec_refs": [
+          "§9"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E7003",
+        "severity": "error",
+        "summary": "Propagated capability not declared.",
+        "description": "A callee requires a capability the caller has not declared.",
+        "spec_refs": [
+          "§9"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W7004",
+        "severity": "warning",
+        "summary": "Public function propagates uninstalled capability.",
+        "description": "A public function calls into code requiring capabilities it has not declared.",
+        "spec_refs": [
+          "§9"
+        ],
+        "related_codes": []
+      }
+    ]
+  },
+  "tooling": {
+    "targets": [
+      {
+        "id": "js",
+        "display_name": "JavaScript"
+      },
+      {
+        "id": "ts",
+        "display_name": "TypeScript"
+      },
+      {
+        "id": "python",
+        "display_name": "Python"
+      },
+      {
+        "id": "rust",
+        "display_name": "Rust"
+      },
+      {
+        "id": "go",
+        "display_name": "Go"
+      }
+    ],
+    "ai_providers": [
+      "openai-compatible",
+      "anthropic",
+      "stub"
+    ],
+    "commands": [
+      {
+        "name": "new",
+        "summary": "Scaffold a new Bock project."
+      },
+      {
+        "name": "build",
+        "summary": "Transpile and compile an Bock project."
+      },
+      {
+        "name": "run",
+        "summary": "Execute an Bock program via the interpreter."
+      },
+      {
+        "name": "check",
+        "summary": "Type-check and lint without building."
+      },
+      {
+        "name": "test",
+        "summary": "Run tests."
+      },
+      {
+        "name": "fmt",
+        "summary": "Format Bock source files."
+      },
+      {
+        "name": "repl",
+        "summary": "Start an interactive REPL session."
+      },
+      {
+        "name": "inspect",
+        "summary": "Browse AI decisions, rule cache, and AI response cache."
+      },
+      {
+        "name": "pin",
+        "summary": "Pin AI decisions so they replay deterministically."
+      },
+      {
+        "name": "unpin",
+        "summary": "Clear pin metadata from a decision."
+      },
+      {
+        "name": "override",
+        "summary": "Override or promote an AI decision."
+      },
+      {
+        "name": "cache",
+        "summary": "Manage on-disk AI, decision, and rule caches."
+      },
+      {
+        "name": "promote",
+        "summary": "Analyze a project at the next strictness level."
+      },
+      {
+        "name": "pkg",
+        "summary": "Package manager commands."
+      },
+      {
+        "name": "model",
+        "summary": "Query or interact with AI models."
+      },
+      {
+        "name": "doc",
+        "summary": "Generate documentation."
+      },
+      {
+        "name": "lsp",
+        "summary": "Start the Bock language server."
+      }
+    ]
+  }
+}
