@@ -394,6 +394,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bock-test-harness"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+]
+
+[[package]]
 name = "bock-types"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,3 @@
+// TEST: effect_pure_no_errors
+// EXPECT: no_errors
+pure fn square(n: Int) -> Int { n * n }

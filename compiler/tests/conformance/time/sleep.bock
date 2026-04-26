@@ -1,0 +1,10 @@
+// TEST: time_sleep_basic
+// EXPECT: no_errors
+async fn main() {
+  let start = Instant.now()
+  await sleep(Duration.millis(50))
+  let elapsed = start.elapsed().as_millis()
+  assert(elapsed >= 45)
+  assert(elapsed < 200)
+  println("sleep: ok (${elapsed}ms)")
+}

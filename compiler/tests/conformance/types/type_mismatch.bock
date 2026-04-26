@@ -1,0 +1,3 @@
+// TEST: type_error_string_as_int
+// EXPECT: error E0205 at 3:10
+fn broken() -> Int { "not an int" }

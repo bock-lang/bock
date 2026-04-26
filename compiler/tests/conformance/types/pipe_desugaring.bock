@@ -1,0 +1,40 @@
+// TEST: pipe desugaring — all three cases per §7.2
+// Verifies: bare function, implicit first arg, placeholder, and closure workaround.
+
+fn double(x: Int) -> Int { x * 2 }
+fn add(a: Int, b: Int) -> Int { a + b }
+fn add3(a: Int, b: Int, c: Int) -> Int { a + b + c }
+fn insert_at(pos: Int, val: Int, target: Int) -> Int { pos + val + target }
+
+fn scale_by(factor: Int) -> Fn(Int) -> Int {
+  (x: Int) => x * factor
+}
+
+fn main() {
+  // Case 1: bare function — x |> f → f(x)
+  let r1 = 5 |> double
+  assert(r1 == 10)
+
+  // Case 2: implicit first arg — x |> f(arg) → f(x, arg)
+  let r2 = 5 |> add(10)
+  assert(r2 == 15)
+
+  // Case 3: multiple extra args — x |> f(a, b) → f(x, a, b)
+  let r3 = 5 |> add3(10, 20)
+  assert(r3 == 35)
+
+  // Case 4: placeholder — x |> f(a, _, b) → f(a, x, b)
+  let r4 = 5 |> insert_at(1, _, 100)
+  assert(r4 == 106)
+
+  // Case 5: closure workaround — bind closure to local, then pipe
+  let f = scale_by(10)
+  let r5 = 5 |> f
+  assert(r5 == 50)
+
+  // Case 6: chained pipes
+  let r6 = 5 |> double |> add(3)
+  assert(r6 == 13)
+
+  println("all pipe cases pass")
+}

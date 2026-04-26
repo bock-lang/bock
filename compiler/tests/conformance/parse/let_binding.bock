@@ -1,0 +1,6 @@
+// TEST: parse_success_let_binding
+// EXPECT: no_errors
+fn main() {
+    let x: Int = 42
+    let y = x + 1
+}

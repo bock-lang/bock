@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "compiler/crates/*",
+    "compiler/tests",
 ]
 
 [workspace.package]
