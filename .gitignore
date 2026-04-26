@@ -1,0 +1,39 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Bock build cache
+.bock/
+
+# Node / VS Code extension
+node_modules/
+*.vsix
+extensions/*/out/
+extensions/*/dist/
+extensions/*/.vscode-test/
+
+# mdBook
+docs/book/
+
+# Website build output
+website/dist/
+website/.next/
+website/node_modules/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Env
+.env
+.env.local
+.env.*.local

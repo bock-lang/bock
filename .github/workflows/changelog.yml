@@ -1,0 +1,52 @@
+name: Changelog
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  append:
+    name: append PR to changelog
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.CHANGELOG_BOT_TOKEN }}
+
+      - name: Append PR to Unreleased section
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          python3 - <<'PY'
+          import os, re, pathlib
+          path = pathlib.Path("CHANGELOG.md")
+          text = path.read_text()
+          title = os.environ["PR_TITLE"]
+          number = os.environ["PR_NUMBER"]
+          author = os.environ["PR_AUTHOR"]
+          url = os.environ["PR_URL"]
+          entry = f"- {title} ([#{number}]({url})) by @{author}\n"
+          pattern = re.compile(r"(## Unreleased\s*\n)", re.MULTILINE)
+          if not pattern.search(text):
+              raise SystemExit("CHANGELOG.md missing '## Unreleased' section")
+          new_text = pattern.sub(rf"\g<1>{entry}", text, count=1)
+          path.write_text(new_text)
+          PY
+
+      - name: Commit
+        run: |
+          git config user.name "bock-changelog-bot"
+          git config user.email "bot@bocklang.org"
+          git add CHANGELOG.md
+          git diff --cached --quiet && exit 0
+          git commit -m "changelog: PR #${{ github.event.pull_request.number }}"
+          git push

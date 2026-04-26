@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "compiler/crates/*",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/bocklang/bock"
+authors = ["Bock Language Contributors"]
+rust-version = "1.75"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
