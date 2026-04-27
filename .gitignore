@@ -49,3 +49,8 @@ desktop.ini
 tools/pypi-placeholder/dist/
 tools/pypi-placeholder/build/
 tools/pypi-placeholder/src/*.egg-info/
+
+# Node/npm build artifacts
+tools/npm-placeholder/node_modules/
+tools/npm-placeholder/*.tgz
+tools/npm-placeholder/package-lock.json
