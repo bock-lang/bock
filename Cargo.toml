@@ -19,7 +19,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 ariadne = "0.4"
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
