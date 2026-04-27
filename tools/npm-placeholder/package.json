@@ -1,0 +1,38 @@
+{
+  "name": "@bock-lang/cli",
+  "version": "0.0.1",
+  "description": "Namespace placeholder for Bock language Node.js tooling. Real bindings post-v1.0.",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node index.js"
+  },
+  "keywords": [
+    "bock",
+    "bock-lang",
+    "language",
+    "compiler",
+    "transpiler",
+    "placeholder"
+  ],
+  "author": {
+    "name": "Andrew Carpenter",
+    "email": "andrew@bocklang.org",
+    "url": "https://bocklang.org"
+  },
+  "license": "MIT",
+  "homepage": "https://bocklang.org",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bock-lang/bock.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bock-lang/bock/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

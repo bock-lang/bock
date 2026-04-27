@@ -1,0 +1,14 @@
+# Development files
+node_modules/
+*.log
+.env
+.DS_Store
+
+# Test artifacts
+coverage/
+*.tgz
+
+# Editor/OS
+.vscode/
+.idea/
+Thumbs.db
