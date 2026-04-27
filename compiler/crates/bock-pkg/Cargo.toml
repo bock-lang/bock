@@ -1,7 +1,17 @@
 [package]
 name = "bock-pkg"
-edition.workspace = true
+description = "Package management for Bock projects, including dependency resolution and lockfiles"
+documentation = "https://docs.rs/bock-pkg"
 version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
 
 [dependencies]
 bock-errors.workspace = true

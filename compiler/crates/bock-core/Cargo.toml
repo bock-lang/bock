@@ -1,7 +1,17 @@
 [package]
 name = "bock-core"
-edition.workspace = true
+description = "Core stdlib registry and runtime primitives for the Bock language"
+documentation = "https://docs.rs/bock-core"
 version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
 
 [dependencies]
 bock-ai.workspace = true

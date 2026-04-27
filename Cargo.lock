@@ -175,6 +175,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "bock"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bock-ai",
+ "bock-air",
+ "bock-ast",
+ "bock-build",
+ "bock-codegen",
+ "bock-core",
+ "bock-errors",
+ "bock-fmt",
+ "bock-interp",
+ "bock-lexer",
+ "bock-lsp",
+ "bock-parser",
+ "bock-pkg",
+ "bock-source",
+ "bock-types",
+ "chrono",
+ "clap",
+ "rustyline",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "bock-ai"
 version = "0.1.0"
 dependencies = [
@@ -230,34 +258,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "bock-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bock-ai",
- "bock-air",
- "bock-ast",
- "bock-build",
- "bock-codegen",
- "bock-core",
- "bock-errors",
- "bock-fmt",
- "bock-interp",
- "bock-lexer",
- "bock-lsp",
- "bock-parser",
- "bock-pkg",
- "bock-source",
- "bock-types",
- "chrono",
- "clap",
- "rustyline",
- "serde_json",
- "tempfile",
  "tokio",
 ]
 

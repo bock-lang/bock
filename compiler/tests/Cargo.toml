@@ -5,6 +5,7 @@ version = "0.1.0"
 authors = ["Bock Contributors"]
 license = "MIT"
 description = "Spec conformance test infrastructure for the Bock compiler"
+publish = false
 
 [lib]
 path = "harness/mod.rs"

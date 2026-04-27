@@ -10,8 +10,12 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/bock-lang/bock"
+homepage = "https://bocklang.org"
 authors = ["Bock Language Contributors"]
 rust-version = "1.75"
+keywords = ["bock", "language", "compiler", "transpiler"]
+categories = ["compilers", "development-tools"]
+readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -23,23 +27,23 @@ regex = "1"
 pretty_assertions = "1"
 
 # Internal crates
-bock-errors = { path = "compiler/crates/bock-errors" }
-bock-source = { path = "compiler/crates/bock-source" }
-bock-lexer = { path = "compiler/crates/bock-lexer" }
-bock-ast = { path = "compiler/crates/bock-ast" }
-bock-parser = { path = "compiler/crates/bock-parser" }
-bock-air = { path = "compiler/crates/bock-air" }
-bock-types = { path = "compiler/crates/bock-types" }
-bock-interp = { path = "compiler/crates/bock-interp" }
-bock-core = { path = "compiler/crates/bock-core" }
-bock-fmt = { path = "compiler/crates/bock-fmt" }
-bock-ai = { path = "compiler/crates/bock-ai" }
-bock-codegen = { path = "compiler/crates/bock-codegen" }
-bock-build = { path = "compiler/crates/bock-build" }
-bock-pkg = { path = "compiler/crates/bock-pkg" }
-bock-cli = { path = "compiler/crates/bock-cli" }
-bock-lsp = { path = "compiler/crates/bock-lsp" }
-bock-vocab = { path = "compiler/crates/bock-vocab" }
+bock-errors = { path = "compiler/crates/bock-errors", version = "0.1.0" }
+bock-source = { path = "compiler/crates/bock-source", version = "0.1.0" }
+bock-lexer = { path = "compiler/crates/bock-lexer", version = "0.1.0" }
+bock-ast = { path = "compiler/crates/bock-ast", version = "0.1.0" }
+bock-parser = { path = "compiler/crates/bock-parser", version = "0.1.0" }
+bock-air = { path = "compiler/crates/bock-air", version = "0.1.0" }
+bock-types = { path = "compiler/crates/bock-types", version = "0.1.0" }
+bock-interp = { path = "compiler/crates/bock-interp", version = "0.1.0" }
+bock-core = { path = "compiler/crates/bock-core", version = "0.1.0" }
+bock-fmt = { path = "compiler/crates/bock-fmt", version = "0.1.0" }
+bock-ai = { path = "compiler/crates/bock-ai", version = "0.1.0" }
+bock-codegen = { path = "compiler/crates/bock-codegen", version = "0.1.0" }
+bock-build = { path = "compiler/crates/bock-build", version = "0.1.0" }
+bock-pkg = { path = "compiler/crates/bock-pkg", version = "0.1.0" }
+bock-cli = { path = "compiler/crates/bock-cli", version = "0.1.0" }
+bock-lsp = { path = "compiler/crates/bock-lsp", version = "0.1.0" }
+bock-vocab = { path = "compiler/crates/bock-vocab", version = "0.1.0" }
 
 [profile.release]
 lto = "thin"

@@ -11,7 +11,9 @@
       "Edit(docs/**)",
       "Edit(STATUS.md)",
       "Edit(CLAUDE.md)",
-      "Edit(CHANGELOG.md)"
+      "Edit(CHANGELOG.md)",
+      "Bash(touch /opt/claude-projects/bock/.git/objects/test_write)",
+      "Bash(rm /opt/claude-projects/bock/.git/objects/test_write)"
     ]
   }
 }
