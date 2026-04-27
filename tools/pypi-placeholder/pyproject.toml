@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bock-lang"
+version = "0.0.1"
+description = "Namespace placeholder for the Bock programming language. Real Python tooling coming post-v1.0."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+  { name = "Andrew Carpenter", email = "andrew@bocklang.org" }
+]
+keywords = ["bock", "language", "compiler", "placeholder"]
+classifiers = [
+  "Development Status :: 1 - Planning",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Compilers",
+]
+
+[project.urls]
+Homepage = "https://bocklang.org"
+Repository = "https://github.com/bock-lang/bock"
+Documentation = "https://bocklang.org/docs"
+Issues = "https://github.com/bock-lang/bock/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
