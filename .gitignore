@@ -6,6 +6,10 @@ Cargo.lock.bak
 # Bock build cache
 .bock/
 
+# Example native binaries (transpiled per-target sources under examples/**/build/ are intentional)
+examples/**/output
+examples/**/output.exe
+
 # Node / VS Code extension
 node_modules/
 *.vsix
@@ -32,6 +36,9 @@ desktop.ini
 *.swp
 *.swo
 *~
+
+# Local-only Claude Code settings
+.claude/settings.local.json
 
 # Env
 .env
