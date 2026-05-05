@@ -17,7 +17,7 @@
   "bugs": {
     "url": "https://github.com/bock-lang/bock/issues"
   },
-  "homepage": "https://github.com/bock-lang/bock#readme",
+  "homepage": "https://bocklang.org",
   "engines": {
     "vscode": "^1.75.0"
   },
