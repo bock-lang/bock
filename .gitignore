@@ -54,3 +54,7 @@ tools/pypi-placeholder/src/*.egg-info/
 tools/npm-placeholder/node_modules/
 tools/npm-placeholder/*.tgz
 tools/npm-placeholder/package-lock.json
+
+# Branding related: explicit allow
+branding/*
+!branding/assets/
