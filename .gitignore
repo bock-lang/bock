@@ -58,3 +58,5 @@ tools/npm-placeholder/package-lock.json
 # Branding related: explicit allow
 branding/*
 !branding/assets/
+
+temp/
