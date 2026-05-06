@@ -520,7 +520,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Helper: create a temp dir with an Bock test file and run tests on it.
+    /// Helper: create a temp dir with a Bock test file and run tests on it.
     async fn run_test_on_source(source: &str) -> Vec<TestResult> {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("test.bock");

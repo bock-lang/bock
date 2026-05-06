@@ -8,7 +8,7 @@ use semver::{Version, VersionReq};
 
 use crate::error::PkgError;
 
-/// Parse an Bock version requirement string into a `semver::VersionReq`.
+/// Parse a Bock version requirement string into a `semver::VersionReq`.
 ///
 /// Supports `^`, `~`, `=`, `>=`, `<=`, `>`, `<` prefixes and bare versions.
 /// A bare version like `"1.0.0"` is treated as `"^1.0.0"`.

@@ -1,6 +1,6 @@
 //! AIR node definitions — the unified intermediate representation.
 //!
-//! Every construct in an Bock program is represented as an [`AIRNode`] with a
+//! Every construct in a Bock program is represented as an [`AIRNode`] with a
 //! [`NodeKind`] discriminant that carries typed children. All four AIR layers
 //! (S-AIR, T-AIR, C-AIR, TR-AIR) use the same node type; later passes fill
 //! in the layer slots that start as `None`.

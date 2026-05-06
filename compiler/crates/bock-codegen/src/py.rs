@@ -2208,7 +2208,7 @@ fn ast_type_name(node: &AIRNode) -> Option<String> {
     }
 }
 
-/// Emit an Bock identifier as a Python identifier. PascalCase names are
+/// Emit a Bock identifier as a Python identifier. PascalCase names are
 /// preserved — they denote classes, ABC traits, or enum variant constructors,
 /// all of which stay PascalCase in Python by convention.
 fn identifier_to_py(s: &str) -> String {

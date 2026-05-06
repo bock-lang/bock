@@ -738,7 +738,7 @@ mod tests {
         fs::write(&entry, "fn main() {}").unwrap();
 
         // Walk from the tempdir up to /: none of those directories should
-        // contain an bock.project. We can't assert None unconditionally
+        // contain a bock.project. We can't assert None unconditionally
         // because the test harness itself might run inside a project, so
         // verify instead that any returned root is an ancestor of the temp
         // file — i.e. the walk either stops at a real marker or fails.

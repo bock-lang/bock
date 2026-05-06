@@ -279,8 +279,8 @@ fn build_tooling() -> schema::ToolingVocab {
 fn command_catalog() -> Vec<(&'static str, &'static str)> {
     vec![
         ("new", "Scaffold a new Bock project."),
-        ("build", "Transpile and compile an Bock project."),
-        ("run", "Execute an Bock program via the interpreter."),
+        ("build", "Transpile and compile a Bock project."),
+        ("run", "Execute a Bock program via the interpreter."),
         ("check", "Type-check and lint without building."),
         ("test", "Run tests."),
         ("fmt", "Format Bock source files."),

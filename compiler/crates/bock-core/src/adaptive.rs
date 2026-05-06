@@ -58,7 +58,7 @@ use sha2::{Digest, Sha256};
 // trait) are expected to implement this trait when they cross the
 // adaptive-handler boundary.
 
-/// Minimal view of an Bock error that the adaptive handler needs.
+/// Minimal view of a Bock error that the adaptive handler needs.
 ///
 /// `type_name` + `structural_props` feed the pin key per Q6 of the
 /// 2026-04-20 spec amendment. `display` feeds the provider prompt and

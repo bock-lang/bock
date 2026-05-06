@@ -12,7 +12,7 @@ use tower_lsp::lsp_types::{
     NumberOrString, Position, Range, Url,
 };
 
-/// Convert an Bock [`Span`] to an LSP [`Range`] using the given source file
+/// Convert a Bock [`Span`] to an LSP [`Range`] using the given source file
 /// for line/column lookup.
 #[must_use]
 pub fn span_to_range(span: Span, source: &SourceFile) -> Range {
@@ -31,7 +31,7 @@ fn offset_to_position(offset: usize, source: &SourceFile) -> Position {
     }
 }
 
-/// Convert an Bock [`Severity`] to an LSP [`DiagnosticSeverity`].
+/// Convert a Bock [`Severity`] to an LSP [`DiagnosticSeverity`].
 #[must_use]
 pub fn severity_to_lsp(severity: Severity) -> DiagnosticSeverity {
     match severity {

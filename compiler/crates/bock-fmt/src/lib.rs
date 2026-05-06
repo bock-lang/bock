@@ -32,7 +32,7 @@ pub struct FormatResult {
     pub changed: bool,
 }
 
-/// Format an Bock source string, returning the formatted output.
+/// Format a Bock source string, returning the formatted output.
 ///
 /// Parses the source, reformats the AST, and emits canonical source text.
 /// If parsing produces errors, the original source is returned unchanged.

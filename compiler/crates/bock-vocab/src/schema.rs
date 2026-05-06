@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Top-level vocabulary emitted for an Bock compiler version.
+/// Top-level vocabulary emitted for a Bock compiler version.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Vocab {
     /// Compiler version (matches the `version` field of the workspace).

@@ -2371,7 +2371,7 @@ fn record_construct_type(node: &AIRNode) -> Option<String> {
     }
 }
 
-/// Emit an Bock identifier as a Rust identifier — PascalCase names are
+/// Emit a Bock identifier as a Rust identifier — PascalCase names are
 /// preserved verbatim (they are types, enum variants, or tuple-struct
 /// constructors), while everything else is converted to snake_case.
 fn identifier_to_rs(s: &str) -> String {

@@ -125,7 +125,7 @@ impl Repl {
                 println!("  :target <T> <s>  Show target-specific output (stub)");
                 println!("  :effects         Show registered effects");
                 println!("  :context         Show current variable bindings");
-                println!("  :load <file>     Load and execute an Bock file");
+                println!("  :load <file>     Load and execute a Bock file");
                 println!("  :paste           Enter multi-line paste mode");
                 println!("  :quit            Exit the REPL");
             }
@@ -579,7 +579,7 @@ impl Repl {
         }
     }
 
-    /// Load and execute an Bock source file.
+    /// Load and execute a Bock source file.
     async fn load_file(&mut self, path: &str) {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,

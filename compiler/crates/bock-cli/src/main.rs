@@ -35,7 +35,7 @@ enum Command {
         /// Project name.
         name: String,
     },
-    /// Transpile and compile an Bock project.
+    /// Transpile and compile a Bock project.
     Build {
         /// Target language (e.g., js, ts, python, rust, go).
         #[arg(short, long)]
@@ -79,7 +79,7 @@ enum Command {
         #[arg(long)]
         no_source_map: bool,
     },
-    /// Execute an Bock program (interpreter by default).
+    /// Execute a Bock program (interpreter by default).
     Run {
         /// Path to the entry file.
         file: Option<String>,

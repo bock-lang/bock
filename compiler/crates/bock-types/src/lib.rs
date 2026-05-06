@@ -145,7 +145,7 @@ pub type TypeVarId = u32;
 
 // ─── Main type algebra ────────────────────────────────────────────────────────
 
-/// The type of an Bock value.
+/// The type of a Bock value.
 ///
 /// This enum covers all type-level constructs in the Bock language spec:
 /// primitives, user-defined names, generics, tuples, function types, optional,

@@ -100,7 +100,7 @@ impl From<f64> for OrdF64 {
 
 // ─── BockString ──────────────────────────────────────────────────────────────
 
-/// An Bock string value.
+/// A Bock string value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BockString(String);
 
@@ -294,7 +294,7 @@ pub enum IteratorKind {
 /// Result of calling [`IteratorKind::next`].
 ///
 /// Most combinators can compute the next value directly, but `map` and `filter`
-/// need the interpreter to invoke an Bock closure. They return `NeedsCallback`
+/// need the interpreter to invoke a Bock closure. They return `NeedsCallback`
 /// with the source value and the function to call.
 #[derive(Debug)]
 pub enum IteratorNext {
