@@ -23,7 +23,7 @@
 13. [Concurrency](#13-concurrency)
 14. [Interop and FFI](#14-interop-and-ffi)
 15. [Annotations](#15-annotations)
-16. [Bock Intermediate Representation (AIR)](#16-bock-intermediate-representation)
+16. [Annotated Intermediate Representation (AIR)](#16-annotated-intermediate-representation-air)
 17. [Transpilation Pipeline](#17-transpilation-pipeline)
 18. [Standard Library](#18-standard-library)
 19. [Package Manager](#19-package-manager)
@@ -1267,7 +1267,7 @@ Annotations use the `@` prefix and form a unified metadata system:
 
 ---
 
-## 16. Bock Intermediate Representation (AIR)
+## 16. Annotated Intermediate Representation (AIR)
 
 ### 16.1 — Layer Model
 
@@ -1680,9 +1680,11 @@ Strict semver. Stability tiers: `stable`, `beta`, `experimental`. Production str
 
 ### 20.1 — CLI (`bock`)
 
-Single binary containing all tooling. Core commands:
+Single binary containing all tooling. The CLI surface is designed for ergonomic discoverability — verbs that describe complete operations are top-level commands rather than flags on broader commands. The shape may evolve through implementation experience; when it does, this section is amended to match. The spec is normative for capabilities, not for the precise shape of the command surface.
 
-`bock new` — Project scaffolding with interactive or flag-based configuration.
+**Build and execute:**
+
+`bock new` — Project scaffolding with interactive or flag-based configuration. Generates `bock.project` with a commented-out `[ai]` block for opt-in AI configuration; see §20.7.
 `bock build` — Transpile and compile. Flags: `--target`, `--all-targets`, `--deterministic`, `--optimize`, `--release`, `--deliverable`.
 `bock run` — Build and execute. Default uses interpreter. `--target` for specific language. `--watch` for hot reload.
 `bock check` — Type check, lint, context validation. `--types`, `--lint`, `--context` for selective checking.
@@ -1690,9 +1692,18 @@ Single binary containing all tooling. Core commands:
 `bock fmt` — Format (one style, zero configuration). `--check` for CI.
 `bock fix` — Auto-fix lint warnings.
 `bock repl` — Interactive REPL with `:type`, `:air`, `:target` commands.
-`bock inspect` — View AI decision manifest. `--diff` for changes.
-`bock override` — Pin, change, or unpin AI decisions. `--pin-all` for production readiness.
-`bock promote` — Migrate code to higher strictness with auto-fixes.
+
+**Decision and rule manifest management:**
+
+`bock inspect` — Read-only browsing of AI decisions, rule cache, and AI response cache. Defaults to build decisions; `--runtime` for runtime decisions, `--all` for both. `--diff` for changes since last build.
+`bock pin <decision-id>` — Pin a decision so it replays deterministically. `--all` to pin every unpinned decision (production readiness).
+`bock unpin <decision-id>` — Remove pin metadata from a decision.
+`bock override <decision-id> --choice=<alternative>` — Change which alternative is selected for an existing decision. `--promote <runtime-id>` migrates a stabilized runtime decision into the build manifest (§10.8).
+`bock cache` — Manage on-disk caches (AI response cache, rule cache, decision manifests). Subcommands: `list`, `clear`, `prune`, `stats`.
+
+**Project lifecycle:**
+
+`bock promote` — Migrate code to higher strictness level with auto-fixes.
 `bock migrate` — AI-assisted import from other languages.
 `bock doc` — Generate, serve, and publish documentation.
 `bock pkg` — Package management (add, remove, update, audit, publish, search).
@@ -1747,6 +1758,27 @@ Built-in interpreter debugger with breakpoints, stepping, expression evaluation,
 Incremental builds at module granularity via content hashing. Parallel compilation. Remote build cache. Build hooks (Bock scripts). Distributed builds for CI.
 
 Build pipeline: Parse → Type Check → Context Resolve → Target Analyze → Code Generate → Verify → Target Compile → Assemble Deliverable.
+
+### 20.7 — Project Scaffolding
+
+`bock new <name>` generates a minimal project structure: `bock.project`, `.gitignore`, `src/main.bock`, and `tests/`.
+
+The generated `bock.project` includes a commented-out `[ai]` block that documents AI provider configuration without activating it. Bock uses rule-based code generation by default; AI configuration is opt-in. The commented block makes the configuration surface discoverable without prescribing provider choices, requiring API keys, or assuming network availability at project creation.
+
+```toml
+# AI provider configuration (optional)
+# Bock uses rule-based code generation by default. Configure an AI
+# provider below to enable AI-assisted generation for capability gaps.
+# See documentation for setup guides.
+#
+# [ai]
+# provider = "openai-compatible"  # or "anthropic"
+# endpoint = "..."
+# model = "..."
+# api_key_env = "..."
+```
+
+The scaffolder does not prompt interactively for provider configuration during `bock new`. Interactive flows fail awkwardly in CI and scripted contexts and demand provider knowledge from users whose first interaction with Bock is project creation. Users who want AI-assisted codegen uncomment and complete the block; users who do not delete it.
 
 ---
 
@@ -2080,7 +2112,7 @@ smart_target_threshold = 0.3
 always_test = ["js"]
 
 [build]
-min_bock = "1.2.0"
+min_aura = "1.2.0"
 [build.hooks]
 pre_build = "scripts/generate-version.bock"
 [build.cache]

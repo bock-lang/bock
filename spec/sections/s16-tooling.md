@@ -1,12 +1,25 @@
 # Spec Excerpt: Tooling
 
 ## CLI Commands
-`bock new` — scaffold. `bock build` — transpile+compile.
-`bock run` — execute (interpreter default). `bock check` — types+lint.
-`bock test` — run tests. `bock fmt` — format.
-`bock repl` — interactive. `bock inspect` — AI decisions.
-`bock override` — pin/change decisions. `bock promote` — strictness.
-`bock pkg` — package manager. `bock doc` — documentation.
+Build/execute: `bock new`, `bock build`, `bock run`, `bock check`,
+`bock test`, `bock fmt`, `bock fix`, `bock repl`.
+
+Decisions/manifests: `bock inspect` (browse decisions/rules/cache),
+`bock pin` / `bock unpin` (pin lifecycle),
+`bock override --choice=X` (change selection),
+`bock override --promote <id>` (runtime → build),
+`bock cache` (list/clear/prune/stats).
+
+Lifecycle: `bock promote` (strictness), `bock migrate`, `bock doc`,
+`bock pkg`, `bock model`, `bock target`, `bock ci`.
+
+CLI shape may evolve through implementation experience; spec follows.
+
+## Project Scaffolding
+`bock new <name>` generates `bock.project`, `.gitignore`,
+`src/main.bock`, `tests/`. The `bock.project` includes a
+commented-out `[ai]` block — AI is opt-in, rule-based codegen
+is the default. No interactive prompts during scaffolding.
 
 ## Formatter (Zero Config)
 - 2-space indent, no tabs
