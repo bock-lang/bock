@@ -1,0 +1,31 @@
+---
+import '../styles/tokens.css';
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const {
+  title,
+  description = 'Bock is a feature-declarative, target-agnostic programming language that compiles to JavaScript, TypeScript, Python, Rust, and Go.',
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <style>
+      body { overflow-x: hidden; }
+    </style>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

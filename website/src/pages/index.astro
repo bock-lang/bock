@@ -1,0 +1,86 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import Hero from '../components/Hero.astro';
+import Section from '../components/Section.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import TargetList from '../components/TargetList.astro';
+import Button from '../components/Button.astro';
+import homepageSample from '../content/homepage-sample.bock?raw';
+
+const HOMEPAGE_BOCK_SAMPLE = homepageSample.replace(/\n$/, '');
+---
+
+<BaseLayout title="Bock — A feature-declarative programming language">
+  <Nav current="/" />
+  <main>
+    <Hero
+      primaryHref="/get-started"
+      githubHref="https://github.com/bock-lang/bock"
+    />
+
+    <Section
+      id="signature"
+      align="left"
+      eyebrow="Section 01 / Signature"
+      title="Behavior in the signature"
+      lede="A function in Bock declares its contract in the signature. Types, effects, and the relationship between input and output are visible before you read the body. The body is the work, expressed as a pipeline. Effects are named interfaces with operations; functions that use them say so. Handlers are injected at the call site, not imported as globals."
+    >
+      <CodeBlock filename="main.bock" language="bock" code={HOMEPAGE_BOCK_SAMPLE} />
+      <p class="bock-section__close">The same source compiles to JavaScript, TypeScript, Python, Rust, and Go.</p>
+    </Section>
+
+    <Section
+      id="targets"
+      align="right"
+      eyebrow="Section 02 / Targets"
+      title="One source, many targets"
+      lede="Bock compiles to five target languages. Deploy to one target, or compile to several at once. Each `bock build -t <target>` writes source files in that language to your output directory. Drop them into your project the way you drop in any other source."
+    >
+      <TargetList showDots={true} />
+      <p class="bock-section__close">Your target language is the source you deploy. No Bock runtime, no shims.</p>
+    </Section>
+
+    <Section
+      id="ship"
+      align="left"
+      eyebrow="Section 03 / Runtime"
+      title="Ship your target, not Bock"
+      lede="Most cross-platform languages add a runtime: a virtual machine, a translation layer, a library your program depends on at execution time. Bock doesn't. The output of a Bock build is plain code in the target language, ready to drop into your existing project. Run it on Node, ship it as a Python package, link it into a Rust binary, deploy it as a Go service. The Bock runtime supports development; it does not ship. Your target ships."
+    />
+
+    <Section
+      id="ai"
+      align="right"
+      eyebrow="Section 04 / Compilation"
+      title="AI in compilation, not in your runtime"
+      lede="AI is a guarded tool inside Bock's compilation toolchain, used at specific stages, contained, constrained, and verified on either side. The pipeline itself is deterministic from parsing through type checking, ownership analysis, effect tracking, and target lowering. AI enters where rule-based translation can't bridge a gap between languages, or where idiomatic target code requires choices that fixed templates can't make. The compiler calls an AI model at those points, accepts the result only if it passes verification, logs the decision, and falls back to rule-based generation if the model is unavailable. This is not codified prompt engineering, and it is not autonomous code generation. Every AI decision is reviewable and overridable. In production builds, every decision is pinned, and the compiler replays stored choices instead of consulting the model."
+    >
+      <p class="bock-section__second">
+        Strictness levels govern how AI participates in a build. In sketch mode, the compiler may consult AI for default choices when the source is incomplete. In development mode, AI assists at known capability gaps and idiomatic synthesis points. In production mode, every decision the compiler will ever make is recorded in a manifest committed to your repository; the compiler replays those decisions identically and never consults the model. Builds are reproducible; AI is auditable; the developer remains in control.
+      </p>
+    </Section>
+
+    <section class="bock-cta">
+      <div class="bock-container bock-cta__inner">
+        <p class="bock-cta__body">Install Bock, write a function, see what compiles.</p>
+        <Button variant="primary" href="/get-started">Start building</Button>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</BaseLayout>
+
+<script>
+  // Code-block "Copy" button — wires every CodeBlock instance.
+  document.querySelectorAll<HTMLButtonElement>('[data-bock-copy]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const code = btn.dataset.code ?? '';
+      navigator.clipboard?.writeText(code);
+      const original = btn.textContent;
+      btn.textContent = 'Copied';
+      window.setTimeout(() => { btn.textContent = original; }, 1400);
+    });
+  });
+</script>

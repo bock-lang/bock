@@ -1,0 +1,342 @@
+/* Bock website UI kit styles
+ * Loaded after tokens.css. Component-scoped, no resets beyond what the tokens already do.
+ */
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+
+.bock-container {
+  width: 100%;
+  max-width: var(--container);
+  margin: 0 auto;
+  padding-left: var(--gutter);
+  padding-right: var(--gutter);
+}
+
+/* ---------------- Nav ---------------- */
+.bock-nav {
+  position: sticky;
+  top: 0; left: 0; right: 0;
+  height: 64px;
+  background: var(--bg);
+  z-index: 50;
+  transition: border-color var(--t-base) var(--ease-out);
+  border-bottom: 1px solid transparent;
+}
+.bock-nav.is-scrolled { border-bottom-color: var(--rule); }
+.bock-nav__inner { display: flex; align-items: center; justify-content: space-between; height: 100%; }
+.bock-nav__brand { display: flex; align-items: center; gap: 10px; color: var(--fg); }
+.bock-nav__links { display: flex; gap: 24px; align-items: center; font-size: 14px; }
+.bock-nav__links a { color: var(--fg-muted); transition: color var(--t-fast); }
+.bock-nav__links a:hover, .bock-nav__links a.is-current { color: var(--fg); }
+
+/* ---------------- Buttons / links ---------------- */
+.bock-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-sans);
+  font-size: 15px; font-weight: 600;
+  padding: 12px 20px;
+  border-radius: var(--r-2);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+  text-decoration: none;
+}
+.bock-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.bock-btn--primary { background: var(--bock-ink); color: #FFFFFF; border-color: color-mix(in srgb, var(--bock-ink) 60%, white 40%); box-shadow: inset 0 1px 0 rgba(255,255,255,0.18); }
+.bock-btn--primary:hover { background: color-mix(in srgb, var(--bock-ink) 70%, white 30%); border-color: color-mix(in srgb, var(--bock-ink) 50%, white 50%); }
+.bock-btn--primary:active { background: var(--bock-ink); }
+.bock-btn--ghost { background: transparent; color: var(--fg); border-color: var(--bock-mist); }
+.bock-btn--ghost:hover { border-color: var(--fg); background: rgba(255,255,255,0.04); color: var(--fg); }
+
+.bock-link-arrow {
+  font-size: 15px; color: var(--fg);
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 12px 4px;
+}
+.bock-link-arrow .arrow { transition: transform var(--t-fast) var(--ease-out); }
+.bock-link-arrow:hover { color: var(--fg); }
+.bock-link-arrow:hover .arrow { transform: translateX(3px); }
+
+/* ---------------- Hero ---------------- */
+.bock-hero {
+  position: relative;
+  padding: clamp(96px, 14vw, 200px) 0 clamp(96px, 14vw, 200px);
+  overflow: hidden;
+  text-align: center;
+}
+.bock-hero__grid {
+  position: absolute; inset: 0;
+  background-image: radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px);
+  background-size: 32px 32px;
+  -webkit-mask: radial-gradient(ellipse at center, black 0%, transparent 75%);
+          mask: radial-gradient(ellipse at center, black 0%, transparent 75%);
+  pointer-events: none;
+  opacity: var(--bock-grid-opacity, 0.5);
+}
+.bock-hero__mark-bg {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--bock-stone);
+  opacity: 0.07;
+  pointer-events: none;
+  -webkit-mask: radial-gradient(ellipse at center, black 30%, transparent 80%);
+          mask: radial-gradient(ellipse at center, black 30%, transparent 80%);
+}
+.bock-hero__inner {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+.bock-hero__copy {
+  display: flex; flex-direction: column;
+  gap: 24px;
+  max-width: 720px;
+  align-items: center;
+  text-align: center;
+}
+.bock-hero__lockup { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.bock-hero__headline {
+  font-size: clamp(40px, 5.6vw, 72px);
+  line-height: 1.04;
+  letter-spacing: -0.025em;
+  font-weight: 600;
+  color: var(--fg);
+  text-wrap: balance;
+}
+.bock-hero__subhead {
+  font-size: 19px;
+  line-height: 1.55;
+  color: var(--fg-muted);
+  max-width: 560px;
+}
+.bock-hero__ctas { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; justify-content: center; }
+@media (max-width: 880px) {
+  .bock-hero__mark-bg { transform: translate(-50%, -50%) scale(.7); }
+}
+
+/* ---------------- Mark + canonical pipe-flow animation ----------------
+   3-beat cross-fade matching preview/brand-mark-motion.html:
+     0–25%   ASCII glyphs
+     33–50%  two chevrons (no rails)
+     58–100% canonical mark (long hold)
+   6s loop. */
+.bock-mark { position: relative; }
+.bock-mark__layer {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  color: currentColor;
+}
+.bock-mark__layer svg { width: 100%; height: 100%; display: block; }
+.bock-mark--anim .bock-mark__ascii { animation: bock-fade-ascii 6s var(--ease-inout) infinite; }
+.bock-mark--anim .bock-mark__chevs { animation: bock-fade-chevs 6s var(--ease-inout) infinite; }
+.bock-mark--anim .bock-mark__final { animation: bock-fade-final 6s var(--ease-inout) infinite; opacity: 0; }
+@keyframes bock-fade-ascii {
+  0%, 25%   { opacity: 1; }
+  33%, 100% { opacity: 0; }
+}
+@keyframes bock-fade-chevs {
+  0%, 25%   { opacity: 0; }
+  33%, 50%  { opacity: 1; }
+  58%, 100% { opacity: 0; }
+}
+@keyframes bock-fade-final {
+  0%, 50%   { opacity: 0; }
+  58%, 100% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bock-mark--anim .bock-mark__ascii,
+  .bock-mark--anim .bock-mark__chevs { animation: none; opacity: 0; }
+  .bock-mark--anim .bock-mark__final { animation: none; opacity: 1; }
+}
+
+/* ---------------- Sections ---------------- */
+.bock-section {
+  padding: clamp(64px, 9vw, 120px) 0;
+}
+.bock-section.has-divider { border-top: 1px solid var(--rule); }
+
+/* Right-aligned section: shift the content column to the right edge of the
+   container, preserving the same internal max-width as left-aligned. Text
+   stays left-aligned for readability; only the column is offset. */
+.bock-section--right .bock-container { display: flex; flex-direction: column; align-items: flex-end; }
+.bock-section--right .bock-container > * { max-width: 720px; width: 100%; }
+.bock-section--right .bock-section__body { max-width: 720px; }
+.bock-section--right .bock-section__body > * { max-width: 100%; }
+@media (max-width: 880px) {
+  .bock-section--right .bock-container { align-items: stretch; }
+  .bock-section--right .bock-container > * { max-width: none; }
+}
+.bock-section__title {
+  font-size: clamp(32px, 4vw, 48px);
+  line-height: 1.1;
+  letter-spacing: -0.018em;
+  font-weight: 600;
+  margin: 14px 0 18px;
+  max-width: 760px;
+  text-wrap: balance;
+}
+.bock-section__lede {
+  font-size: 18px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  max-width: 720px;
+  margin: 0 0 32px;
+}
+.bock-section__second {
+  font-size: 18px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  max-width: 720px;
+  margin: 24px 0 0;
+}
+.bock-section__close {
+  margin-top: 28px;
+  font-size: 16px;
+  color: var(--fg);
+  max-width: 720px;
+}
+.bock-section__body { margin-top: 12px; }
+
+/* ---------------- Code block ---------------- */
+.bock-code {
+  background: var(--bock-code-bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  overflow: hidden;
+  max-width: 880px;
+}
+.bock-code__head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.bock-code__file { color: var(--fg-muted); text-transform: none; letter-spacing: 0; font-size: 12px; }
+.bock-code__lang { margin-left: auto; }
+.bock-code__copy {
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: var(--r-1);
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.bock-code__copy:hover { color: var(--fg); border-color: var(--bock-mist); }
+.bock-code__pre {
+  margin: 0;
+  padding: 18px 20px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--bock-code-fg);
+  white-space: pre;
+}
+.bock-code__pre code { font-family: inherit; }
+.tok-kw { color: var(--bock-code-keyword); }
+.tok-ty { color: var(--bock-code-type); }
+.tok-st { color: var(--bock-code-string); }
+.tok-co { color: var(--bock-code-comment); font-style: italic; }
+.tok-fn { color: var(--bock-code-fn); }
+.tok-pi { color: var(--bock-code-pipe); font-weight: 600; }
+.tok-pu { color: var(--bock-code-punct); }
+.tok-nu { color: var(--bock-code-number); }
+
+.bock-cmd { font-family: var(--font-mono); font-size: 14px; }
+.bock-cmd__prompt { color: var(--bock-fog); }
+.bock-inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--bock-graphite);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-1);
+  padding: 1px 6px;
+  color: var(--fg);
+}
+
+/* ---------------- Target list ---------------- */
+.bock-targets { list-style: none; margin: 0; padding: 0; max-width: 880px; border-top: 1px solid var(--rule); }
+.bock-targets__row {
+  display: grid;
+  grid-template-columns: 16px 160px 1fr;
+  gap: 18px;
+  align-items: baseline;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.bock-targets__dot { width: 8px; height: 8px; border-radius: 999px; align-self: center; }
+.bock-targets__name { font-weight: 600; color: var(--fg); font-size: 17px; }
+.bock-targets__desc { color: var(--fg-muted); font-size: 16px; line-height: 1.55; }
+@media (max-width: 640px) {
+  .bock-targets__row { grid-template-columns: 16px 1fr; }
+  .bock-targets__desc { grid-column: 1 / -1; padding-left: 34px; }
+}
+
+/* ---------------- Closing CTA ---------------- */
+.bock-cta { padding: clamp(64px, 9vw, 120px) 0; border-top: 1px solid var(--rule); }
+.bock-cta__inner { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 24px; }
+.bock-cta__body { font-size: clamp(22px, 2.4vw, 28px); color: var(--fg); max-width: 640px; line-height: 1.3; letter-spacing: -0.01em; }
+
+/* ---------------- Footer ---------------- */
+.bock-footer { background: var(--bock-pitch); padding: 56px 0 32px; border-top: 1px solid var(--rule); }
+.bock-footer__cols { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 32px; padding-bottom: 40px; border-bottom: 1px solid var(--rule); }
+.bock-footer__head { font-family: var(--font-mono); font-size: 11px; color: var(--fg-dim); letter-spacing: .06em; text-transform: uppercase; margin-bottom: 14px; }
+.bock-footer ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.bock-footer a { color: var(--fg-muted); font-size: 14px; }
+.bock-footer a:hover { color: var(--fg); }
+.bock-footer__bottom { padding-top: 28px; display: flex; justify-content: space-between; align-items: center; gap: 24px; flex-wrap: wrap; }
+.bock-footer__brand { display: flex; flex-direction: column; gap: 8px; }
+.bock-footer__copy { font-size: 13px; color: var(--fg-dim); font-family: var(--font-mono); }
+@media (max-width: 720px) {
+  .bock-footer__cols { grid-template-columns: 1fr 1fr; }
+}
+
+/* ---------------- Get-started doc ---------------- */
+.bock-doc__hero { padding: clamp(64px, 8vw, 120px) 0 clamp(40px, 5vw, 64px); }
+.bock-doc__title { font-size: clamp(40px, 5vw, 64px); font-weight: 600; letter-spacing: -0.02em; margin: 12px 0 18px; line-height: 1.05; }
+.bock-doc__lede { font-size: 19px; line-height: 1.55; color: var(--fg-muted); max-width: 640px; }
+.bock-doc__placeholder-flag {
+  margin-top: 24px;
+  display: inline-flex;
+  align-items: center; gap: 10px;
+  font-size: 13px; color: var(--fg-muted);
+  background: var(--bock-slate);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+}
+.bock-doc__placeholder-flag span {
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--bock-code-pipe);
+  border: 1px solid color-mix(in srgb, var(--bock-code-pipe) 30%, var(--rule));
+  padding: 1px 6px; border-radius: var(--r-1);
+}
+.bock-step { padding: clamp(48px, 6vw, 80px) 0; border-top: 1px solid var(--rule); }
+.bock-step__head { display: flex; align-items: baseline; gap: 18px; margin-bottom: 24px; }
+.bock-step__n { font-family: var(--font-mono); font-size: 13px; color: var(--bock-fog); letter-spacing: .06em; }
+.bock-step__title { font-size: clamp(26px, 3vw, 36px); font-weight: 600; letter-spacing: -0.015em; line-height: 1.15; margin: 0; }
+.bock-step__body { display: flex; flex-direction: column; gap: 18px; max-width: 880px; }
+.bock-step__body p { font-size: 17px; line-height: 1.6; color: var(--fg-muted); max-width: 720px; }
+.bock-doc__caption { font-size: 14px !important; color: var(--fg-dim) !important; }
+.bock-doc__next { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.bock-doc__next li { color: var(--fg-muted); font-size: 16px; line-height: 1.55; }
+.bock-doc__next a { color: var(--fg); border-bottom: 1px solid var(--rule); padding-bottom: 1px; }
+.bock-doc__next a:hover { border-bottom-color: var(--fg); }
+
+/* File tree panel */
+.bock-tree { background: var(--bock-pitch); border: 1px solid var(--rule); border-radius: var(--r-2); padding: 14px 18px; max-width: 560px; }
+.bock-tree__head { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--fg-dim); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 10px; }
+.bock-tree__dot { width: 6px; height: 6px; border-radius: 999px; background: var(--bock-fog); display: inline-block; }
+.bock-tree__pre { margin: 0; font-family: var(--font-mono); font-size: 13.5px; line-height: 1.7; color: var(--bock-mist); white-space: pre; }

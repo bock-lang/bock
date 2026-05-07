@@ -1,0 +1,34 @@
+---
+import Mark from './Mark.astro';
+import Wordmark from './Wordmark.astro';
+
+interface Props {
+  current?: '/' | '/get-started';
+}
+
+const { current = '/' } = Astro.props;
+---
+
+<nav class="bock-nav" data-bock-nav>
+  <div class="bock-container bock-nav__inner">
+    <a class="bock-nav__brand" href="/">
+      <Mark size={28} />
+      <Wordmark size={20} />
+    </a>
+    <div class="bock-nav__links">
+      <a href="/get-started" class={current === '/get-started' ? 'is-current' : undefined}>Get started</a>
+      <a href="#docs">Docs</a>
+      <a href="https://github.com/bock-lang/bock">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<script>
+  // Hairline border appears once the page has scrolled past the nav.
+  const nav = document.querySelector<HTMLElement>('[data-bock-nav]');
+  if (nav) {
+    const update = () => nav.classList.toggle('is-scrolled', window.scrollY > 32);
+    update();
+    window.addEventListener('scroll', update, { passive: true });
+  }
+</script>

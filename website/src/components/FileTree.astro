@@ -1,0 +1,14 @@
+---
+interface Props {
+  label: string;
+}
+
+const { label } = Astro.props;
+---
+
+<div class="bock-tree">
+  <div class="bock-tree__head">
+    <span class="bock-tree__dot"></span> {label}
+  </div>
+  <pre class="bock-tree__pre"><slot /></pre>
+</div>

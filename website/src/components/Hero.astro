@@ -1,0 +1,39 @@
+---
+import Mark from './Mark.astro';
+import Wordmark from './Wordmark.astro';
+import Tagline from './Tagline.astro';
+import Button from './Button.astro';
+import LinkArrow from './LinkArrow.astro';
+
+interface Props {
+  primaryHref: string;
+  githubHref: string;
+  gridOpacity?: number;
+}
+
+const { primaryHref, githubHref, gridOpacity = 0.5 } = Astro.props;
+const heroStyle = `--bock-grid-opacity: ${gridOpacity}`;
+---
+
+<section class="bock-hero" style={heroStyle}>
+  <div class="bock-hero__grid" aria-hidden="true"></div>
+  <div class="bock-hero__mark-bg" aria-hidden="true">
+    <Mark size={760} animate />
+  </div>
+  <div class="bock-container bock-hero__inner">
+    <div class="bock-hero__copy">
+      <div class="bock-hero__lockup">
+        <Wordmark size={36} />
+        <Tagline />
+      </div>
+      <h1 class="bock-hero__headline">A feature-declarative programming language.</h1>
+      <p class="bock-hero__subhead">
+        Compiles to JavaScript, TypeScript, Python, Rust, and Go. No runtime to ship.
+      </p>
+      <div class="bock-hero__ctas">
+        <Button variant="primary" href={primaryHref}>Start building</Button>
+        <LinkArrow href={githubHref}>View on GitHub</LinkArrow>
+      </div>
+    </div>
+  </div>
+</section>

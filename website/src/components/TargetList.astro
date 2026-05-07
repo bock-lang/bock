@@ -1,0 +1,29 @@
+---
+interface Props {
+  showDots?: boolean;
+}
+
+const { showDots = true } = Astro.props;
+
+const TARGETS = [
+  { name: 'JavaScript', dot: '#E8C56C', desc: 'the default for ecosystem reach. Node services, browser code, build tooling.' },
+  { name: 'TypeScript', dot: '#3F7CCB', desc: 'typed code for larger codebases and team work. Generated with full type signatures.' },
+  { name: 'Python',     dot: '#7E6BC9', desc: 'the language of one of the largest developer communities. Scripts, data work, scientific code.' },
+  { name: 'Rust',       dot: '#C97A5A', desc: 'systems-grade output for performance and embedded work. Idiomatic ownership and trait-based code.' },
+  { name: 'Go',         dot: '#3FB8A8', desc: 'the right pick when deployment simplicity or concurrency matters. Standard interface-based code.' },
+];
+---
+
+<ul class="bock-targets">
+  {TARGETS.map((t) => (
+    <li class="bock-targets__row">
+      <span
+        class="bock-targets__dot"
+        style={`background: ${showDots ? t.dot : 'transparent'}`}
+        aria-hidden="true"
+      ></span>
+      <span class="bock-targets__name">{t.name}</span>
+      <span class="bock-targets__desc">{t.desc}</span>
+    </li>
+  ))}
+</ul>

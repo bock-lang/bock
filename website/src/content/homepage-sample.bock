@@ -1,0 +1,50 @@
+module main
+
+public record Document {
+  id: String
+  text: String
+  category: String
+  quality: Float
+}
+
+public effect Logger {
+  fn log(message: String) -> Void
+}
+
+public effect Storage {
+  fn read(key: String) -> Optional[String]
+  fn write(key: String, value: String) -> Void
+}
+
+public fn normalize(doc: Document) -> Document {
+  Document {
+    id: doc.id
+    text: doc.text.trim().to_lower()
+    category: doc.category
+    quality: doc.quality
+  }
+}
+
+public fn validate(doc: Document) -> Bool {
+  doc.text.length() > 0 && doc.category.length() > 0
+}
+
+public fn quality_filter(docs: List[Document]) -> List[Document] {
+  docs.filter((d) => d.quality > 0.5)
+}
+
+public fn normalize_all(docs: List[Document]) -> List[Document] {
+  docs.map(normalize)
+}
+
+public fn validate_filter(docs: List[Document]) -> List[Document] {
+  docs.filter((d) => validate(d))
+}
+
+public fn prepare_documents(docs: List[Document]) -> List[Document] with Logger, Storage {
+  log("preparing ${docs.length()} documents")
+  docs
+    |> quality_filter
+    |> normalize_all
+    |> validate_filter
+}

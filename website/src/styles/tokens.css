@@ -1,0 +1,183 @@
+/* Bock Design System — colors & type tokens
+ * Dark default. Single locked Plex pairing.
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&family=Fira+Code:wght@400;500;600;700&display=swap");
+
+:root {
+  /* ---- Brand (locked) ---- */
+  --bock-ink: #00137B;       /* deep ultramarine, slight violet undertone */
+  --bock-stone: #D9D9D9;     /* warm-leaning light grey, material */
+
+  /* ---- Neutrals (substance-named, dark-bias scale) ---- */
+  --bock-pitch: #07091A;     /* near-black background, slightly warm-violet */
+  --bock-coal: #0B0F25;      /* page background (dark default) */
+  --bock-slate: #141938;     /* card / panel surface */
+  --bock-graphite: #1E2347;  /* raised surface, inputs */
+  --bock-steel: #2B315B;     /* divider, hairline rule */
+  --bock-fog: #5C6294;       /* muted text, secondary */
+  --bock-mist: #9099C2;      /* tertiary text / labels */
+  --bock-paper: #F2F2EE;     /* paper-white for inverted contexts */
+
+  /* ---- Code highlighting (Bock palette) ---- */
+  --bock-code-bg: #06091C;
+  --bock-code-fg: #F2F2EE;
+  --bock-code-comment: #7E86B8;
+  --bock-code-keyword: #B6C4FF;   /* lifted from ink, higher chroma */
+  --bock-code-type: #DCC8FF;      /* violet, brighter */
+  --bock-code-string: #B6F0BC;    /* sage, brighter */
+  --bock-code-number: #FFC07A;    /* warm sand, brighter */
+  --bock-code-fn: #FFFFFF;        /* full white for identifiers */
+  --bock-code-pipe: #FFD15C;      /* small brand-adjacent accent on |> */
+  --bock-code-punct: #9099C2;
+
+  /* ---- Semantic (dark default) ---- */
+  --bg: var(--bock-coal);
+  --bg-deep: var(--bock-pitch);
+  --surface: var(--bock-slate);
+  --surface-raised: var(--bock-graphite);
+  --rule: var(--bock-steel);
+  --fg: var(--bock-stone);
+  --fg-muted: var(--bock-mist);
+  --fg-dim: var(--bock-fog);
+  --accent: var(--bock-ink);
+  --accent-fg: var(--bock-stone);
+  --link: #B7C2FF;             /* lifted ink for legibility on dark */
+  --focus: #FFD15C;
+
+  /* ---- Type ----
+     Wordmark: Fira Code (the language-defining choice; reads as "code that became a name").
+     Body & headings: IBM Plex Sans — humanist, engineered as a sans companion to mono families.
+     Code: IBM Plex Mono — the locked Plex pairing for production.
+   */
+  --font-wordmark: "Fira Code", ui-monospace, monospace;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Display / heading sizes (clamp for responsive) */
+  --fs-display: clamp(48px, 7vw, 96px);
+  --fs-h1: clamp(36px, 5vw, 64px);
+  --fs-h2: clamp(28px, 3.5vw, 44px);
+  --fs-h3: clamp(20px, 2vw, 26px);
+  --fs-h4: 18px;
+  --fs-body: 17px;
+  --fs-small: 14px;
+  --fs-micro: 12px;
+  --fs-code: 14px;
+
+  --lh-tight: 1.05;
+  --lh-snug: 1.2;
+  --lh-body: 1.55;
+
+  --tracking-tight: -0.02em;
+  --tracking-snug: -0.01em;
+  --tracking-wide: 0.06em;
+  --tracking-mono: 0;
+
+  /* ---- Spacing (4px base) ---- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --s-8: 64px;
+  --s-9: 96px;
+  --s-10: 128px;
+
+  /* ---- Radius (restrained — geometric brand) ---- */
+  --r-0: 0px;
+  --r-1: 2px;
+  --r-2: 4px;
+  --r-3: 8px;
+  --r-pill: 999px;
+
+  /* ---- Borders / hairlines ---- */
+  --hairline: 1px solid var(--rule);
+  --hairline-strong: 1px solid color-mix(in srgb, var(--rule) 70%, var(--fg) 30%);
+
+  /* ---- Elevation (used sparingly; brand is flat) ---- */
+  --shadow-1: 0 1px 0 rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.02);
+  --shadow-2: 0 8px 24px -8px rgba(0,0,0,0.6);
+
+  /* ---- Motion ---- */
+  --ease-out: cubic-bezier(.2,.7,.2,1);
+  --ease-inout: cubic-bezier(.4,.2,.2,1);
+  --t-fast: 120ms;
+  --t-base: 200ms;
+  --t-slow: 480ms;
+
+  /* Layout */
+  --container: 1200px;
+  --gutter: clamp(20px, 4vw, 48px);
+}
+
+/* ---------------------------------------------------------------- */
+/* Element defaults                                                 */
+/* ---------------------------------------------------------------- */
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, .h1 {
+  font-size: var(--fs-h1);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tracking-tight);
+  font-weight: 600;
+  margin: 0;
+}
+h2, .h2 {
+  font-size: var(--fs-h2);
+  line-height: var(--lh-snug);
+  letter-spacing: var(--tracking-snug);
+  font-weight: 600;
+  margin: 0;
+}
+h3, .h3 {
+  font-size: var(--fs-h3);
+  line-height: var(--lh-snug);
+  letter-spacing: var(--tracking-snug);
+  font-weight: 600;
+  margin: 0;
+}
+h4, .h4 { font-size: var(--fs-h4); font-weight: 600; margin: 0; }
+
+p { margin: 0; }
+.text-muted { color: var(--fg-muted); }
+.text-dim { color: var(--fg-dim); }
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.tagline {
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  color: var(--fg-muted);
+  letter-spacing: 0;
+}
+
+code, pre, kbd, samp {
+  font-family: var(--font-mono);
+  font-size: var(--fs-code);
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { color: var(--fg); }
+
+hr { border: 0; border-top: var(--hairline); margin: var(--s-7) 0; }
+
+::selection { background: var(--bock-ink); color: var(--bock-stone); }

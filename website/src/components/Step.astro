@@ -1,0 +1,21 @@
+---
+interface Props {
+  n: number;
+  title: string;
+}
+
+const { n, title } = Astro.props;
+const num = String(n).padStart(2, '0');
+---
+
+<section class="bock-step" id={`step-${n}`}>
+  <div class="bock-container">
+    <div class="bock-step__head">
+      <span class="bock-step__n">{num}</span>
+      <h2 class="bock-step__title">{title}</h2>
+    </div>
+    <div class="bock-step__body">
+      <slot />
+    </div>
+  </div>
+</section>
