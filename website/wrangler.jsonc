@@ -3,7 +3,7 @@
 	"compatibility_flags": [
 		"global_fetch_strictly_public"
 	],
-	"name": "bock-website",
+	"name": "bock-homepage",
 	"main": "@astrojs/cloudflare/entrypoints/server",
 	"assets": {
 		"directory": "./dist",
