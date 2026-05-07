@@ -4,12 +4,27 @@
 Source → Parse → Type Check → Context Resolve → Target Analyze
 → Code Generate → Verify → Target Compile → Assemble Deliverable
 
-## Three-Tier Generation
+## Three-Tier Generation (AI involvement, §17.2)
 - Tier 1 (default): AI generates idiomatic target code from AIR,
   invoked selectively at capability gaps (§17.6) — not every node
 - Tier 2 (fallback): Rule-based deterministic transpilation,
   handles the common case and AI fallback
 - Tier 3 (optional): AI optimization pass
+
+## Output Modes (output completeness, §20.6.2)
+Distinct concept from generation tiers. Selected by `bock build` flag:
+- **Source mode** (`--source-only`): bare target source files,
+  source-mirrored structure, no scaffolding
+- **Project mode** (default): source files + target-ecosystem
+  scaffolding (package.json / Cargo.toml / pyproject.toml /
+  go.mod / etc.) — runnable in target's normal toolchain
+- **Deliverable mode** (`--deliverable`): final runnable artifact
+  (bundled JS, compiled binary, container, mobile package, etc.);
+  see §17.5 for deliverable types
+
+Default is project mode. Output filename mirrors source: `src/<path>.bock`
+→ `build/<target>/<path>.<ext>`. Per-target scaffolding contents
+documented in each target's codegen package.
 
 ## Target Profile
 ```

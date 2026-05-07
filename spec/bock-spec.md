@@ -1685,7 +1685,7 @@ Single binary containing all tooling. The CLI surface is designed for ergonomic 
 **Build and execute:**
 
 `bock new` — Project scaffolding with interactive or flag-based configuration. Generates `bock.project` with a commented-out `[ai]` block for opt-in AI configuration; see §20.7.
-`bock build` — Transpile and compile. Flags: `--target`, `--all-targets`, `--deterministic`, `--optimize`, `--release`, `--deliverable`.
+`bock build` — Transpile and compile. Produces a scaffolded project (project mode) by default; see §20.6.2 for output modes. Flags: `--target`, `--all-targets`, `--source-only`, `--deliverable`, `--deterministic`, `--optimize`, `--release`.
 `bock run` — Build and execute. Default uses interpreter. `--target` for specific language. `--watch` for hot reload.
 `bock check` — Type check, lint, context validation. `--types`, `--lint`, `--context` for selective checking.
 `bock test` — Run tests. Default uses interpreter (fast). `--target` for transpilation tests. `--all-targets`, `--smart` for cross-target. `--coverage`, `--snapshot`.
@@ -1758,6 +1758,34 @@ Built-in interpreter debugger with breakpoints, stepping, expression evaluation,
 Incremental builds at module granularity via content hashing. Parallel compilation. Remote build cache. Build hooks (Bock scripts). Distributed builds for CI.
 
 Build pipeline: Parse → Type Check → Context Resolve → Target Analyze → Code Generate → Verify → Target Compile → Assemble Deliverable.
+
+#### 20.6.1 — Output Layout
+
+Build output preserves the source filesystem structure. A source file at `src/<path>.bock` produces output at `build/<target>/<path>.<ext>`, where `<ext>` is the target language's idiomatic extension. Module nesting in `src/` is preserved in the target output — `src/foo/bar.bock` becomes `build/js/foo/bar.js`, `build/py/foo/bar.py`, and so on.
+
+Target-specific scaffolding files (manifests, package descriptors, ecosystem-required entry points) are generated alongside the mirrored source structure at `build/<target>/` root or per the target ecosystem's conventions. These are part of producing usable output, not in place of it. Per-target scaffolding details are documented in each target's codegen package.
+
+Entry-point selection — which output file is invoked when running the build artifact — is a project-level concern documented in `bock.project`, not derived from the filename convention. By default, `src/main.bock` is the entry point if present.
+
+#### 20.6.2 — Output Modes
+
+`bock build --target T` produces output in one of three modes, selected by flag. (These are distinct from the AI involvement tiers in §17.2; "tier" is reserved for those, "mode" describes output completeness.)
+
+**Source mode.** Bare transpilation: target source files mirroring the project's source structure, with no manifests, scaffolding, or entry-point wiring. The output is suitable for integration into an existing target-language project the user already manages.
+- Flag: `--source-only`
+- Output: source files only
+
+**Project mode.** Source files plus target-ecosystem scaffolding — the manifests, configuration, and entry-point wiring needed for the output to be a working project in the target language's normal toolchain. After `bock build --target rust`, the user can `cd build/rust && cargo build`. After `bock build --target js`, the user can `cd build/js && npm install && node main.js`.
+- Flag: default for `bock build --target T`
+- Output: source files + target-ecosystem scaffolding (`package.json` / `Cargo.toml` / `pyproject.toml` / `go.mod` / `tsconfig.json` etc.)
+
+**Deliverable mode.** Final runnable artifact: bundled JS, compiled binary, container image, mobile package, deployment archive. Deliverable mode may invoke external tooling (target compilers, bundlers, containerizers) beyond Bock's own transpiler. See §17.5 for deliverable types and configuration via target manifests.
+- Flag: `--deliverable`
+- Output: target-specific runnable artifact
+
+The default is project mode because `bock build` implies producing something the user can run. Source mode exists for the integration-into-existing-project case; deliverable mode exists for production deployment. The mode flags are mutually exclusive — a single `bock build` invocation produces output in exactly one mode.
+
+Per-target scaffolding details (the contents of `package.json`, the structure of a generated `Cargo.toml`, the layout of a Python project) are documented in each target's codegen package. The spec commits to the mode model and the structural distinction; per-target manifest contents evolve with the target ecosystems and are not enumerated here.
 
 ### 20.7 — Project Scaffolding
 
