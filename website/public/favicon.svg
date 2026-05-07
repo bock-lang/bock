@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<svg width="100%" height="100%" viewBox="0 0 3000 3000" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+    <g transform="matrix(1.39151,0,0,1.33355,-330.22,-487.836)">
+        <g transform="matrix(0.736131,0,0,0.766377,213.595,346.321)">
+            <use xlink:href="#_Image1" x="0" y="0" width="3000px" height="3000px"></use>
+        </g>
+        <g transform="matrix(-0.769012,0,0,-0.802437,2468.79,2322.19)">
+            <path d="M1308.18,121.274L124.412,970.391L124.412,1279.39L1431.12,1972.73L1568.88,1972.73L1308.18,121.274ZM1308.18,1505.1L413.731,1003.52L1308.18,678.903L1308.18,1505.1ZM1691.82,121.274L2875.59,970.391L2875.59,1279.39L1568.88,1972.73L1431.12,1972.73L1691.82,121.274ZM1691.82,1505.1L2586.27,1003.52L1691.82,678.903L1691.82,1505.1Z" style="fill:rgb(217,217,217);fill-rule:nonzero;"></path>
+        </g>
+    </g>
+    <defs>
+        <image id="_Image1" width="3000px" height="3000px"></image>
+    </defs>
+</svg>

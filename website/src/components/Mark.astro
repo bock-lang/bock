@@ -1,0 +1,38 @@
+---
+interface Props {
+  size?: number;
+  animate?: boolean;
+  class?: string;
+}
+
+const { size = 64, animate = false, class: className = '' } = Astro.props;
+const wrapperStyle = `display:inline-block;width:${size}px;height:${size}px;position:relative;color:inherit;`;
+const asciiStyle = `font-family:var(--font-mono);font-weight:600;font-size:${size * 0.44}px;line-height:1;letter-spacing:0;color:currentColor;`;
+const spacerStyle = `display:inline-block;width:${size * 0.14}px;`;
+const svgStyle = `width:100%;height:100%;display:block;`;
+---
+
+{animate ? (
+  <span style={wrapperStyle} class={`bock-mark bock-mark--anim ${className}`}>
+    <span class="bock-mark__layer bock-mark__ascii" aria-hidden="true">
+      <span style={asciiStyle}>&lt;&nbsp;|<span style={spacerStyle}></span>|&nbsp;&gt;</span>
+    </span>
+    <span class="bock-mark__layer bock-mark__chevs" aria-hidden="true">
+      <svg viewBox="0 0 3000 3000" fill="currentColor" style={svgStyle}>
+        <polygon points="338,1535 1295,998 1295,2072"/>
+        <polygon points="2662,1535 1705,998 1705,2072"/>
+      </svg>
+    </span>
+    <span class="bock-mark__layer bock-mark__final" aria-hidden="true">
+      <svg viewBox="0 0 3000 3000" fill="currentColor" aria-label="Bock" style={svgStyle}>
+        <path fill-rule="nonzero" d="m1705 2479 1267-908v-331L1574 498h-148zm0-1481 957 537-957 347zm-410 1481L28 1571v-331l1398-742h148zm0-1481-957 537 957 347z"/>
+      </svg>
+    </span>
+  </span>
+) : (
+  <span style={wrapperStyle} class={`bock-mark ${className}`}>
+    <svg viewBox="0 0 3000 3000" fill="currentColor" aria-label="Bock" style={svgStyle}>
+      <path fill-rule="nonzero" d="m1705 2479 1267-908v-331L1574 498h-148zm0-1481 957 537-957 347zm-410 1481L28 1571v-331l1398-742h148zm0-1481-957 537 957 347z"/>
+    </svg>
+  </span>
+)}

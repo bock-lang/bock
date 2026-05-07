@@ -1,0 +1,47 @@
+---
+import Mark from './Mark.astro';
+import Wordmark from './Wordmark.astro';
+import Tagline from './Tagline.astro';
+---
+
+<footer class="bock-footer">
+  <div class="bock-container">
+    <div class="bock-footer__cols">
+      <div>
+        <div class="bock-footer__head">Community</div>
+        <ul>
+          <li><a href="https://github.com/bock-lang/bock">GitHub</a></li>
+          <li><a href="#bsky">Bluesky</a></li>
+          <li><a href="#reddit">Reddit</a></li>
+        </ul>
+      </div>
+      <div>
+        <div class="bock-footer__head">Resources</div>
+        <ul>
+          <li><a href="#docs">Documentation</a></li>
+          <li><a href="/get-started">Get started</a></li>
+          <li><a href="https://github.com/bock-lang/bock">GitHub</a></li>
+          <li><a href="#examples">Examples</a></li>
+        </ul>
+      </div>
+      <div>
+        <div class="bock-footer__head">Legal</div>
+        <ul>
+          <li><a href="#license">License</a></li>
+          <li><a href="#security">Security policy</a></li>
+          <li><a href="#coc">Code of conduct</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="bock-footer__bottom">
+      <div class="bock-footer__brand">
+        <div style="display: flex; align-items: center; gap: 12px">
+          <Mark size={28} />
+          <Wordmark size={20} />
+        </div>
+        <Tagline />
+      </div>
+      <div class="bock-footer__copy">© 2026 Bock-lang and contributors. MIT License.</div>
+    </div>
+  </div>
+</footer>

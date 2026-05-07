@@ -1,0 +1,111 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import Eyebrow from '../components/Eyebrow.astro';
+import Button from '../components/Button.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import FileTree from '../components/FileTree.astro';
+import Step from '../components/Step.astro';
+
+const TREE = `hello/
+├── bock.project
+├── .gitignore
+├── src/
+│   └── main.bock
+└── tests/`;
+
+const STARTER_BOCK = `fn main() {
+  println("Hello, world!")
+}`;
+---
+
+<BaseLayout
+  title="Get started with Bock"
+  description="Install Bock, write your first function, and build it for your stack."
+>
+  <Nav current="/get-started" />
+  <main class="bock-doc">
+    <header class="bock-doc__hero">
+      <div class="bock-container">
+        <Eyebrow>Documentation</Eyebrow>
+        <h1 class="bock-doc__title">Get started with Bock</h1>
+        <p class="bock-doc__lede">
+          Install Bock, write your first function, and build it for your stack.
+        </p>
+      </div>
+    </header>
+
+    <Step n={1} title="Install">
+      <p>Bock ships as a single binary for macOS, Linux, and Windows.</p>
+      <p><strong>Cargo</strong> (any platform with Rust installed):</p>
+      <CodeBlock filename="terminal" language="bash" code={`cargo install bock`} />
+      <p><strong>Pre-built binaries:</strong> download from <a href="https://github.com/bock-lang/bock/releases">GitHub Releases</a> for macOS, Linux, and Windows.</p>
+      <p>Verify the install:</p>
+      <CodeBlock filename="terminal" language="bash" code={`bock --version`} />
+    </Step>
+
+    <Step n={2} title="Your first project">
+      <p>Scaffold a new project:</p>
+      <CodeBlock filename="terminal" language="bash" code={`bock new hello\ncd hello`} />
+      <p>You'll get this layout:</p>
+      <FileTree label="hello/">{TREE}</FileTree>
+      <p>
+        <code class="bock-inline-code">bock.project</code> is the project config (TOML, similar to <code class="bock-inline-code">Cargo.toml</code> or <code class="bock-inline-code">pyproject.toml</code>). It includes a commented-out <code class="bock-inline-code">[ai]</code> block. Bock uses rule-based code generation by default; AI is opt-in. <code class="bock-inline-code">src/main.bock</code> is the entry point. <code class="bock-inline-code">tests/</code> is where your tests go. The <code class="bock-inline-code">.gitignore</code> is pre-populated with sensible defaults including the <code class="bock-inline-code">.bock/</code> cache directory that gets created on first build.
+      </p>
+      <p>Open <code class="bock-inline-code">src/main.bock</code>. The starter prints <code class="bock-inline-code">"Hello, world!"</code>:</p>
+      <CodeBlock filename="src/main.bock" language="bock" code={STARTER_BOCK} />
+      <p>Make it yours.</p>
+    </Step>
+
+    <Step n={3} title="Build for your target">
+      <p>Bock supports JavaScript, TypeScript, Python, Rust, and Go in v1. The same source compiles to any of them.</p>
+      <p>JavaScript:</p>
+      <CodeBlock filename="terminal" language="bash" code={`bock build --target js`} />
+      <p>Go:</p>
+      <CodeBlock filename="terminal" language="bash" code={`bock build --target go`} />
+      <p>The JavaScript output uses <code class="bock-inline-code">console.log</code> and ES modules. The Go output uses <code class="bock-inline-code">fmt.Println</code> and follows gofmt conventions. Idiomatic here means the generated code follows each language's conventions rather than mechanically translating Bock's syntax.</p>
+    </Step>
+
+    <Step n={4} title="Run it">
+      <p>For development, run the source directly through the interpreter:</p>
+      <CodeBlock filename="terminal" language="bash" code={`bock run`} />
+      <p>This skips codegen entirely, which makes the iteration loop fast.</p>
+      <p>To run the compiled output, build first then invoke the target's runtime:</p>
+      <CodeBlock filename="terminal" language="bash" code={`bock build --target js\nnode build/js/main.js`} />
+      <p>The compiled JavaScript runs on Node without anything from Bock imported at runtime. The compiled output is your code. Bock isn't in the picture at runtime.</p>
+    </Step>
+
+    <Step n={5} title="Where to next">
+      <p>The full language reference is at <a href="https://bocklang.org/docs">the documentation</a>.</p>
+      <ul class="bock-doc__next">
+        <li><strong>Language guide:</strong> types, effects, context annotations, the strictness system</li>
+        <li><strong>Stdlib reference:</strong> core modules and what they emit per target</li>
+        <li><strong>Examples:</strong> <a href="https://github.com/bock-lang/bock/tree/main/examples">examples on GitHub</a></li>
+        <li><strong>Discussions:</strong> <a href="https://github.com/bock-lang/bock/discussions">GitHub Discussions</a></li>
+        <li><strong>Subreddit:</strong> <a href="https://reddit.com/r/bocklang">the Bock subreddit</a></li>
+      </ul>
+      <p class="bock-doc__caption">Bock is open source under the MIT License.</p>
+    </Step>
+
+    <section class="bock-cta">
+      <div class="bock-container bock-cta__inner">
+        <p class="bock-cta__body">Back to the homepage when you're ready.</p>
+        <Button variant="ghost" href="/">Home</Button>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</BaseLayout>
+
+<script>
+  document.querySelectorAll<HTMLButtonElement>('[data-bock-copy]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const code = btn.dataset.code ?? '';
+      navigator.clipboard?.writeText(code);
+      const original = btn.textContent;
+      btn.textContent = 'Copied';
+      window.setTimeout(() => { btn.textContent = original; }, 1400);
+    });
+  });
+</script>

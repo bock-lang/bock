@@ -1,0 +1,35 @@
+---
+import Eyebrow from './Eyebrow.astro';
+
+interface Props {
+  id?: string;
+  eyebrow?: string;
+  title?: string;
+  lede?: string;
+  divider?: boolean;
+  align?: 'left' | 'right';
+}
+
+const {
+  id,
+  eyebrow,
+  title,
+  lede,
+  divider = true,
+  align = 'left',
+} = Astro.props;
+
+const classes = ['bock-section', `bock-section--${align}`];
+if (divider) classes.push('has-divider');
+---
+
+<section id={id} class={classes.join(' ')}>
+  <div class="bock-container">
+    {eyebrow && <Eyebrow>{eyebrow}</Eyebrow>}
+    {title && <h2 class="bock-section__title">{title}</h2>}
+    {lede && <p class="bock-section__lede">{lede}</p>}
+    {Astro.slots.has('default') && (
+      <div class="bock-section__body"><slot /></div>
+    )}
+  </div>
+</section>

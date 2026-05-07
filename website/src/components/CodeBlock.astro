@@ -1,0 +1,36 @@
+---
+import { highlightBock, escapeCode } from '../lib/highlight-bock';
+
+interface Props {
+  filename?: string;
+  language?: string;
+  code: string;
+  copyable?: boolean;
+}
+
+const {
+  filename = 'main.bock',
+  language = 'bock',
+  code,
+  copyable = true,
+} = Astro.props;
+
+const rendered = language === 'bock' ? highlightBock(code) : escapeCode(code);
+---
+
+<div class="bock-code" data-bock-code>
+  <div class="bock-code__head">
+    <span class="bock-code__file">{filename}</span>
+    <span class="bock-code__lang">{language.toUpperCase()}</span>
+    {copyable && (
+      <button
+        class="bock-code__copy"
+        type="button"
+        aria-label="Copy code"
+        data-bock-copy
+        data-code={code}
+      >Copy</button>
+    )}
+  </div>
+  <pre class="bock-code__pre"><code set:html={rendered} /></pre>
+</div>
