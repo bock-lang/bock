@@ -11,3 +11,9 @@ npm-debug.log*
 # Environment
 .env
 .env.production
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
