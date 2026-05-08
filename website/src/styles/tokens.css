@@ -1,4 +1,4 @@
-/* Bock Design System — colors & type tokens
+/* Bock Design System - colors & type tokens
  * Dark default. Single locked Plex pairing.
  */
 
@@ -47,8 +47,8 @@
 
   /* ---- Type ----
      Wordmark: Fira Code (the language-defining choice; reads as "code that became a name").
-     Body & headings: IBM Plex Sans — humanist, engineered as a sans companion to mono families.
-     Code: IBM Plex Mono — the locked Plex pairing for production.
+     Body & headings: IBM Plex Sans - humanist, engineered as a sans companion to mono families.
+     Code: IBM Plex Mono - the locked Plex pairing for production.
    */
   --font-wordmark: "Fira Code", ui-monospace, monospace;
   --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -86,7 +86,7 @@
   --s-9: 96px;
   --s-10: 128px;
 
-  /* ---- Radius (restrained — geometric brand) ---- */
+  /* ---- Radius (restrained - geometric brand) ---- */
   --r-0: 0px;
   --r-1: 2px;
   --r-2: 4px;

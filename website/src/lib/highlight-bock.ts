@@ -1,5 +1,5 @@
 // Bock-flavored syntax highlighting (rule-based, not a real lexer).
-// Ported from CodeBlock.jsx — runs at build time. Returns HTML string.
+// Ported from CodeBlock.jsx - runs at build time. Returns HTML string.
 //
 // Highlights: keywords, types, strings, comments, numbers, the |> pipe operator.
 // Token CSS classes (tok-kw, tok-ty, tok-st, tok-co, tok-fn, tok-pi, tok-pu,
@@ -34,7 +34,7 @@ export function highlightBock(src: string): string {
     if (i > 0) out.push('\n');
     let rest = line;
     while (rest.length) {
-      // comment — consumes rest of line
+      // comment - consumes rest of line
       const cmt = rest.match(/^\/\/.*/);
       if (cmt) { out.push(span('co', cmt[0])); break; }
       // string literal (handles \\. escapes; template ${…} segments fall under [^"\\] runs)

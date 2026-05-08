@@ -18,10 +18,10 @@ npm run preview  # serves dist/ for verification
 
 ## Pages
 
-- `src/pages/index.astro` — homepage
-- `src/pages/get-started.astro` — getting started guide
+- `src/pages/index.astro` - homepage
+- `src/pages/get-started.astro` - getting started guide
 
-Marketing copy is editorially locked — do not edit without coordination
+Marketing copy is editorially locked - do not edit without coordination
 with the marketing/spec process.
 
 ## Output
