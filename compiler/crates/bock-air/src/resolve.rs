@@ -473,9 +473,7 @@ impl<'a> Resolver<'a> {
                                 Err(RegistryError::SymbolNotFound { name, .. }) => {
                                     self.diag.error(
                                         E_SYMBOL_NOT_FOUND,
-                                        format!(
-                                            "`{name}` is not exported by module `{module_id}`"
-                                        ),
+                                        format!("`{name}` is not exported by module `{module_id}`"),
                                         imported.span,
                                     );
                                     NameKind::Unresolved
@@ -483,9 +481,7 @@ impl<'a> Resolver<'a> {
                                 Err(RegistryError::NotVisible { name, .. }) => {
                                     self.diag.error(
                                         E_NOT_VISIBLE,
-                                        format!(
-                                            "`{name}` in module `{module_id}` is private"
-                                        ),
+                                        format!("`{name}` in module `{module_id}` is private"),
                                         imported.span,
                                     );
                                     NameKind::Unresolved
@@ -563,11 +559,8 @@ impl<'a> Resolver<'a> {
                                 );
                             }
                             Err(e) => {
-                                self.diag.error(
-                                    E_SYMBOL_NOT_FOUND,
-                                    format!("{e}"),
-                                    import.span,
-                                );
+                                self.diag
+                                    .error(E_SYMBOL_NOT_FOUND, format!("{e}"), import.span);
                             }
                         }
                     }
@@ -887,9 +880,10 @@ impl<'a> Resolver<'a> {
     fn resolve_impl(&mut self, d: &ImplBlock) {
         for m in &d.methods {
             // Check whether the method already declares `self` as a parameter.
-            let has_self = m.params.iter().any(|p| {
-                matches!(&p.pattern, Pattern::Bind { name, .. } if name.name == "self")
-            });
+            let has_self = m
+                .params
+                .iter()
+                .any(|p| matches!(&p.pattern, Pattern::Bind { name, .. } if name.name == "self"));
 
             if has_self || d.trait_path.is_none() {
                 // Inherent impl or method with explicit `self` — resolve normally.
@@ -1173,7 +1167,10 @@ impl<'a> Resolver<'a> {
                 }
             }
             bock_ast::TypeExpr::Function {
-                params, ret, effects, ..
+                params,
+                ret,
+                effects,
+                ..
             } => {
                 for p in params {
                     self.resolve_type_expr(p);
@@ -1300,12 +1297,7 @@ impl<'a> Resolver<'a> {
                 .symbols
                 .variant_parent
                 .iter()
-                .filter(|(variant, _)| {
-                    scope
-                        .bindings
-                        .get(variant.as_str())
-                        .is_some_and(|b| b.used)
-                })
+                .filter(|(variant, _)| scope.bindings.get(variant.as_str()).is_some_and(|b| b.used))
                 .map(|(_, parent)| parent.clone())
                 .collect();
             for parent in used_parents {
@@ -1397,10 +1389,9 @@ fn seed_enum_variants_from_registry(
 ) {
     if let ExportDetail::Enum { variants, .. } = &sym.detail {
         for variant in variants {
-            symbols.variant_parent.insert(
-                variant.name.clone(),
-                enum_name.to_string(),
-            );
+            symbols
+                .variant_parent
+                .insert(variant.name.clone(), enum_name.to_string());
             symbols.define(
                 variant.name.clone(),
                 Binding {
@@ -1436,7 +1427,9 @@ fn keyword_hint(name: &str) -> Option<&'static str> {
         "func" | "def" => Some("Bock uses `fn` to declare functions"),
         "interface" => Some("Bock uses `trait` for interfaces"),
         "struct" => Some("Bock uses `record` for value types"),
-        "class" => Some("Bock uses `record` for data and `trait` for behavior — there is no `class`"),
+        "class" => {
+            Some("Bock uses `record` for data and `trait` for behavior — there is no `class`")
+        }
         "None_" | "nil" | "null" | "undefined" => {
             Some("Bock uses `None` (from `Optional[T]`) to represent absent values")
         }
@@ -2061,8 +2054,7 @@ mod tests {
     // ── Registry-backed import resolution ────────────────────────────────────
 
     use crate::registry::{
-        EnumVariantExport, ExportDetail, ExportKind, ExportedSymbol, ModuleExports,
-        ModuleRegistry,
+        EnumVariantExport, ExportDetail, ExportKind, ExportedSymbol, ModuleExports, ModuleRegistry,
     };
     use crate::stubs::TypeRef;
 
@@ -2414,7 +2406,9 @@ mod tests {
         assert!(diag.has_errors());
         // But the binding is still defined (as Unresolved) so the compiler
         // can continue downstream.
-        let b = st.lookup_peek("Thing").expect("Thing should still be bound");
+        let b = st
+            .lookup_peek("Thing")
+            .expect("Thing should still be bound");
         assert_eq!(b.resolved.kind, NameKind::Unresolved);
     }
 
@@ -2548,13 +2542,11 @@ mod tests {
                 visibility: Visibility::Public,
                 ty: TypeRef("Color".to_string()),
                 detail: ExportDetail::Enum {
-                    variants: vec![
-                        EnumVariantExport {
-                            name: "Red".to_string(),
-                            constructor_type: None,
-                            fields: None,
-                        },
-                    ],
+                    variants: vec![EnumVariantExport {
+                        name: "Red".to_string(),
+                        constructor_type: None,
+                        fields: None,
+                    }],
                     generic_params: vec![],
                 },
             },
@@ -2578,7 +2570,9 @@ mod tests {
             diag.iter().collect::<Vec<_>>()
         );
         assert!(st.lookup_peek("Color").is_some());
-        let red = st.lookup_peek("Red").expect("Red should be in scope via glob");
+        let red = st
+            .lookup_peek("Red")
+            .expect("Red should be in scope via glob");
         assert_eq!(red.resolved.kind, NameKind::Function);
         assert!(!red.is_import);
     }

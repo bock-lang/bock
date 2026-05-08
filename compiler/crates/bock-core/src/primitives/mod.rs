@@ -1,7 +1,7 @@
 //! Primitive type method registrations.
 //!
 //! Each submodule registers methods and trait implementations for one
-//! primitive type into the [`BuiltinRegistry`].
+//! primitive type into the [`bock_interp::BuiltinRegistry`].
 
 pub mod bool;
 pub mod char;

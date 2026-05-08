@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use futures::future::BoxFuture;
 use bock_interp::{BockString, BuiltinRegistry, CallbackInvoker, RuntimeError, TypeTag, Value};
+use futures::future::BoxFuture;
 
 /// Register all Map methods and trait implementations.
 pub fn register(registry: &mut BuiltinRegistry) {
@@ -167,42 +167,48 @@ fn map_map_values<'a>(
     invoker: &'a mut dyn CallbackInvoker,
 ) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let m = expect_map(args, 0, "map_values")?;
-    let f = expect_fn(args, 1, "map_values")?;
-    let mut result = BTreeMap::new();
-    for (k, v) in m {
-        let new_v = invoker.invoke(f, std::slice::from_ref(v)).await?;
-        result.insert(k.clone(), new_v);
-    }
-    Ok(Value::Map(result))
-})
+        let m = expect_map(args, 0, "map_values")?;
+        let f = expect_fn(args, 1, "map_values")?;
+        let mut result = BTreeMap::new();
+        for (k, v) in m {
+            let new_v = invoker.invoke(f, std::slice::from_ref(v)).await?;
+            result.insert(k.clone(), new_v);
+        }
+        Ok(Value::Map(result))
+    })
 }
 
 /// `map.filter(fn)` — keep entries where `fn(key, value)` returns `true`.
-fn map_filter<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn map_filter<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let m = expect_map(args, 0, "filter")?;
-    let f = expect_fn(args, 1, "filter")?;
-    let mut result = BTreeMap::new();
-    for (k, v) in m {
-        if let Value::Bool(true) = invoker.invoke(f, &[k.clone(), v.clone()]).await? {
-            result.insert(k.clone(), v.clone());
+        let m = expect_map(args, 0, "filter")?;
+        let f = expect_fn(args, 1, "filter")?;
+        let mut result = BTreeMap::new();
+        for (k, v) in m {
+            if let Value::Bool(true) = invoker.invoke(f, &[k.clone(), v.clone()]).await? {
+                result.insert(k.clone(), v.clone());
+            }
         }
-    }
-    Ok(Value::Map(result))
-})
+        Ok(Value::Map(result))
+    })
 }
 
 /// `map.for_each(fn)` — call `fn(key, value)` for each entry, returns Void.
-fn map_for_each<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn map_for_each<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let m = expect_map(args, 0, "for_each")?;
-    let f = expect_fn(args, 1, "for_each")?;
-    for (k, v) in m {
-        invoker.invoke(f, &[k.clone(), v.clone()]).await?;
-    }
-    Ok(Value::Void)
-})
+        let m = expect_map(args, 0, "for_each")?;
+        let f = expect_fn(args, 1, "for_each")?;
+        for (k, v) in m {
+            invoker.invoke(f, &[k.clone(), v.clone()]).await?;
+        }
+        Ok(Value::Void)
+    })
 }
 
 // ─── Conversion ───────────────────────────────────────────────────────────────
@@ -415,7 +421,7 @@ mod tests {
         let r = reg();
         let m = make_map(&[(1, 10), (2, 20)]);
         let entries = r
-            .call(TypeTag::Map, "entries", &[m.clone()])
+            .call(TypeTag::Map, "entries", std::slice::from_ref(&m))
             .unwrap()
             .unwrap();
         let to_list = r.call(TypeTag::Map, "to_list", &[m]).unwrap().unwrap();
@@ -458,7 +464,7 @@ mod tests {
         let r = reg();
         let m = make_map(&[(1, 10)]);
         let h1 = r
-            .call(TypeTag::Map, "hash_code", &[m.clone()])
+            .call(TypeTag::Map, "hash_code", std::slice::from_ref(&m))
             .unwrap()
             .unwrap();
         let h2 = r.call(TypeTag::Map, "hash_code", &[m]).unwrap().unwrap();

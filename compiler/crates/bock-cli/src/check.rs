@@ -6,11 +6,11 @@
 //! 3. Build a dependency graph from import declarations
 //! 4. Topological sort (cycle detection → clear error)
 //! 5. For each module in dependency order:
-//!    a. Resolve names (with [`ModuleRegistry`] for cross-file imports)
+//!    a. Resolve names (with [`bock_air::registry::ModuleRegistry`] for cross-file imports)
 //!    b. Lower to S-AIR
 //!    c. Type-check (T-AIR)
 //!    d. Run analysis passes (ownership, effects, capabilities)
-//!    e. Collect exports → register in [`ModuleRegistry`]
+//!    e. Collect exports → register in [`bock_air::registry::ModuleRegistry`]
 //! 6. Report accumulated diagnostics
 
 use std::collections::HashMap;
@@ -23,7 +23,9 @@ use bock_errors::{Diagnostic, DiagnosticBag, Severity};
 use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
-use bock_types::{collect_exports, seed_imports, FnType, PrimitiveType, Strictness, Type, TypeChecker};
+use bock_types::{
+    collect_exports, seed_imports, FnType, PrimitiveType, Strictness, Type, TypeChecker,
+};
 
 /// Options controlling which checks to run.
 pub struct CheckOptions {
@@ -48,7 +50,7 @@ impl Default for CheckOptions {
 /// Run the check command on the given file paths with the specified options.
 ///
 /// Uses the multi-file pipeline: parse all → dependency sort → compile in order
-/// with cross-file name resolution via [`ModuleRegistry`].
+/// with cross-file name resolution via [`bock_air::registry::ModuleRegistry`].
 pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<()> {
     let files = if files.is_empty() {
         discover_bock_files(".")?
@@ -113,8 +115,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<()> {
 
         // 4a. Name resolution (with registry for cross-file imports)
         let mut symbols = SymbolTable::new();
-        let resolve_diags =
-            resolve_names_with_registry(&pf.module, &mut symbols, &registry);
+        let resolve_diags = resolve_names_with_registry(&pf.module, &mut symbols, &registry);
         collect_diagnostics(&mut all_diagnostics, &resolve_diags);
 
         if has_errors(&all_diagnostics) {
@@ -165,8 +166,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<()> {
         };
 
         if !diagnostics_to_show.is_empty() {
-            let to_render: Vec<Diagnostic> =
-                diagnostics_to_show.into_iter().cloned().collect();
+            let to_render: Vec<Diagnostic> = diagnostics_to_show.into_iter().cloned().collect();
             print_diagnostics(
                 &to_render,
                 &pf.filename,
@@ -179,8 +179,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<()> {
             found_errors = true;
         } else {
             // 4e. Register exports for downstream modules
-            let exports =
-                collect_exports(module_id, &pf.path, &checker, &air_module);
+            let exports = collect_exports(module_id, &pf.path, &checker, &air_module);
             registry.register(exports);
         }
     }

@@ -182,7 +182,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let fut = r
-            .call(TypeTag::Channel, "recv", &[rx.clone()])
+            .call(TypeTag::Channel, "recv", std::slice::from_ref(&rx))
             .unwrap()
             .unwrap();
         let handle = match fut {

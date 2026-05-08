@@ -11,17 +11,17 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use bock_ai::{
-    AiCache, AiError, AiProvider, CandidateRule, GenerateRequest, GenerateResponse,
-    ManifestWriter, ModuleContext, OptimizeRequest, OptimizeResponse, RepairRequest,
-    RepairResponse, Rule, RuleCache, SelectRequest, SelectResponse,
+    AiCache, AiError, AiProvider, CandidateRule, GenerateRequest, GenerateResponse, ManifestWriter,
+    ModuleContext, OptimizeRequest, OptimizeResponse, RepairRequest, RepairResponse, Rule,
+    RuleCache, SelectRequest, SelectResponse,
 };
 use bock_air::{AIRNode, AirHandlerPair, EnumVariantPayload, NodeKind};
 use bock_ast::{Ident, TypePath, Visibility};
-use bock_codegen::{
-    needs_ai_synthesis, synthesize_and_flush, verify_generated, AiSynthesisDriver,
-    JsGenerator, RsGenerator, SynthesisConfig, TargetProfile,
-};
 use bock_codegen::CodeGenerator;
+use bock_codegen::{
+    needs_ai_synthesis, synthesize_and_flush, verify_generated, AiSynthesisDriver, JsGenerator,
+    RsGenerator, SynthesisConfig, TargetProfile,
+};
 use bock_errors::{FileId, Span};
 use bock_types::Strictness;
 
@@ -57,17 +57,17 @@ impl CountingProvider {
 
 #[async_trait]
 impl AiProvider for CountingProvider {
-    async fn generate(
-        &self,
-        request: &GenerateRequest,
-    ) -> Result<GenerateResponse, AiError> {
+    async fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, AiError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail {
             return Err(AiError::Unavailable("test: provider down".into()));
         }
         // Emit code that always verifies cleanly: non-empty, balanced.
         Ok(GenerateResponse {
-            code: format!("// synthesized for {}\n{{ /* body */ }}\n", request.target.id),
+            code: format!(
+                "// synthesized for {}\n{{ /* body */ }}\n",
+                request.target.id
+            ),
             confidence: self.confidence,
             reasoning: Some("test".into()),
             alternatives: Vec::new(),
@@ -78,10 +78,7 @@ impl AiProvider for CountingProvider {
         unreachable!("repair not used in D.5 tests")
     }
 
-    async fn optimize(
-        &self,
-        _request: &OptimizeRequest,
-    ) -> Result<OptimizeResponse, AiError> {
+    async fn optimize(&self, _request: &OptimizeRequest) -> Result<OptimizeResponse, AiError> {
         unreachable!("optimize not used in D.5 tests")
     }
 
@@ -486,7 +483,10 @@ async fn pinned_cache_replay_bypasses_threshold() {
     let content = std::fs::read_to_string(&manifest_file).unwrap();
     // Count pinned=true entries.
     let pinned_count = content.matches("\"pinned\": true").count();
-    assert!(pinned_count >= 1, "expected pinned replay entry in {content}");
+    assert!(
+        pinned_count >= 1,
+        "expected pinned replay entry in {content}"
+    );
     assert!(content.contains("\"cache-replay\""));
 }
 
@@ -542,7 +542,11 @@ async fn trivial_code_never_hits_ai() {
     assert_eq!(stats.flagged_nodes, 0);
     assert_eq!(stats.ai_calls, 0);
     assert_eq!(stats.fallback_triggered, 0);
-    assert_eq!(provider.calls(), 0, "provider must not be called for literals");
+    assert_eq!(
+        provider.calls(),
+        0,
+        "provider must not be called for literals"
+    );
 }
 
 // ── Production strictness without pinned decisions ──────────────────────────
@@ -704,9 +708,7 @@ async fn rule_cache_hit_skips_ai_and_records_rule_applied() {
     assert_eq!(provider.calls(), 0, "provider untouched");
 
     // Manifest should have a rule_applied decision, not codegen.
-    let file = dir
-        .path()
-        .join(".bock/decisions/build/src/m.bock.json");
+    let file = dir.path().join(".bock/decisions/build/src/m.bock.json");
     let content = std::fs::read_to_string(&file).unwrap();
     assert!(
         content.contains("\"rule_applied\""),

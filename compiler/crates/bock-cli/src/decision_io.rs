@@ -51,8 +51,8 @@ pub fn read_manifest_file(path: &Path) -> anyhow::Result<Vec<Decision>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let bytes = fs::read(path)
-        .map_err(|e| anyhow::anyhow!("could not read {}: {e}", path.display()))?;
+    let bytes =
+        fs::read(path).map_err(|e| anyhow::anyhow!("could not read {}: {e}", path.display()))?;
     serde_json::from_slice(&bytes)
         .map_err(|e| anyhow::anyhow!("could not parse {}: {e}", path.display()))
 }
@@ -64,8 +64,7 @@ pub fn write_manifest_file(path: &Path, entries: &[Decision]) -> anyhow::Result<
     }
     let bytes = serde_json::to_vec_pretty(entries)
         .map_err(|e| anyhow::anyhow!("could not serialize manifest: {e}"))?;
-    fs::write(path, bytes)
-        .map_err(|e| anyhow::anyhow!("could not write {}: {e}", path.display()))
+    fs::write(path, bytes).map_err(|e| anyhow::anyhow!("could not write {}: {e}", path.display()))
 }
 
 /// Human-readable name for a scope (`"build"` / `"runtime"`).

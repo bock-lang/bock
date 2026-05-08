@@ -71,14 +71,16 @@ impl BockLanguageServer {
         let uri_for_task = uri.clone();
         // The pipeline is CPU-bound — hop to a blocking thread so we don't
         // stall the LSP reactor when checking a large file.
-        let result =
-            tokio::task::spawn_blocking(move || check_document(path, content)).await;
+        let result = tokio::task::spawn_blocking(move || check_document(path, content)).await;
 
         let result = match result {
             Ok(r) => r,
             Err(err) => {
                 self.client
-                    .log_message(MessageType::ERROR, format!("check pipeline panicked: {err}"))
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("check pipeline panicked: {err}"),
+                    )
                     .await;
                 return;
             }
@@ -248,7 +250,10 @@ mod tests {
         }
 
         assert!(
-            matches!(caps.hover_provider, Some(HoverProviderCapability::Simple(true))),
+            matches!(
+                caps.hover_provider,
+                Some(HoverProviderCapability::Simple(true))
+            ),
             "hover provider must be enabled",
         );
 

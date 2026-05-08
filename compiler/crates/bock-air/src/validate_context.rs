@@ -231,29 +231,29 @@ fn validate_completeness(node: &AIRNode, strictness: StrictnessLevel, diags: &mu
     let mode_label = if is_strict { "production" } else { "standard" };
 
     match &node.kind {
-        NodeKind::Module { .. } => {
-            if node.context.is_none() {
-                if is_strict {
-                    diags.error(
-                        DiagnosticCode {
-                            prefix: 'E',
-                            number: 8014,
-                        },
-                        format!(
-                            "module is missing @context annotation (required in {mode_label} mode)"
-                        ),
-                        node.span,
-                    );
-                } else {
-                    diags.warning(
-                        DiagnosticCode {
-                            prefix: 'W',
-                            number: 8014,
-                        },
-                        format!("module is missing @context annotation (recommended in {mode_label} mode)"),
-                        node.span,
-                    );
-                }
+        NodeKind::Module { .. } if node.context.is_none() => {
+            if is_strict {
+                diags.error(
+                    DiagnosticCode {
+                        prefix: 'E',
+                        number: 8014,
+                    },
+                    format!(
+                        "module is missing @context annotation (required in {mode_label} mode)"
+                    ),
+                    node.span,
+                );
+            } else {
+                diags.warning(
+                    DiagnosticCode {
+                        prefix: 'W',
+                        number: 8014,
+                    },
+                    format!(
+                        "module is missing @context annotation (recommended in {mode_label} mode)"
+                    ),
+                    node.span,
+                );
             }
         }
         NodeKind::FnDecl {
@@ -280,33 +280,31 @@ fn validate_completeness(node: &AIRNode, strictness: StrictnessLevel, diags: &mu
             visibility: Visibility::Public,
             name,
             ..
-        } => {
-            if node.context.is_none() {
-                if is_strict {
-                    diags.error(
-                        DiagnosticCode {
-                            prefix: 'E',
-                            number: 8013,
-                        },
-                        format!(
-                            "public item `{}` is missing context annotations (required in {mode_label} mode)",
-                            name.name
-                        ),
-                        node.span,
-                    );
-                } else {
-                    diags.warning(
-                        DiagnosticCode {
-                            prefix: 'W',
-                            number: 8013,
-                        },
-                        format!(
-                            "public item `{}` is missing context annotations (recommended in {mode_label} mode)",
-                            name.name
-                        ),
-                        node.span,
-                    );
-                }
+        } if node.context.is_none() => {
+            if is_strict {
+                diags.error(
+                    DiagnosticCode {
+                        prefix: 'E',
+                        number: 8013,
+                    },
+                    format!(
+                        "public item `{}` is missing context annotations (required in {mode_label} mode)",
+                        name.name
+                    ),
+                    node.span,
+                );
+            } else {
+                diags.warning(
+                    DiagnosticCode {
+                        prefix: 'W',
+                        number: 8013,
+                    },
+                    format!(
+                        "public item `{}` is missing context annotations (recommended in {mode_label} mode)",
+                        name.name
+                    ),
+                    node.span,
+                );
             }
         }
         _ => {}

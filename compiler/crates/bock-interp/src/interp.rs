@@ -382,7 +382,10 @@ impl Interpreter {
                 method,
                 args,
                 ..
-            } => self.eval_method_call(receiver, &method.name.clone(), args).await,
+            } => {
+                self.eval_method_call(receiver, &method.name.clone(), args)
+                    .await
+            }
 
             NodeKind::FieldAccess { object, field } => {
                 self.eval_field_access(object, &field.name.clone()).await
@@ -437,7 +440,10 @@ impl Interpreter {
                 path,
                 fields,
                 spread,
-            } => self.eval_record_construct(path, fields, spread.as_deref()).await,
+            } => {
+                self.eval_record_construct(path, fields, spread.as_deref())
+                    .await
+            }
 
             NodeKind::Interpolation { parts } => self.eval_interpolation(parts).await,
 
@@ -462,12 +468,15 @@ impl Interpreter {
                 condition,
                 then_block,
                 else_block,
-            } => self.eval_if(
-                let_pattern.as_deref(),
-                condition,
-                then_block,
-                else_block.as_deref(),
-            ).await,
+            } => {
+                self.eval_if(
+                    let_pattern.as_deref(),
+                    condition,
+                    then_block,
+                    else_block.as_deref(),
+                )
+                .await
+            }
 
             NodeKind::Match { scrutinee, arms } => self.eval_match(scrutinee, arms).await,
 
@@ -503,7 +512,10 @@ impl Interpreter {
                 let_pattern,
                 condition,
                 else_block,
-            } => self.eval_guard(let_pattern.as_deref(), condition, else_block).await,
+            } => {
+                self.eval_guard(let_pattern.as_deref(), condition, else_block)
+                    .await
+            }
 
             NodeKind::Unreachable => Err(RuntimeError::Unreachable),
 
@@ -585,7 +597,8 @@ impl Interpreter {
                 // Call handler.operation(args...)
                 // The handler is a record value whose fields are the operation
                 // implementations, or a function if the effect has a single op.
-                self.dispatch_effect_op(&handler, &operation.name, arg_values).await
+                self.dispatch_effect_op(&handler, &operation.name, arg_values)
+                    .await
             }
 
             // Handling block: push handlers, execute body, pop handlers.
@@ -646,10 +659,7 @@ impl Interpreter {
                 if let Some(op_fn) = rec.fields.get(operation).cloned() {
                     return self.call_fn_value(&op_fn, args).await;
                 }
-                if let Some(result) = self
-                    .try_call_impl_method(handler, operation, args)
-                    .await?
-                {
+                if let Some(result) = self.try_call_impl_method(handler, operation, args).await? {
                     return Ok(result);
                 }
                 Err(RuntimeError::FieldNotFound {
@@ -672,7 +682,11 @@ impl Interpreter {
     /// the function registry.
     /// Call a function value with the given arguments.
     #[async_recursion]
-    pub async fn call_fn_value(&mut self, val: &Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    pub async fn call_fn_value(
+        &mut self,
+        val: &Value,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
         let fn_id = match val {
             Value::Function(fv) => fv.id,
             other => {
@@ -850,7 +864,7 @@ impl Interpreter {
                         },
                         captured: self.env.clone(),
                         is_toplevel: false,
-                is_async: false,
+                        is_async: false,
                     },
                 );
                 Ok(Value::Function(fn_val))
@@ -891,7 +905,11 @@ impl Interpreter {
     // ── Unary operator evaluation ──────────────────────────────────────────
 
     #[async_recursion]
-    async fn eval_unary_op(&mut self, op: UnaryOp, operand: &AIRNode) -> Result<Value, RuntimeError> {
+    async fn eval_unary_op(
+        &mut self,
+        op: UnaryOp,
+        operand: &AIRNode,
+    ) -> Result<Value, RuntimeError> {
         let val = self.eval_expr(operand).await?;
         match (op, val) {
             (UnaryOp::Neg, Value::Int(n)) => n
@@ -1082,7 +1100,11 @@ impl Interpreter {
     // ── Function calls ─────────────────────────────────────────────────────
 
     #[async_recursion]
-    async fn eval_call(&mut self, callee: &AIRNode, args: &[AirArg]) -> Result<Value, RuntimeError> {
+    async fn eval_call(
+        &mut self,
+        callee: &AIRNode,
+        args: &[AirArg],
+    ) -> Result<Value, RuntimeError> {
         // Check for global built-in functions first (e.g., print, println, debug).
         if let NodeKind::Identifier { name } = &callee.kind {
             if self.builtins.has_global(&name.name) {
@@ -1098,18 +1120,18 @@ impl Interpreter {
 
             // Check for effect operation dispatch: log(msg) → Logger handler
             if let Some(effect_name) = self.effect_operations.get(&name.name).cloned() {
-                let handler =
-                    self.effect_handlers
-                        .resolve(&effect_name)
-                        .cloned()
-                        .ok_or(RuntimeError::NoEffectHandler {
-                            effect: effect_name,
-                        })?;
+                let handler = self.effect_handlers.resolve(&effect_name).cloned().ok_or(
+                    RuntimeError::NoEffectHandler {
+                        effect: effect_name,
+                    },
+                )?;
                 let mut arg_values = Vec::with_capacity(args.len());
                 for arg in args {
                     arg_values.push(self.eval_expr(&arg.value).await?);
                 }
-                return self.dispatch_effect_op(&handler, &name.name, arg_values).await;
+                return self
+                    .dispatch_effect_op(&handler, &name.name, arg_values)
+                    .await;
             }
         }
 
@@ -1160,8 +1182,9 @@ impl Interpreter {
             for a in args.iter().skip(1) {
                 method_args.push(self.eval_expr(&a.value).await?);
             }
-            if let Some(result) =
-                self.try_call_impl_method(&recv, &field.name, method_args).await?
+            if let Some(result) = self
+                .try_call_impl_method(&recv, &field.name, method_args)
+                .await?
             {
                 return Ok(result);
             }
@@ -1180,9 +1203,9 @@ impl Interpreter {
             }
         };
         let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
-                for a in args {
-                    arg_values.push(self.eval_expr(&a.value).await?);
-                }
+        for a in args {
+            arg_values.push(self.eval_expr(&a.value).await?);
+        }
         let closure =
             self.fn_registry
                 .get(&fn_id)
@@ -1194,7 +1217,11 @@ impl Interpreter {
     }
 
     #[async_recursion]
-    async fn call_closure(&mut self, closure: &Closure, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    async fn call_closure(
+        &mut self,
+        closure: &Closure,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
         match &closure.body {
             ClosureBody::Air(body) => {
                 if closure.params.len() != args.len() {
@@ -1360,7 +1387,11 @@ impl Interpreter {
     // ── Function composition ───────────────────────────────────────────────
 
     #[async_recursion]
-    async fn eval_compose(&mut self, left: &AIRNode, right: &AIRNode) -> Result<Value, RuntimeError> {
+    async fn eval_compose(
+        &mut self,
+        left: &AIRNode,
+        right: &AIRNode,
+    ) -> Result<Value, RuntimeError> {
         let f = self.eval_expr(left).await?;
         let g = self.eval_expr(right).await?;
         let f_id = match &f {
@@ -1535,7 +1566,9 @@ impl Interpreter {
                 let items = items.clone();
                 let mut result = Vec::new();
                 for item in items {
-                    if let Value::Bool(true) = self.call_closure(&closure, vec![item.clone()]).await? {
+                    if let Value::Bool(true) =
+                        self.call_closure(&closure, vec![item.clone()]).await?
+                    {
                         result.push(item);
                     }
                 }
@@ -1774,11 +1807,19 @@ impl Interpreter {
                 }
                 let start = match &arg_values[0] {
                     Value::Int(i) => *i,
-                    _ => return Err(RuntimeError::TypeError("List.slice expects Int arguments".to_string())),
+                    _ => {
+                        return Err(RuntimeError::TypeError(
+                            "List.slice expects Int arguments".to_string(),
+                        ))
+                    }
                 };
                 let end = match &arg_values[1] {
                     Value::Int(i) => *i,
-                    _ => return Err(RuntimeError::TypeError("List.slice expects Int arguments".to_string())),
+                    _ => {
+                        return Err(RuntimeError::TypeError(
+                            "List.slice expects Int arguments".to_string(),
+                        ))
+                    }
                 };
                 let len = items.len() as i64;
                 let start = start.max(0).min(len) as usize;
@@ -1830,7 +1871,11 @@ impl Interpreter {
                 }
                 let idx = match &arg_values[0] {
                     Value::Int(i) => *i as usize,
-                    _ => return Err(RuntimeError::TypeError("List.insert expects Int index".to_string())),
+                    _ => {
+                        return Err(RuntimeError::TypeError(
+                            "List.insert expects Int index".to_string(),
+                        ))
+                    }
                 };
                 if idx > items.len() {
                     return Err(RuntimeError::IndexOutOfBounds {
@@ -1845,7 +1890,11 @@ impl Interpreter {
             (Value::List(items), "remove") => {
                 let idx = match arg_values.first() {
                     Some(Value::Int(i)) => *i,
-                    _ => return Err(RuntimeError::TypeError("List.remove expects Int index".to_string())),
+                    _ => {
+                        return Err(RuntimeError::TypeError(
+                            "List.remove expects Int index".to_string(),
+                        ))
+                    }
                 };
                 if idx < 0 || idx as usize >= items.len() {
                     return Err(RuntimeError::IndexOutOfBounds {
@@ -2132,8 +2181,9 @@ impl Interpreter {
             // ── Fallback: check user-defined impl methods, then free functions
             (recv_val, _) => {
                 // Try user-defined impl methods from method_table.
-                if let Some(result) =
-                    self.try_call_impl_method(recv_val, &method, arg_values.clone()).await?
+                if let Some(result) = self
+                    .try_call_impl_method(recv_val, &method, arg_values.clone())
+                    .await?
                 {
                     return Ok(result);
                 }
@@ -2225,7 +2275,11 @@ impl Interpreter {
     // ── Field access ───────────────────────────────────────────────────────
 
     #[async_recursion]
-    async fn eval_field_access(&mut self, object: &AIRNode, field: &str) -> Result<Value, RuntimeError> {
+    async fn eval_field_access(
+        &mut self,
+        object: &AIRNode,
+        field: &str,
+    ) -> Result<Value, RuntimeError> {
         let obj = self.eval_expr(object).await?;
         match obj {
             Value::Record(rv) => {
@@ -2256,7 +2310,11 @@ impl Interpreter {
     // ── Index access ───────────────────────────────────────────────────────
 
     #[async_recursion]
-    async fn eval_index(&mut self, object: &AIRNode, index: &AIRNode) -> Result<Value, RuntimeError> {
+    async fn eval_index(
+        &mut self,
+        object: &AIRNode,
+        index: &AIRNode,
+    ) -> Result<Value, RuntimeError> {
         let obj = self.eval_expr(object).await?;
         let idx = self.eval_expr(index).await?;
         match (obj, idx) {
@@ -2493,7 +2551,11 @@ impl Interpreter {
     // ── Match expression ───────────────────────────────────────────────────
 
     #[async_recursion]
-    async fn eval_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<Value, RuntimeError> {
+    async fn eval_match(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<Value, RuntimeError> {
         let val = self.eval_expr(scrutinee).await?;
 
         // M-075: Check for non-exhaustive match patterns.
@@ -2581,11 +2643,13 @@ impl Interpreter {
                     ("None", Value::Optional(None)) => true,
                     ("Ok", Value::Result(Ok(inner))) => {
                         fields.is_empty()
-                            || (fields.len() == 1 && self.try_match_pattern(&fields[0], inner).await)
+                            || (fields.len() == 1
+                                && self.try_match_pattern(&fields[0], inner).await)
                     }
                     ("Err", Value::Result(Err(inner))) => {
                         fields.is_empty()
-                            || (fields.len() == 1 && self.try_match_pattern(&fields[0], inner).await)
+                            || (fields.len() == 1
+                                && self.try_match_pattern(&fields[0], inner).await)
                     }
                     (name, Value::Enum(ev)) if ev.variant == name => {
                         match (&ev.payload, fields.len()) {
@@ -2711,7 +2775,11 @@ impl Interpreter {
 
     /// Bind `value` to `pattern` in the current scope, for use in `let`.
     #[async_recursion]
-    pub async fn bind_pattern(&mut self, pattern: &AIRNode, value: Value) -> Result<(), RuntimeError> {
+    pub async fn bind_pattern(
+        &mut self,
+        pattern: &AIRNode,
+        value: Value,
+    ) -> Result<(), RuntimeError> {
         match &pattern.kind.clone() {
             NodeKind::BindPat { name, .. } => {
                 self.env.define(name.name.clone(), value);
@@ -2861,7 +2929,9 @@ impl Interpreter {
                 }
                 IteratorNext::NeedsFilterCallback { value, func } => {
                     let fn_val = Value::Function(func);
-                    let keep = self.invoke_callback(&fn_val, std::slice::from_ref(&value)).await?;
+                    let keep = self
+                        .invoke_callback(&fn_val, std::slice::from_ref(&value))
+                        .await?;
                     if keep == Value::Bool(true) {
                         self.env.push_scope();
                         let bind_result = self.bind_pattern(pattern, value).await;
@@ -2885,7 +2955,11 @@ impl Interpreter {
     }
 
     #[async_recursion]
-    async fn eval_while(&mut self, condition: &AIRNode, body: &AIRNode) -> Result<Value, RuntimeError> {
+    async fn eval_while(
+        &mut self,
+        condition: &AIRNode,
+        body: &AIRNode,
+    ) -> Result<Value, RuntimeError> {
         loop {
             let cond = self.eval_expr(condition).await?;
             match cond {
@@ -3116,7 +3190,7 @@ mod tests {
     async fn eval_float_literal() {
         let mut interp = Interpreter::new();
         let g = gen();
-        let result = interp.eval_expr(&float_lit(&g, 3.14)).await;
+        let result = interp.eval_expr(&float_lit(&g, 3.5)).await;
         assert!(matches!(result, Ok(Value::Float(_))));
     }
 
@@ -3124,7 +3198,10 @@ mod tests {
     async fn eval_bool_literal() {
         let mut interp = Interpreter::new();
         let g = gen();
-        assert_eq!(interp.eval_expr(&bool_lit(&g, true)).await, Ok(Value::Bool(true)));
+        assert_eq!(
+            interp.eval_expr(&bool_lit(&g, true)).await,
+            Ok(Value::Bool(true))
+        );
         assert_eq!(
             interp.eval_expr(&bool_lit(&g, false)).await,
             Ok(Value::Bool(false))

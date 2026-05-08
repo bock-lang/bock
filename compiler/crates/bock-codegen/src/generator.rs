@@ -179,8 +179,7 @@ fn escape_json(s: &str) -> String {
 /// Encode mappings as a Source Map v3 "mappings" string (semicolons between
 /// generated lines, commas between segments, VLQ-encoded deltas).
 fn encode_vlq_mappings(mappings: &[SourceMapping]) -> String {
-    let mut resolved: Vec<&SourceMapping> =
-        mappings.iter().filter(|m| m.src_line > 0).collect();
+    let mut resolved: Vec<&SourceMapping> = mappings.iter().filter(|m| m.src_line > 0).collect();
     resolved.sort_by_key(|m| (m.gen_line, m.gen_col));
 
     let mut out = String::new();
@@ -222,8 +221,7 @@ fn encode_vlq_mappings(mappings: &[SourceMapping]) -> String {
 
 /// Base-64 VLQ encode a single signed integer onto `out`.
 fn vlq_encode(out: &mut String, value: i64) {
-    const BASE64: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const BASE64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut v: u64 = if value < 0 {
         ((-value as u64) << 1) | 1
     } else {
@@ -472,8 +470,10 @@ mod tests {
 
     #[test]
     fn source_map_v3_json_contains_required_fields() {
-        let mut sm = SourceMap::default();
-        sm.generated_file = "output.js".into();
+        let mut sm = SourceMap {
+            generated_file: "output.js".into(),
+            ..Default::default()
+        };
         sm.sources.push(SourceInfo {
             path: "main.bock".into(),
             content: Some("let x = 1\n".into()),

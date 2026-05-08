@@ -372,8 +372,9 @@ pub fn unify(a: &Type, b: &Type, subst: &mut Substitution) -> Result<(), TypeErr
         (Type::Error, _) | (_, Type::Error) => Ok(()),
 
         // Never is the bottom type — it unifies with anything.
-        (Type::Primitive(PrimitiveType::Never), _)
-        | (_, Type::Primitive(PrimitiveType::Never)) => Ok(()),
+        (Type::Primitive(PrimitiveType::Never), _) | (_, Type::Primitive(PrimitiveType::Never)) => {
+            Ok(())
+        }
 
         // Two identical types trivially unify.
         _ if a == b => Ok(()),

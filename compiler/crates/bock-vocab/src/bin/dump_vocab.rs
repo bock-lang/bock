@@ -66,7 +66,9 @@ fn main() -> ExitCode {
         }
         None => {
             let mut stdout = io::stdout().lock();
-            if let Err(e) = stdout.write_all(json.as_bytes()).and_then(|()| stdout.write_all(b"\n"))
+            if let Err(e) = stdout
+                .write_all(json.as_bytes())
+                .and_then(|()| stdout.write_all(b"\n"))
             {
                 eprintln!("bock-dump-vocab: stdout: {e}");
                 return ExitCode::from(1);

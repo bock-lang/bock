@@ -10,8 +10,8 @@ use std::collections::HashMap;
 
 use bock_ai::{
     AiConfig, AiError, AiProvider, GenerateRequest, ModuleContext, OpenAiCompatProvider,
-    OptimizationHint, OptimizeRequest, RepairRequest, SelectContext, SelectOption,
-    SelectRequest, TargetProfile,
+    OptimizationHint, OptimizeRequest, RepairRequest, SelectContext, SelectOption, SelectRequest,
+    TargetProfile,
 };
 use bock_air::{AIRNode, NodeIdGen, NodeKind};
 use bock_errors::Span;

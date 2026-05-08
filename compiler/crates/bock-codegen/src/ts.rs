@@ -904,8 +904,7 @@ impl TsEmitCtx {
                         name.name,
                         comp_names.join(" + ")
                     ));
-                    self.composite_effects
-                        .insert(name.name.clone(), comp_names);
+                    self.composite_effects.insert(name.name.clone(), comp_names);
                     return Ok(());
                 }
                 // Record effect operations for Call → handler.op rewriting.
@@ -987,8 +986,7 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::ModuleHandle { effect, handler } => {
-                let effect_name =
-                    effect.segments.last().map_or("effect", |s| s.name.as_str());
+                let effect_name = effect.segments.last().map_or("effect", |s| s.name.as_str());
                 let var_name = format!("__{}", to_camel_case(effect_name));
                 let type_name = effect_name;
                 let ind = self.indent_str();
@@ -1472,8 +1470,11 @@ impl TsEmitCtx {
                 self.indent += 1;
                 let old_handler_vars = self.current_handler_vars.clone();
                 for h in handlers {
-                    let effect_name =
-                        h.effect.segments.last().map_or("effect", |s| s.name.as_str());
+                    let effect_name = h
+                        .effect
+                        .segments
+                        .last()
+                        .map_or("effect", |s| s.name.as_str());
                     let var_name = format!("__{}", to_camel_case(effect_name));
                     let type_name = effect_name;
                     let ind = self.indent_str();
@@ -1740,11 +1741,7 @@ impl TsEmitCtx {
                 fields,
                 spread,
             } => {
-                let type_name = path
-                    .segments
-                    .last()
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("");
+                let type_name = path.segments.last().map(|s| s.name.as_str()).unwrap_or("");
                 let is_class = self.record_names.contains(type_name);
                 if is_class {
                     let _ = write!(self.buf, "new {type_name}(");

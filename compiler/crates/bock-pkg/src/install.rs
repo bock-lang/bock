@@ -174,11 +174,8 @@ fn resolve_and_fetch(
     };
 
     if options.offline {
-        let (version, tarball_path, checksum) = resolve_from_cache(
-            registry.cache_dir(),
-            name,
-            req.as_ref(),
-        )?;
+        let (version, tarball_path, checksum) =
+            resolve_from_cache(registry.cache_dir(), name, req.as_ref())?;
         return Ok(Resolved {
             version,
             tarball_path,
@@ -326,17 +323,14 @@ fn update_lockfile(
                 }
                 match spec {
                     DependencySpec::Simple(v) => Some((dep_name.clone(), v.clone())),
-                    DependencySpec::Detailed(d) => d
-                        .version
-                        .as_ref()
-                        .map(|v| (dep_name.clone(), v.clone())),
+                    DependencySpec::Detailed(d) => {
+                        d.version.as_ref().map(|v| (dep_name.clone(), v.clone()))
+                    }
                 }
             })
             .collect(),
     });
-    lockfile
-        .packages
-        .sort_by(|a, b| a.name.cmp(&b.name));
+    lockfile.packages.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(lockfile)
 }
 
@@ -393,7 +387,10 @@ mod tests {
             std::fs::read_to_string(target.join("src/main.bock")).unwrap(),
             "module main"
         );
-        assert_eq!(std::fs::read_to_string(target.join("README.md")).unwrap(), "hi");
+        assert_eq!(
+            std::fs::read_to_string(target.join("README.md")).unwrap(),
+            "hi"
+        );
     }
 
     #[test]
@@ -428,13 +425,8 @@ mod tests {
         let cache_dir = project.path().join(CACHE_SUBDIR);
         let registry = NetworkRegistry::new(server.url(), &cache_dir).unwrap();
 
-        let installed = install_package(
-            project.path(),
-            &registry,
-            "foo",
-            &InstallOptions::default(),
-        )
-        .unwrap();
+        let installed =
+            install_package(project.path(), &registry, "foo", &InstallOptions::default()).unwrap();
 
         assert_eq!(installed.version.to_string(), "1.2.0");
         assert!(installed.install_dir.ends_with(".bock/packages/foo/1.2.0"));
@@ -444,8 +436,7 @@ mod tests {
         );
 
         // Manifest updated.
-        let manifest =
-            Manifest::from_file(&project.path().join(commands::MANIFEST_FILE)).unwrap();
+        let manifest = Manifest::from_file(&project.path().join(commands::MANIFEST_FILE)).unwrap();
         assert_eq!(manifest.dependencies["foo"].version_req(), Some("^1.2.0"));
 
         // Lockfile written with checksum and source.
@@ -499,8 +490,7 @@ mod tests {
             version_req: Some("^1.0".to_string()),
             offline: false,
         };
-        let installed =
-            install_package(project.path(), &registry, "foo", &options).unwrap();
+        let installed = install_package(project.path(), &registry, "foo", &options).unwrap();
 
         assert_eq!(installed.version.to_string(), "1.5.0");
     }
@@ -525,8 +515,7 @@ mod tests {
             offline: true,
             version_req: None,
         };
-        let installed =
-            install_package(project.path(), &registry, "foo", &options).unwrap();
+        let installed = install_package(project.path(), &registry, "foo", &options).unwrap();
 
         assert_eq!(installed.version.to_string(), "1.4.0");
         assert_eq!(installed.checksum, checksum);
@@ -545,7 +534,10 @@ mod tests {
             project.path(),
             &registry,
             "foo",
-            &InstallOptions { offline: true, version_req: None },
+            &InstallOptions {
+                offline: true,
+                version_req: None,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, PkgError::PackageNotFound(_)));
@@ -567,7 +559,12 @@ mod tests {
 
     #[test]
     fn pick_version_selects_highest_matching() {
-        let versions = vec!["0.9.0".into(), "1.0.0".into(), "1.2.3".into(), "2.0.0".into()];
+        let versions = vec![
+            "0.9.0".into(),
+            "1.0.0".into(),
+            "1.2.3".into(),
+            "2.0.0".into(),
+        ];
         let req = VersionReq::parse("^1.0").unwrap();
         let picked = pick_version(&versions, Some(&req)).unwrap();
         assert_eq!(picked.as_deref(), Some("1.2.3"));
@@ -617,12 +614,6 @@ mod tests {
         let registry = NetworkRegistry::new(server.url(), &cache_dir)
             .unwrap()
             .with_auth_token(Some("secret-xyz".to_string()));
-        install_package(
-            project.path(),
-            &registry,
-            "foo",
-            &InstallOptions::default(),
-        )
-        .unwrap();
+        install_package(project.path(), &registry, "foo", &InstallOptions::default()).unwrap();
     }
 }

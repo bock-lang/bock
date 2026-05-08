@@ -9,7 +9,7 @@
 //!
 //! Per §17.8, cached responses are treated as **pinned** — the
 //! `from_cache: true` signal returned by the
-//! [`*_cached`](Self::generate_cached) inherent methods lets the
+//! `*_cached` inherent methods lets the
 //! decision-recording layer set [`Decision::pinned`](
 //! crate::decision::Decision::pinned) accordingly. The plain
 //! [`AiProvider`] impl drops the signal so the wrapper is a drop-in
@@ -128,10 +128,7 @@ impl<P: AiProvider> CachingProvider<P> {
 
 #[async_trait]
 impl<P: AiProvider> AiProvider for CachingProvider<P> {
-    async fn generate(
-        &self,
-        request: &GenerateRequest,
-    ) -> Result<GenerateResponse, AiError> {
+    async fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, AiError> {
         self.generate_cached(request).await.map(|(r, _)| r)
     }
 
@@ -139,10 +136,7 @@ impl<P: AiProvider> AiProvider for CachingProvider<P> {
         self.repair_cached(request).await.map(|(r, _)| r)
     }
 
-    async fn optimize(
-        &self,
-        request: &OptimizeRequest,
-    ) -> Result<OptimizeResponse, AiError> {
+    async fn optimize(&self, request: &OptimizeRequest) -> Result<OptimizeResponse, AiError> {
         self.optimize_cached(request).await.map(|(r, _)| r)
     }
 

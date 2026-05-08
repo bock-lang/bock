@@ -27,9 +27,9 @@ use crate::config::AiConfig;
 use crate::error::AiError;
 use crate::provider::{validate_select_response, AiProvider};
 use crate::request::{
-    Alternative, CandidateRule, GenerateRequest, GenerateResponse, ModuleContext,
-    OptimizationHint, OptimizeRequest, OptimizeResponse, RepairRequest, RepairResponse,
-    SelectContext, SelectRequest, SelectResponse, TargetProfile,
+    Alternative, CandidateRule, GenerateRequest, GenerateResponse, ModuleContext, OptimizationHint,
+    OptimizeRequest, OptimizeResponse, RepairRequest, RepairResponse, SelectContext, SelectRequest,
+    SelectResponse, TargetProfile,
 };
 use bock_air::AIRNode;
 
@@ -82,9 +82,7 @@ impl AnthropicProvider {
         let client = Client::builder()
             .timeout(StdDuration::from_secs(config.timeout_seconds.max(1)))
             .build()
-            .map_err(|e| {
-                AiError::ProviderError(format!("failed to build reqwest client: {e}"))
-            })?;
+            .map_err(|e| AiError::ProviderError(format!("failed to build reqwest client: {e}")))?;
 
         Ok(Self {
             config,
@@ -127,9 +125,9 @@ impl AnthropicProvider {
 
         let status = resp.status();
         if status.is_success() {
-            resp.json::<JsonValue>().await.map_err(|e| {
-                AiError::InvalidResponse(format!("response body not JSON: {e}"))
-            })
+            resp.json::<JsonValue>()
+                .await
+                .map_err(|e| AiError::InvalidResponse(format!("response body not JSON: {e}")))
         } else {
             let body_text = resp.text().await.unwrap_or_default();
             Err(map_http_status(status, &body_text))
@@ -150,10 +148,7 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl AiProvider for AnthropicProvider {
-    async fn generate(
-        &self,
-        request: &GenerateRequest,
-    ) -> Result<GenerateResponse, AiError> {
+    async fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, AiError> {
         let (system, user) = build_generate_messages(request);
         let value = self.send(&self.base_body(&system, &user)).await?;
         let blocks = extract_content_blocks(&value)?;
@@ -167,10 +162,7 @@ impl AiProvider for AnthropicProvider {
         parse_repair_blocks(&blocks)
     }
 
-    async fn optimize(
-        &self,
-        request: &OptimizeRequest,
-    ) -> Result<OptimizeResponse, AiError> {
+    async fn optimize(&self, request: &OptimizeRequest) -> Result<OptimizeResponse, AiError> {
         let (system, user) = build_optimize_messages(request);
         let value = self.send(&self.base_body(&system, &user)).await?;
         let blocks = extract_content_blocks(&value)?;
@@ -501,9 +493,10 @@ struct ContentBlocks {
 }
 
 fn extract_content_blocks(resp: &JsonValue) -> Result<ContentBlocks, AiError> {
-    let arr = resp.get("content").and_then(|c| c.as_array()).ok_or_else(|| {
-        AiError::InvalidResponse("response missing content array".into())
-    })?;
+    let arr = resp
+        .get("content")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| AiError::InvalidResponse("response missing content array".into()))?;
 
     let mut blocks = ContentBlocks::default();
     for block in arr {
@@ -539,9 +532,7 @@ fn extract_content_blocks(resp: &JsonValue) -> Result<ContentBlocks, AiError> {
 fn parse_generate_blocks(blocks: &ContentBlocks) -> Result<GenerateResponse, AiError> {
     let (code, tail) = split_code_and_tail(&blocks.text);
     let code = code.ok_or_else(|| {
-        AiError::InvalidResponse(
-            "generate response missing markdown code block".into(),
-        )
+        AiError::InvalidResponse("generate response missing markdown code block".into())
     })?;
     let confidence = extract_confidence(tail.as_ref());
     let reasoning = combine_reasoning(&blocks.thinking, tail.as_ref());
@@ -557,9 +548,7 @@ fn parse_generate_blocks(blocks: &ContentBlocks) -> Result<GenerateResponse, AiE
 fn parse_optimize_blocks(blocks: &ContentBlocks) -> Result<OptimizeResponse, AiError> {
     let (code, tail) = split_code_and_tail(&blocks.text);
     let code = code.ok_or_else(|| {
-        AiError::InvalidResponse(
-            "optimize response missing markdown code block".into(),
-        )
+        AiError::InvalidResponse("optimize response missing markdown code block".into())
     })?;
     let confidence = extract_confidence(tail.as_ref());
     let reasoning = combine_reasoning(&blocks.thinking, tail.as_ref());
@@ -586,9 +575,7 @@ fn parse_repair_blocks(blocks: &ContentBlocks) -> Result<RepairResponse, AiError
     let fixed_code = json
         .get("fixed_code")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            AiError::InvalidResponse("repair response missing 'fixed_code'".into())
-        })?
+        .ok_or_else(|| AiError::InvalidResponse("repair response missing 'fixed_code'".into()))?
         .to_string();
     let confidence = extract_confidence(Some(&json));
     let reasoning = combine_reasoning(&blocks.thinking, Some(&json));
@@ -614,9 +601,7 @@ fn parse_select_blocks(blocks: &ContentBlocks) -> Result<SelectResponse, AiError
     let selected_id = input
         .get("selected_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            AiError::InvalidResponse("select tool_use missing 'selected_id'".into())
-        })?
+        .ok_or_else(|| AiError::InvalidResponse("select tool_use missing 'selected_id'".into()))?
         .to_string();
     let confidence = extract_confidence(Some(input));
     let reasoning = combine_reasoning(&blocks.thinking, Some(input));
@@ -728,9 +713,8 @@ fn parse_json_object(content: &str) -> Result<JsonValue, AiError> {
             }
         }
     }
-    extract_first_json_object(trimmed).ok_or_else(|| {
-        AiError::InvalidResponse("response did not contain a JSON object".into())
-    })
+    extract_first_json_object(trimmed)
+        .ok_or_else(|| AiError::InvalidResponse("response did not contain a JSON object".into()))
 }
 
 fn extract_first_json_object(s: &str) -> Option<JsonValue> {
@@ -817,10 +801,7 @@ mod tests {
 
     #[test]
     fn new_rejects_missing_api_key() {
-        let cfg = remote_config(
-            "claude-opus-4-7",
-            "__BOCK_AI_ANTHROPIC_DEFINITELY_UNSET__",
-        );
+        let cfg = remote_config("claude-opus-4-7", "__BOCK_AI_ANTHROPIC_DEFINITELY_UNSET__");
         let err = AnthropicProvider::new(cfg).unwrap_err();
         assert!(matches!(err, AiError::Auth(_)));
     }
@@ -965,7 +946,10 @@ mod tests {
             },
         ];
         let schema = select_tool_schema(&options);
-        assert_eq!(schema.get("name").and_then(|v| v.as_str()), Some(SELECT_TOOL_NAME));
+        assert_eq!(
+            schema.get("name").and_then(|v| v.as_str()),
+            Some(SELECT_TOOL_NAME)
+        );
 
         let enum_vals = schema
             .pointer("/input_schema/properties/selected_id/enum")
@@ -978,9 +962,7 @@ mod tests {
             .pointer("/input_schema/required")
             .and_then(|v| v.as_array())
             .expect("required present");
-        assert!(required
-            .iter()
-            .any(|v| v.as_str() == Some("selected_id")));
+        assert!(required.iter().any(|v| v.as_str() == Some("selected_id")));
     }
 
     // ── Response parsing: content blocks ───────────────────────────────
@@ -1212,12 +1194,8 @@ mod tests {
             combine_reasoning("", Some(&json!({"reasoning": "json"}))).as_deref(),
             Some("json")
         );
-        assert_eq!(
-            combine_reasoning("think", None).as_deref(),
-            Some("think")
-        );
-        let merged =
-            combine_reasoning("think", Some(&json!({"reasoning": "json"}))).unwrap();
+        assert_eq!(combine_reasoning("think", None).as_deref(), Some("think"));
+        let merged = combine_reasoning("think", Some(&json!({"reasoning": "json"}))).unwrap();
         assert!(merged.contains("think"));
         assert!(merged.contains("json"));
     }

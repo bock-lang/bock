@@ -146,10 +146,7 @@ impl ManifestWriter {
     ///
     /// # Errors
     /// Returns [`ManifestError`] on I/O or parse failure.
-    pub fn find_by_id(
-        &self,
-        id: &str,
-    ) -> Result<Option<(Decision, ManifestScope)>, ManifestError> {
+    pub fn find_by_id(&self, id: &str) -> Result<Option<(Decision, ManifestScope)>, ManifestError> {
         for d in self.read_build()? {
             if d.id == id {
                 return Ok(Some((d, ManifestScope::Build)));

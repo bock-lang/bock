@@ -2,7 +2,7 @@
 //!
 //! The interpreter's expression evaluator uses [`TraitDispatch`] to resolve
 //! operators, `for..in`, and string interpolation to the corresponding trait
-//! method names registered in the [`BuiltinRegistry`].
+//! method names registered in the [`bock_interp::BuiltinRegistry`].
 //!
 //! ## Trait-to-Language-Feature Mapping
 //!

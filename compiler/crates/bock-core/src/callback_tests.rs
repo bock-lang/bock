@@ -6,8 +6,8 @@
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     use bock_air::{AIRNode, AirArg, NodeIdGen, NodeKind};
     use bock_ast::{BinOp, Ident, Literal};

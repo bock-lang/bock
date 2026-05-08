@@ -242,10 +242,8 @@ fn pin_bare_id_sets_pinned_true_when_unambiguous() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let content = fs::read_to_string(
-        dir.path().join(".bock/decisions/build/src/api.bock.json"),
-    )
-    .unwrap();
+    let content =
+        fs::read_to_string(dir.path().join(".bock/decisions/build/src/api.bock.json")).unwrap();
     assert!(content.contains("\"pinned\": true"));
     assert!(content.contains("\"reviewed\""));
 }
@@ -284,10 +282,8 @@ fn pin_all_runtime_pins_only_runtime_decisions() {
         build.contains("\"pinned\": false"),
         "build must stay unpinned: {build}"
     );
-    let runtime = fs::read_to_string(
-        dir.path().join(".bock/decisions/runtime/src/api.bock.json"),
-    )
-    .unwrap();
+    let runtime =
+        fs::read_to_string(dir.path().join(".bock/decisions/runtime/src/api.bock.json")).unwrap();
     assert!(runtime.contains("\"pinned\": true"));
 }
 
@@ -297,9 +293,7 @@ fn pin_all_in_module_only_matches_substring() {
     touch_project(dir.path());
     seed_build_decision(dir.path(), "api1", false);
     // A second build decision in a different module.
-    let other = dir
-        .path()
-        .join(".bock/decisions/build/src/other.bock.json");
+    let other = dir.path().join(".bock/decisions/build/src/other.bock.json");
     fs::create_dir_all(other.parent().unwrap()).unwrap();
     fs::write(
         &other,
@@ -356,10 +350,8 @@ fn unpin_clears_pin_metadata() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let content = fs::read_to_string(
-        dir.path().join(".bock/decisions/build/src/api.bock.json"),
-    )
-    .unwrap();
+    let content =
+        fs::read_to_string(dir.path().join(".bock/decisions/build/src/api.bock.json")).unwrap();
     assert!(content.contains("\"pinned\": false"));
 }
 
@@ -381,10 +373,8 @@ fn override_inline_choice_replaces_and_auto_pins() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let content = fs::read_to_string(
-        dir.path().join(".bock/decisions/build/src/api.bock.json"),
-    )
-    .unwrap();
+    let content =
+        fs::read_to_string(dir.path().join(".bock/decisions/build/src/api.bock.json")).unwrap();
     assert!(content.contains("\"choice\": \"new-code-here\""));
     assert!(content.contains("\"pinned\": true"));
 }
@@ -413,10 +403,8 @@ fn override_from_file_reads_file_contents() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let content = fs::read_to_string(
-        dir.path().join(".bock/decisions/build/src/api.bock.json"),
-    )
-    .unwrap();
+    let content =
+        fs::read_to_string(dir.path().join(".bock/decisions/build/src/api.bock.json")).unwrap();
     // The file body is escaped with \n in JSON form.
     assert!(content.contains("lines\\nof\\ncode"));
     assert!(content.contains("\"pinned\": true"));
