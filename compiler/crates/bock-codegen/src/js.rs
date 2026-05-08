@@ -369,9 +369,7 @@ impl EmitCtx {
             ("Duration", "seconds") => format!("(({}) * 1000000000)", arg0()),
             ("Duration", "minutes") => format!("(({}) * 60000000000)", arg0()),
             ("Duration", "hours") => format!("(({}) * 3600000000000)", arg0()),
-            ("Instant", "now") => {
-                "(performance.now() * 1000000)".to_string()
-            }
+            ("Instant", "now") => "(performance.now() * 1000000)".to_string(),
             _ => return Ok(false),
         };
         self.buf.push_str(&code);
@@ -534,10 +532,7 @@ impl EmitCtx {
                         fields.iter().map(|f| f.name.name.as_str()).collect();
                     self.writeln(&format!("class {} {{", name.name));
                     self.indent += 1;
-                    self.writeln(&format!(
-                        "constructor({{ {} }}) {{",
-                        field_names.join(", "),
-                    ));
+                    self.writeln(&format!("constructor({{ {} }}) {{", field_names.join(", "),));
                     self.indent += 1;
                     for f in &field_names {
                         self.writeln(&format!("this.{f} = {f};"));
@@ -684,16 +679,12 @@ impl EmitCtx {
                         name.name,
                         comp_names.join(" + ")
                     ));
-                    self.composite_effects
-                        .insert(name.name.clone(), comp_names);
+                    self.composite_effects.insert(name.name.clone(), comp_names);
                     return Ok(());
                 }
                 // Record effect operations for Call → handler.op rewriting.
                 for op in operations {
-                    if let NodeKind::FnDecl {
-                        name: op_name, ..
-                    } = &op.kind
-                    {
+                    if let NodeKind::FnDecl { name: op_name, .. } = &op.kind {
                         self.effect_ops
                             .insert(op_name.name.clone(), name.name.clone());
                     }
@@ -702,10 +693,7 @@ impl EmitCtx {
                 self.writeln(&format!("class {} {{", name.name));
                 self.indent += 1;
                 for op in operations {
-                    if let NodeKind::FnDecl {
-                        name, params, ..
-                    } = &op.kind
-                    {
+                    if let NodeKind::FnDecl { name, params, .. } = &op.kind {
                         let param_names = self.collect_param_names(params);
                         self.writeln(&format!(
                             "{}({}) {{",
@@ -735,8 +723,7 @@ impl EmitCtx {
                 Ok(())
             }
             NodeKind::ModuleHandle { effect, handler } => {
-                let effect_name =
-                    effect.segments.last().map_or("effect", |s| s.name.as_str());
+                let effect_name = effect.segments.last().map_or("effect", |s| s.name.as_str());
                 let var_name = format!("__{}", to_camel_case(effect_name));
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}const {var_name} = ");
@@ -1157,8 +1144,11 @@ impl EmitCtx {
                 self.indent += 1;
                 let old_handler_vars = self.current_handler_vars.clone();
                 for h in handlers {
-                    let effect_name =
-                        h.effect.segments.last().map_or("effect", |s| s.name.as_str());
+                    let effect_name = h
+                        .effect
+                        .segments
+                        .last()
+                        .map_or("effect", |s| s.name.as_str());
                     let var_name = format!("__{}", to_camel_case(effect_name));
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}const {var_name} = ");
@@ -1434,11 +1424,7 @@ impl EmitCtx {
                 fields,
                 spread,
             } => {
-                let type_name = path
-                    .segments
-                    .last()
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("");
+                let type_name = path.segments.last().map(|s| s.name.as_str()).unwrap_or("");
                 let is_class = self.record_names.contains(type_name);
                 if is_class {
                     let _ = write!(self.buf, "new {type_name}(");
@@ -3828,10 +3814,7 @@ mod tests {
                             is_async: false,
                             name: ident("log"),
                             generic_params: vec![],
-                            params: vec![
-                                param_node(3, "level"),
-                                param_node(4, "msg"),
-                            ],
+                            params: vec![param_node(3, "level"), param_node(4, "msg")],
                             return_type: None,
                             effect_clause: vec![],
                             where_clause: vec![],
@@ -4177,7 +4160,8 @@ mod tests {
             out.contains("class ConsoleLogger {}"),
             "empty record should be an empty class, got: {out}"
         );
-        let _ = AirHandlerPair { // keep import used
+        let _ = AirHandlerPair {
+            // keep import used
             effect: type_path(&["X"]),
             handler: Box::new(id_node(0, "x")),
         };

@@ -6,15 +6,18 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   append:
     name: append PR to changelog
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           token: ${{ secrets.CHANGELOG_BOT_TOKEN }}
@@ -43,10 +46,12 @@ jobs:
           PY
 
       - name: Commit
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           git config user.name "bock-changelog-bot"
           git config user.email "bot@bocklang.org"
           git add CHANGELOG.md
           git diff --cached --quiet && exit 0
-          git commit -m "changelog: PR #${{ github.event.pull_request.number }}"
+          git commit -m "changelog: PR #${PR_NUMBER}"
           git push

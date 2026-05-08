@@ -1,7 +1,7 @@
 //! Optional type methods and trait implementations.
 
-use futures::future::BoxFuture;
 use bock_interp::{BockString, BuiltinRegistry, CallbackInvoker, RuntimeError, TypeTag, Value};
+use futures::future::BoxFuture;
 
 /// Register all Optional methods and trait implementations.
 pub fn register(registry: &mut BuiltinRegistry) {
@@ -88,18 +88,21 @@ fn optional_unwrap_or(args: &[Value]) -> Result<Value, RuntimeError> {
 
 // ─── Higher-order methods ─────────────────────────────────────────────────────
 
-fn optional_map<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn optional_map<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let opt = expect_optional(args, 0, "map")?;
-    let f = expect_fn(args, 1, "map")?;
-    match opt {
-        Some(inner) => {
-            let result = invoker.invoke(f, &[*inner]).await?;
-            Ok(Value::Optional(Some(Box::new(result))))
+        let opt = expect_optional(args, 0, "map")?;
+        let f = expect_fn(args, 1, "map")?;
+        match opt {
+            Some(inner) => {
+                let result = invoker.invoke(f, &[*inner]).await?;
+                Ok(Value::Optional(Some(Box::new(result))))
+            }
+            None => Ok(Value::Optional(None)),
         }
-        None => Ok(Value::Optional(None)),
-    }
-})
+    })
 }
 
 fn optional_flat_map<'a>(
@@ -107,21 +110,21 @@ fn optional_flat_map<'a>(
     invoker: &'a mut dyn CallbackInvoker,
 ) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let opt = expect_optional(args, 0, "flat_map")?;
-    let f = expect_fn(args, 1, "flat_map")?;
-    match opt {
-        Some(inner) => {
-            let result = invoker.invoke(f, &[*inner]).await?;
-            match result {
-                Value::Optional(_) => Ok(result),
-                other => Err(RuntimeError::TypeError(format!(
-                    "Optional.flat_map callback must return Optional, got {other}"
-                ))),
+        let opt = expect_optional(args, 0, "flat_map")?;
+        let f = expect_fn(args, 1, "flat_map")?;
+        match opt {
+            Some(inner) => {
+                let result = invoker.invoke(f, &[*inner]).await?;
+                match result {
+                    Value::Optional(_) => Ok(result),
+                    other => Err(RuntimeError::TypeError(format!(
+                        "Optional.flat_map callback must return Optional, got {other}"
+                    ))),
+                }
             }
+            None => Ok(Value::Optional(None)),
         }
-        None => Ok(Value::Optional(None)),
-    }
-})
+    })
 }
 
 // ─── Trait implementations ────────────────────────────────────────────────────

@@ -173,7 +173,9 @@ fn duration_equals(args: &[Value]) -> Result<Value, RuntimeError> {
 
 fn duration_display(args: &[Value]) -> Result<Value, RuntimeError> {
     let d = expect_duration(args, 0, "display")?;
-    Ok(Value::String(BockString::new(Value::Duration(d).to_string())))
+    Ok(Value::String(BockString::new(
+        Value::Duration(d).to_string(),
+    )))
 }
 
 fn duration_hash_code(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -321,7 +323,11 @@ mod tests {
     fn as_millis() {
         let r = reg();
         let result = r
-            .call(TypeTag::Duration, "as_millis", &[Value::Duration(1_500_000_000)])
+            .call(
+                TypeTag::Duration,
+                "as_millis",
+                &[Value::Duration(1_500_000_000)],
+            )
             .unwrap()
             .unwrap();
         assert_eq!(result, Value::Int(1500));

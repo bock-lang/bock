@@ -751,8 +751,7 @@ impl GoEmitCtx {
                         name.name,
                         comp_names.join(" + ")
                     ));
-                    self.composite_effects
-                        .insert(name.name.clone(), comp_names);
+                    self.composite_effects.insert(name.name.clone(), comp_names);
                     return Ok(());
                 }
                 // Record effect operations for Call → handler.op rewriting.
@@ -827,8 +826,7 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::ModuleHandle { effect, handler } => {
-                let effect_name =
-                    effect.segments.last().map_or("effect", |s| s.name.as_str());
+                let effect_name = effect.segments.last().map_or("effect", |s| s.name.as_str());
                 let var_name = format!("__{}", to_camel_case(effect_name));
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}var {var_name} {effect_name} = ");
@@ -1030,10 +1028,7 @@ impl GoEmitCtx {
             .chain(effects.iter().map(|e| {
                 // Effects params look like `name EffectType`; recover the
                 // name before the first space.
-                e.split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string()
+                e.split_whitespace().next().unwrap_or("").to_string()
             }))
             .collect();
         let call_site = format!("{sync_fn_name}({})", call_args.join(", "));
@@ -1396,8 +1391,11 @@ impl GoEmitCtx {
                 let old_handler_vars = self.current_handler_vars.clone();
                 let mut new_var_names = Vec::with_capacity(handlers.len());
                 for h in handlers {
-                    let effect_name =
-                        h.effect.segments.last().map_or("effect", |s| s.name.as_str());
+                    let effect_name = h
+                        .effect
+                        .segments
+                        .last()
+                        .map_or("effect", |s| s.name.as_str());
                     let var_name = format!("__{}", to_camel_case(effect_name));
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}{var_name} := ");
@@ -1571,12 +1569,8 @@ impl GoEmitCtx {
                         if let Some(handler_var) =
                             self.current_handler_vars.get(&effect_name).cloned()
                         {
-                            let _ = write!(
-                                self.buf,
-                                "{}.{}",
-                                handler_var,
-                                to_pascal_case(&name.name)
-                            );
+                            let _ =
+                                write!(self.buf, "{}.{}", handler_var, to_pascal_case(&name.name));
                             self.buf.push('(');
                             for (i, arg) in args.iter().enumerate() {
                                 if i > 0 {

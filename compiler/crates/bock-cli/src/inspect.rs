@@ -14,9 +14,7 @@
 
 use std::path::Path;
 
-use bock_ai::{
-    AiCache, Decision, DecisionType, ManifestScope, ManifestWriter, Rule, RuleCache,
-};
+use bock_ai::{AiCache, Decision, DecisionType, ManifestScope, ManifestWriter, Rule, RuleCache};
 
 use crate::decision_io::{display_id, find_project_root, scope_name};
 
@@ -250,11 +248,7 @@ fn print_decision_detail(scope: ManifestScope, d: &Decision) {
         display_id(scope, &d.id)
     );
     println!("{header}");
-    println!(
-        "  {:<14} {}",
-        "type:",
-        decision_type_name(d.decision_type)
-    );
+    println!("  {:<14} {}", "type:", decision_type_name(d.decision_type));
     println!("  {:<14} {}", "module:", d.module.display());
     if let Some(t) = &d.target {
         println!("  {:<14} {}", "target:", t);

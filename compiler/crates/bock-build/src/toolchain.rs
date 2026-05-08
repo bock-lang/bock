@@ -106,11 +106,7 @@ impl fmt::Display for ToolchainError {
                 stderr,
                 exit_code,
             } => {
-                let diagnostic = if !stderr.is_empty() {
-                    stderr
-                } else {
-                    stdout
-                };
+                let diagnostic = if !stderr.is_empty() { stderr } else { stdout };
                 write!(
                     f,
                     "Compilation failed for target '{target_id}'.\n\

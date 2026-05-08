@@ -1,7 +1,7 @@
 //! Result type methods and trait implementations.
 
-use futures::future::BoxFuture;
 use bock_interp::{BockString, BuiltinRegistry, CallbackInvoker, RuntimeError, TypeTag, Value};
+use futures::future::BoxFuture;
 
 /// Register all Result methods and trait implementations.
 pub fn register(registry: &mut BuiltinRegistry) {
@@ -90,18 +90,21 @@ fn result_unwrap_or(args: &[Value]) -> Result<Value, RuntimeError> {
 
 // ─── Higher-order methods ─────────────────────────────────────────────────────
 
-fn result_map<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn result_map<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let res = expect_result(args, 0, "map")?;
-    let f = expect_fn(args, 1, "map")?;
-    match res {
-        Ok(inner) => {
-            let mapped = invoker.invoke(f, &[*inner]).await?;
-            Ok(Value::Result(Ok(Box::new(mapped))))
+        let res = expect_result(args, 0, "map")?;
+        let f = expect_fn(args, 1, "map")?;
+        match res {
+            Ok(inner) => {
+                let mapped = invoker.invoke(f, &[*inner]).await?;
+                Ok(Value::Result(Ok(Box::new(mapped))))
+            }
+            Err(e) => Ok(Value::Result(Err(e))),
         }
-        Err(e) => Ok(Value::Result(Err(e))),
-    }
-})
+    })
 }
 
 fn result_map_err<'a>(
@@ -109,16 +112,16 @@ fn result_map_err<'a>(
     invoker: &'a mut dyn CallbackInvoker,
 ) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let res = expect_result(args, 0, "map_err")?;
-    let f = expect_fn(args, 1, "map_err")?;
-    match res {
-        Ok(v) => Ok(Value::Result(Ok(v))),
-        Err(inner) => {
-            let mapped = invoker.invoke(f, &[*inner]).await?;
-            Ok(Value::Result(Err(Box::new(mapped))))
+        let res = expect_result(args, 0, "map_err")?;
+        let f = expect_fn(args, 1, "map_err")?;
+        match res {
+            Ok(v) => Ok(Value::Result(Ok(v))),
+            Err(inner) => {
+                let mapped = invoker.invoke(f, &[*inner]).await?;
+                Ok(Value::Result(Err(Box::new(mapped))))
+            }
         }
-    }
-})
+    })
 }
 
 // ─── Trait implementations ────────────────────────────────────────────────────

@@ -4,7 +4,7 @@
 //! 1. Discover sources
 //! 2. Lex + parse all files
 //! 3. Build dependency graph → topological sort
-//! 4. Compile in dependency order (with [`ModuleRegistry`] for cross-file imports)
+//! 4. Compile in dependency order (with [`bock_air::registry::ModuleRegistry`] for cross-file imports)
 //! 5. Code-generate → (optionally) invoke target compiler
 
 use std::collections::HashMap;
@@ -57,7 +57,7 @@ pub struct BuildOptions {
 /// Run the `bock build` command.
 ///
 /// Uses the multi-file pipeline: parse all → dependency sort → compile in order
-/// with cross-file name resolution via [`ModuleRegistry`], then codegen.
+/// with cross-file name resolution via [`bock_air::registry::ModuleRegistry`], then codegen.
 pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
     let total_start = Instant::now();
 
@@ -150,8 +150,7 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
         ) {
             Ok((air_module, checker)) => {
                 // Register exports for downstream modules
-                let exports =
-                    collect_exports(module_id, &pf.path, &checker, &air_module);
+                let exports = collect_exports(module_id, &pf.path, &checker, &air_module);
                 registry.register(exports);
 
                 air_modules.push(air_module);
@@ -337,10 +336,7 @@ fn run_production_gate(project_root: &Path) -> anyhow::Result<()> {
 /// Returns the number of decisions newly pinned. Returns `Ok(0)` when
 /// the tree is missing — a fresh project has nothing to pin.
 fn pin_all_build_decisions(project_root: &Path) -> anyhow::Result<usize> {
-    let build_root = project_root
-        .join(".bock")
-        .join("decisions")
-        .join("build");
+    let build_root = project_root.join(".bock").join("decisions").join("build");
     if !build_root.exists() {
         return Ok(0);
     }

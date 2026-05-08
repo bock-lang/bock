@@ -48,7 +48,7 @@ fn build_js_produces_output_files() {
             e.path()
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .map_or(false, |ext| ext == "js")
+                .is_some_and(|ext| ext == "js")
         })
         .collect();
     assert!(!js_files.is_empty(), "should have generated .js files");
@@ -430,9 +430,7 @@ fn build_pin_all_pins_every_build_decision() {
     );
 
     // Manifest entry is now pinned.
-    let manifest_path = dir
-        .path()
-        .join(".bock/decisions/build/main.bock.json");
+    let manifest_path = dir.path().join(".bock/decisions/build/main.bock.json");
     let content = fs::read_to_string(&manifest_path).unwrap();
     assert!(content.contains("\"pinned\": true"));
     assert!(content.contains("pin_reason"));

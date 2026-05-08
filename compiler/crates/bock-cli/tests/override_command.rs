@@ -17,8 +17,7 @@ fn touch_project(dir: &std::path::Path) {
 }
 
 fn seed_runtime(dir: &std::path::Path, id: &str, pinned: bool) {
-    let path = dir
-        .join(".bock/decisions/runtime/src/api.bock.json");
+    let path = dir.join(".bock/decisions/runtime/src/api.bock.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let pin_reason = if pinned { "\"manual\"" } else { "null" };
     let pinned_at = if pinned {

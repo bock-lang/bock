@@ -230,9 +230,7 @@ impl RsEmitCtx {
             "unreachable" => "unreachable!()".to_string(),
             "sleep" => {
                 let a = arg_strs.first().map_or(String::new(), |s| s.clone());
-                format!(
-                    "tokio::time::sleep(std::time::Duration::from_nanos(({a}) as u64))"
-                )
+                format!("tokio::time::sleep(std::time::Duration::from_nanos(({a}) as u64))")
             }
             _ => return Ok(None),
         };
@@ -368,9 +366,7 @@ impl RsEmitCtx {
             }
             "duration_since" => {
                 let other = arg_strs.first().cloned().unwrap_or_default();
-                format!(
-                    "((({recv_str}).saturating_duration_since({other})).as_nanos() as i64)"
-                )
+                format!("((({recv_str}).saturating_duration_since({other})).as_nanos() as i64)")
             }
             _ => return Ok(false),
         };
@@ -754,8 +750,7 @@ impl RsEmitCtx {
                         name.name,
                         comp_names.join(" + ")
                     ));
-                    self.composite_effects
-                        .insert(name.name.clone(), comp_names);
+                    self.composite_effects.insert(name.name.clone(), comp_names);
                     return Ok(());
                 }
                 // Record effect operations for Call → handler.op rewriting.
@@ -825,10 +820,8 @@ impl RsEmitCtx {
                 // would impose. The handler is registered as the default
                 // for this effect, so subsequent effectful calls pass it
                 // implicitly unless a local handling block overrides it.
-                let effect_name =
-                    effect.segments.last().map_or("effect", |s| s.name.as_str());
-                let const_name =
-                    format!("__{}_HANDLER", to_snake_case(effect_name).to_uppercase());
+                let effect_name = effect.segments.last().map_or("effect", |s| s.name.as_str());
+                let const_name = format!("__{}_HANDLER", to_snake_case(effect_name).to_uppercase());
                 let handler_type = record_construct_type(handler);
                 let ind = self.indent_str();
                 if let Some(type_name) = handler_type {
@@ -1313,8 +1306,11 @@ impl RsEmitCtx {
                 self.indent += 1;
                 let old_handler_vars = self.current_handler_vars.clone();
                 for h in handlers {
-                    let effect_name =
-                        h.effect.segments.last().map_or("effect", |s| s.name.as_str());
+                    let effect_name = h
+                        .effect
+                        .segments
+                        .last()
+                        .map_or("effect", |s| s.name.as_str());
                     let var_name = format!("__{}", to_snake_case(effect_name));
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}let {var_name} = ");
@@ -1492,12 +1488,8 @@ impl RsEmitCtx {
                         if let Some(handler_var) =
                             self.current_handler_vars.get(&effect_name).cloned()
                         {
-                            let _ = write!(
-                                self.buf,
-                                "{}.{}",
-                                handler_var,
-                                to_snake_case(&name.name)
-                            );
+                            let _ =
+                                write!(self.buf, "{}.{}", handler_var, to_snake_case(&name.name));
                             self.buf.push('(');
                             for (i, arg) in args.iter().enumerate() {
                                 if i > 0 {
@@ -2180,11 +2172,8 @@ impl RsEmitCtx {
     /// skipped (nothing to spawn). The binding must be awaited in the same
     /// flat block — nested scopes are ignored because we can't prove the
     /// binding is still live once control leaves the block.
-    fn collect_task_bindings(
-        stmts: &[AIRNode],
-    ) -> std::collections::HashSet<String> {
-        let mut awaited: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+    fn collect_task_bindings(stmts: &[AIRNode]) -> std::collections::HashSet<String> {
+        let mut awaited: std::collections::HashSet<String> = std::collections::HashSet::new();
         for s in stmts {
             Self::collect_awaited_identifiers(s, &mut awaited);
         }
@@ -2193,9 +2182,7 @@ impl RsEmitCtx {
             if let NodeKind::LetBinding { pattern, value, .. } = &s.kind {
                 if let NodeKind::BindPat { name, .. } = &pattern.kind {
                     let rs_name = to_snake_case(&name.name);
-                    if matches!(&value.kind, NodeKind::Call { .. })
-                        && awaited.contains(&rs_name)
-                    {
+                    if matches!(&value.kind, NodeKind::Call { .. }) && awaited.contains(&rs_name) {
                         out.insert(rs_name);
                     }
                 }
@@ -2208,10 +2195,7 @@ impl RsEmitCtx {
     /// bare identifier. Nested function / lambda bodies are not descended —
     /// an inner closure awaiting the name doesn't imply the outer block
     /// wants a task.
-    fn collect_awaited_identifiers(
-        node: &AIRNode,
-        out: &mut std::collections::HashSet<String>,
-    ) {
+    fn collect_awaited_identifiers(node: &AIRNode, out: &mut std::collections::HashSet<String>) {
         match &node.kind {
             NodeKind::Await { expr } => {
                 if let NodeKind::Identifier { name } = &expr.kind {
@@ -2278,8 +2262,7 @@ impl RsEmitCtx {
             NodeKind::Assign { value, .. } => {
                 Self::collect_awaited_identifiers(value, out);
             }
-            NodeKind::TupleLiteral { elems }
-            | NodeKind::ListLiteral { elems } => {
+            NodeKind::TupleLiteral { elems } | NodeKind::ListLiteral { elems } => {
                 for e in elems {
                     Self::collect_awaited_identifiers(e, out);
                 }

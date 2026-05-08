@@ -405,24 +405,22 @@ fn verify_item(
         }
         | NodeKind::EnumDecl {
             visibility, name, ..
-        } => {
-            if *visibility == Visibility::Public {
-                report.total_public_fns += 1;
-                if item.context.is_some() {
-                    report.public_fns_with_context += 1;
-                } else if mode == VerificationMode::Production {
-                    diags.error(
-                        DiagnosticCode {
-                            prefix: 'E',
-                            number: 8023,
-                        },
-                        format!(
-                            "public type `{}` is missing @context annotation (required in production mode)",
-                            name.name
-                        ),
-                        item.span,
-                    );
-                }
+        } if *visibility == Visibility::Public => {
+            report.total_public_fns += 1;
+            if item.context.is_some() {
+                report.public_fns_with_context += 1;
+            } else if mode == VerificationMode::Production {
+                diags.error(
+                    DiagnosticCode {
+                        prefix: 'E',
+                        number: 8023,
+                    },
+                    format!(
+                        "public type `{}` is missing @context annotation (required in production mode)",
+                        name.name
+                    ),
+                    item.span,
+                );
             }
         }
         _ => {}

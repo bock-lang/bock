@@ -180,12 +180,12 @@ pub struct TypeChecker {
     /// Effect operation types: effect_name → [(op_name, fn_type)].
     /// Populated during `collect_sig` for `EffectDecl` nodes.
     effect_op_types: HashMap<String, Vec<(String, Type)>>,
-    /// Component effects for composite effects: effect_name → [component_name].
+    /// Component effects for composite effects: effect_name → Vec\<component_name\>.
     effect_components: HashMap<String, Vec<String>>,
     /// Record field types: record_name → [(field_name, field_type)].
     /// Populated during `collect_sig` for `RecordDecl` nodes.
     record_field_types: HashMap<String, Vec<(String, Type)>>,
-    /// Generic type parameter names for records: record_name → [param_names].
+    /// Generic type parameter names for records: record_name → Vec\<param_name\>.
     /// Populated during `collect_sig` for `RecordDecl` nodes with generics.
     record_generic_params: HashMap<String, Vec<String>>,
     /// Type alias mappings: alias_name → underlying type.
@@ -246,8 +246,7 @@ impl TypeChecker {
         });
         // Mark primitive types as copy so ownership analysis skips moves.
         if matches!(resolved, Type::Primitive(_)) {
-            node.metadata
-                .insert("copy_type".into(), Value::Bool(true));
+            node.metadata.insert("copy_type".into(), Value::Bool(true));
         }
         resolved
     }
@@ -266,7 +265,7 @@ impl TypeChecker {
         &self.record_field_types
     }
 
-    /// Generic type parameter names for records: record_name → [param_names].
+    /// Generic type parameter names for records: record_name → Vec\<param_name\>.
     #[must_use]
     pub fn record_generic_params(&self) -> &HashMap<String, Vec<String>> {
         &self.record_generic_params
@@ -278,7 +277,7 @@ impl TypeChecker {
         &self.effect_op_types
     }
 
-    /// Component effects for composite effects: effect_name → [component_name].
+    /// Component effects for composite effects: effect_name → Vec\<component_name\>.
     #[must_use]
     pub fn effect_components(&self) -> &HashMap<String, Vec<String>> {
         &self.effect_components
@@ -343,13 +342,13 @@ impl TypeChecker {
     /// gets fresh [`TypeVarId`]s (just like local generic functions).
     ///
     /// When a generic function is exported, its type string contains the
-    /// original [`TypeVarId`]s (e.g. `"Fn(?3) -> ?3"`). Without an [`FnSig`]
+    /// original [`TypeVarId`]s (e.g. `"Fn(?3) -> ?3"`). Without an `FnSig`
     /// entry the call-site instantiation logic in the `Call` handler is
     /// bypassed, causing the first call to bind those vars permanently.
     ///
     /// This method re-allocates fresh [`TypeVarId`]s, remaps the function
     /// type, stores the remapped type in `env`, and inserts a matching
-    /// [`FnSig`] into `fn_sigs`.
+    /// `FnSig` into `fn_sigs`.
     pub fn seed_imported_generic_fn(&mut self, name: &str, fn_ty: &FnType) -> Type {
         // Collect unique TypeVarIds from the function type in order of first
         // appearance, so the mapping is deterministic.
@@ -392,9 +391,8 @@ impl TypeChecker {
         self.env.define(name, remapped.clone());
 
         // Create synthetic generic param names.
-        let generic_params: Vec<String> = (0..original_ids.len())
-            .map(|i| format!("T{i}"))
-            .collect();
+        let generic_params: Vec<String> =
+            (0..original_ids.len()).map(|i| format!("T{i}")).collect();
 
         // Extract param types and return type from remapped function.
         if let Type::Function(ref f) = remapped {
@@ -545,14 +543,17 @@ impl TypeChecker {
                 let const_ty = self.air_type_node_to_type(ty, &HashMap::new());
                 self.env.define(name.name.clone(), const_ty);
             }
-            NodeKind::EnumDecl { name, variants, generic_params, .. } => {
+            NodeKind::EnumDecl {
+                name,
+                variants,
+                generic_params,
+                ..
+            } => {
                 let enum_name = name.name.clone();
 
                 // Extract generic param names.
-                let gp_names: Vec<String> = generic_params
-                    .iter()
-                    .map(|g| g.name.name.clone())
-                    .collect();
+                let gp_names: Vec<String> =
+                    generic_params.iter().map(|g| g.name.name.clone()).collect();
 
                 // For generic enums, build a gp_map so variant field types
                 // resolve type parameters (e.g. L, R) as fresh type vars
@@ -580,8 +581,7 @@ impl TypeChecker {
                             _ => unreachable!(),
                         })
                         .collect();
-                    let type_args: Vec<Type> =
-                        gp_names.iter().map(|n| gp_map[n].clone()).collect();
+                    let type_args: Vec<Type> = gp_names.iter().map(|n| gp_map[n].clone()).collect();
                     let generic_ret_ty = Type::Generic(GenericType {
                         constructor: enum_name.clone(),
                         args: type_args,
@@ -650,10 +650,7 @@ impl TypeChecker {
                                 let field_types: Vec<(String, Type)> = fields
                                     .iter()
                                     .map(|f| {
-                                        let ty = self.type_expr_to_type(
-                                            &f.ty,
-                                            &gp_map,
-                                        );
+                                        let ty = self.type_expr_to_type(&f.ty, &gp_map);
                                         (f.name.name.clone(), ty)
                                     })
                                     .collect();
@@ -763,21 +760,20 @@ impl TypeChecker {
                 }
                 self.effect_op_types.insert(name.name.clone(), ops);
 
-                let comp_names: Vec<String> =
-                    components.iter().map(type_path_to_name).collect();
+                let comp_names: Vec<String> = components.iter().map(type_path_to_name).collect();
                 if !comp_names.is_empty() {
-                    self.effect_components
-                        .insert(name.name.clone(), comp_names);
+                    self.effect_components.insert(name.name.clone(), comp_names);
                 }
             }
             NodeKind::RecordDecl {
-                name, fields, generic_params, ..
+                name,
+                fields,
+                generic_params,
+                ..
             } => {
                 let record_name = name.name.clone();
-                let gp_names: Vec<String> = generic_params
-                    .iter()
-                    .map(|g| g.name.name.clone())
-                    .collect();
+                let gp_names: Vec<String> =
+                    generic_params.iter().map(|g| g.name.name.clone()).collect();
                 let field_types: Vec<(String, Type)> = fields
                     .iter()
                     .map(|f| {
@@ -794,17 +790,12 @@ impl TypeChecker {
                 // Also register the record name as a Named type in env.
                 self.env.define(
                     record_name.clone(),
-                    Type::Named(crate::NamedType {
-                        name: record_name,
-                    }),
+                    Type::Named(crate::NamedType { name: record_name }),
                 );
             }
-            NodeKind::TypeAlias {
-                name, ty, ..
-            } => {
+            NodeKind::TypeAlias { name, ty, .. } => {
                 let underlying = self.air_type_node_to_type(ty, &HashMap::new());
-                self.type_aliases
-                    .insert(name.name.clone(), underlying);
+                self.type_aliases.insert(name.name.clone(), underlying);
             }
             NodeKind::ClassDecl {
                 name,
@@ -817,10 +808,8 @@ impl TypeChecker {
                 let class_name = name.name.clone();
 
                 // Register generic params if present.
-                let gp_names: Vec<String> = generic_params
-                    .iter()
-                    .map(|g| g.name.name.clone())
-                    .collect();
+                let gp_names: Vec<String> =
+                    generic_params.iter().map(|g| g.name.name.clone()).collect();
                 if !gp_names.is_empty() {
                     self.record_generic_params
                         .insert(class_name.clone(), gp_names);
@@ -900,9 +889,7 @@ impl TypeChecker {
                     }
                 }
             }
-            NodeKind::TraitDecl {
-                name, methods, ..
-            } => {
+            NodeKind::TraitDecl { name, methods, .. } => {
                 let trait_name = name.name.clone();
                 let self_ty = Type::Named(crate::NamedType {
                     name: "Self".to_string(),
@@ -1022,25 +1009,24 @@ impl TypeChecker {
         // (e.g. `T: Describable`) and where-clause constraints.
         for gp in &generic_params {
             if let Some(Type::TypeVar(id)) = gp_map.get(&gp.name.name) {
-                let bound_names: Vec<String> = gp
-                    .bounds
-                    .iter()
-                    .map(type_path_to_name)
-                    .collect();
+                let bound_names: Vec<String> = gp.bounds.iter().map(type_path_to_name).collect();
                 if !bound_names.is_empty() {
-                    self.type_var_bounds.entry(*id).or_default().extend(bound_names);
+                    self.type_var_bounds
+                        .entry(*id)
+                        .or_default()
+                        .extend(bound_names);
                 }
             }
         }
         for clause in &where_clause {
             if let Some(Type::TypeVar(id)) = gp_map.get(&clause.param.name) {
-                let bound_names: Vec<String> = clause
-                    .bounds
-                    .iter()
-                    .map(type_path_to_name)
-                    .collect();
+                let bound_names: Vec<String> =
+                    clause.bounds.iter().map(type_path_to_name).collect();
                 if !bound_names.is_empty() {
-                    self.type_var_bounds.entry(*id).or_default().extend(bound_names);
+                    self.type_var_bounds
+                        .entry(*id)
+                        .or_default()
+                        .extend(bound_names);
                 }
             }
         }
@@ -1366,20 +1352,21 @@ impl TypeChecker {
                             let self_params = vec!["Self".to_string()];
                             let self_args = vec![obj_ty.clone()];
                             for trait_name in &bounds {
-                                if let Some(methods) = self.trait_method_types.get(trait_name).cloned() {
+                                if let Some(methods) =
+                                    self.trait_method_types.get(trait_name).cloned()
+                                {
                                     if let Some(fn_ty) = methods.get(&field_name) {
-                                        let resolved = substitute_type_params(
-                                            fn_ty,
-                                            &self_params,
-                                            &self_args,
-                                        );
+                                        let resolved =
+                                            substitute_type_params(fn_ty, &self_params, &self_args);
                                         return self.record(node, resolved);
                                     }
                                 }
                             }
                         }
                         // Fall through to built-in methods.
-                        if let Some(fn_ty) = self.resolve_builtin_method_fn_type(&obj_ty, &field_name) {
+                        if let Some(fn_ty) =
+                            self.resolve_builtin_method_fn_type(&obj_ty, &field_name)
+                        {
                             fn_ty
                         } else {
                             self.fresh_var()
@@ -1387,7 +1374,9 @@ impl TypeChecker {
                     }
                     _ => {
                         // Check built-in method signatures for Generic / Primitive types.
-                        if let Some(fn_ty) = self.resolve_builtin_method_fn_type(&obj_ty, &field_name) {
+                        if let Some(fn_ty) =
+                            self.resolve_builtin_method_fn_type(&obj_ty, &field_name)
+                        {
                             fn_ty
                         } else {
                             // Return a fresh type var; downstream calls may unify it.
@@ -2350,18 +2339,12 @@ impl TypeChecker {
                 let elem_ty = &g.args[0];
                 match method {
                     "len" | "length" | "count" => Type::Primitive(PrimitiveType::Int),
-                    "first" | "last" | "find" | "get" => {
-                        Type::Optional(Box::new(elem_ty.clone()))
-                    }
-                    "index_of" => {
-                        Type::Optional(Box::new(Type::Primitive(PrimitiveType::Int)))
-                    }
-                    "contains" | "is_empty" | "any" | "all" => {
-                        Type::Primitive(PrimitiveType::Bool)
-                    }
-                    "push" | "append" | "pop" | "insert" | "remove" | "concat"
-                    | "reverse" | "sort" | "filter" | "dedup" | "take" | "skip"
-                    | "flat_map" | "slice" | "flatten" => receiver_ty.clone(),
+                    "first" | "last" | "find" | "get" => Type::Optional(Box::new(elem_ty.clone())),
+                    "index_of" => Type::Optional(Box::new(Type::Primitive(PrimitiveType::Int))),
+                    "contains" | "is_empty" | "any" | "all" => Type::Primitive(PrimitiveType::Bool),
+                    "push" | "append" | "pop" | "insert" | "remove" | "concat" | "reverse"
+                    | "sort" | "filter" | "dedup" | "take" | "skip" | "flat_map" | "slice"
+                    | "flatten" => receiver_ty.clone(),
                     "clear" | "for_each" => Type::Primitive(PrimitiveType::Void),
                     "join" | "display" => Type::Primitive(PrimitiveType::String),
                     "enumerate" => Type::Generic(GenericType {
@@ -2405,15 +2388,15 @@ impl TypeChecker {
             }
             // String methods
             Type::Primitive(PrimitiveType::String) => match method {
-                "len" | "length" | "count" | "byte_len" => {
-                    Type::Primitive(PrimitiveType::Int)
+                "len" | "length" | "count" | "byte_len" => Type::Primitive(PrimitiveType::Int),
+                "contains" | "starts_with" | "ends_with" | "is_empty" | "regex_match" => {
+                    Type::Primitive(PrimitiveType::Bool)
                 }
-                "contains" | "starts_with" | "ends_with" | "is_empty"
-                | "regex_match" => Type::Primitive(PrimitiveType::Bool),
-                "to_upper" | "to_lower" | "trim" | "trim_start" | "trim_end"
-                | "reverse" | "slice" | "substring" | "replace" | "to_string"
-                | "display" | "repeat" | "pad_start" | "pad_end" | "format"
-                | "regex_replace" | "join" => Type::Primitive(PrimitiveType::String),
+                "to_upper" | "to_lower" | "trim" | "trim_start" | "trim_end" | "reverse"
+                | "slice" | "substring" | "replace" | "to_string" | "display" | "repeat"
+                | "pad_start" | "pad_end" | "format" | "regex_replace" | "join" => {
+                    Type::Primitive(PrimitiveType::String)
+                }
                 "split" | "regex_find" => Type::Generic(GenericType {
                     constructor: "List".into(),
                     args: vec![Type::Primitive(PrimitiveType::String)],
@@ -2427,15 +2410,13 @@ impl TypeChecker {
                     args: vec![Type::Primitive(PrimitiveType::Int)],
                 }),
                 "index_of" => Type::Optional(Box::new(Type::Primitive(PrimitiveType::Int))),
-                "char_at" => {
-                    Type::Optional(Box::new(Type::Primitive(PrimitiveType::Char)))
-                }
+                "char_at" => Type::Optional(Box::new(Type::Primitive(PrimitiveType::Char))),
                 _ => self.fresh_var(),
             },
             // Int methods
             Type::Primitive(PrimitiveType::Int) => match method {
-                "abs" | "min" | "max" | "clamp" | "shift_left" | "shift_right"
-                | "compare" | "hash_code" => Type::Primitive(PrimitiveType::Int),
+                "abs" | "min" | "max" | "clamp" | "shift_left" | "shift_right" | "compare"
+                | "hash_code" => Type::Primitive(PrimitiveType::Int),
                 "to_float" => Type::Primitive(PrimitiveType::Float),
                 "to_string" | "display" => Type::Primitive(PrimitiveType::String),
                 "equals" => Type::Primitive(PrimitiveType::Bool),
@@ -2476,10 +2457,17 @@ impl TypeChecker {
                 let elem_ty = &g.args[0];
                 match method {
                     "len" | "length" | "count" => Type::Primitive(PrimitiveType::Int),
-                    "contains" | "is_empty" | "is_subset" | "is_superset"
-                    | "is_disjoint" => Type::Primitive(PrimitiveType::Bool),
-                    "add" | "remove" | "union" | "intersection" | "difference"
-                    | "symmetric_difference" | "filter" | "map" => receiver_ty.clone(),
+                    "contains" | "is_empty" | "is_subset" | "is_superset" | "is_disjoint" => {
+                        Type::Primitive(PrimitiveType::Bool)
+                    }
+                    "add"
+                    | "remove"
+                    | "union"
+                    | "intersection"
+                    | "difference"
+                    | "symmetric_difference"
+                    | "filter"
+                    | "map" => receiver_ty.clone(),
                     "for_each" => Type::Primitive(PrimitiveType::Void),
                     "to_list" => Type::Generic(GenericType {
                         constructor: "List".into(),
@@ -2552,7 +2540,9 @@ impl TypeChecker {
                 let elem = &g.args[0];
                 let r = &receiver_ty;
                 match method {
-                    "len" | "length" | "count" => mk(r, vec![], Type::Primitive(PrimitiveType::Int)),
+                    "len" | "length" | "count" => {
+                        mk(r, vec![], Type::Primitive(PrimitiveType::Int))
+                    }
                     "is_empty" => mk(r, vec![], Type::Primitive(PrimitiveType::Bool)),
                     "contains" => mk(r, vec![elem.clone()], Type::Primitive(PrimitiveType::Bool)),
                     "first" | "last" => mk(r, vec![], Type::Optional(Box::new(elem.clone()))),
@@ -2588,9 +2578,7 @@ impl TypeChecker {
                     ),
                     "concat" => mk(r, vec![receiver_ty.clone()], receiver_ty.clone()),
                     "clear" => mk(r, vec![], Type::Primitive(PrimitiveType::Void)),
-                    "reverse" | "sort" | "dedup" | "flatten" => {
-                        mk(r, vec![], receiver_ty.clone())
-                    }
+                    "reverse" | "sort" | "dedup" | "flatten" => mk(r, vec![], receiver_ty.clone()),
                     "take" | "skip" => mk(
                         r,
                         vec![Type::Primitive(PrimitiveType::Int)],
@@ -2676,14 +2664,16 @@ impl TypeChecker {
                         mk(r, vec![cb], Type::Primitive(PrimitiveType::Bool))
                     }
                     "enumerate" => {
-                        let pair = Type::Tuple(vec![
-                            Type::Primitive(PrimitiveType::Int),
-                            elem.clone(),
-                        ]);
-                        mk(r, vec![], Type::Generic(GenericType {
-                            constructor: "List".into(),
-                            args: vec![pair],
-                        }))
+                        let pair =
+                            Type::Tuple(vec![Type::Primitive(PrimitiveType::Int), elem.clone()]);
+                        mk(
+                            r,
+                            vec![],
+                            Type::Generic(GenericType {
+                                constructor: "List".into(),
+                                args: vec![pair],
+                            }),
+                        )
                     }
                     "zip" => {
                         let f = self.fresh_var();
@@ -2692,20 +2682,28 @@ impl TypeChecker {
                             args: vec![f.clone()],
                         });
                         let pair = Type::Tuple(vec![elem.clone(), f]);
-                        mk(r, vec![other_list], Type::Generic(GenericType {
-                            constructor: "List".into(),
-                            args: vec![pair],
-                        }))
+                        mk(
+                            r,
+                            vec![other_list],
+                            Type::Generic(GenericType {
+                                constructor: "List".into(),
+                                args: vec![pair],
+                            }),
+                        )
                     }
                     "join" => mk(
                         r,
                         vec![Type::Primitive(PrimitiveType::String)],
                         Type::Primitive(PrimitiveType::String),
                     ),
-                    "to_set" => mk(r, vec![], Type::Generic(GenericType {
-                        constructor: "Set".into(),
-                        args: vec![elem.clone()],
-                    })),
+                    "to_set" => mk(
+                        r,
+                        vec![],
+                        Type::Generic(GenericType {
+                            constructor: "Set".into(),
+                            args: vec![elem.clone()],
+                        }),
+                    ),
                     _ => None,
                 }
             }
@@ -2714,7 +2712,9 @@ impl TypeChecker {
                 let val = &g.args[1];
                 let r = &receiver_ty;
                 match method {
-                    "len" | "length" | "count" => mk(r, vec![], Type::Primitive(PrimitiveType::Int)),
+                    "len" | "length" | "count" => {
+                        mk(r, vec![], Type::Primitive(PrimitiveType::Int))
+                    }
                     "is_empty" => mk(r, vec![], Type::Primitive(PrimitiveType::Bool)),
                     "contains_key" => {
                         mk(r, vec![key.clone()], Type::Primitive(PrimitiveType::Bool))
@@ -2754,10 +2754,14 @@ impl TypeChecker {
                             ret: Box::new(u.clone()),
                             effects: vec![],
                         });
-                        mk(r, vec![cb], Type::Generic(GenericType {
-                            constructor: "Map".into(),
-                            args: vec![key.clone(), u],
-                        }))
+                        mk(
+                            r,
+                            vec![cb],
+                            Type::Generic(GenericType {
+                                constructor: "Map".into(),
+                                args: vec![key.clone(), u],
+                            }),
+                        )
                     }
                     "filter" => {
                         let cb = Type::Function(FnType {
@@ -2782,17 +2786,20 @@ impl TypeChecker {
                 let elem = &g.args[0];
                 let r = &receiver_ty;
                 match method {
-                    "len" | "length" | "count" => mk(r, vec![], Type::Primitive(PrimitiveType::Int)),
+                    "len" | "length" | "count" => {
+                        mk(r, vec![], Type::Primitive(PrimitiveType::Int))
+                    }
                     "is_empty" => mk(r, vec![], Type::Primitive(PrimitiveType::Bool)),
                     "contains" => mk(r, vec![elem.clone()], Type::Primitive(PrimitiveType::Bool)),
                     "add" | "remove" => mk(r, vec![elem.clone()], receiver_ty.clone()),
-                    "union" | "intersection" | "difference"
-                    | "symmetric_difference" => {
+                    "union" | "intersection" | "difference" | "symmetric_difference" => {
                         mk(r, vec![receiver_ty.clone()], receiver_ty.clone())
                     }
-                    "is_subset" | "is_superset" | "is_disjoint" => {
-                        mk(r, vec![receiver_ty.clone()], Type::Primitive(PrimitiveType::Bool))
-                    }
+                    "is_subset" | "is_superset" | "is_disjoint" => mk(
+                        r,
+                        vec![receiver_ty.clone()],
+                        Type::Primitive(PrimitiveType::Bool),
+                    ),
                     "filter" => {
                         let cb = Type::Function(FnType {
                             params: vec![elem.clone()],
@@ -2817,10 +2824,14 @@ impl TypeChecker {
                         });
                         mk(r, vec![cb], Type::Primitive(PrimitiveType::Void))
                     }
-                    "to_list" => mk(r, vec![], Type::Generic(GenericType {
-                        constructor: "List".into(),
-                        args: vec![elem.clone()],
-                    })),
+                    "to_list" => mk(
+                        r,
+                        vec![],
+                        Type::Generic(GenericType {
+                            constructor: "List".into(),
+                            args: vec![elem.clone()],
+                        }),
+                    ),
                     _ => None,
                 }
             }
@@ -2829,25 +2840,21 @@ impl TypeChecker {
                 let str_ty = Type::Primitive(PrimitiveType::String);
                 let int_ty = Type::Primitive(PrimitiveType::Int);
                 match method {
-                    "len" | "length" | "count" | "byte_len" => {
-                        mk(r, vec![], int_ty)
-                    }
+                    "len" | "length" | "count" | "byte_len" => mk(r, vec![], int_ty),
                     "is_empty" => mk(r, vec![], Type::Primitive(PrimitiveType::Bool)),
-                    "contains" | "starts_with" | "ends_with" => {
-                        mk(r, vec![str_ty.clone()], Type::Primitive(PrimitiveType::Bool))
-                    }
-                    "regex_match" => {
-                        mk(r, vec![str_ty.clone()], Type::Primitive(PrimitiveType::Bool))
-                    }
-                    "to_upper" | "to_lower" | "trim" | "trim_start" | "trim_end"
-                    | "reverse" | "to_string" | "display" => {
-                        mk(r, vec![], str_ty)
-                    }
-                    "repeat" => mk(
+                    "contains" | "starts_with" | "ends_with" => mk(
                         r,
-                        vec![Type::Primitive(PrimitiveType::Int)],
-                        str_ty,
+                        vec![str_ty.clone()],
+                        Type::Primitive(PrimitiveType::Bool),
                     ),
+                    "regex_match" => mk(
+                        r,
+                        vec![str_ty.clone()],
+                        Type::Primitive(PrimitiveType::Bool),
+                    ),
+                    "to_upper" | "to_lower" | "trim" | "trim_start" | "trim_end" | "reverse"
+                    | "to_string" | "display" => mk(r, vec![], str_ty),
+                    "repeat" => mk(r, vec![Type::Primitive(PrimitiveType::Int)], str_ty),
                     "slice" | "substring" => mk(
                         r,
                         vec![
@@ -2856,11 +2863,9 @@ impl TypeChecker {
                         ],
                         str_ty,
                     ),
-                    "replace" | "regex_replace" => mk(
-                        r,
-                        vec![str_ty.clone(), str_ty.clone()],
-                        str_ty,
-                    ),
+                    "replace" | "regex_replace" => {
+                        mk(r, vec![str_ty.clone(), str_ty.clone()], str_ty)
+                    }
                     "pad_start" | "pad_end" => mk(
                         r,
                         vec![Type::Primitive(PrimitiveType::Int), str_ty.clone()],
@@ -2925,16 +2930,10 @@ impl TypeChecker {
                 let int_ty = Type::Primitive(PrimitiveType::Int);
                 match method {
                     "abs" => mk(r, vec![], int_ty),
-                    "min" | "max" | "shift_left" | "shift_right" | "compare" => mk(
-                        r,
-                        vec![int_ty.clone()],
-                        int_ty,
-                    ),
-                    "clamp" => mk(
-                        r,
-                        vec![int_ty.clone(), int_ty.clone()],
-                        int_ty,
-                    ),
+                    "min" | "max" | "shift_left" | "shift_right" | "compare" => {
+                        mk(r, vec![int_ty.clone()], int_ty)
+                    }
+                    "clamp" => mk(r, vec![int_ty.clone(), int_ty.clone()], int_ty),
                     "equals" => mk(
                         r,
                         vec![Type::Primitive(PrimitiveType::Int)],
@@ -2952,19 +2951,9 @@ impl TypeChecker {
                 let r = &receiver_ty;
                 let float_ty = Type::Primitive(PrimitiveType::Float);
                 match method {
-                    "abs" | "floor" | "ceil" | "round" | "sqrt" => {
-                        mk(r, vec![], float_ty)
-                    }
-                    "min" | "max" => mk(
-                        r,
-                        vec![float_ty.clone()],
-                        float_ty,
-                    ),
-                    "clamp" => mk(
-                        r,
-                        vec![float_ty.clone(), float_ty.clone()],
-                        float_ty,
-                    ),
+                    "abs" | "floor" | "ceil" | "round" | "sqrt" => mk(r, vec![], float_ty),
+                    "min" | "max" => mk(r, vec![float_ty.clone()], float_ty),
+                    "clamp" => mk(r, vec![float_ty.clone(), float_ty.clone()], float_ty),
                     "to_int" => mk(r, vec![], Type::Primitive(PrimitiveType::Int)),
                     "to_string" | "display" => {
                         mk(r, vec![], Type::Primitive(PrimitiveType::String))
@@ -2972,9 +2961,7 @@ impl TypeChecker {
                     "is_nan" | "is_infinite" | "equals" => {
                         mk(r, vec![], Type::Primitive(PrimitiveType::Bool))
                     }
-                    "compare" | "hash_code" => {
-                        mk(r, vec![], Type::Primitive(PrimitiveType::Int))
-                    }
+                    "compare" | "hash_code" => mk(r, vec![], Type::Primitive(PrimitiveType::Int)),
                     _ => None,
                 }
             }
@@ -3012,9 +2999,7 @@ impl TypeChecker {
                 let r = &receiver_ty;
                 let inner = *inner_ty.clone();
                 match method {
-                    "is_some" | "is_none" => {
-                        mk(r, vec![], Type::Primitive(PrimitiveType::Bool))
-                    }
+                    "is_some" | "is_none" => mk(r, vec![], Type::Primitive(PrimitiveType::Bool)),
                     "unwrap" => mk(r, vec![], inner),
                     "unwrap_or" => mk(r, vec![inner.clone()], inner),
                     "map" => {
@@ -3045,9 +3030,7 @@ impl TypeChecker {
                 let ok = *ok_ty.clone();
                 let err = *err_ty.clone();
                 match method {
-                    "is_ok" | "is_err" => {
-                        mk(r, vec![], Type::Primitive(PrimitiveType::Bool))
-                    }
+                    "is_ok" | "is_err" => mk(r, vec![], Type::Primitive(PrimitiveType::Bool)),
                     "unwrap" => mk(r, vec![], ok),
                     "unwrap_or" => mk(r, vec![ok.clone()], ok),
                     "map" => {
@@ -3413,11 +3396,7 @@ impl TypeChecker {
     ///
     /// Used for record field type declarations where the type is stored as
     /// an AST `TypeExpr` rather than a lowered AIR node.
-    fn type_expr_to_type(
-        &self,
-        ty: &TypeExpr,
-        gp_map: &HashMap<String, Type>,
-    ) -> Type {
+    fn type_expr_to_type(&self, ty: &TypeExpr, gp_map: &HashMap<String, Type>) -> Type {
         match ty {
             TypeExpr::Named { path, args, .. } => {
                 let name = type_path_to_name(path);
@@ -3443,9 +3422,7 @@ impl TypeChecker {
                             Box::new(converted_args[0].clone()),
                             Box::new(converted_args[1].clone()),
                         ),
-                        ("Optional", 1) => {
-                            Type::Optional(Box::new(converted_args[0].clone()))
-                        }
+                        ("Optional", 1) => Type::Optional(Box::new(converted_args[0].clone())),
                         _ => Type::Generic(GenericType {
                             constructor: name,
                             args: converted_args,
@@ -3453,12 +3430,13 @@ impl TypeChecker {
                     }
                 }
             }
-            TypeExpr::Tuple { elems, .. } => {
-                Type::Tuple(elems.iter().map(|e| self.type_expr_to_type(e, gp_map)).collect())
-            }
-            TypeExpr::Function {
-                params, ret, ..
-            } => {
+            TypeExpr::Tuple { elems, .. } => Type::Tuple(
+                elems
+                    .iter()
+                    .map(|e| self.type_expr_to_type(e, gp_map))
+                    .collect(),
+            ),
+            TypeExpr::Function { params, ret, .. } => {
                 let param_tys: Vec<Type> = params
                     .iter()
                     .map(|p| self.type_expr_to_type(p, gp_map))
@@ -3570,10 +3548,8 @@ fn collect_type_var_ids_fn(fn_ty: &FnType, out: &mut Vec<TypeVarId>) {
 /// Recursively collect unique [`TypeVarId`]s from a type.
 fn collect_type_var_ids(ty: &Type, out: &mut Vec<TypeVarId>) {
     match ty {
-        Type::TypeVar(id) => {
-            if !out.contains(id) {
-                out.push(*id);
-            }
+        Type::TypeVar(id) if !out.contains(id) => {
+            out.push(*id);
         }
         Type::Function(f) => {
             for p in &f.params {
@@ -3701,7 +3677,22 @@ fn conversion_hint(lhs: &Type, rhs: &Type) -> Option<String> {
     let l = as_primitive(lhs)?;
     let r = as_primitive(rhs)?;
     use PrimitiveType as P;
-    let is_int = |p: &P| matches!(p, P::Int | P::Int8 | P::Int16 | P::Int32 | P::Int64 | P::Int128 | P::UInt8 | P::UInt16 | P::UInt32 | P::UInt64 | P::BigInt);
+    let is_int = |p: &P| {
+        matches!(
+            p,
+            P::Int
+                | P::Int8
+                | P::Int16
+                | P::Int32
+                | P::Int64
+                | P::Int128
+                | P::UInt8
+                | P::UInt16
+                | P::UInt32
+                | P::UInt64
+                | P::BigInt
+        )
+    };
     let is_float = |p: &P| matches!(p, P::Float | P::Float32 | P::Float64 | P::BigFloat);
     if (is_int(&l) && is_float(&r)) || (is_float(&l) && is_int(&r)) {
         return Some(

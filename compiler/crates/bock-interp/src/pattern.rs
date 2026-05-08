@@ -393,10 +393,10 @@ mod tests {
         let pat = Pattern::Literal {
             id: g.next(),
             span: span(),
-            lit: Literal::Float("3.14".to_string()),
+            lit: Literal::Float("3.5".to_string()),
         };
         assert_eq!(
-            match_pattern(&Value::Float(OrdF64(3.14)), &pat),
+            match_pattern(&Value::Float(OrdF64(3.5)), &pat),
             Some(vec![])
         );
     }

@@ -30,7 +30,7 @@ use bock_types::Strictness;
 ///
 /// Pure data — `allow_build_ai`, `allow_runtime_ai`, `auto_pin_default`,
 /// and `allow_unpinned_in_build` are the four switches the rest of the
-/// pipeline consults. [`for_level`] is the only constructor so the
+/// pipeline consults. `for_level` is the only constructor so the
 /// mapping from `Strictness` to policy is centralized here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrictnessPolicy {
@@ -181,7 +181,11 @@ pub fn validate_production(decisions: &[Decision]) -> UnpinnedReport {
             summary: summarize_choice(d),
         })
         .collect();
-    entries.sort_by(|a, b| a.module.cmp(&b.module).then_with(|| a.full_id.cmp(&b.full_id)));
+    entries.sort_by(|a, b| {
+        a.module
+            .cmp(&b.module)
+            .then_with(|| a.full_id.cmp(&b.full_id))
+    });
     UnpinnedReport { entries }
 }
 
@@ -291,9 +295,24 @@ mod tests {
     #[test]
     fn validate_production_lists_each_unpinned_build_decision() {
         let ds = vec![
-            decision("abc12345", "src/api/client.bock", DecisionType::Codegen, false),
-            decision("def45678", "src/api/client.bock", DecisionType::Codegen, false),
-            decision("ghi78901", "src/models/user.bock", DecisionType::Repair, false),
+            decision(
+                "abc12345",
+                "src/api/client.bock",
+                DecisionType::Codegen,
+                false,
+            ),
+            decision(
+                "def45678",
+                "src/api/client.bock",
+                DecisionType::Codegen,
+                false,
+            ),
+            decision(
+                "ghi78901",
+                "src/models/user.bock",
+                DecisionType::Repair,
+                false,
+            ),
         ];
         let report = validate_production(&ds);
         assert_eq!(report.entries.len(), 3);
@@ -319,9 +338,12 @@ mod tests {
 
     #[test]
     fn render_error_matches_spec_shape() {
-        let ds = vec![
-            decision("abc12345", "src/api/client.bock", DecisionType::Codegen, false),
-        ];
+        let ds = vec![decision(
+            "abc12345",
+            "src/api/client.bock",
+            DecisionType::Codegen,
+            false,
+        )];
         let report = validate_production(&ds);
         let rendered = report.render_error();
         assert!(rendered.starts_with("Error: 1 unpinned decision in production mode"));

@@ -42,16 +42,12 @@ pub fn severity_to_lsp(severity: Severity) -> DiagnosticSeverity {
     }
 }
 
-/// Convert a single Bock [`Diagnostic`] to its LSP representation.
+/// Convert a single Bock [`bock_errors::Diagnostic`] to its LSP representation.
 ///
 /// `uri` is the document URI associated with `source`; secondary labels are
 /// attached as [`DiagnosticRelatedInformation`] pointing back at the same URI.
 #[must_use]
-pub fn to_lsp_diagnostic(
-    diag: &BockDiagnostic,
-    uri: &Url,
-    source: &SourceFile,
-) -> LspDiagnostic {
+pub fn to_lsp_diagnostic(diag: &BockDiagnostic, uri: &Url, source: &SourceFile) -> LspDiagnostic {
     let range = span_to_range(diag.span, source);
 
     let related = if diag.labels.is_empty() && diag.notes.is_empty() {
@@ -118,8 +114,20 @@ mod tests {
             end: 5,
         };
         let range = span_to_range(span, file);
-        assert_eq!(range.start, Position { line: 0, character: 4 });
-        assert_eq!(range.end, Position { line: 0, character: 5 });
+        assert_eq!(
+            range.start,
+            Position {
+                line: 0,
+                character: 4
+            }
+        );
+        assert_eq!(
+            range.end,
+            Position {
+                line: 0,
+                character: 5
+            }
+        );
     }
 
     #[test]

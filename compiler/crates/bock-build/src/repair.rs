@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use bock_ai::{
-    compute_key, node_kind_name, AiProvider, CandidateRule, Decision, DecisionType,
-    ManifestError, ManifestWriter, RepairRequest, Rule, RuleCache, TargetProfile,
+    compute_key, node_kind_name, AiProvider, CandidateRule, Decision, DecisionType, ManifestError,
+    ManifestWriter, RepairRequest, Rule, RuleCache, TargetProfile,
 };
 use bock_air::AIRNode;
 use bock_types::Strictness;
@@ -297,12 +297,7 @@ impl RepairPipeline {
                     self.record_repair(node, target, &response, &compiler_error)?;
                     if let Some(candidate) = response.candidate_rule.as_ref() {
                         if let Some(rules) = &self.rules {
-                            let rule = persist_rule(
-                                rules,
-                                candidate,
-                                node,
-                                response.confidence,
-                            )?;
+                            let rule = persist_rule(rules, candidate, node, response.confidence)?;
                             rule_added = true;
                             self.record_rule_applied(node, target, &rule)?;
                         }
@@ -317,9 +312,8 @@ impl RepairPipeline {
                     // Roll forward: keep the attempted code and the new
                     // error for the next iteration.
                     current_code = response.fixed_code;
-                    compiler_error = invocation_error(
-                        &self.toolchain.invoke(&target_id, source_path, false),
-                    );
+                    compiler_error =
+                        invocation_error(&self.toolchain.invoke(&target_id, source_path, false));
                 }
                 Err(other) => return Err(other.into()),
             }

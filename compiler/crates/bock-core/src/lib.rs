@@ -3,7 +3,7 @@
 #![allow(clippy::mutable_key_type)]
 //! Bock core — core standard library primitives, collections, monadic types, iterators, and built-in operations.
 //!
-//! This crate populates the interpreter's [`BuiltinRegistry`] with the full
+//! This crate populates the interpreter's [`bock_interp::BuiltinRegistry`] with the full
 //! method suites for primitive types (Int, Float, Bool, String, Char),
 //! collection types (List, Map, Set), monadic types (Optional, Result),
 //! iterator protocol (lazy combinators: map, filter, take, skip, enumerate, zip, chain, collect),
@@ -36,7 +36,7 @@ pub use traits::{ConversionDirection, TraitDispatch};
 use bock_interp::BuiltinRegistry;
 
 /// Register all primitive, collection, and monadic type methods and trait
-/// implementations into the given [`BuiltinRegistry`].
+/// implementations into the given [`bock_interp::BuiltinRegistry`].
 ///
 /// Call this during interpreter initialization to make all built-in methods
 /// available.

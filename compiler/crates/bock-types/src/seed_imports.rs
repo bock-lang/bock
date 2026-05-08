@@ -2,7 +2,7 @@
 //!
 //! After name resolution resolves cross-file imports, the type checker needs
 //! the full type definitions (record fields, enum variants, trait methods, etc.)
-//! from the [`ModuleRegistry`] so that imported types participate in type
+//! from the [`bock_air::registry::ModuleRegistry`] so that imported types participate in type
 //! checking.
 //!
 //! The [`seed_imports`] function reads the AST's import declarations, looks up
@@ -29,11 +29,7 @@ use crate::{EffectRef, FnType, GenericType, NamedType, PrimitiveType, Type};
 /// Reads the AST's import declarations and populates the checker's internal
 /// tables with the relevant types from the registry, so that imported records,
 /// enums, functions, traits, and effects participate fully in type checking.
-pub fn seed_imports(
-    checker: &mut TypeChecker,
-    imports: &[ImportDecl],
-    registry: &ModuleRegistry,
-) {
+pub fn seed_imports(checker: &mut TypeChecker, imports: &[ImportDecl], registry: &ModuleRegistry) {
     for import in imports {
         let module_id = module_path_to_id(&import.path);
 
@@ -371,10 +367,8 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     for (i, ch) in s.char_indices() {
         match ch {
             '(' | '[' => depth += 1,
-            ')' | ']' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            ')' | ']' if depth > 0 => {
+                depth -= 1;
             }
             c if c == sep && depth == 0 => {
                 parts.push(&s[start..i]);

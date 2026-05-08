@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use futures::future::BoxFuture;
 use bock_interp::{BockString, BuiltinRegistry, CallbackInvoker, RuntimeError, TypeTag, Value};
+use futures::future::BoxFuture;
 
 /// Register all Set methods and trait implementations.
 pub fn register(registry: &mut BuiltinRegistry) {
@@ -168,44 +168,53 @@ fn expect_fn<'a>(args: &'a [Value], pos: usize, method: &str) -> Result<&'a Valu
 }
 
 /// `set.filter(fn)` — keep elements where `fn(element)` returns `true`.
-fn set_filter<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn set_filter<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let s = expect_set(args, 0, "filter")?;
-    let f = expect_fn(args, 1, "filter")?;
-    let mut result = BTreeSet::new();
-    for item in s {
-        if let Value::Bool(true) = invoker.invoke(f, std::slice::from_ref(item)).await? {
-            result.insert(item.clone());
+        let s = expect_set(args, 0, "filter")?;
+        let f = expect_fn(args, 1, "filter")?;
+        let mut result = BTreeSet::new();
+        for item in s {
+            if let Value::Bool(true) = invoker.invoke(f, std::slice::from_ref(item)).await? {
+                result.insert(item.clone());
+            }
         }
-    }
-    Ok(Value::Set(result))
-})
+        Ok(Value::Set(result))
+    })
 }
 
 /// `set.for_each(fn)` — call `fn(element)` for each element, returns Void.
-fn set_for_each<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn set_for_each<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let s = expect_set(args, 0, "for_each")?;
-    let f = expect_fn(args, 1, "for_each")?;
-    for item in s {
-        invoker.invoke(f, std::slice::from_ref(item)).await?;
-    }
-    Ok(Value::Void)
-})
+        let s = expect_set(args, 0, "for_each")?;
+        let f = expect_fn(args, 1, "for_each")?;
+        for item in s {
+            invoker.invoke(f, std::slice::from_ref(item)).await?;
+        }
+        Ok(Value::Void)
+    })
 }
 
 /// `set.map(fn)` — apply `fn` to each element, returning a new set.
-fn set_map<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn set_map<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let s = expect_set(args, 0, "map")?;
-    let f = expect_fn(args, 1, "map")?;
-    let mut result = BTreeSet::new();
-    for item in s {
-        let mapped = invoker.invoke(f, std::slice::from_ref(item)).await?;
-        result.insert(mapped);
-    }
-    Ok(Value::Set(result))
-})
+        let s = expect_set(args, 0, "map")?;
+        let f = expect_fn(args, 1, "map")?;
+        let mut result = BTreeSet::new();
+        for item in s {
+            let mapped = invoker.invoke(f, std::slice::from_ref(item)).await?;
+            result.insert(mapped);
+        }
+        Ok(Value::Set(result))
+    })
 }
 
 // ─── Conversion ───────────────────────────────────────────────────────────────
@@ -493,7 +502,7 @@ mod tests {
         let r = reg();
         let s = make_set(&[1, 2]);
         let h1 = r
-            .call(TypeTag::Set, "hash_code", &[s.clone()])
+            .call(TypeTag::Set, "hash_code", std::slice::from_ref(&s))
             .unwrap()
             .unwrap();
         let h2 = r.call(TypeTag::Set, "hash_code", &[s]).unwrap().unwrap();

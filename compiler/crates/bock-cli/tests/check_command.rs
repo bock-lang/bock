@@ -235,16 +235,8 @@ fn check_multifile_error_shows_correct_path() {
     // should reference the correct file path.
     let dir = tempfile::tempdir().unwrap();
 
-    std::fs::write(
-        dir.path().join("good.bock"),
-        "fn helper() -> Int { 42 }\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.path().join("bad.bock"),
-        "fn broken( { }\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join("good.bock"), "fn helper() -> Int { 42 }\n").unwrap();
+    std::fs::write(dir.path().join("bad.bock"), "fn broken( { }\n").unwrap();
 
     let output = bock_bin()
         .arg("check")

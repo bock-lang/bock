@@ -105,10 +105,7 @@ impl CodeGenerator for PyGenerator {
 
     fn entry_invocation(&self, main_is_async: bool) -> Option<String> {
         if main_is_async {
-            Some(
-                "if __name__ == \"__main__\":\n    asyncio.run(main())\n"
-                    .to_string(),
-            )
+            Some("if __name__ == \"__main__\":\n    asyncio.run(main())\n".to_string())
         } else {
             Some("if __name__ == \"__main__\":\n    main()\n".to_string())
         }
@@ -698,16 +695,12 @@ impl PyEmitCtx {
                         name.name,
                         comp_names.join(" + ")
                     ));
-                    self.composite_effects
-                        .insert(name.name.clone(), comp_names);
+                    self.composite_effects.insert(name.name.clone(), comp_names);
                     return Ok(());
                 }
                 // Record effect operations for Call → handler.op rewriting.
                 for op in operations {
-                    if let NodeKind::FnDecl {
-                        name: op_name, ..
-                    } = &op.kind
-                    {
+                    if let NodeKind::FnDecl { name: op_name, .. } = &op.kind {
                         self.effect_ops
                             .insert(op_name.name.clone(), name.name.clone());
                     }
@@ -772,8 +765,7 @@ impl PyEmitCtx {
                 // register it as the default handler. Effectful calls later
                 // in the module will pick it up via `current_handler_vars`
                 // unless a local handling block overrides it.
-                let effect_name =
-                    effect.segments.last().map_or("effect", |s| s.name.as_str());
+                let effect_name = effect.segments.last().map_or("effect", |s| s.name.as_str());
                 let var_name = format!("__{}", to_snake_case(effect_name));
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}{var_name}: {effect_name} = ");
@@ -1190,8 +1182,11 @@ impl PyEmitCtx {
                 self.handling_counter += 1;
                 let suffix = format!("_h{}", self.handling_counter);
                 for h in handlers {
-                    let effect_name =
-                        h.effect.segments.last().map_or("effect", |s| s.name.as_str());
+                    let effect_name = h
+                        .effect
+                        .segments
+                        .last()
+                        .map_or("effect", |s| s.name.as_str());
                     let var_name = format!("__{}{suffix}", to_snake_case(effect_name));
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}{var_name}: {effect_name} = ");
@@ -1327,7 +1322,8 @@ impl PyEmitCtx {
                         if let Some(handler_var) =
                             self.current_handler_vars.get(&effect_name).cloned()
                         {
-                            let _ = write!(self.buf, "{}.{}", handler_var, to_snake_case(&name.name));
+                            let _ =
+                                write!(self.buf, "{}.{}", handler_var, to_snake_case(&name.name));
                             self.buf.push('(');
                             for (i, arg) in args.iter().enumerate() {
                                 if i > 0 {
@@ -1534,9 +1530,11 @@ impl PyEmitCtx {
                 Ok(())
             }
             NodeKind::Interpolation { parts } => {
-                let has_newline = parts.iter().any(|p| matches!(p,
-                    AirInterpolationPart::Literal(s) if s.contains('\n')
-                ));
+                let has_newline = parts.iter().any(|p| {
+                    matches!(p,
+                        AirInterpolationPart::Literal(s) if s.contains('\n')
+                    )
+                });
                 if has_newline {
                     self.buf.push_str("f\"\"\"");
                 } else {
@@ -1997,11 +1995,8 @@ impl PyEmitCtx {
     /// skipped (not awaitable work we can parallelise). The binding must be
     /// awaited in the same flat block — nested scopes are ignored because we
     /// can't prove the binding is still live once control leaves the block.
-    fn collect_task_bindings(
-        stmts: &[AIRNode],
-    ) -> std::collections::HashSet<String> {
-        let mut awaited: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+    fn collect_task_bindings(stmts: &[AIRNode]) -> std::collections::HashSet<String> {
+        let mut awaited: std::collections::HashSet<String> = std::collections::HashSet::new();
         for s in stmts {
             Self::collect_awaited_identifiers(s, &mut awaited);
         }
@@ -2010,9 +2005,7 @@ impl PyEmitCtx {
             if let NodeKind::LetBinding { pattern, value, .. } = &s.kind {
                 if let NodeKind::BindPat { name, .. } = &pattern.kind {
                     let py_name = to_snake_case(&name.name);
-                    if matches!(&value.kind, NodeKind::Call { .. })
-                        && awaited.contains(&py_name)
-                    {
+                    if matches!(&value.kind, NodeKind::Call { .. }) && awaited.contains(&py_name) {
                         out.insert(py_name);
                     }
                 }
@@ -2025,10 +2018,7 @@ impl PyEmitCtx {
     /// bare identifier. Nested function / lambda bodies are not descended —
     /// an inner closure awaiting the name doesn't imply the outer block
     /// wants a task.
-    fn collect_awaited_identifiers(
-        node: &AIRNode,
-        out: &mut std::collections::HashSet<String>,
-    ) {
+    fn collect_awaited_identifiers(node: &AIRNode, out: &mut std::collections::HashSet<String>) {
         match &node.kind {
             NodeKind::Await { expr } => {
                 if let NodeKind::Identifier { name } = &expr.kind {
@@ -2095,8 +2085,7 @@ impl PyEmitCtx {
             NodeKind::Assign { value, .. } => {
                 Self::collect_awaited_identifiers(value, out);
             }
-            NodeKind::TupleLiteral { elems }
-            | NodeKind::ListLiteral { elems } => {
+            NodeKind::TupleLiteral { elems } | NodeKind::ListLiteral { elems } => {
                 for e in elems {
                     Self::collect_awaited_identifiers(e, out);
                 }
@@ -2954,7 +2943,10 @@ mod tests {
             "got: {out}"
         );
         // Single-line interpolation should still use regular f-string
-        assert!(!out.contains("f\"Hello"), "single-line should not appear: {out}");
+        assert!(
+            !out.contains("f\"Hello"),
+            "single-line should not appear: {out}"
+        );
     }
 
     #[test]
@@ -2994,7 +2986,10 @@ mod tests {
         );
         let out = gen(&module(vec![], vec![f]));
         assert!(out.contains("f\"Hi {name}\""), "got: {out}");
-        assert!(!out.contains("f\"\"\""), "should not use triple quotes: {out}");
+        assert!(
+            !out.contains("f\"\"\""),
+            "should not use triple quotes: {out}"
+        );
     }
 
     #[test]

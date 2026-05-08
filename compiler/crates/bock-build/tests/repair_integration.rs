@@ -53,10 +53,7 @@ impl SwitchingProvider {
 
 #[async_trait]
 impl AiProvider for SwitchingProvider {
-    async fn generate(
-        &self,
-        _request: &GenerateRequest,
-    ) -> Result<GenerateResponse, AiError> {
+    async fn generate(&self, _request: &GenerateRequest) -> Result<GenerateResponse, AiError> {
         self.generate_calls.fetch_add(1, Ordering::SeqCst);
         Ok(GenerateResponse {
             code: self.broken_code.clone(),
@@ -86,10 +83,7 @@ impl AiProvider for SwitchingProvider {
         })
     }
 
-    async fn optimize(
-        &self,
-        _request: &OptimizeRequest,
-    ) -> Result<OptimizeResponse, AiError> {
+    async fn optimize(&self, _request: &OptimizeRequest) -> Result<OptimizeResponse, AiError> {
         unreachable!("optimize not used in D.6 tests")
     }
 
@@ -124,10 +118,7 @@ impl AlwaysBrokenRepairProvider {
 
 #[async_trait]
 impl AiProvider for AlwaysBrokenRepairProvider {
-    async fn generate(
-        &self,
-        _request: &GenerateRequest,
-    ) -> Result<GenerateResponse, AiError> {
+    async fn generate(&self, _request: &GenerateRequest) -> Result<GenerateResponse, AiError> {
         unreachable!("generate not used for this test")
     }
 
@@ -142,10 +133,7 @@ impl AiProvider for AlwaysBrokenRepairProvider {
         })
     }
 
-    async fn optimize(
-        &self,
-        _request: &OptimizeRequest,
-    ) -> Result<OptimizeResponse, AiError> {
+    async fn optimize(&self, _request: &OptimizeRequest) -> Result<OptimizeResponse, AiError> {
         unreachable!("optimize not used in D.6 tests")
     }
 
@@ -248,9 +236,7 @@ async fn generate_then_repair_produces_working_code() {
 
     // Flush manifest and inspect.
     manifest.lock().unwrap().flush().unwrap();
-    let decisions_file = dir
-        .path()
-        .join(".bock/decisions/build/src/m.bock.json");
+    let decisions_file = dir.path().join(".bock/decisions/build/src/m.bock.json");
     let contents = std::fs::read_to_string(&decisions_file).unwrap();
     assert!(contents.contains("\"repair\""), "expected repair entry");
     assert!(
@@ -303,28 +289,16 @@ async fn second_build_hits_rule_and_skips_ai_call() {
     struct NoCallsProvider;
     #[async_trait]
     impl AiProvider for NoCallsProvider {
-        async fn generate(
-            &self,
-            _request: &GenerateRequest,
-        ) -> Result<GenerateResponse, AiError> {
+        async fn generate(&self, _request: &GenerateRequest) -> Result<GenerateResponse, AiError> {
             panic!("AI must not be called when rule cache serves the node");
         }
-        async fn repair(
-            &self,
-            _request: &RepairRequest,
-        ) -> Result<RepairResponse, AiError> {
+        async fn repair(&self, _request: &RepairRequest) -> Result<RepairResponse, AiError> {
             panic!("repair not expected");
         }
-        async fn optimize(
-            &self,
-            _request: &OptimizeRequest,
-        ) -> Result<OptimizeResponse, AiError> {
+        async fn optimize(&self, _request: &OptimizeRequest) -> Result<OptimizeResponse, AiError> {
             unreachable!()
         }
-        async fn select(
-            &self,
-            _request: &SelectRequest,
-        ) -> Result<SelectResponse, AiError> {
+        async fn select(&self, _request: &SelectRequest) -> Result<SelectResponse, AiError> {
             unreachable!()
         }
         fn model_id(&self) -> String {
@@ -389,9 +363,7 @@ async fn second_build_hits_rule_and_skips_ai_call() {
     assert_eq!(stats.rule_applied, 1);
     assert_eq!(stats.ai_calls, 0);
 
-    let decisions_file = dir
-        .path()
-        .join(".bock/decisions/build/src/m.bock.json");
+    let decisions_file = dir.path().join(".bock/decisions/build/src/m.bock.json");
     let contents = std::fs::read_to_string(&decisions_file).unwrap();
     assert!(
         contents.contains("\"rule_applied\""),
