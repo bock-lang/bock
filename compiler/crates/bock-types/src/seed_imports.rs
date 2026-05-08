@@ -367,10 +367,8 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     for (i, ch) in s.char_indices() {
         match ch {
             '(' | '[' => depth += 1,
-            ')' | ']' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            ')' | ']' if depth > 0 => {
+                depth -= 1;
             }
             c if c == sep && depth == 0 => {
                 parts.push(&s[start..i]);

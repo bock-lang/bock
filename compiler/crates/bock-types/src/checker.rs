@@ -3548,10 +3548,8 @@ fn collect_type_var_ids_fn(fn_ty: &FnType, out: &mut Vec<TypeVarId>) {
 /// Recursively collect unique [`TypeVarId`]s from a type.
 fn collect_type_var_ids(ty: &Type, out: &mut Vec<TypeVarId>) {
     match ty {
-        Type::TypeVar(id) => {
-            if !out.contains(id) {
-                out.push(*id);
-            }
+        Type::TypeVar(id) if !out.contains(id) => {
+            out.push(*id);
         }
         Type::Function(f) => {
             for p in &f.params {
