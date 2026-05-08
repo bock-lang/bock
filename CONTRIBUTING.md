@@ -45,6 +45,43 @@ cd extensions/vscode && npm install && npm run compile
    `cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings && cargo test --workspace`
 6. **Open a PR** using the template. CI must be green before merge.
 
+## Validating CI locally
+
+Bock's CI workflows run on every PR. To validate workflow changes
+before pushing — without burning Actions minutes — use
+[`act`](https://github.com/nektos/act), which executes workflows in
+local Docker containers:
+
+```bash
+# Install act (one-time)
+brew install act           # macOS
+# or: curl -fsSL https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash
+
+# List available jobs
+act -l
+
+# Run a specific job (use catthehacker images for fidelity to GH runners)
+act -j fmt    -P ubuntu-latest=catthehacker/ubuntu:act-latest
+act -j clippy -P ubuntu-latest=catthehacker/ubuntu:act-latest
+act -j test   -P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# Reuse containers between runs (faster iteration)
+act -j test --reuse
+```
+
+Some workflow features don't reproduce 1:1 under act: `actions/cache`
+restores empty caches across runs, release artifact uploads are no-ops,
+and `GITHUB_TOKEN` has reduced scope. For non-release jobs this is
+fine. For release-only paths, validate against the actual GitHub
+Actions run.
+
+For pure static analysis without Docker, use
+[`actionlint`](https://github.com/rhysd/actionlint):
+
+```bash
+actionlint .github/workflows/*.yml
+```
+
 ## Commit Messages
 
 - Imperative mood: "Add effect inference for closures" not "Added".
