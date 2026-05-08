@@ -60,12 +60,132 @@ time horizons. When a milestone completes, both must be updated in
 the same PR. If they disagree, the most recent commit on each file
 wins until reconciled. Do not let drift persist across sessions.
 
-## Parallel Sessions
+## Session Workflow
 
-Use `/project:parallel <branch> <crate1> [crate2] ...` when running
-multiple Claude Code sessions simultaneously. Each session may only
-modify its owned crates. See `.claude/commands/project/parallel.md`
-for the full protocol.
+All Claude Code sessions use the worktree-based pattern via
+`/project:session <branch> [owned-files...]`. This isolates each
+session from the main checkout and from concurrent sessions.
+
+### What this means for session prompts
+
+- Don't `cd /opt/claude-projects/bock` in the session body. The
+  slash command places you in a worktree at
+  `/opt/claude-projects/bock-worktrees/<branch-slug>` and exports
+  `$WORKTREE` pointing there. Use the current working directory
+  or `$WORKTREE`.
+- Don't manually create branches with `git checkout -b`. The
+  slash command does this.
+- Don't manually push or open PRs at the end. The slash
+  command's teardown handles it on success.
+- For scratch directories under `/tmp/`, prefix with
+  `$BOCK_TEST_NAMESPACE`: `mkdir -p
+  /tmp/$BOCK_TEST_NAMESPACE-test-build` rather than
+  `/tmp/test-build`. Prevents collisions across concurrent
+  sessions.
+
+### Cargo target sharing
+
+`CARGO_TARGET_DIR` is set per-branch under
+`~/.cargo/cache/bock-target/<branch-slug>/`. Sessions on the
+same branch reuse build artifacts. Different branches stay
+isolated. Trade-off: disk space for compile speed.
+
+To wipe build state for a branch:
+
+```bash
+rm -rf ~/.cargo/cache/bock-target/<branch-slug>
+```
+
+### Worktree cleanup
+
+Successful sessions clean up their worktree automatically. On
+failure (test failure, push rejection, gh auth issue), the
+worktree persists at
+`/opt/claude-projects/bock-worktrees/<branch-slug>` for
+inspection. Resume work there or clean up manually:
+
+```bash
+git worktree remove /opt/claude-projects/bock-worktrees/<slug>
+git branch -D <branch>                        # if abandoning
+rm -rf ~/.cargo/cache/bock-target/<slug>      # reclaim disk
+```
+
+## GitHub Operations (gh CLI)
+
+Claude Code has authenticated access to the `gh` CLI. The
+following operations are permitted, restricted, or prohibited:
+
+### Permitted (no confirmation needed)
+
+Read operations and the standard session-completion writes:
+
+- `gh auth status`
+- `gh run list`, `gh run view`, `gh run watch`, `gh run download`
+- `gh pr list`, `gh pr view`, `gh pr checks`, `gh pr diff`
+- `gh pr create` (on feature branches only — never on `main`)
+- `gh pr comment` (own session's PR)
+- `gh pr ready` (draft → ready, own session's PR)
+- `gh issue list`, `gh issue view`, `gh issue comment`
+- `gh api` with GET method
+- `gh repo view`
+- `gh release list`, `gh release view`
+- `gh workflow list`, `gh workflow view`
+
+### Restricted (surface to human, do NOT execute autonomously)
+
+These are reversible but materially affect the canonical state.
+Surface as `PROPOSED:` in the session output and let the human
+run them:
+
+- `gh pr merge` — affects main; merge ceremony belongs to the human
+- `gh pr close`, `gh pr reopen`
+- `gh issue close`, `gh issue reopen`
+- `gh release create`, `gh release upload`, `gh release edit`
+- `gh api` with `POST`, `PATCH`, `PUT`, `DELETE` (except the
+  endpoints implicit in the permitted commands above)
+- `gh workflow run` (manually-triggered workflow dispatches)
+- `gh pr review` with `--approve` or `--request-changes` on
+  PRs the same session opened (self-review)
+
+### Prohibited (never, under any circumstance)
+
+These are destructive, irreversible, or escalate access:
+
+- `gh repo delete` — any repo, including bock-lang/bock
+- `gh repo edit` — changing visibility, default branch, settings
+- `gh repo create` — creating new repos in the bock-lang org
+- `gh secret set`, `gh secret delete`, `gh secret list`
+- `gh variable set`, `gh variable delete`
+- `gh org` — any org-level operations (members, teams, settings)
+- `gh ruleset` — modifying branch protection / rulesets
+- Force pushes (`git push --force`, `--force-with-lease`)
+- Deletions of remote refs other than the session's own
+  newly-created feature branch when explicitly resetting
+- Approving or merging PRs the same session created
+- `gh auth refresh --scopes` to expand token scope
+
+### When in doubt
+
+If an operation isn't clearly listed above and could affect more
+than the session's own branch and PR: don't run it. Surface as
+`PROPOSED: gh <command>` with rationale. The human decides.
+
+## Concurrent Sessions
+
+Multiple sessions on different branches run safely under the
+worktree pattern. Each session gets its own worktree, its own
+`CARGO_TARGET_DIR`, and its own `BOCK_TEST_NAMESPACE`. There's
+no shared mutable state between concurrent sessions on
+different branches.
+
+Sessions still must respect ownership: a session declares its
+owned files / directories at the top of the prompt, and only
+modifies those. Tracking files (STATUS.md, ROADMAP.md, this
+CLAUDE.md) are off-limits to all sessions; the merge coordinator
+updates them after PRs land.
+
+The legacy `/project:parallel` command is deprecated; use
+`/project:session` for all new work.
 
 ## Code Style
 
