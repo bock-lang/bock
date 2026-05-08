@@ -518,10 +518,8 @@ fn extract_content_blocks(resp: &JsonValue) -> Result<ContentBlocks, AiError> {
                     blocks.thinking.push_str(s);
                 }
             }
-            "tool_use" => {
-                if blocks.tool_use_input.is_none() {
-                    blocks.tool_use_input = block.get("input").cloned();
-                }
+            "tool_use" if blocks.tool_use_input.is_none() => {
+                blocks.tool_use_input = block.get("input").cloned();
             }
             _ => {}
         }
