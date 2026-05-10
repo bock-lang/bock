@@ -66,6 +66,19 @@ All Claude Code sessions use the worktree-based pattern via
 `/project:session <branch> [owned-files...]`. This isolates each
 session from the main checkout and from concurrent sessions.
 
+### Stale-main protection
+
+The slash command's pre-flight always fetches and fast-forwards
+local `main` to `origin/main` before creating the worktree, then
+bases the new branch on the now-current `origin/main`. Sessions
+therefore cannot build from a stale main: the worktree's base
+commit is always whatever `origin/main` reports at session start.
+
+If you want to verify before invoking, run `git -C
+/opt/claude-projects/bock log -1 --format='%h %s' origin/main`
+and `git -C /opt/claude-projects/bock fetch origin main` to
+compare. The slash command does both automatically.
+
 ### What this means for session prompts
 
 - Don't `cd /opt/claude-projects/bock` in the session body. The
