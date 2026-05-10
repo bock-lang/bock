@@ -265,7 +265,16 @@ enum Command {
         format: String,
     },
     /// Start the Bock language server over stdio.
-    Lsp,
+    Lsp {
+        /// Use stdio transport (default; provided for LSP convention).
+        ///
+        /// `--stdio` is the universal LSP convention. We accept it for
+        /// compatibility with LSP clients (VS Code, neovim, emacs
+        /// lsp-mode, etc.) but stdio is already the default and only
+        /// transport at v1.
+        #[arg(long)]
+        stdio: bool,
+    },
 }
 
 /// `bock inspect` subcommands.
@@ -546,7 +555,7 @@ async fn main() -> anyhow::Result<()> {
             output,
             format,
         } => doc::run(path, output, &format)?,
-        Command::Lsp => bock_lsp::run_stdio().await,
+        Command::Lsp { stdio: _ } => bock_lsp::run_stdio().await,
     }
 
     Ok(())
@@ -554,6 +563,26 @@ async fn main() -> anyhow::Result<()> {
 
 fn stub(name: &str) {
     println!("bock {name}: not yet implemented");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn lsp_accepts_stdio_flag() {
+        let cli = Cli::try_parse_from(["bock", "lsp", "--stdio"])
+            .expect("`bock lsp --stdio` should parse cleanly");
+        assert!(matches!(cli.command, Command::Lsp { stdio: true }));
+    }
+
+    #[test]
+    fn lsp_works_without_stdio_flag() {
+        let cli = Cli::try_parse_from(["bock", "lsp"])
+            .expect("`bock lsp` (no flag) should parse cleanly");
+        assert!(matches!(cli.command, Command::Lsp { stdio: false }));
+    }
 }
 
 fn run_inspect(cmd: InspectCommand) -> anyhow::Result<()> {
