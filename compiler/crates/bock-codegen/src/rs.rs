@@ -95,15 +95,15 @@ impl CodeGenerator for RsGenerator {
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
-            generated_file: "output.rs".to_string(),
+            generated_file: String::new(),
             ..Default::default()
         };
         Ok(GeneratedCode {
             files: vec![OutputFile {
-                path: PathBuf::from("output.rs"),
+                path: PathBuf::new(),
                 content,
+                source_map: Some(source_map),
             }],
-            source_map: Some(source_map),
         })
     }
 }

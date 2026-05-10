@@ -132,6 +132,7 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
     let mut registry = ModuleRegistry::new();
     let mut air_modules = Vec::new();
     let mut source_infos = Vec::new();
+    let mut module_source_paths: Vec<PathBuf> = Vec::new();
 
     for module_id in &topo_order {
         let Some(&idx) = id_to_index.get(module_id) else {
@@ -155,6 +156,7 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
 
                 air_modules.push(air_module);
                 source_infos.push(pf.filename.clone());
+                module_source_paths.push(pf.path.clone());
             }
             Err(()) => found_errors = true,
         }
@@ -195,30 +197,32 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
 
         println!("  target: {target}");
 
-        // Generate concatenated output for all modules
+        // Generate output: one file per module, mirroring source structure
+        // under `build/<target>/` per spec §20.6.1.
         let mut total_files_written = 0;
-        let module_refs: Vec<&bock_types::AIRModule> = air_modules.iter().collect();
-        match generator.generate_project(&module_refs) {
+        let module_inputs: Vec<(&bock_types::AIRModule, &Path)> = air_modules
+            .iter()
+            .zip(module_source_paths.iter())
+            .map(|(m, p)| (m, p.as_path()))
+            .collect();
+        match generator.generate_project(&module_inputs) {
             Ok(mut generated) => {
-                // Populate source map file refs and resolve positions so the
-                // emitted sidecar references the originating Bock sources.
-                // Applied for every target that produced a source map —
-                // JS/TS additionally get a `//# sourceMappingURL` comment.
                 let emit_url_comment = matches!(target.as_str(), "js" | "ts");
-                if options.source_map {
-                    if let Some(sm) = generated.source_map.as_mut() {
-                        populate_source_map(sm, &parsed_files, &source_map);
-                    }
-                }
 
                 for output_file in &mut generated.files {
+                    if options.source_map {
+                        if let Some(sm) = output_file.source_map.as_mut() {
+                            populate_source_map(sm, &parsed_files, &source_map);
+                        }
+                    }
+
                     let dest = output_dir.join(&output_file.path);
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
 
                     if options.source_map {
-                        if let Some(sm) = &generated.source_map {
+                        if let Some(sm) = &output_file.source_map {
                             let map_name = format!(
                                 "{}.map",
                                 output_file
@@ -583,15 +587,13 @@ fn create_generator(target: &str) -> anyhow::Result<Box<dyn CodeGenerator>> {
 }
 
 /// Get the file extension for a target's generated files.
+///
+/// Single source of truth lives on each [`bock_codegen::TargetProfile`] —
+/// this helper just delegates so call sites don't duplicate the table.
 fn target_file_extension(target: &str) -> String {
-    match target {
-        "js" => "js".to_string(),
-        "ts" => "ts".to_string(),
-        "python" => "py".to_string(),
-        "rust" => "rs".to_string(),
-        "go" => "go".to_string(),
-        _ => "txt".to_string(),
-    }
+    bock_codegen::TargetProfile::from_id(target)
+        .map(|p| p.conventions.file_extension)
+        .unwrap_or_else(|| "txt".to_string())
 }
 
 /// Find all files with a given extension in a directory (recursive).

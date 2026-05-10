@@ -91,15 +91,15 @@ impl CodeGenerator for PyGenerator {
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
-            generated_file: "output.py".to_string(),
+            generated_file: String::new(),
             ..Default::default()
         };
         Ok(GeneratedCode {
             files: vec![OutputFile {
-                path: PathBuf::from("output.py"),
+                path: PathBuf::new(),
                 content,
+                source_map: Some(source_map),
             }],
-            source_map: Some(source_map),
         })
     }
 
@@ -4251,8 +4251,10 @@ mod tests {
         );
         let m = module(vec![], vec![main_fn]);
         let gen = PyGenerator::new();
-        let out = gen.generate_project(&[&m]).unwrap();
+        let src_path = std::path::Path::new("src/main.bock");
+        let out = gen.generate_project(&[(&m, src_path)]).unwrap();
         let src = &out.files[0].content;
+        assert_eq!(out.files[0].path, std::path::PathBuf::from("main.py"));
         assert!(src.contains("import asyncio"), "got: {src}");
         assert!(src.contains("async def main():"), "got: {src}");
         assert!(src.contains("asyncio.run(main())"), "got: {src}");
