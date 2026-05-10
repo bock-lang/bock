@@ -86,6 +86,52 @@ The `/project:session` teardown runs all three before pushing.
 If any fail, the push is aborted, the worktree is preserved,
 and the session is told what to fix and amend.
 
+## Documentation Sync
+
+Every session that changes user-facing behavior is responsible
+for updating the corresponding documentation in the same PR.
+"User-facing behavior" includes:
+
+- CLI surface: commands, flags, error messages
+- Bock language surface: syntax, semantics, type rules,
+  effect rules, context rules
+- Stdlib API: function signatures, behavior, examples
+- Project conventions: `bock.project` fields, scaffolding output,
+  build outputs, manifest layouts
+- Spec-relevant invariants: anything §<N> claims as normative
+
+If your change touches any of these, the same PR must update:
+
+- `docs/` mdBook content (the contributor-facing reference)
+- `spec/sections/` content if the spec was wrong (with a
+  changelog at `spec/changelogs/<date>-impl-changes.md`)
+- `examples/` if examples demonstrated the old behavior
+- `website/` get-started copy if the website's locked copy
+  references the changed behavior
+
+If documentation updates would be substantial (>~50 lines or a
+new section), surface this in the session's PR description
+rather than expanding the session's scope unilaterally. The
+review can decide whether to land the docs in the same PR or a
+follow-up.
+
+### What "in sync" means concretely
+
+A change is documented when:
+1. mdBook builds without warnings against the new behavior
+2. Code examples in docs run against the new implementation
+   (verified by the doc-build CI job, see below)
+3. The spec section that governs the changed behavior has been
+   read and confirmed accurate, OR a changelog has been published
+   noting the spec amendment
+
+### Spec divergence is OPEN, not silent
+
+If a session discovers that implementation diverges from spec,
+do NOT silently change either. Surface as `OPEN: §X.Y - <description>`
+in the session's PR and route to design chat. The implementation
+chat does not resolve spec divergences unilaterally.
+
 ## Tracking File Alignment
 
 `STATUS.md` and `ROADMAP.md` describe the same project at different
