@@ -1685,7 +1685,7 @@ Single binary containing all tooling. The CLI surface is designed for ergonomic 
 **Build and execute:**
 
 `bock new` — Project scaffolding with interactive or flag-based configuration. Generates `bock.project` with a commented-out `[ai]` block for opt-in AI configuration; see §20.7.
-`bock build` — Transpile and compile. Produces a scaffolded project (project mode) by default; see §20.6.2 for output modes. Flags: `--target`, `--all-targets`, `--source-only`, `--deliverable`, `--deterministic`, `--optimize`, `--release`.
+`bock build` — Transpile and compile. Produces a scaffolded project (project mode) by default; see §20.6.2 for output modes. Flags: `--target`, `--all-targets`, `--source-only`, `--deliverable`, `--no-tests`, `--deterministic`, `--optimize`, `--release`.
 `bock run` — Build and execute. Default uses interpreter. `--target` for specific language. `--watch` for hot reload.
 `bock check` — Type check, lint, context validation. `--types`, `--lint`, `--context` for selective checking.
 `bock test` — Run tests. Default uses interpreter (fast). `--target` for transpilation tests. `--all-targets`, `--smart` for cross-target. `--coverage`, `--snapshot`.
@@ -1749,6 +1749,8 @@ Full LSP implementation plus Bock-specific extensions:
 
 Principle: semantic pass + target fail = transpiler bug, not user code bug.
 
+**Project mode validation gate.** When project mode (§20.6.2) includes transpiled tests in build output, Tier 2 transpilation tests serve as the gate that determines whether the output is trustworthy. A target's codegen is considered project-mode-ready when its Tier 2 tests pass on a representative test suite. Targets where Tier 2 tests fail intermittently or on common patterns should not ship project mode by default — they ship source mode (`--source-only`) until the transpilation gap closes. This is not a user-facing distinction but a release-readiness criterion for each target's codegen package.
+
 ### 20.5 — Debugger
 
 Built-in interpreter debugger with breakpoints, stepping, expression evaluation, ownership state inspection, effect handler display, and context viewing. Source maps enable debugging transpiled code in target-language debuggers.
@@ -1787,6 +1789,39 @@ The default is project mode because `bock build` implies producing something the
 
 Per-target scaffolding details (the contents of `package.json`, the structure of a generated `Cargo.toml`, the layout of a Python project) are documented in each target's codegen package. The spec commits to the mode model and the structural distinction; per-target manifest contents evolve with the target ecosystems and are not enumerated here.
 
+**Project kind: bin / lib.** The scaffolder generates target manifests appropriate to whether the project is a binary, a library, or both. Determination follows this rule: presence of `src/main.bock` with a `main` function indicates a binary; presence of `src/lib.bock` indicates a library; both present indicates both (where the target supports it — Rust supports `[[bin]]` + `[lib]` coexistence; targets that don't represent the distinction natively produce a binary and emit a warning that the library surface is not separately exported). Neither present is an error at scaffold time. The `[project] type` field in `bock.project` (`"bin"` | `"lib"` | `"both"`) explicitly overrides inference.
+
+**Per-target naming.** The scaffolder transforms the project name from `bock.project` per target conventions when not explicitly overridden:
+
+- npm/TypeScript: project name preserved as-is (kebab-case is npm-idiomatic)
+- Python: hyphens become underscores, leading digits prefixed, special characters stripped (PEP 8)
+- Rust: same normalization as Python (binary names cannot contain hyphens)
+- Go: a placeholder module path (`example.com/<project-name>`) is generated with a build warning; users must override
+
+Per-target overrides live in `[targets.<T>]` sections of `bock.project`:
+
+```toml
+[targets.go]
+module = "github.com/user/my-project"
+
+[targets.python]
+package = "my_custom_name"
+
+[targets.rust]
+crate = "my_crate"
+
+[targets.npm]
+package = "@scope/my-project"
+```
+
+**Lockfile policy.** The scaffolder does not generate lockfiles. `package-lock.json`, `Cargo.lock`, `poetry.lock`, `go.sum`, and equivalents are the responsibility of each target's package manager. The scaffolded README instructs users to run the appropriate install command on first contact (`npm install`, `cargo build`, `pip install -e .`, `go mod tidy`), which generates the lockfile correctly through the target ecosystem's normal flow.
+
+**Test inclusion.** Project mode includes Bock tests transpiled to the target's idiomatic test framework by default. After `bock build --target js`, users running `npm test` execute the Bock tests as Vitest/Jest tests; `cargo test` executes them as Rust tests; `pytest` executes them as Python tests; and so on. Per-target test framework mapping is documented in each target's codegen package.
+
+Including transpiled tests is part of how Bock makes its semantic equivalence claim verifiable to users: the same tests that pass on the Bock interpreter (Tier 1, §20.4) pass on the target after transpilation (Tier 2, §20.4). If they don't, that's a transpilation bug — the principle stated in §20.4 ("semantic pass + target fail = transpiler bug, not user code bug") becomes empirically checkable in user CI.
+
+`--no-tests` opts out of test inclusion for project mode output. Use cases: vendor distribution where tests should not ship, library consumers who only want runtime code, security-sensitive contexts. Test inclusion is the default because it's the validation surface that distinguishes Bock's cross-target semantic equivalence claim from a "good enough" transpiler's.
+
 ### 20.7 — Project Scaffolding
 
 `bock new <name>` generates a minimal project structure: `bock.project`, `.gitignore`, `src/main.bock`, and `tests/`.
@@ -1807,6 +1842,26 @@ The generated `bock.project` includes a commented-out `[ai]` block that document
 ```
 
 The scaffolder does not prompt interactively for provider configuration during `bock new`. Interactive flows fail awkwardly in CI and scripted contexts and demand provider knowledge from users whose first interaction with Bock is project creation. Users who want AI-assisted codegen uncomment and complete the block; users who do not delete it.
+
+`bock.project` supports several optional fields that influence project mode output (§20.6.2):
+
+```toml
+[project]
+name = "my-project"
+version = "0.1.0"
+type = "bin"                    # "bin" | "lib" | "both"; inferred when omitted
+
+[targets.go]
+module = "github.com/user/my-project"
+
+[targets.python]
+package = "my_custom_name"      # overrides default normalization
+
+[targets.rust]
+crate = "my_crate"              # overrides default normalization
+```
+
+Inference rules and override semantics are specified in §20.6.2. `bock new` does not generate these fields by default — they're added by users when needed. Generated projects rely on inference for the common case.
 
 ---
 

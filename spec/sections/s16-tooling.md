@@ -4,6 +4,11 @@
 Build/execute: `bock new`, `bock build`, `bock run`, `bock check`,
 `bock test`, `bock fmt`, `bock fix`, `bock repl`.
 
+`bock build` flags: `--target`, `--all-targets`, `--source-only`,
+`--deliverable`, `--no-tests`, `--deterministic`, `--optimize`,
+`--release`. Default produces project mode (§20.6.2) with
+transpiled tests included.
+
 Decisions/manifests: `bock inspect` (browse decisions/rules/cache),
 `bock pin` / `bock unpin` (pin lifecycle),
 `bock override --choice=X` (change selection),
