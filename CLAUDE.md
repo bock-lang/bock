@@ -24,10 +24,10 @@ tools/scripts/   Dev scripts (vocab sync, release helpers, etc.)
 
 ```bash
 # From repo root (workspace-aware):
-cargo build                               # build all compiler crates
-cargo test                                # run all tests
-cargo clippy --workspace -- -D warnings   # lint workspace
-cargo fmt --all -- --check                # format check
+cargo build                                        # build all compiler crates
+cargo test                                         # run all tests
+cargo clippy --workspace --all-targets -- -D warnings   # lint (matches CI)
+cargo fmt --all -- --check                         # format check (matches CI)
 
 # From compiler/ (equivalent):
 cd compiler && cargo build
@@ -52,6 +52,39 @@ cd extensions/vscode && npm test          # extension tests
 - **Architecture overview:** `ARCHITECTURE.md` (start here for new contributors)
 - **Current state:** `STATUS.md`
 - **Forward plans:** `ROADMAP.md`
+
+## Pre-PR Verification
+
+Before any session opens a PR, run the exact commands CI runs.
+Local lint/test runs that don't match CI will produce
+"works locally, fails in CI" surprises, especially for clippy
+(which only checks lib+bin code by default; CI uses
+`--all-targets`).
+
+The canonical pre-PR sequence:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+All three must exit zero. Notes on each:
+
+- **`cargo fmt --all -- --check`** — exits non-zero if any
+  workspace member has formatting drift. If it fails, run
+  `cargo fmt --all` (without `--check`) to fix and amend the
+  commit.
+- **`cargo clippy --workspace --all-targets -- -D warnings`** —
+  the `--workspace` flag lints every crate, not just the one
+  in cwd. The `--all-targets` flag lints lib, bin, tests,
+  examples, and benches; default clippy without `--all-targets`
+  skips tests, which is the most common cause of CI surprises.
+- **`cargo test --workspace`** — runs tests across every crate.
+
+The `/project:session` teardown runs all three before pushing.
+If any fail, the push is aborted, the worktree is preserved,
+and the session is told what to fix and amend.
 
 ## Tracking File Alignment
 
