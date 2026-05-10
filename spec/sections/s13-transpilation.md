@@ -17,7 +17,9 @@ Distinct concept from generation tiers. Selected by `bock build` flag:
   source-mirrored structure, no scaffolding
 - **Project mode** (default): source files + target-ecosystem
   scaffolding (package.json / Cargo.toml / pyproject.toml /
-  go.mod / etc.) — runnable in target's normal toolchain
+  go.mod / etc.) + transpiled tests in target test framework
+  (Vitest, pytest, cargo test, etc.). Runnable in target's
+  normal toolchain
 - **Deliverable mode** (`--deliverable`): final runnable artifact
   (bundled JS, compiled binary, container, mobile package, etc.);
   see §17.5 for deliverable types
@@ -25,6 +27,18 @@ Distinct concept from generation tiers. Selected by `bock build` flag:
 Default is project mode. Output filename mirrors source: `src/<path>.bock`
 → `build/<target>/<path>.<ext>`. Per-target scaffolding contents
 documented in each target's codegen package.
+
+Project mode specifics:
+- bin/lib/both inferred from `src/main.bock` and `src/lib.bock`;
+  `[project] type` overrides
+- per-target naming defaults to language conventions
+  (kebab-case for npm, snake_case for Python/Rust, placeholder
+  for Go modules); `[targets.<T>]` sections override
+- lockfiles NOT generated (target package manager owns this);
+  scaffolded README instructs users on first install
+- transpiled tests included by default; `--no-tests` opts out
+- §20.4 Tier 2 transpilation tests are the validation gate for
+  project mode trustworthiness
 
 ## Target Profile
 ```
