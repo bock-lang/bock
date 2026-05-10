@@ -174,6 +174,21 @@ if ! cargo test --workspace; then
   echo "  Worktree preserved at $WORKTREE."
   exit 1
 fi
+
+# Documentation build check (catches broken references and
+# unbuildable docs at PR time rather than CI time)
+if [ -f docs/book.toml ]; then
+  if ! mdbook build docs/ 2>&1 | tee /tmp/mdbook-output.log; then
+    echo ""
+    echo "ERROR: mdBook build failed. Documentation is broken."
+    echo "  Common causes:"
+    echo "    - Reference to a file that was renamed/deleted"
+    echo "    - Internal link to a section that was moved"
+    echo "    - Missing summary entry for a new chapter"
+    echo "  Fix and amend; worktree preserved at $WORKTREE."
+    exit 1
+  fi
+fi
  
 echo "============================================="
 echo "Verification passed. Pushing branch..."
