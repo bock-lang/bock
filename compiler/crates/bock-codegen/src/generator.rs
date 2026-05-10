@@ -1,6 +1,6 @@
 //! Code generator trait and output types.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bock_air::NodeKind;
 use bock_types::AIRModule;
@@ -13,10 +13,8 @@ use crate::profile::TargetProfile;
 /// Output from code generation — consistent across all targets.
 #[derive(Debug, Clone)]
 pub struct GeneratedCode {
-    /// Generated output files (path + content pairs).
+    /// Generated output files (path + content + per-file source map).
     pub files: Vec<OutputFile>,
-    /// Source map from AIR spans to target spans (optional for v1).
-    pub source_map: Option<SourceMap>,
 }
 
 /// A single generated output file.
@@ -26,6 +24,43 @@ pub struct OutputFile {
     pub path: PathBuf,
     /// Generated source code content.
     pub content: String,
+    /// Source map for this file's content (optional). Each generated file
+    /// owns its own map — multi-file builds produce one map per file.
+    pub source_map: Option<SourceMap>,
+}
+
+/// Derive the output path for a generated file from its source `.bock` path.
+///
+/// Per spec §20.6.1, a source file at `src/<path>.bock` produces output at
+/// `<path>.<ext>` (relative to the target build directory). Sources outside
+/// `src/` keep their full path. The returned `PathBuf` is always relative —
+/// callers prepend `build/<target>/`.
+///
+/// - `src/main.bock` → `main.<ext>`
+/// - `src/utils/parse.bock` → `utils/parse.<ext>`
+/// - `main.bock` → `main.<ext>` (no `src/` prefix to strip)
+///
+/// Leading `./` and any other curdir components are normalized away before
+/// stripping, so the source path can be supplied either bare or with a
+/// `./` prefix as produced by directory traversal.
+#[must_use]
+pub fn derive_output_path(source_path: &Path, target: &TargetProfile) -> PathBuf {
+    use std::path::Component;
+
+    let mut comps: Vec<&std::ffi::OsStr> = source_path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+
+    if comps.first().and_then(|c| c.to_str()) == Some("src") {
+        comps.remove(0);
+    }
+
+    let stripped: PathBuf = comps.iter().collect();
+    stripped.with_extension(&target.conventions.file_extension)
 }
 
 /// Maps AIR source spans to generated code spans.
@@ -39,7 +74,8 @@ pub struct SourceMap {
     pub entries: Vec<SourceMapEntry>,
     /// Pointwise position mappings from generated code to source.
     pub mappings: Vec<SourceMapping>,
-    /// The generated output file these mappings refer to (e.g. `"output.js"`).
+    /// File name (no directory) this map refers to. Populated by
+    /// `generate_project` from the source-mirrored output path.
     pub generated_file: String,
     /// Source files referenced by `mappings`, in file-id order.
     /// Each entry is `(path, optional_inline_content)`.
@@ -287,72 +323,55 @@ pub trait CodeGenerator {
         None
     }
 
-    /// Generates target code from multiple AIR modules, producing a single concatenated output.
+    /// Generates target code from multiple AIR modules with their source paths.
     ///
-    /// The default implementation generates each module separately and joins the
-    /// results into one file. Generators that need to deduplicate preambles
-    /// (e.g., Go's `package` declaration) should override this method.
-    fn generate_project(&self, modules: &[&AIRModule]) -> Result<GeneratedCode, CodegenError> {
-        let mut combined = String::new();
-        let mut merged_map: Option<SourceMap> = None;
-        for module in modules {
+    /// Per spec §20.6.1, each source file produces a corresponding target file
+    /// at the source-mirrored path. The default implementation invokes
+    /// `generate_module` per module, then rewrites each emitted file's path
+    /// (and its source map's `generated_file`) using
+    /// [`derive_output_path`]. The entry-point invocation, if any, is
+    /// appended to the file generated from the module that declares `main`.
+    ///
+    /// Generators with cross-module concerns (e.g., Go's `package` declaration
+    /// or async-function pre-scan) should override this method.
+    fn generate_project(
+        &self,
+        modules: &[(&AIRModule, &Path)],
+    ) -> Result<GeneratedCode, CodegenError> {
+        let main_is_async = modules.iter().any(|(m, _)| module_main_fn_is_async(m));
+        let invocation = self.entry_invocation(main_is_async);
+
+        let mut all_files: Vec<OutputFile> = Vec::with_capacity(modules.len());
+
+        for (module, source_path) in modules {
             let code = self.generate_module(module)?;
-            // For each file, record where its content starts in `combined`
-            // (as a 0-indexed line count). Generators typically emit one file.
-            let mut file_shifts: Vec<u32> = Vec::with_capacity(code.files.len());
-            for file in &code.files {
-                if !combined.is_empty() && !file.content.is_empty() {
-                    combined.push('\n');
+            let derived = derive_output_path(source_path, self.target());
+            let derived_name = derived
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let needs_invocation = invocation.is_some() && module_declares_main_fn(module);
+
+            for mut file in code.files {
+                file.path = derived.clone();
+                if let Some(sm) = file.source_map.as_mut() {
+                    sm.generated_file = derived_name.clone();
                 }
-                file_shifts.push(count_newlines(&combined) as u32);
-                combined.push_str(&file.content);
-            }
-            if let Some(mut sm) = code.source_map {
-                let shift = file_shifts.first().copied().unwrap_or(0);
-                for m in &mut sm.mappings {
-                    m.gen_line = m.gen_line.saturating_add(shift);
-                }
-                match &mut merged_map {
-                    Some(acc) => {
-                        acc.mappings.append(&mut sm.mappings);
-                        for src in sm.sources {
-                            if !acc.sources.iter().any(|s| s.path == src.path) {
-                                acc.sources.push(src);
-                            }
+                if needs_invocation {
+                    if let Some(invoc) = invocation.as_ref() {
+                        if !file.content.is_empty() && !file.content.ends_with('\n') {
+                            file.content.push('\n');
                         }
+                        file.content.push_str(invoc);
                     }
-                    None => merged_map = Some(sm),
                 }
+                all_files.push(file);
             }
         }
 
-        let main_is_async = modules.iter().any(|m| module_main_fn_is_async(m));
-        if let Some(invocation) = self.entry_invocation(main_is_async) {
-            if modules.iter().any(|m| module_declares_main_fn(m)) {
-                if !combined.is_empty() && !combined.ends_with('\n') {
-                    combined.push('\n');
-                }
-                combined.push_str(&invocation);
-            }
-        }
-
-        let ext = &self.target().conventions.file_extension;
-        let out_path = format!("output.{ext}");
-        if let Some(sm) = &mut merged_map {
-            sm.generated_file = out_path.clone();
-        }
-        Ok(GeneratedCode {
-            files: vec![OutputFile {
-                path: PathBuf::from(out_path),
-                content: combined,
-            }],
-            source_map: merged_map,
-        })
+        Ok(GeneratedCode { files: all_files })
     }
-}
-
-fn count_newlines(s: &str) -> usize {
-    s.bytes().filter(|b| *b == b'\n').count()
 }
 
 /// Returns true if the given AIR module declares a top-level function named
@@ -398,6 +417,7 @@ mod tests {
         let f = OutputFile {
             path: PathBuf::from("main.js"),
             content: "console.log('hello');".into(),
+            source_map: None,
         };
         assert_eq!(f.path, PathBuf::from("main.js"));
         assert!(f.content.contains("console.log"));
@@ -409,11 +429,83 @@ mod tests {
             files: vec![OutputFile {
                 path: PathBuf::from("out.py"),
                 content: "print('hello')".into(),
+                source_map: None,
             }],
-            source_map: None,
         };
         assert_eq!(code.files.len(), 1);
-        assert!(code.source_map.is_none());
+        assert!(code.files[0].source_map.is_none());
+    }
+
+    #[test]
+    fn derive_output_path_strips_src_prefix() {
+        let js = TargetProfile::javascript();
+        assert_eq!(
+            derive_output_path(Path::new("src/main.bock"), &js),
+            PathBuf::from("main.js")
+        );
+        assert_eq!(
+            derive_output_path(Path::new("src/utils/parse.bock"), &js),
+            PathBuf::from("utils/parse.js")
+        );
+        assert_eq!(
+            derive_output_path(Path::new("src/api/v1/handler.bock"), &js),
+            PathBuf::from("api/v1/handler.js")
+        );
+    }
+
+    #[test]
+    fn derive_output_path_preserves_paths_without_src_prefix() {
+        let py = TargetProfile::python();
+        assert_eq!(
+            derive_output_path(Path::new("main.bock"), &py),
+            PathBuf::from("main.py")
+        );
+        assert_eq!(
+            derive_output_path(Path::new("lib/foo.bock"), &py),
+            PathBuf::from("lib/foo.py")
+        );
+    }
+
+    #[test]
+    fn derive_output_path_normalizes_leading_curdir() {
+        let js = TargetProfile::javascript();
+        assert_eq!(
+            derive_output_path(Path::new("./src/main.bock"), &js),
+            PathBuf::from("main.js")
+        );
+        assert_eq!(
+            derive_output_path(Path::new("./main.bock"), &js),
+            PathBuf::from("main.js")
+        );
+        assert_eq!(
+            derive_output_path(Path::new("./src/utils/parse.bock"), &js),
+            PathBuf::from("utils/parse.js")
+        );
+    }
+
+    #[test]
+    fn derive_output_path_uses_target_extension() {
+        let path = Path::new("src/main.bock");
+        assert_eq!(
+            derive_output_path(path, &TargetProfile::javascript()),
+            PathBuf::from("main.js")
+        );
+        assert_eq!(
+            derive_output_path(path, &TargetProfile::typescript()),
+            PathBuf::from("main.ts")
+        );
+        assert_eq!(
+            derive_output_path(path, &TargetProfile::python()),
+            PathBuf::from("main.py")
+        );
+        assert_eq!(
+            derive_output_path(path, &TargetProfile::rust()),
+            PathBuf::from("main.rs")
+        );
+        assert_eq!(
+            derive_output_path(path, &TargetProfile::go()),
+            PathBuf::from("main.go")
+        );
     }
 
     #[test]

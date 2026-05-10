@@ -90,28 +90,26 @@ impl CodeGenerator for GoGenerator {
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
-            generated_file: "output.go".to_string(),
+            generated_file: String::new(),
             ..Default::default()
         };
         Ok(GeneratedCode {
             files: vec![OutputFile {
-                path: PathBuf::from("output.go"),
+                path: PathBuf::new(),
                 content,
+                source_map: Some(source_map),
             }],
-            source_map: Some(source_map),
         })
     }
 
-    fn generate_project(&self, modules: &[&AIRModule]) -> Result<GeneratedCode, CodegenError> {
-        let mut combined_body = String::new();
-        let mut needs_fmt = false;
-        let mut needs_sync = false;
-        let mut needs_time = false;
-
+    fn generate_project(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+    ) -> Result<GeneratedCode, CodegenError> {
         // Pre-scan async fns across all modules so cross-module calls
         // between async functions route through the Async-suffix wrappers.
         let mut global_async_fns: HashSet<String> = HashSet::new();
-        for module in modules {
+        for (module, _) in modules {
             if let NodeKind::Module { items, .. } = &module.kind {
                 for item in items {
                     if let NodeKind::FnDecl {
@@ -125,57 +123,75 @@ impl CodeGenerator for GoGenerator {
                 }
             }
         }
-        for module in modules {
+
+        let main_is_async = modules
+            .iter()
+            .any(|(m, _)| crate::generator::module_main_fn_is_async(m));
+        let invocation = self.entry_invocation(main_is_async);
+        let mut all_files: Vec<OutputFile> = Vec::with_capacity(modules.len());
+
+        for (module, source_path) in modules {
             let mut ctx = GoEmitCtx::new();
             ctx.async_fns = global_async_fns.clone();
             ctx.emit_node(module)?;
-            let (body, fmt, sync, time) = ctx.into_parts();
-            needs_fmt |= fmt;
-            needs_sync |= sync;
-            needs_time |= time;
-            if !combined_body.is_empty() && !body.is_empty() {
-                combined_body.push('\n');
-            }
-            combined_body.push_str(&body);
-        }
+            let (body, needs_fmt, needs_sync, needs_time) = ctx.into_parts();
 
-        // Build single preamble with merged imports
-        let mut header = "package main\n".to_string();
-        let mut imports = Vec::new();
-        if needs_fmt {
-            imports.push("\"fmt\"");
-        }
-        if needs_sync {
-            imports.push("\"sync\"");
-        }
-        if needs_time {
-            imports.push("\"time\"");
-        }
-        if !imports.is_empty() {
-            if imports.len() == 1 {
-                header.push_str(&format!("\nimport {}\n", imports[0]));
-            } else {
-                header.push_str("\nimport (\n");
-                for imp in &imports {
-                    header.push_str(&format!("\t{imp}\n"));
+            // Each generated .go file declares `package main` and its own
+            // imports. Per-file preambles avoid one-large-file collisions
+            // when sources mirror project structure.
+            let mut content = "package main\n".to_string();
+            let mut imports = Vec::new();
+            if needs_fmt {
+                imports.push("\"fmt\"");
+            }
+            if needs_sync {
+                imports.push("\"sync\"");
+            }
+            if needs_time {
+                imports.push("\"time\"");
+            }
+            if !imports.is_empty() {
+                if imports.len() == 1 {
+                    content.push_str(&format!("\nimport {}\n", imports[0]));
+                } else {
+                    content.push_str("\nimport (\n");
+                    for imp in &imports {
+                        content.push_str(&format!("\t{imp}\n"));
+                    }
+                    content.push_str(")\n");
                 }
-                header.push_str(")\n");
             }
-        }
-        header.push('\n');
-        header.push_str(&combined_body);
+            content.push('\n');
+            content.push_str(&body);
 
-        let source_map = SourceMap {
-            generated_file: "output.go".to_string(),
-            ..Default::default()
-        };
-        Ok(GeneratedCode {
-            files: vec![OutputFile {
-                path: PathBuf::from("output.go"),
-                content: header,
-            }],
-            source_map: Some(source_map),
-        })
+            if let (Some(invoc), true) = (
+                invocation.as_ref(),
+                crate::generator::module_declares_main_fn(module),
+            ) {
+                if !content.is_empty() && !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                content.push_str(invoc);
+            }
+
+            let derived = crate::generator::derive_output_path(source_path, self.target());
+            let derived_name = derived
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let source_map = SourceMap {
+                generated_file: derived_name,
+                ..Default::default()
+            };
+            all_files.push(OutputFile {
+                path: derived,
+                content,
+                source_map: Some(source_map),
+            });
+        }
+
+        Ok(GeneratedCode { files: all_files })
     }
 }
 

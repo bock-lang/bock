@@ -78,16 +78,16 @@ impl CodeGenerator for JsGenerator {
         ctx.emit_node(module)?;
         let (content, mappings) = ctx.finish();
         let source_map = SourceMap {
-            generated_file: "output.js".to_string(),
+            generated_file: String::new(),
             mappings,
             ..Default::default()
         };
         Ok(GeneratedCode {
             files: vec![OutputFile {
-                path: PathBuf::from("output.js"),
+                path: PathBuf::new(),
                 content,
+                source_map: Some(source_map),
             }],
-            source_map: Some(source_map),
         })
     }
 
@@ -4374,8 +4374,10 @@ mod tests {
         );
         let m = module(vec![], vec![main_fn]);
         let gen = JsGenerator::new();
-        let out = gen.generate_project(&[&m]).unwrap();
+        let src_path = std::path::Path::new("src/main.bock");
+        let out = gen.generate_project(&[(&m, src_path)]).unwrap();
         let src = &out.files[0].content;
+        assert_eq!(out.files[0].path, std::path::PathBuf::from("main.js"));
         assert!(src.contains("async function main()"), "got: {src}");
         assert!(
             src.contains("(async () => { await main(); })();"),
