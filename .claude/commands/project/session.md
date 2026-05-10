@@ -132,6 +132,53 @@ if [ "$COMMIT_COUNT" -eq 0 ]; then
   exit 0
 fi
  
+# Pre-push verification gate: run the exact commands CI runs.
+# Catches "passes locally, fails in CI" before we push and waste
+# a CI run + create a broken PR. The gate is non-optional;
+# sessions that need to push WIP/draft work can use a dedicated
+# draft flow, not bypass this.
+echo "============================================="
+echo "Running pre-push verification (matches CI)..."
+echo "============================================="
+ 
+if ! cargo fmt --all -- --check; then
+  echo ""
+  echo "ERROR: cargo fmt --check failed. Format drift in commit."
+  echo "  Fix and amend:"
+  echo "    cd $WORKTREE"
+  echo "    cargo fmt --all"
+  echo "    git add -A && git commit --amend --no-edit"
+  echo "  Then re-run /project:session teardown or push manually."
+  echo "  Worktree preserved at $WORKTREE."
+  exit 1
+fi
+ 
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+  echo ""
+  echo "ERROR: cargo clippy failed (--workspace --all-targets -D warnings)."
+  echo "  Note: --all-targets covers tests/examples/benches that"
+  echo "  default 'cargo clippy' skips — this is the most common"
+  echo "  source of CI surprises."
+  echo "  Fix the warnings and amend:"
+  echo "    cd $WORKTREE"
+  echo "    # ... fix code ..."
+  echo "    git add -A && git commit --amend --no-edit"
+  echo "  Worktree preserved at $WORKTREE."
+  exit 1
+fi
+ 
+if ! cargo test --workspace; then
+  echo ""
+  echo "ERROR: cargo test --workspace failed."
+  echo "  Fix failing tests and amend the commit."
+  echo "  Worktree preserved at $WORKTREE."
+  exit 1
+fi
+ 
+echo "============================================="
+echo "Verification passed. Pushing branch..."
+echo "============================================="
+ 
 # Push the branch
 if ! git push -u origin "$BRANCH"; then
   echo "ERROR: git push failed."
@@ -192,3 +239,13 @@ echo "============================================="
   immediately reflected in active worktrees through the symlink.
   If the canonical file doesn't exist, the symlink step is
   skipped and the agent runs with default permissions.
+- The teardown's pre-push verification gate runs `cargo fmt
+  --check`, `cargo clippy --workspace --all-targets -D warnings`,
+  and `cargo test --workspace` — the same commands CI runs. If
+  any fail, the push is aborted and the worktree is preserved
+  for the user to fix and amend. This makes "passes locally,
+  fails in CI" structurally impossible for these three checks.
+  Tradeoff: the gate adds time (especially clippy and tests)
+  to every successful session. Cargo's incremental cache makes
+  the second run fast since the session's Test step already
+  warmed it.
