@@ -565,26 +565,6 @@ fn stub(name: &str) {
     println!("bock {name}: not yet implemented");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn lsp_accepts_stdio_flag() {
-        let cli = Cli::try_parse_from(["bock", "lsp", "--stdio"])
-            .expect("`bock lsp --stdio` should parse cleanly");
-        assert!(matches!(cli.command, Command::Lsp { stdio: true }));
-    }
-
-    #[test]
-    fn lsp_works_without_stdio_flag() {
-        let cli = Cli::try_parse_from(["bock", "lsp"])
-            .expect("`bock lsp` (no flag) should parse cleanly");
-        assert!(matches!(cli.command, Command::Lsp { stdio: false }));
-    }
-}
-
 fn run_inspect(cmd: InspectCommand) -> anyhow::Result<()> {
     match cmd {
         InspectCommand::Decisions {
@@ -614,5 +594,25 @@ fn run_inspect(cmd: InspectCommand) -> anyhow::Result<()> {
         InspectCommand::Decision { id, json } => inspect::run_decision(&id, json),
         InspectCommand::Cache { size } => inspect::run_cache(size),
         InspectCommand::Rules { target } => inspect::run_rules(target.as_deref()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn lsp_accepts_stdio_flag() {
+        let cli = Cli::try_parse_from(["bock", "lsp", "--stdio"])
+            .expect("`bock lsp --stdio` should parse cleanly");
+        assert!(matches!(cli.command, Command::Lsp { stdio: true }));
+    }
+
+    #[test]
+    fn lsp_works_without_stdio_flag() {
+        let cli = Cli::try_parse_from(["bock", "lsp"])
+            .expect("`bock lsp` (no flag) should parse cleanly");
+        assert!(matches!(cli.command, Command::Lsp { stdio: false }));
     }
 }
