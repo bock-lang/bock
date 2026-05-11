@@ -4,6 +4,8 @@
 permanent docs structure has absorbed its work.**
 
 Captured against `main` at commit `7fb6e75`, build date 2026-05-10.
+Updated 2026-05-10 with implementation-chat clarifications on
+Item B scope overlap and spec authority.
 
 ## Executive Summary
 
@@ -27,6 +29,8 @@ Captured against `main` at commit `7fb6e75`, build date 2026-05-10.
 **41** items
 **Spec gaps (impl-only surface, absent from spec):** **5** items
 **Drift (spec describes surface not in impl):** **10** items
+  — of which **3** (F01-F03) are pre-resolved as Item B Phase 1
+  scope; effective drift requiring design chat: **7** items
 **Aligned rows:** **17** items
 **Total surface rows in matrix:** **73**
 
@@ -43,11 +47,35 @@ Rough order-of-magnitude budget; refine in each phase intro.
 | D5    | Contributor docs (architecture, playbook, doc-build CI) | 3–5             |
 | **Total** |                                | **19–30 hours** |
 
-The D4 estimate is small only because `stdlib/` is empty
+D2 and D3 can run in parallel via the worktree session pattern;
+parallelization shortens the critical path by 6-8 hours
+elapsed. D4 is intentionally small because `stdlib/` is empty
 (see [Implementation Surface](#stdlib-public-functions)). Once
 stdlib lands, D4 will grow substantially; D4 in this scope is
 limited to setting up the reference scaffolding and the
 `bock doc`-generated index hookup.
+
+---
+
+## Spec Authority Note
+
+**`spec/bock-spec.md` is the canonical assembled spec and is
+authoritative when it disagrees with section excerpts under
+`spec/sections/`.**
+
+The `s*-` section files are excerpts intended for human reading;
+they have not consistently kept pace with `bock-spec.md` edits.
+This matters for downstream phases:
+
+- **D1** uses `bock-spec.md` as the reference for what the spec
+  currently says when classifying matrix rows
+- **D2-D5** read from `bock-spec.md` for spec-derived content;
+  the section files are useful as reading aids but should not
+  be cited as authoritative in user-facing docs
+
+This authority hierarchy is fixed; if changes to the section
+file mechanism are needed, that's a separate question (route
+through K04 if it intersects the numbering reconciliation).
 
 ---
 
@@ -106,19 +134,21 @@ output-modes split, project-mode pass, CLI surface alignment).
 | `s15-packaging.md`          | Package Manager                | `bock.package`, lockfile, registries         | 2026-04-26 `54e2ad1`                       | 03-04 1651, 04-20 0413                                                                            |
 | `s16-tooling.md`            | Tooling                        | CLI, REPL, formatter, build system           | **2026-05-10 `019fb1e`**                   | 03-04 1651, 04-20 0413, 05-06 0900, 05-10 2100                                                    |
 
-`spec/bock-spec.md` is the canonical assembled spec (2379 lines).
-It is the authoritative source for §17.x (transpilation), §18.x
-(stdlib), §19.x (packaging), §20.x (tooling) and Appendix A
-(project configuration). The `s*-` section files under
-`spec/sections/` are **excerpts** — most are shorter than the
-corresponding sections in `bock-spec.md`.
+`spec/bock-spec.md` is the canonical assembled spec (2379 lines)
+and is the authoritative source per the [Spec Authority Note](#spec-authority-note)
+above. It owns §17.x (transpilation), §18.x (stdlib), §19.x
+(packaging), §20.x (tooling) and Appendix A (project
+configuration). The `s*-` section files under `spec/sections/`
+are **excerpts** — most are shorter than the corresponding
+sections in `bock-spec.md`.
 
 There is no section file corresponding to §17 (Transpilation —
 covered partly by `s13-transpilation.md`), §18 (Stdlib — covered
 by `s14-stdlib.md`), §19 (Packaging — covered by
 `s15-packaging.md`), or §20 (Tooling — covered partly by
 `s16-tooling.md`). The numbering mismatch between section files
-and `bock-spec.md` sections is documented here for D1 to resolve.
+and `bock-spec.md` sections is tracked as matrix row K04 for
+D1 to resolve.
 
 ---
 
@@ -143,9 +173,9 @@ no docs/spec footprint.
 | `bock build --pin-all`             | pin every build decision after success                                                                      | no    | implied by §17.4; not named | doc gap + spec gap |
 | `bock build --source-map`          | emit source map files (default on)                                                                          | no    | not specified        | doc gap + spec gap |
 | `bock build --no-source-map`       | suppress source map output                                                                                  | no    | not specified        | doc gap + spec gap |
-| `bock build --deliverable`         | *(spec says: produce binary-ready deliverable)*                                                             | no    | §20.1                | drift (spec only; impl missing) |
-| `bock build --no-tests`            | *(spec says: skip transpiled tests)*                                                                        | no    | §20.1                | drift (spec only; impl missing) |
-| `bock build --optimize`            | *(spec says: enable target-side optimization)*                                                              | no    | §20.1                | drift (spec only; impl missing) |
+| `bock build --deliverable`         | *(spec says: produce binary-ready deliverable)*                                                             | no    | §20.1                | drift (spec only; **Item B Phase 1**) |
+| `bock build --no-tests`            | *(spec says: skip transpiled tests)*                                                                        | no    | §20.1                | drift (spec only; **Item B Phase 1**) |
+| `bock build --optimize`            | *(spec says: enable target-side optimization)*                                                              | no    | §20.1                | drift (spec only; **Item B Phase 1**) |
 | `bock run [FILE] [-- ARGS…]`       | `--watch` (stub: not yet implemented)                                                                        | yes   | §20.1                | aligned* (--watch stub) |
 | `bock check [FILES…]`              | `--types`, `--lint`, `--no-context`                                                                          | partial | §20.1 (`--types`, `--lint`, `--context`) | drift (`--no-context` vs `--context` polarity) |
 | `bock test [FILES…]`               | `--filter <pattern>`                                                                                         | yes   | §20.1 (also names `--target`, `--all-targets`, `--smart`, `--coverage`, `--snapshot`) | drift (impl missing several spec'd flags) |
@@ -175,6 +205,11 @@ Notes on the table:
   rather than a doc gap.
 - `bock check --no-context` (impl) vs `--context` (spec) is a
   polarity difference — same capability, opposite default.
+- **`--deliverable`, `--no-tests`, `--optimize`** are noted as
+  **Item B Phase 1** scope. Item B's implementation plan
+  schedules these for Phase 1 (foundation + JavaScript codegen),
+  not a separate fix. They appear here as drift but resolve via
+  Item B's own work rather than via D1's design chat handoff.
 
 ### Stdlib Public Functions
 
@@ -206,64 +241,39 @@ Schema as actually parsed by the compiler:
 | `[strictness.overrides]`  | *(not read)*                                            | no                                 | yes                | drift    |
 | `[ai] provider`           | `bock-ai/config.rs::AiConfig`                          | no                                 | yes                | doc gap  |
 | `[ai] endpoint`           | `bock-ai/config.rs::AiConfig`                          | no                                 | yes                | doc gap  |
-| `[ai] model`              | `bock-ai/config.rs::AiConfig`                          | no                                 | yes                | doc gap  |
-| `[ai] api_key_env`        | `bock-ai/config.rs::AiConfig`                          | no                                 | yes                | doc gap  |
-| `[ai] deterministic_fallback` | `bock-ai/config.rs::AiConfig`                       | no                                 | yes                | doc gap  |
-| `[ai] auto_pin`           | `bock-ai/config.rs::AiConfig`                          | no                                 | yes                | doc gap  |
-| `[ai] cache`              | `bock-ai/config.rs::AiConfig`                          | no                                 | yes                | doc gap  |
-| `[ai] confidence_threshold` | `bock-ai/config.rs::AiConfig`                        | no                                 | yes                | doc gap  |
-| `[ai] max_retries`        | `bock-ai/config.rs::AiConfig`                          | no                                 | yes                | doc gap  |
-| `[ai] timeout_seconds`    | `bock-ai/config.rs::AiConfig`                          | no                                 | yes                | doc gap  |
-| `[paradigm] default`      | *(not read)*                                            | no                                 | yes                | drift    |
-| `[targets] primary`       | *(not read)*                                            | no                                 | yes                | drift    |
-| `[targets] additional`    | *(not read)*                                            | no                                 | yes                | drift    |
-| `[effects.*]`             | *(not read)*                                            | no                                 | yes                | drift    |
-| `[plugins.*]`             | *(not read)*                                            | no                                 | yes                | drift    |
-| `[testing.*]`             | *(not read)*                                            | no                                 | yes                | drift    |
-| `[build.*]`               | *(not read)*                                            | no                                 | yes                | drift    |
-| `[registries.*]`          | *(not read)*                                            | no                                 | yes                | drift    |
-| `[dependencies]` (in `bock.project`) | *(not read at project root — only in `bock.package`)* | no                       | yes                | drift    |
-
-The project root marker is `bock.project` per CLAUDE.md and
-`bock-cli/run.rs::find_project_root`. The actual schema parsed
-by the compiler is a small subset of Appendix A. Every
-unparsed section is "drift" — spec promises behavior the impl
-silently ignores. D1 resolves the question of whether spec
-should be trimmed, impl should be expanded, or sections should
-be marked "Reserved for future use."
 
 ---
 
 ## Cross-Reference Matrix
 
-Sorted with `spec gap` and `doc gap` at the top so the work
-list is immediately visible. Rows below are referenced by ID
-from the [Phase Work Allocation](#phase-work-allocation) section.
+Stable row IDs for downstream phases to reference. Statuses use
+the controlled vocabulary: `aligned`, `doc gap`, `spec gap`,
+`drift`.
 
-| #   | Surface element                       | docs? | spec? | impl? | Status   |
-| --- | ------------------------------------- | ----- | ----- | ----- | -------- |
-| C01 | `bock build --strict`                 | no    | no    | yes   | spec gap + doc gap |
-| C02 | `bock build --pin-all`                | no    | no    | yes   | spec gap + doc gap |
-| C03 | `bock build --source-map` / `--no-source-map` | no | no | yes   | spec gap + doc gap |
-| C04 | `bock pkg init`                       | no    | no    | yes   | spec gap + doc gap |
-| C05 | `bock pkg tree`, `bock pkg list`, `bock pkg cache` | no | no | yes | spec gap + doc gap |
-| D01 | `bock build --release`                | no    | yes   | yes   | doc gap  |
-| D02 | `bock build --deterministic` / `--no-ai` | no | yes   | yes   | doc gap  |
-| D03 | `bock repl` (interactive commands)    | no    | yes   | yes   | doc gap  |
-| D04 | `bock inspect` + 4 subs               | no    | yes   | yes   | doc gap  |
-| D05 | `bock pin`                            | no    | yes   | yes   | doc gap  |
-| D06 | `bock unpin`                          | no    | yes   | yes   | doc gap  |
-| D07 | `bock override` (+ `--promote`)       | no    | yes   | yes   | doc gap  |
-| D08 | `bock promote`                        | no    | yes   | yes   | doc gap  |
-| D09 | `bock model show/set`                 | no    | partial | yes | doc gap  |
-| D10 | `bock doc`                            | no    | yes   | yes   | doc gap  |
-| D11 | `bock lsp`                            | no    | yes (§20.3) | yes | doc gap |
-| D12 | `[project] name`/`version`            | partial | yes | yes   | doc gap  |
-| D13 | `[strictness] default`                | no    | yes   | yes   | doc gap  |
-| D14 | `[ai]` block (10 fields)              | no    | yes   | yes   | doc gap  |
-| F01 | `bock build --deliverable`            | no    | yes   | no    | drift    |
-| F02 | `bock build --no-tests`               | no    | yes   | no    | drift    |
-| F03 | `bock build --optimize`               | no    | yes   | no    | drift    |
+| ID  | Surface | Docs? | Spec? | Impl? | Status |
+|-----|---------|-------|-------|-------|--------|
+| C01 | `bock build --strict` | no | partial (implied) | yes | spec gap |
+| C02 | `bock build --pin-all` | no | partial (implied) | yes | spec gap |
+| C03 | `bock build --source-map` / `--no-source-map` | no | no | yes | spec gap |
+| C04 | `bock pkg init`, `tree`, `list` | no | no | yes | spec gap |
+| C05 | `bock pkg cache clear` | no | no | yes | spec gap |
+| D01 | `bock build --release` flag docs | no | yes | yes | doc gap |
+| D02 | `bock build --deterministic` / `--no-ai` flag docs | no | yes | yes | doc gap |
+| D03 | `bock repl` interactive commands docs | no | yes | yes | doc gap |
+| D04 | `bock inspect` and subs | no | yes | yes | doc gap |
+| D05 | `bock pin` / `unpin` | no | yes | yes | doc gap |
+| D06 | `bock override` | no | yes | yes | doc gap |
+| D07 | `bock cache` subs (`stats`, `clear`) | partial | yes | yes | doc gap |
+| D08 | `bock promote` | no | yes | yes | doc gap |
+| D09 | `bock pkg` subs (`add`, `remove`) | partial | yes | yes | doc gap |
+| D10 | `bock model` subs (`show`, `set`) | no | yes | yes | doc gap |
+| D11 | `bock lsp` | no | yes (§20.3) | yes | doc gap |
+| D12 | `[project] name`/`version` | partial | yes | yes | doc gap |
+| D13 | `[strictness] default` | no | yes | yes | doc gap |
+| D14 | `[ai]` block (10 fields) | no | yes | yes | doc gap |
+| F01 | `bock build --deliverable` | no | yes | no | drift (**Item B Phase 1**) |
+| F02 | `bock build --no-tests` | no | yes | no | drift (**Item B Phase 1**) |
+| F03 | `bock build --optimize` | no | yes | no | drift (**Item B Phase 1**) |
 | F04 | `bock check --context` vs `--no-context` polarity | partial | yes | yes | drift |
 | F05 | `bock test --target`, `--all-targets`, `--smart`, `--coverage`, `--snapshot` | no | yes | no | drift |
 | F06 | `bock cache list`, `bock cache prune` | partial | yes | no | drift    |
@@ -324,6 +334,43 @@ Status legend:
 - **drift** — spec or docs describe something the impl doesn't
   do (or vice versa) such that the three disagree.
 - **stub** in docs column — page exists but content defers.
+- **Item B Phase 1** suffix on a row's status indicates the
+  drift is closed by Item B's scheduled work rather than by D1
+  routing.
+
+---
+
+## Cross-Effort Dependencies
+
+D-phases interact with other in-flight work:
+
+- **F01-F03 ↔ Item B Phase 1.** The `--deliverable`,
+  `--no-tests`, and `--optimize` flags are scoped into Item B's
+  Phase 1 work (foundation + JavaScript codegen). D1 marks these
+  in the alignment record but does NOT route them to design
+  chat. Item B closes them.
+
+- **K04 ↔ D2-D5 cross-references.** D1's resolution of the
+  section file vs bock-spec.md numbering determines how
+  subsequent phases cite the spec. If D1 picks "rename section
+  files," D2-D5 cite by new names. If D1 picks "document the
+  mapping," D2-D5 cite by bock-spec.md numbering with translation
+  notes where the section file is the natural pointer.
+
+- **D6 ↔ D1 timing.** The changelog backfill (D6) doesn't
+  depend on D2-D5 but does need D1's design chat resolutions to
+  settle before it can describe spec changes accurately. D6 can
+  run in parallel with D2-D4 once D1's handoff resolves.
+
+- **L11 ↔ D5.** The AIR narrative for contributors (matrix row
+  L11) is intentionally deferred from D2 (user-facing language
+  reference) to D5 (contributor docs). D2 should NOT add an AIR
+  page; D5 owns it.
+
+- **D3 ↔ Documentation Sync convention.** D3 documents the CLI
+  surface. Going-forward sessions touching the CLI (per CLAUDE.md
+  Documentation Sync) update D3's pages in the same PR. D3's
+  output is the baseline future sessions maintain.
 
 ---
 
@@ -340,28 +387,52 @@ that would otherwise document phantom behavior or omit real
 behavior. **Every row below is either a `spec gap` (impl ahead
 of spec) or `drift` (spec ahead of impl).**
 
-For each row, D1 decides: amend spec to match impl, amend impl
-to match spec, or mark the spec entry "Reserved for future use"
-with a changelog. The decisions chat owns the resolution.
+For each row, D1 classifies and routes to one of: design chat
+amendment (A), implementation planned (B), defer or remove from
+spec (C), implementation bug (D — filed via FOUND: in commit),
+resolved by Item B (E), or naming/organization (F).
 
-- C01–C03: spec must describe `--strict`, `--pin-all`, source-map flags on `bock build`.
-- C04–C05: spec must describe (or explicitly reserve) `bock pkg init|tree|list|cache`.
-- F01–F03: decide for each whether `--deliverable`, `--no-tests`, `--optimize` are deferred or removed from §20.1.
-- F04: settle `bock check --context` polarity in spec.
-- F05: decide which `bock test` flags are deferred.
-- F06: `bock cache list`/`prune` — keep spec, or trim.
-- F07–F08, F10–F12: same disposition for `bock pkg update/audit/publish/search`, `bock model list/install/use`, `bock fix`, `bock migrate`, `bock target`, `bock ci`.
-- F09: `bock fix` — likely defer; called out separately because it's the most user-facing missing command.
-- F13–F22: decide which Appendix A sections impl actually plans to read in v1 vs which are aspirational; mark accordingly.
-- K04: reconcile section file numbering (`s01-s16`) with the assembled spec's `§1-§23`. Either rename section files or document the mapping in `docs/src/reference/spec.md`.
+**Item B carve-out:** F01-F03 (`--deliverable`, `--no-tests`,
+`--optimize`) are pre-classified as E. Item B Phase 1's
+implementation plan schedules these flags; they close when Item
+B lands. D1 includes them in the alignment record for
+completeness but does not route them to design chat.
 
-Estimated cost: 3–5 hours, mostly decision-routing.
+**Spec gaps (impl ahead of spec; mostly classification A — amend spec):**
+- C01: `--strict` flag
+- C02: `--pin-all` flag
+- C03: source-map flags
+- C04: `bock pkg init|tree|list` subs
+- C05: `bock pkg cache clear` sub
+
+**Drift requiring design chat (after Item B carve-out):**
+- F04: `bock check --context` polarity (likely classification A
+  or D — depends on whether spec or impl polarity is right)
+- F05: `bock test` flags impl doesn't have (likely C — defer
+  spec or trim)
+- F06: `bock cache list/prune` (likely C — defer or align)
+- F07-F08, F10-F12: spec-only commands impl lacks (likely C —
+  defer or remove from §20.1)
+- F09: `bock fix` (likely C — defer, user-visible miss)
+- F13-F22: Appendix A sections impl doesn't read (likely C
+  case-by-case — some defer, some remove)
+
+**Naming/organization:**
+- K04: section file numbering reconciliation
+
+**Closed by Item B (no design chat action):**
+- F01-F03
+
+Estimated cost: 3–5 hours, mostly classification-and-routing
+work over the 28 rows in scope.
 
 ### D2 — Language reference
 
 Replace docs/language-guide stubs with reference content keyed
 to the spec sections they currently defer to. Add the language
-topics not yet covered.
+topics not yet covered. **Reads from bock-spec.md as
+authoritative; cites section files only as reading aids per the
+Spec Authority Note.**
 
 - L01: rewrite `language-guide/types.md` as a reference page (not a stub).
 - L02: rewrite `language-guide/functions.md`.
@@ -389,6 +460,8 @@ Estimated cost: 6–10 hours.
 Replace stale `reference/cli.md` with a generated-leaning
 reference covering every implemented subcommand and flag. Add
 the project-config reference page that doesn't yet exist.
+**Reads from bock-spec.md as authoritative; reflects D1's
+classification decisions for drift rows.**
 
 CLI command pages (one each, structured the same way):
 
@@ -454,10 +527,12 @@ Estimated cost: 3–5 hours.
   rows it owns into its task list verbatim. The "Cross-Reference
   Matrix" row IDs are stable; subsequent phases append rows but
   do not renumber existing ones.
-- `bock-spec.md` is the canonical source for §17.x onward;
-  section excerpts under `spec/sections/` lag and have not
-  consistently kept pace with `bock-spec.md` edits. D1 should
-  flag any drift between excerpts and the assembled spec.
+- **`bock-spec.md` is authoritative when it disagrees with
+  section excerpts** (see [Spec Authority Note](#spec-authority-note)).
+  D2-D5 should read from `bock-spec.md` for spec-derived content.
+- D1 should flag any drift between excerpts and the assembled
+  spec it discovers; section files lag and have not consistently
+  kept pace with `bock-spec.md` edits.
 - `stdlib/` is empty. D4 is a scaffolding phase only; the real
   stdlib documentation cycle happens once `stdlib/std/<name>/`
   packages start landing.
@@ -465,3 +540,7 @@ Estimated cost: 3–5 hours.
   `/project:session` teardown via `mdbook build docs/`. D5
   should add the equivalent to GitHub Actions so external
   contributors get the same gate.
+- **D2 and D3 are parallel-runnable** via the worktree session
+  pattern. They share `docs/src/SUMMARY.md` edits; coordinate
+  the SUMMARY merge order via PR comments or sequential merges
+  rather than concurrent ones for that one file.
