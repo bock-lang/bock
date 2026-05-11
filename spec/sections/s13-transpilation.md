@@ -37,8 +37,14 @@ Project mode specifics:
 - lockfiles NOT generated (target package manager owns this);
   scaffolded README instructs users on first install
 - transpiled tests included by default; `--no-tests` opts out
-- §20.4 Tier 2 transpilation tests are the validation gate for
-  project mode trustworthiness
+- per-target tooling configuration: deep (`[targets.<T>]` —
+  test framework, formatter; changes emitted code) and shallow
+  (`[targets.<T>.scaffolding]` — linter, package manager;
+  adds files only)
+- codegen-formatter agreement: emitted code must pass the
+  configured formatter cleanly (Prettier, Black, gofmt, rustfmt)
+- §20.4 Tier 2 transpilation tests + formatter cleanliness are
+  the validation gates for project mode trustworthiness
 
 ## Target Profile
 ```
