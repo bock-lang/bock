@@ -1751,6 +1751,8 @@ Principle: semantic pass + target fail = transpiler bug, not user code bug.
 
 **Project mode validation gate.** When project mode (§20.6.2) includes transpiled tests in build output, Tier 2 transpilation tests serve as the gate that determines whether the output is trustworthy. A target's codegen is considered project-mode-ready when its Tier 2 tests pass on a representative test suite. Targets where Tier 2 tests fail intermittently or on common patterns should not ship project mode by default — they ship source mode (`--source-only`) until the transpilation gap closes. This is not a user-facing distinction but a release-readiness criterion for each target's codegen package.
 
+The gate also includes formatter cleanliness: a target's project mode output must pass the target's configured formatter (`prettier --check`, `gofmt -l`, `rustfmt --check`, `black --check`, etc.) without modification. A formatter that wants to rewrite Bock's emitted code introduces version-control churn on every user's first commit — the validation gate prevents shipping that. For targets with multiple supported formatters (Python's Black and Ruff format), each variant has its own gate; a target may ship project mode with Black support while Ruff format support is still maturing.
+
 ### 20.5 — Debugger
 
 Built-in interpreter debugger with breakpoints, stepping, expression evaluation, ownership state inspection, effect handler display, and context viewing. Source maps enable debugging transpiled code in target-language debuggers.
@@ -1822,6 +1824,62 @@ Including transpiled tests is part of how Bock makes its semantic equivalence cl
 
 `--no-tests` opts out of test inclusion for project mode output. Use cases: vendor distribution where tests should not ship, library consumers who only want runtime code, security-sensitive contexts. Test inclusion is the default because it's the validation surface that distinguishes Bock's cross-target semantic equivalence claim from a "good enough" transpiler's.
 
+**Tooling configuration.** Project mode supports two categories of per-target tooling configuration in `bock.project`:
+
+*Deep configuration* (`[targets.<T>]`) — changes what code Bock emits. Selecting Jest instead of Vitest produces different test file structure and different assertion APIs. Selecting Black instead of Ruff format produces different formatting conventions in the emitted code. Codegen branches on these choices.
+
+*Shallow configuration* (`[targets.<T>.scaffolding]`) — adds config files alongside the emitted code without changing the code itself. Including an ESLint config doesn't change Bock's generated JavaScript; it just adds `.eslintrc.json` so the user's existing tooling can consume the project. The codegen output is the same regardless.
+
+The distinction matters because the two categories have very different implementation costs and very different friction signatures. A team standardized on Jest cannot adopt Bock without test framework support; a team using ESLint can adopt Bock with or without the config file (their existing config can be copied in post-scaffold). Bock invests heavily in the first category and supports the second cheaply.
+
+**v1-supported deep configuration:**
+
+| Target | Test framework | Formatter |
+|--------|---------------|-----------|
+| JS     | Vitest (default), Jest | Prettier (default), none |
+| TS     | Vitest (default), Jest | Prettier (default), none |
+| Python | pytest (default), unittest | Black (default), Ruff format, none |
+| Rust   | cargo test (universal) | rustfmt (universal — always on) |
+| Go     | stdlib testing (universal) | gofmt (universal — always on) |
+
+For Rust and Go, the formatter is universal and always-on: Bock's codegen for those targets must produce output that passes `rustfmt --check` and `gofmt -l` cleanly as a release-readiness baseline. There is no user-facing choice because the ecosystem has already made it. Variant test runners (Rust's `nextest`, Go's `testify`) are wrappers around the universal frameworks and do not require codegen branches; the scaffolded README mentions them as options.
+
+**v1-supported shallow configuration:**
+
+| Target | Linter config | Package manager hint |
+|--------|--------------|----------------------|
+| JS     | ESLint | npm (default), pnpm, yarn |
+| TS     | ESLint | npm (default), pnpm, yarn |
+| Python | Ruff check, Pylint | pip (default), Poetry, uv |
+| Rust   | Clippy | (cargo only) |
+| Go     | golangci-lint | (go mod only) |
+
+Shallow tooling is opt-in: omitting the field generates no config file. Selecting the field generates a baseline config that doesn't conflict with Bock's emitted patterns. Users who want stricter configs add their own rules on top.
+
+**Configuration shape:**
+
+```toml
+[targets.js]
+test_framework = "jest"           # deep: affects test codegen
+formatter = "prettier"            # deep: affects code style
+
+[targets.js.scaffolding]
+linter = "eslint"                 # shallow: adds .eslintrc.json
+package_manager = "pnpm"          # shallow: affects README only
+
+[targets.python]
+test_framework = "pytest"
+formatter = "black"
+
+[targets.python.scaffolding]
+linter = "ruff"
+package_manager = "uv"
+```
+
+Unknown values in either section produce a build error pointing at the spec's documented options for that target. The codegen package owns the supported-options list per target; the spec carries the v1 matrix above and is updated when new variants become first-class.
+
+**The codegen-formatter agreement.** When a formatter is configured (or universal as in Rust/Go), Bock's emitted code must pass the formatter's check cleanly on first generation. A formatter config that disagrees with generated code produces churn on every user's first commit — the user runs `prettier --write .` and watches every generated file get rewritten, polluting version control history. This is worse than not including the config. Per-target codegen packages are responsible for emitting formatter-clean output as a release-readiness criterion.
+
 ### 20.7 — Project Scaffolding
 
 `bock new <name>` generates a minimal project structure: `bock.project`, `.gitignore`, `src/main.bock`, and `tests/`.
@@ -1856,12 +1914,25 @@ module = "github.com/user/my-project"
 
 [targets.python]
 package = "my_custom_name"      # overrides default normalization
+test_framework = "pytest"       # deep: affects test codegen
+formatter = "black"             # deep: affects code style
 
-[targets.rust]
-crate = "my_crate"              # overrides default normalization
+[targets.python.scaffolding]
+linter = "ruff"                 # shallow: adds config file only
+package_manager = "uv"          # shallow: affects README only
+
+[targets.js]
+test_framework = "jest"
+formatter = "prettier"
+
+[targets.js.scaffolding]
+linter = "eslint"
+package_manager = "pnpm"
 ```
 
-Inference rules and override semantics are specified in §20.6.2. `bock new` does not generate these fields by default — they're added by users when needed. Generated projects rely on inference for the common case.
+The two sections per target are conceptually distinct: `[targets.<T>]` configures choices that change what Bock emits (deep configuration); `[targets.<T>.scaffolding]` configures choices that just add files alongside the emitted code (shallow configuration). See §20.6.2 for the v1-supported variant matrix per target.
+
+Inference rules and override semantics are specified in §20.6.2. `bock new` does not generate these fields by default — they're added by users when needed. Generated projects rely on inference and target-appropriate defaults for the common case.
 
 ---
 
