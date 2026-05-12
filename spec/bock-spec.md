@@ -1383,6 +1383,8 @@ Confidence is a float in the range `0.0`–`1.0`. The compiler accepts AI output
 
 In `production` strictness, all decisions must be pinned. Pinned decisions bypass the confidence check — the stored choice is replayed identically regardless of any new AI response. `bock inspect` browses decisions; `bock override` changes them.
 
+**Build workflow.** The develop → ship transition uses two `bock build` flags described in §20.1: `--pin-all` pins every build-scope decision after a successful build, producing a manifest ready to commit; `--strict` forces production strictness for the build, failing on any unpinned build-scope decision. The canonical workflow is develop with default strictness, run `bock build --pin-all` to capture pinned decisions, commit the manifest, then ship CI builds with `--strict`.
+
 ### 17.5 — Deliverables
 
 ```bash
@@ -1685,12 +1687,11 @@ Single binary containing all tooling. The CLI surface is designed for ergonomic 
 **Build and execute:**
 
 `bock new` — Project scaffolding with interactive or flag-based configuration. Generates `bock.project` with a commented-out `[ai]` block for opt-in AI configuration; see §20.7.
-`bock build` — Transpile and compile. Produces a scaffolded project (project mode) by default; see §20.6.2 for output modes. Flags: `--target`, `--all-targets`, `--source-only`, `--deliverable`, `--no-tests`, `--deterministic`, `--optimize`, `--release`.
+`bock build` — Transpile and compile. Produces a scaffolded project (project mode) by default; see §20.6.2 for output modes. Flags: `--target`, `--all-targets`, `--source-only`, `--deliverable`, `--no-tests`, `--source-map` / `--no-source-map` (default on), `--strict`, `--pin-all`, `--deterministic`, `--optimize`, `--release`. `--strict` forces production strictness for the build (fails on unpinned build-scope decisions); `--pin-all` pins every build-scope decision after a successful build. The pair enables the develop → ship workflow: build with `--pin-all`, commit the resulting pins, then ship with `--strict`. See §17.4 for the pinning model.
 `bock run` — Build and execute. Default uses interpreter. `--target` for specific language. `--watch` for hot reload.
-`bock check` — Type check, lint, context validation. `--types`, `--lint`, `--context` for selective checking.
-`bock test` — Run tests. Default uses interpreter (fast). `--target` for transpilation tests. `--all-targets`, `--smart` for cross-target. `--coverage`, `--snapshot`.
+`bock check` — Type check, lint, context validation. `--only=<aspect>` restricts the check to specific aspects (e.g., `--only=types`, `--only=context`, `--only=types,context`); see §20.1.1 for the aspect surface. `--brief` produces compact error output (omits source-context snippets).
+`bock test` — Run tests. Default uses interpreter (fast). `--filter <pattern>` selects tests by name. Cross-target testing (`--target`, `--all-targets`, `--smart`), coverage, and snapshot testing are planned for v1.x; see §20.4.
 `bock fmt` — Format (one style, zero configuration). `--check` for CI.
-`bock fix` — Auto-fix lint warnings.
 `bock repl` — Interactive REPL with `:type`, `:air`, `:target` commands.
 
 **Decision and rule manifest management:**
@@ -1699,17 +1700,39 @@ Single binary containing all tooling. The CLI surface is designed for ergonomic 
 `bock pin <decision-id>` — Pin a decision so it replays deterministically. `--all` to pin every unpinned decision (production readiness).
 `bock unpin <decision-id>` — Remove pin metadata from a decision.
 `bock override <decision-id> --choice=<alternative>` — Change which alternative is selected for an existing decision. `--promote <runtime-id>` migrates a stabilized runtime decision into the build manifest (§10.8).
-`bock cache` — Manage on-disk caches (AI response cache, rule cache, decision manifests). Subcommands: `list`, `clear`, `prune`, `stats`.
+`bock cache` — Manage on-disk caches (AI response cache, rule cache, decision manifests). Subcommands: `stats`, `clear`. (`list` and `prune` planned for v1.x.)
 
 **Project lifecycle:**
 
 `bock promote` — Migrate code to higher strictness level with auto-fixes.
-`bock migrate` — AI-assisted import from other languages.
 `bock doc` — Generate, serve, and publish documentation.
-`bock pkg` — Package management (add, remove, update, audit, publish, search).
-`bock model` — AI model management (list, install, use).
-`bock target` — Target management (list, add, info).
-`bock ci` — Run all CI checks in one command.
+`bock pkg` — Package management. Subcommands: `add`, `remove`, `init`, `tree`, `list`, `cache` (manages the tarball cache under `.bock/cache/`, distinct from `bock cache` which manages AI/decision/rule caches). Additional subcommands (`update`, `audit`, `publish`, `search`) ship alongside the public registry; see §19.
+`bock model` — AI model management. Subcommands: `show`, `set`. (Local model management — `list`, `install`, `use` — planned for v1.x alongside local provider support.)
+
+**Planned for v1.x or later:**
+
+- `bock fix` — Auto-fix for lint warnings. Pairs with `bock check --only=lint` once auto-fix semantics (safety, idempotence, source preservation) are designed.
+- `bock migrate` — AI-assisted import from other source languages. Per-source-language frontends plus AI pipeline reversal.
+- `bock target` — Target management as a top-level surface. v1's target customization happens via `[targets.<T>]` in `bock.project` and `--target` on `bock build`; the top-level verb is reserved for future use.
+
+#### 20.1.1 — `bock check` Aspect Surface
+
+`bock check --only=<aspect>` restricts the check to specific aspects of analysis. The flag accepts a comma-separated list or repeated invocations:
+
+```bash
+bock check --only=types
+bock check --only=types,context
+bock check --only=types --only=context
+```
+
+**v1 aspects:**
+- `types` — type checking
+- `context` — context-system validation (§11)
+
+**v1.x aspects** (ship alongside `bock fix`):
+- `lint` — lint pass; the underlying pass exists in v1 (`bock check` runs it by default) but `--only=lint` ships when `bock fix` provides the ergonomic counterpart
+
+Omitting `--only` runs all aspects (the default full check). Unknown aspect values produce a build error with the list of valid aspects. Adding a new aspect later does not require a new flag — it becomes a new valid value for `--only`.
 
 ### 20.2 — Formatter
 
@@ -2210,26 +2233,36 @@ TargetProfile {
 
 ### Appendix A: Project Configuration Reference
 
-```toml
-# bock.project
+#### A.1 — `bock.project` (v1)
 
+```toml
 [project]
 name = "my-app"
 version = "0.1.0"
-authors = ["team@example.com"]
+type = "bin"                      # "bin" | "lib" | "both"; inferred when omitted
 
 [strictness]
 default = "development"
-[strictness.overrides]
-"src/experiments/**" = "sketch"
-"src/core/**" = "production"
 
-[paradigm]
-default = "multi"
+[targets.go]
+module = "github.com/user/my-app"
 
-[targets]
-primary = "web"
-additional = ["ios", "android"]
+[targets.python]
+package = "my_app"                # overrides default normalization
+test_framework = "pytest"         # deep: affects test codegen
+formatter = "black"               # deep: affects code style
+
+[targets.python.scaffolding]
+linter = "ruff"                   # shallow: adds config file only
+package_manager = "uv"            # shallow: affects README only
+
+[targets.js]
+test_framework = "vitest"
+formatter = "prettier"
+
+[targets.js.scaffolding]
+linter = "eslint"
+package_manager = "pnpm"
 
 [ai]
 provider = "openai-compatible"    # built-in: "openai-compatible" | "anthropic"
@@ -2243,38 +2276,36 @@ cache = true                      # cache AI responses (content-addressed)
 max_retries = 3
 timeout_seconds = 30
 
-[effects]
-Log = "std.logging.ConsoleLog"
-Trace = "std.tracing.NoOpTrace"
-Clock = "std.time.SystemClock"
-Random = "std.crypto.random.SecureRandom"
+[registries]
+default = "https://registry.bock-lang.org"
+internal = "https://bock.company.internal"
+```
 
-[effects.overrides.test]
-Log = "std.testing.NullLog"
-Clock = "std.testing.MockClock"
-Random = "std.testing.DeterministicRandom"
+#### A.2 — `bock.package` (v1)
+
+Dependencies are declared in `bock.package`, not `bock.project`. See §19 for the package manifest format.
+
+```toml
+[package]
+name = "my-app"
+version = "0.1.0"
 
 [dependencies]
 core-http = "^1.0"
-
-[plugins]
-derive-protobuf = { version = "^1.0", allow = ["derive"] }
-lint-security = { version = "^2.0", allow = ["lint"] }
-
-[testing]
-smart_target_threshold = 0.3
-always_test = ["js"]
-
-[build]
-min_aura = "1.2.0"
-[build.hooks]
-pre_build = "scripts/generate-version.bock"
-[build.cache]
-remote = "s3://build-cache/my-app"
-
-[registries]
-internal = "https://bock.company.internal"
 ```
+
+#### A.3 — Reserved for future versions
+
+These fields appear in older spec drafts and may be implemented in v1.x or later. They are not active in v1 and should not appear in user-authored `bock.project` files (the compiler ignores unknown fields but may warn in `production` strictness).
+
+- **`[project] authors`** — Author metadata. Activated alongside `bock pkg publish` (§19).
+- **`[strictness.overrides]`** — Per-path glob-based strictness mappings (e.g., `"src/experiments/**" = "sketch"`). v1 ships flat project-level strictness; layered strictness is v1.x.
+- **`[effects]` and `[effects.overrides.<env>]`** — Project-level effect handler routing. v1 ships inline + module-level handler resolution via §10 mechanisms; project-level routing may be unnecessary and will only be introduced if real-world usage demonstrates need.
+- **`[plugins]`** — Plugin declarations. Reserved pending the plugin loader (Appendix C describes the planned plugin system).
+- **`[testing]`** — Smart target selection thresholds. Reserved alongside the deferred cross-target test flags (§20.4).
+- **`[build.hooks]`** — Pre/post-build script hooks. Hook semantics (ordering, error propagation, sandboxing) need a design pass.
+- **`[build.cache] remote`** — Remote build cache. Reserved pending a v1.x cache-server design.
+- **`[build] min_bock`** — Minimum compiler version. Reserved; v1 does not enforce a minimum compiler version on the manifest.
 
 ### Appendix B: Project Structure
 
