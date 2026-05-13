@@ -1,7 +1,7 @@
 # Types
 
 > This page is a stub. Full coverage of Bock's type system lives in
-> [section 2 of the specification](../../../spec/sections/s02-types.md).
+> §4 (Type System) of [`spec/bock-spec.md`](../../../spec/bock-spec.md).
 
 Bock has a static type system with bidirectional inference. Every
 expression has a type known at compile time; explicit annotations are
@@ -30,5 +30,5 @@ fn first<T>(xs: List<T>) -> Option<T> {
 }
 ```
 
-See `spec/sections/s02-types.md` for the full grammar of type
+See §4 of `spec/bock-spec.md` for the full grammar of type
 expressions, type-class constraints, and variance rules.

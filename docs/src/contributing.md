@@ -35,7 +35,7 @@ Spec changes are deliberate. Process:
 1. Open an issue describing the proposed change.
 2. Add a changelog entry under `spec/changelogs/` with the
    `YYYYMMDD-HHMM-specs-changes.md` filename convention.
-3. Update the affected `spec/sections/` file(s) and `spec/bock-spec.md`.
+3. Update the affected section(s) of `spec/bock-spec.md`.
 4. Add a conformance fixture under
    `compiler/tests/conformance/<category>/` exercising the new
    behavior.

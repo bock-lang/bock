@@ -1,6 +1,6 @@
 # Status
 
-**Last updated:** 2026-04-26
+**Last updated:** 2026-05-13
 **Phase:** M.4 complete — big-bang migration landed.
 
 ## Build Status
@@ -36,9 +36,9 @@ branch on `main`:
   with the harness as `compiler/tests/` workspace member.
 - **Examples.** 20 example projects across `fundamentals/`,
   `real-world/`, `spec-exercisers/`, `target-optimized/`.
-- **Spec.** Primary spec at `spec/bock-spec.md`; 16 sections in
-  `spec/sections/`; 14 historical changelogs in `spec/changelogs/`
-  with Aura naming preserved as historical record.
+- **Spec.** Primary spec at `spec/bock-spec.md`; historical
+  changelogs in `spec/changelogs/` with Aura naming preserved as
+  historical record.
 - **VS Code extension.** Builds to a working `.vsix` (1003 KB).
   Vocabulary at `extensions/vscode/assets/vocab.json` is regenerated
   from the compiler via `tools/scripts/sync-vocab.sh`.

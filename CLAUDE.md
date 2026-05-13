@@ -47,7 +47,7 @@ cd extensions/vscode && npm test          # extension tests
 
 ## Where to Find What
 
-- **Language reference:** `spec/sections/`
+- **Language reference:** `spec/bock-spec.md`
 - **Implementation playbook:** `docs/src/contributing/playbook.md`
 - **Architecture overview:** `ARCHITECTURE.md` (start here for new contributors)
 - **Current state:** `STATUS.md`
@@ -103,7 +103,7 @@ for updating the corresponding documentation in the same PR.
 If your change touches any of these, the same PR must update:
 
 - `docs/` mdBook content (the contributor-facing reference)
-- `spec/sections/` content if the spec was wrong (with a
+- `spec/bock-spec.md` content if the spec was wrong (with a
   changelog at `spec/changelogs/<date>-impl-changes.md`)
 - `examples/` if examples demonstrated the old behavior
 - `website/` get-started copy if the website's locked copy
@@ -302,7 +302,7 @@ The legacy `/project:parallel` command is deprecated; use
 - `public` keyword required for exported items (default is private)
 - Records, enums, match arms: newline-separated
 - `if (cond)`, `(x) => expr` — parens required
-- See `spec/sections/` for the authoritative grammar
+- See `spec/bock-spec.md` (§21 Formal Grammar) for the authoritative grammar
 
 ## Multi-File / Build Conventions for Bock
 
