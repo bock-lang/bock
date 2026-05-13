@@ -1,550 +1,628 @@
-# Spec Alignment Assessment (D1)
+# Spec Alignment Assessment (D1, refreshed)
 
 **Scratch file. Drives the design-chat handoff for spec/impl
 divergence. Deleted in D5 alongside `docs/INVENTORY.md` once
 D2–D4 have absorbed every row.**
 
-Worked through `docs/INVENTORY.md` cross-reference matrix rows
-C01–C05, F01–F22, and K04 — 28 rows total. Each row is
-classified for downstream resolution per the scheme described
-in the D1 session prompt. Verified against `main` at the
-session base commit; `spec/bock-spec.md` is treated as
-authoritative per the inventory's Spec Authority Note.
+2026-05-13
+
+## Why a refresh
+
+The first D1 pass (PR #35, merged 2026-05-11) walked the 28 CLI-
+and-config rows the D0 inventory enumerated (C01–C05, F01–F22,
+K04). Design chat resolved every row through four spec-change
+batches (`20260512-1400`, `1500`, `1600`, `1700`), closing the
+matrix at the spec end and consolidating `spec/sections/` into
+`spec/bock-spec.md`.
+
+This refresh widens the pass: instead of the CLI surface, every
+spec section is walked for normative claims and compared against
+the implementation. The previous file's 28 rows are not
+re-litigated — they are resolved or tracked via Item B Phase 1.
 
 ## Summary
 
-| Classification                              | Count | Routing |
-|---------------------------------------------|-------|---------|
-| **A.** Spec amendment to match impl         | 7     | Design chat |
-| **B.** Implementation planned; spec forward | 0     | — (no fits) |
-| **C.** Defer or remove from spec            | 16    | Design chat |
-| **D.** Implementation bug                   | 0     | — (no fits) |
-| **E.** Resolved by Item B Phase 1           | 3     | Closed by Item B |
-| **F.** Naming/organization                  | 1     | Design chat |
-| Reclassified to aligned (no action)         | 1     | FOUND: tag |
-| **Total**                                   | **28**| |
+- Spec sections walked: **23** (§1 – §23 plus Appendices A–D)
+- Divergences surfaced: **19**
+  - Direct contradictions: **1**
+  - Spec stale: **15**
+  - Spec gaps: **2**
+  - Implementation-defined: **1**
+  - Genuine questions: **0**
+- Implementation bugs filed separately: **0**
+- Already tracked elsewhere (Item B Phase 1; do not re-route):
+  **3** (`--deliverable`, `--no-tests`, `--optimize`)
 
-Design-chat-routed rows: **24** (A + C + F). Closed without
-design chat: **4** (E + reclassified-aligned).
+The volume of "Spec stale" entries reflects the spec's
+forward-looking character: many sections describe v1 surfaces
+that the implementation will grow into. The pattern is uniform —
+present-tense spec prose for a feature the impl doesn't yet
+ship. Design chat decides per row: defer in spec, prune from
+spec, or schedule implementation.
 
-**FOUND:** F21 (`[registries]`) was marked drift in the matrix
-but is actually aligned — the impl reads `[registries].default`
-and named registries via `bock-pkg/network.rs::parse_registries`.
-Inventory error; no spec or impl change needed. Surfaced in this
-session's commit message.
+The single direct contradiction is §20.1.1 (`bock check`
+flags) — the spec was amended for the `--only=<aspect>` /
+`--brief` shape in Batch 3 of the K04 series, and the CLI hasn't
+caught up. This is implementation work, not a spec question.
 
-## Classification scheme (recap)
+## OPEN list for design chat
 
-- **A.** Spec gap or drift where impl made a deliberate choice;
-  update the spec to describe it.
-- **B.** Spec is forward-looking; impl is planned but not yet
-  scoped into a specific session.
-- **C.** Spec describes functionality outside v1 scope; trim or
-  mark "Reserved" in the spec.
-- **D.** Impl is wrong; file as bug.
-- **E.** Closed by Item B Phase 1 (F01–F03 are pre-classified
-  per the inventory and Item B implementation plan).
-- **F.** Structural/organizational decision that doesn't fit the
-  spec/impl axis.
+Sorted by spec section.
 
-The recommendations below are implementation chat's read.
-Design chat decides.
+- **§1.3** — Supported targets list claims 9 targets; impl ships 5
+- **§10.3** — Layer 3 (project-level `[effects]`) prose lingers after Appendix A.3 marked the field Reserved
+- **§10.6** — Effect erasure optimization described as a v1 production-mode pass; no pass exists
+- **§13.3** — Channel example shows `buffer: 10` parameter the impl doesn't accept; iteration over channels not implemented
+- **§13.4** — Five sync primitives listed (`Mutex[T]`, `RwLock[T]`, `Atomic[T]`, `WaitGroup`, `OnceCell[T]`); none exposed to Bock code
+- **§13.5** — Cancellation: `Cancel` ambient plumbed in adaptive handlers, but `check_cancel()`, `task.cancel()`, checkpoint insertion, and target mapping (tokio/AbortSignal/context.Context/asyncio) are unimplemented
+- **§14.1** — `native` blocks with backtick-quoted target code: keyword tokenised; no parser or codegen path
+- **§14.2** — FFI linter warning suggesting platform trait: no linter rule (gated on §14.1)
+- **§15** — Annotation taxonomy lists ~19 annotations; 12 recognised, 6 (`@test`, `@benchmark`, `@property`, `@derive`, `@target`, `@platform`) parsed but silently dropped at C-AIR. No "unknown annotation" diagnostic
+- **§16.3** — AIR-T and AIR-B serialization formats: structures exist; neither serializer implemented
+- **§16.4** — Binary package compatibility (patch/minor/major fallback) depends on §16.3; not implemented
+- **§17.6** — Capability gap synthesis table (6 rows: ADTs / pattern matching / ownership / channels / refinement types / effects) not systematically realised by codegen
+- **§18.3** — Core modules: spec lists 15 modules; bock-core ships a partial subset with stubs for `concurrency`, `effect`, `error`, `math`, `memory`, `test`
+- **§18.5** — Trait-language integration claims (`Comparable` → `<`/`>`, `Iterable` → `for..in`, `Displayable` → `${}`, operator overloading via `Add`/`Sub`/etc.) not verified end-to-end
+- **§19.7** — Versioning stability tiers (`stable`/`beta`/`experimental`) not in manifest schema
+- **§20.1.1** — Spec amended for `--only=<aspect>` and `--brief` (K04 Batch 3); CLI still ships `--types` / `--lint` / `--no-context` (**Direct contradiction**)
+- **§20.3** — LSP advertises AI Context Panel, Target Preview, Capability Graph, Smart Completions; impl LSP has text sync, hover, definition, diagnostics only
+- **§20.5** — Built-in interpreter debugger with breakpoints / stepping / ownership inspection / effect handler display: interpreter exists, debugger UI doesn't
+- **§20.6** — Remote build cache, build hooks, distributed builds: described as v1 surface; none implemented (consistent with Appendix A.3's `[build.hooks]` / `[build.cache] remote` being Reserved)
 
----
+## Already tracked (do not re-route to design chat)
 
-## Per-row entries
+These are pre-classified by the previous D1 pass and the Item B
+implementation plan. They appear here only for completeness; no
+new routing.
 
-### C01 — `bock build --strict`
+| Surface | Status | Closing path |
+|---------|--------|--------------|
+| `bock build --deliverable` (§17.5, §20.6.2) | Item B Phase 1 | Closes when JS codegen project mode lands |
+| `bock build --no-tests` (§20.6.2) | Item B Phase 1 | Closes alongside test-inclusion default |
+| `bock build --optimize` (§17.2 Tier 3) | Item B Phase 1 | Closes when Tier 3 surfaces |
+| `--target`, `--all-targets`, `--smart`, `--coverage`, `--snapshot` on `bock test` (§20.4) | K04 Batch 1 deferred in spec | Spec marked v1.x; no impl gap |
+| `bock cache list` / `prune` (§20.1) | K04 Batch 1 deferred | Spec marked v1.x |
+| `bock pkg update` / `audit` / `publish` / `search` (§19) | K04 Batch 1 deferred | Spec marked v1.x |
+| `bock model list` / `install` / `use` (§20.1) | K04 Batch 1 deferred | Spec marked v1.x |
+| `bock fix` / `migrate` / `target` (§20.1) | K04 Batch 1 deferred | Spec marked v1.x |
+| Appendix A.3 reserved fields | K04 Batch 2 deferred | Spec already in Reserved section |
+| `spec/sections/` numbering | K04 Batch 4 resolved | Files deleted; `bock-spec.md` is sole source |
+| §17.7 Codegen Rule Learning | Marked Post-v1 in spec | No divergence; aligned-by-design |
+| §18.4 `std.*` modules | Ships via package manager | Stdlib empty; D4 scaffolds reference |
 
-- **Inventory row:** C01 (spec gap)
-- **Classification:** A — Spec amendment to match impl
-- **Spec says:** Implied by §10.7 (graduated strictness — production
-  requires pinning) and §17.4 (production strictness replays pinned
-  decisions). Flag not named in §20.1 build flag list.
-- **Impl does:** `bock build --strict` forces production strictness
-  for the build regardless of the project's configured default; fails
-  if any build-scope decision is unpinned
-  (`compiler/crates/bock-cli/src/main.rs:62-65`).
-- **Recommendation:** Add `--strict` to §20.1's `bock build` flag
-  list with a one-line description. Behavior is already consistent
-  with §10.7's strictness model; this is a naming gap, not a
-  behavioral one.
+## Classification scheme
 
-### C02 — `bock build --pin-all`
+- **Direct contradiction** — Spec X, impl Y, X and Y are clearly
+  incompatible.
+- **Spec stale** — Impl evolved past spec; spec hasn't caught up.
+- **Spec gap** — Impl made a decision spec doesn't address.
+- **Implementation-defined** — Spec uses MAY or doesn't specify;
+  impl chose something specific that should arguably be in spec.
+- **Genuine question** — Both reasonable but different; no clear
+  right answer.
 
-- **Inventory row:** C02 (spec gap)
-- **Classification:** A — Spec amendment to match impl
-- **Spec says:** Implied by §17.4 (every AI decision is recorded;
-  decisions can be pinned). Flag not named in §20.1.
-- **Impl does:** After a successful build, pins every build-scope
-  decision in `.bock/decisions/build/`. Intended development → ship
-  workflow: build with `--pin-all`, commit pins, then ship with
-  production strictness
-  (`compiler/crates/bock-cli/src/main.rs:67-72`).
-- **Recommendation:** Add `--pin-all` to §20.1's `bock build` flag
-  list. The workflow it enables (`pin-all` in development →
-  `--strict` in production) is worth documenting alongside §17.4.
-
-### C03 — `bock build --source-map` / `--no-source-map`
-
-- **Inventory row:** C03 (spec gap)
-- **Classification:** A — Spec amendment to match impl
-- **Spec says:** §20.5 references source maps generically ("Source
-  maps enable debugging transpiled code in target-language
-  debuggers"). Flag pair not named in §20.1.
-- **Impl does:** `--source-map` (default on) emits source map files
-  alongside generated code; `--no-source-map` suppresses them
-  (`compiler/crates/bock-cli/src/main.rs:74-80`).
-- **Recommendation:** Add `--source-map` / `--no-source-map` to
-  §20.1's `bock build` flag list and note default-on. The
-  source-map subsystem itself is already described in §20.5; this
-  is a flag-surface gap.
-
-### C04 — `bock pkg init`, `tree`, `list`
-
-- **Inventory row:** C04 (spec gap)
-- **Classification:** A — Spec amendment to match impl
-- **Spec says:** §20.1 lists `pkg` subs as `add`, `remove`,
-  `update`, `audit`, `publish`, `search`. The three impl-only verbs
-  are absent.
-- **Impl does:** `bock pkg init` initializes a `bock.package`
-  manifest in the current directory; `bock pkg tree` shows the
-  dependency tree; `bock pkg list` enumerates direct dependencies
-  (`compiler/crates/bock-cli/src/main.rs:362-393` and
-  `compiler/crates/bock-cli/src/pkg.rs`).
-- **Recommendation:** Add `init`, `tree`, `list` to §20.1's pkg
-  subcommand list. These are standard package-manager verbs
-  orthogonal to the spec's existing set; they describe lifecycle
-  operations that complement (don't conflict with) `add`/`remove`.
-
-### C05 — `bock pkg cache clear`
-
-- **Inventory row:** C05 (spec gap)
-- **Classification:** A — Spec amendment to match impl
-- **Spec says:** §20.1 lists `bock cache` (AI/decision/rule
-  caches) but does not describe `bock pkg cache` (tarball cache).
-- **Impl does:** `bock pkg cache clear` removes downloaded
-  package tarballs from `.bock/cache/`
-  (`compiler/crates/bock-cli/src/main.rs:395-400`,
-  `compiler/crates/bock-pkg/src/install.rs:CACHE_SUBDIR`).
-- **Recommendation:** Add `bock pkg cache` as a distinct cache
-  surface in §20.1, separate from `bock cache`. The two operate
-  on different caches with different lifecycles (AI/decision/rule
-  vs. package tarballs); conflating them in docs would mislead
-  users about what `bock cache clear` removes.
-
-### F01 — `bock build --deliverable`
-
-- **Inventory row:** F01 (drift: spec only)
-- **Classification:** E — Resolved by Item B Phase 1
-- **Status:** Spec describes (§20.6.2 "Deliverable mode" with
-  `--deliverable` flag, §17.5 "Deliverables"); impl doesn't yet.
-  Item B Phase 1 schedules this flag per the
-  `20260510-2100-specs-changes.md` changelog ("Phase 1 scope
-  additions: `--source-only` and `--deliverable` flags").
-- **Routing:** None to design chat. Will close when Item B Phase 1
-  lands. Until then, invoking `--deliverable` errors out (not
-  silently misbuilds).
-
-### F02 — `bock build --no-tests`
-
-- **Inventory row:** F02 (drift: spec only)
-- **Classification:** E — Resolved by Item B Phase 1
-- **Status:** Spec describes (§20.6.2 "Test inclusion" — tests
-  included by default, `--no-tests` opts out); impl doesn't yet.
-  Item B Phase 1 schedules this flag per the same changelog
-  ("Phase 1 scope additions: `--no-tests` flag (new)").
-- **Routing:** None to design chat. Closes with Item B Phase 1.
-
-### F03 — `bock build --optimize`
-
-- **Inventory row:** F03 (drift: spec only)
-- **Classification:** E — Resolved by Item B Phase 1
-- **Status:** Spec describes (§17.2 Tier 3 — AI Optimization,
-  activated via `bock build --optimize`); impl doesn't yet. Item
-  B Phase 1 owns the build-flag surface establishment per the
-  `20260510-2100` and `20260510-2300` changelogs.
-- **Routing:** None to design chat. Closes with Item B Phase 1.
-
-### F04 — `bock check --context` vs `--no-context`
-
-- **Inventory row:** F04 (drift: polarity)
-- **Classification:** A — Spec amendment to match impl
-  *(ambiguous: also consider C for the separate `--context`
-  facet)*
-- **Spec says:** §20.1 lists `bock check` flags as `--types`,
-  `--lint`, `--context` — described as "for selective checking"
-  (i.e., run only context-system validation in isolation).
-- **Impl does:** `bock check --no-context` is a *diagnostic
-  display* toggle that hides the source-context snippet in error
-  output (default-on); it does not select what's checked. The
-  selective-check `--context` mode described in the spec is not
-  implemented (`compiler/crates/bock-cli/src/main.rs:108-110`,
-  `compiler/crates/bock-cli/src/check.rs:30-48,267-273`).
-- **Note on the inventory framing:** The matrix described this as
-  a "polarity difference (same capability)". On verification, the
-  two flags are different features with confusingly similar names,
-  not opposite defaults of the same feature. The impl flag is a
-  rendering toggle on diagnostic output; the spec flag is a
-  selective-check mode analogous to `--types` and `--lint`.
-- **Recommendation:** Two facets, both routed to design chat:
-  1. **Spec amendment (A):** add the impl's `--no-context`
-     (diagnostic display) to §20.1's `bock check` flag list with a
-     name that doesn't collide with the selective-check usage —
-     candidates: `--no-source-context`, `--brief`, or rename the
-     spec's selective-check flag to `--only=context`.
-  2. **Defer the selective-check feature (C):** the spec's
-     `--context` (as selective check) is a planned feature impl
-     doesn't have. Either implement it as `--only=context`
-     (alongside `--only=types`, `--only=lint`) or remove from
-     spec until implemented.
-
-### F05 — `bock test` flags impl lacks
-
-- **Inventory row:** F05 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** §20.1 lists `bock test` flags as `--target`,
-  `--all-targets`, `--smart`, `--coverage`, `--snapshot` in
-  addition to `--filter`.
-- **Impl does:** Only `--filter` is implemented
-  (`compiler/crates/bock-cli/src/main.rs:113-120`).
-- **Recommendation:** Defer in spec — mark "v1.x additions: ..."
-  in §20.1 or move the unshipped flags to §20.4 (Testing Tiers)
-  as forward-looking. `--target` and `--all-targets` come for free
-  once Item B is further along (the build surface gains target
-  selection); `--smart`, `--coverage`, `--snapshot` are larger
-  features that don't need to ship in v1. v1's testing surface
-  is "run tests with an optional filter."
-
-### F06 — `bock cache list`, `bock cache prune`
-
-- **Inventory row:** F06 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** §20.1 lists `bock cache` subs as `list`, `clear`,
-  `prune`, `stats`.
-- **Impl does:** `bock cache stats` and `bock cache clear` are
-  implemented; `list` and `prune` are not
-  (`compiler/crates/bock-cli/src/main.rs:333-358`).
-- **Recommendation:** Defer in spec — `list` and `prune` are
-  operational conveniences (`stats` already shows aggregate info;
-  `clear` is the universal-hammer). v1 ships with `stats` + `clear`;
-  `list` (enumerate entries) and `prune` (age-based eviction)
-  can land post-v1.
-
-### F07 — `bock pkg update`, `audit`, `publish`, `search`
-
-- **Inventory row:** F07 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** §20.1 lists `bock pkg` verbs including `update`,
-  `audit`, `publish`, `search`.
-- **Impl does:** `init`, `add`, `remove`, `tree`, `list`, `cache`
-  exist (see also C04, C05). `update`, `audit`, `publish`,
-  `search` are not implemented.
-- **Recommendation:** Defer in spec. Most v1 package work to date
-  has been the install/resolve loop; the remaining verbs depend on
-  registry workflows that aren't v1-blocking:
-  - `update` — depends on a stable lockfile format and resolver
-  - `audit` — depends on a security-advisory feed (post-v1
-    infrastructure)
-  - `publish` — depends on a public registry and auth flow
-  - `search` — depends on a registry search API
-  Mark "Reserved; ships alongside the public registry" in §20.1.
-
-### F08 — `bock model list`, `install`, `use`
-
-- **Inventory row:** F08 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** §20.1 lists `bock model` verbs as `list`,
-  `install`, `use`.
-- **Impl does:** `bock model show` and `bock model set` are
-  implemented; the spec's three verbs are not
-  (`compiler/crates/bock-cli/src/main.rs:402-414`).
-- **Recommendation:** Defer in spec. v1's AI surface is
-  remote-only (`[ai] provider`/`endpoint`/`api_key_env`); there's
-  no local-model lifecycle to manage. Reshape §20.1 to describe
-  what's actually shipped (`show`/`set`) and mark
-  `list`/`install`/`use` as post-v1 (paired with local model
-  support).
-
-### F09 — `bock fix`
-
-- **Inventory row:** F09 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** §20.1 describes `bock fix — Auto-fix lint
-  warnings.`
-- **Impl does:** Not implemented.
-- **Recommendation:** Defer in spec — mark "v1.x". Auto-fix
-  semantics ("safe to apply, idempotent, source-preserving")
-  warrant a small design pass before v1 lands them. Today's
-  `bock check --lint` reports warnings; `bock fix` is its
-  ergonomic counterpart and ships once the lint catalog stabilizes.
-
-### F10 — `bock migrate`
-
-- **Inventory row:** F10 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** §20.1 describes `bock migrate — AI-assisted
-  import from other languages.`
-- **Impl does:** Not implemented.
-- **Recommendation:** Defer in spec — mark "post-v1". This is a
-  full feature requiring a per-source-language frontend plus the
-  AI pipeline reverse-direction. v1 ships green-field Bock
-  authoring; migration is a separate effort.
-
-### F11 — `bock target`
-
-- **Inventory row:** F11 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** §20.1 describes `bock target — Target management
-  (list, add, info).`
-- **Impl does:** Not implemented. Target selection today happens
-  via `bock build --target T`.
-- **Recommendation:** Defer in spec — mark "post-v1". Target
-  management as a top-level surface (registering custom targets,
-  listing supported targets, inspecting target capabilities)
-  doesn't have user pull today; the per-target `[targets.<T>]`
-  config block in `bock.project` is the v1 surface for target
-  customization.
-
-### F12 — `bock ci`
-
-- **Inventory row:** F12 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** §20.1 describes `bock ci — Run all CI checks
-  in one command.`
-- **Impl does:** Not implemented.
-- **Recommendation:** Remove from spec, or defer. Users can
-  compose `bock fmt --check && bock check && bock test` from
-  existing primitives; a packaged `bock ci` is convenience, not
-  capability. Either drop from §20.1 or mark "Reserved" — both
-  are defensible. Mild preference for keep-and-defer (the verb
-  is good shorthand once it exists).
-
-### F13 — `[project] authors`
-
-- **Inventory row:** F13 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** Appendix A includes `authors = ["team@example.com"]`.
-- **Impl does:** Not read. `bock-cli/src/doc.rs::read_project_meta`
-  reads `name` and `version` only.
-- **Recommendation:** Defer in spec — mark "Reserved" or remove
-  from the Appendix A example. `authors` becomes meaningful once
-  publishing exists (F07); v1 doesn't need it.
-
-### F14 — `[strictness.overrides]`
-
-- **Inventory row:** F14 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** Appendix A shows `[strictness.overrides]` with
-  per-path glob mappings (`"src/experiments/**" = "sketch"`).
-- **Impl does:** Reads `[strictness] default` only
-  (`bock-cli/src/promote.rs::read_strictness`).
-- **Recommendation:** Defer. v1 ships a flat project-level
-  strictness default; per-path overrides are a layered concept
-  that depends on a glob matcher and a strictness-resolution
-  hierarchy that isn't built. Mark "Reserved" in Appendix A.
-
-### F15 — `[paradigm]`
-
-- **Inventory row:** F15 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** Appendix A includes `[paradigm] default = "multi"`.
-- **Impl does:** Not read.
-- **Recommendation:** Remove from Appendix A. Bock is
-  multi-paradigm by design (functional + OO + effectful); a
-  project-level paradigm switch doesn't have semantic content
-  the compiler acts on. If a future linting/style decision needs
-  it, reintroduce then.
-
-### F16 — `[targets]` (top-level)
-
-- **Inventory row:** F16 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** Appendix A shows `[targets] primary = "web"`
-  with `additional = ["ios", "android"]`.
-- **Impl does:** The impl reads per-target tooling config
-  (`[targets.<T>]`) per §20.6.2 — *not* the top-level `[targets]
-  primary/additional` block. The two have different semantics
-  (top-level: which targets to build; per-target: how to scaffold
-  each one).
-- **Recommendation:** Defer in spec — replace the top-level
-  `[targets]` example in Appendix A with the `[targets.<T>]`
-  pattern that §20.6.2 actually describes. Target selection
-  happens via `bock build --target T` / `--all-targets`, not via
-  manifest-level primary/additional lists. Mark the
-  primary/additional surface "Reserved" if it has future value.
-
-### F17 — `[effects]` + `[effects.overrides.*]`
-
-- **Inventory row:** F17 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** Appendix A shows `[effects]` mapping effect names
-  to handler symbols, with `[effects.overrides.test]` for test
-  contexts.
-- **Impl does:** Not read. Effect handlers are resolved via §10.3
-  (call-site + module + project layers) which is implemented
-  inline in code via `handling` blocks and module-level
-  `handle ... with ...` declarations.
-- **Recommendation:** Defer in spec — mark "Reserved" or remove
-  from Appendix A. Project-level handler defaults are a layered
-  feature on top of the inline mechanism; v1 ships the inline
-  surface. Either drop the Appendix A example or note that the
-  project-level handler defaults are forward-looking.
-
-### F18 — `[plugins]`
-
-- **Inventory row:** F18 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** Appendix A shows `[plugins]` entries with version
-  and capability grants. Appendix C describes the plugin system in
-  detail.
-- **Impl does:** Not read. No plugin loading mechanism exists.
-- **Recommendation:** Mark consistent with Appendix C — Appendix C
-  already implies plugins are forward-looking. Annotate the
-  Appendix A `[plugins]` entry to point at Appendix C's
-  description and note it's not active in v1. Or remove from
-  Appendix A entirely and reintroduce when plugin loading lands.
-
-### F19 — `[testing]`
-
-- **Inventory row:** F19 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** Appendix A shows `[testing] smart_target_threshold
-  = 0.3`, `always_test = ["js"]`.
-- **Impl does:** Not read. v1 testing is single-target via
-  `bock test --filter` (see F05).
-- **Recommendation:** Defer. The `[testing]` config block is paired
-  with the unshipped test flags in F05 (`--smart`,
-  `--all-targets`, etc.). Ships together post-v1. Remove from
-  Appendix A or mark "Reserved" alongside §20.4's smart-target
-  description.
-
-### F20 — `[build]` (incl. `hooks`, `cache.remote`)
-
-- **Inventory row:** F20 (drift: spec ahead)
-- **Classification:** C — Defer or trim spec
-- **Spec says:** Appendix A shows `[build] min_aura = "1.2.0"`
-  (note: pre-rename, should be `min_bock`), `[build.hooks]`
-  with pre-build scripts, `[build.cache] remote = "s3://..."`.
-- **Impl does:** Not read. v1 has no build hooks and no remote
-  cache.
-- **Recommendation:** Defer. Three sub-decisions:
-  1. **`min_aura` → `min_bock`:** rename in Appendix A regardless
-     (§20 rename was 2026-04-20; Appendix A wasn't refreshed).
-     This is a copy-edit fix bundled with the deferral.
-  2. **`[build.hooks]`:** Defer; mark "Reserved". Hook semantics
-     (pre-build vs. post-build, error propagation, sandboxing)
-     warrant their own design pass.
-  3. **`[build.cache] remote`:** Defer; mark "Reserved" pending
-     a v1.x cache-server design.
-
-### F21 — `[registries]`
-
-- **Inventory row:** F21 (originally drift; reclassified)
-- **Classification:** *Reclassified — aligned*
-- **Spec says:** Appendix A shows `[registries] internal =
-  "https://bock.company.internal"`.
-- **Impl does:** **Reads** the `[registries]` section. The
-  `default` field selects the default registry URL; named
-  registries are flattened into a map for per-add overrides
-  (`compiler/crates/bock-pkg/src/network.rs:366-400`,
-  `parse_registries` / `default_registry_url`).
-- **Conclusion:** Inventory error. F21 belongs on the aligned
-  list, not the drift list. Surfaced via FOUND: tag in this
-  session's commit message; no design chat action, no spec or
-  impl change. The Appendix A example is consistent with the
-  impl.
-
-### F22 — `[dependencies]` at project root
-
-- **Inventory row:** F22 (drift: spec/impl placement mismatch)
-- **Classification:** A — Spec amendment to match impl
-- **Spec says:** Appendix A shows `[dependencies] core-http = "^1.0"`
-  in the `bock.project` example.
-- **Impl does:** Reads `[dependencies]` from `bock.package`, not
-  `bock.project` (`compiler/crates/bock-pkg/src/manifest.rs:18-24`).
-  §19 (Package Manager) describes `bock.package` as the
-  package-manifest file; the spec is internally inconsistent
-  between §19 and Appendix A on where dependencies live.
-- **Recommendation:** Fix Appendix A — move `[dependencies]` out
-  of the `bock.project` example and into a `bock.package` example
-  (or a cross-reference to §19). The spec internally treats
-  `bock.project` as project config and `bock.package` as package
-  manifest; the Appendix A example conflates them.
-
-### K04 — Section file numbering vs `bock-spec.md` numbering
-
-- **Inventory row:** K04 (numbering mismatch)
-- **Classification:** F — Naming/organization decision
-- **Issue:** `spec/sections/s01-lexical.md` through
-  `s16-tooling.md` don't map cleanly to `bock-spec.md`'s §1–§23.
-  Examples:
-  - `s13-transpilation.md` covers `bock-spec.md` §17 (Transpilation
-    Pipeline), not §13 (Concurrency).
-  - `s14-stdlib.md` covers §18 (Standard Library), not §14
-    (Interop and FFI).
-  - `s15-packaging.md` covers §19 (Package Manager).
-  - `s16-tooling.md` covers §20 (Tooling).
-  - There are no section files for §13 (Concurrency), §14
-    (Interop), §15 (Annotations), §16 (AIR), §22 (Target
-    Profiles), or §23 (Appendices) — these only exist in
-    `bock-spec.md`.
-- **Resolution options:**
-  - **Option 1: Rename section files to match `bock-spec.md`.**
-    `s13-transpilation.md` becomes `s17-transpilation.md`, etc.
-    Add missing section files for §13, §14, §15, §16, §22, §23.
-    Pro: clean numerical correspondence after rename. Con: every
-    changelog (18 of them) references section files by their
-    current names; renaming creates link churn in historical
-    changelogs that don't merit edits.
-  - **Option 2: Document the mapping; don't rename.** Section
-    files keep current names; add a translation table to
-    `docs/src/reference/spec.md` mapping each `s##-` file to its
-    `bock-spec.md` section number. New section files (for §13,
-    §14, etc.) use the next free `s##-` number.
-    Pro: no link churn, no changelog edits. Con: ongoing mental
-    overhead for anyone cross-referencing.
-- **Recommendation:** **Option 2**. Section files are excerpts
-  per the Spec Authority Note ("`bock-spec.md` is the canonical
-  assembled spec and is authoritative when it disagrees with
-  section excerpts"); their numbering can be a separate naming
-  scheme that doesn't pretend to mirror `bock-spec.md`. A
-  documented mapping in `docs/src/reference/spec.md` (created in
-  D3) is cheaper than retroactive renames.
-- **Routing:** Design chat decision. Affects D2–D5
-  cross-reference patterns: D2/D3 cite by `bock-spec.md`
-  numbering (authoritative) with section files as reading-aid
-  links; D5 may want to consolidate by removing the section
-  files entirely if `bock-spec.md` is canonical.
+The recommendations below are implementation chat's read. Design
+chat decides.
 
 ---
 
-## Closed without design-chat action
+## §1.3 — Supported targets list claims 9; impl ships 5
 
-The following 4 rows are listed here for completeness. They
-require no escalation to design chat:
+**Spec says:** "Bock transpiles to JavaScript, TypeScript,
+Python, Rust, Go, Java, C++, C#, and Swift" with a 9-row table
+of targets.
 
-| Row | Status | Disposition |
-|-----|--------|-------------|
-| F01 | E | Closed by Item B Phase 1 (`--deliverable`) |
-| F02 | E | Closed by Item B Phase 1 (`--no-tests`) |
-| F03 | E | Closed by Item B Phase 1 (`--optimize`) |
-| F21 | Reclassified aligned | FOUND: tag; inventory error, no change needed |
+**Implementation does:** `TargetProfile::all_builtins()` returns
+five profiles: javascript, typescript, python, rust, go.
+`TargetProfile::from_id()` only resolves these five plus their
+short aliases.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 53, 57–69
+- Impl: compiler/crates/bock-codegen/src/profile.rs, lines 441–464
+
+**Recommendation for design chat:** Either ship the four missing
+targets as project commitments or mark §1.3's java/cpp/csharp/
+swift rows as "Planned for v1.x" alongside their current "core,
+ships-with-compiler" framing. Today the present-tense table
+overstates the implementation.
 
 ---
 
-## Expected output from design chat
+## §10.3 — Layer 3 (project-level `[effects]`) lingers in §10.3 after Appendix A.3 marked the field Reserved
 
-The 24 design-chat-routed rows (7 A + 16 C + 1 F) should resolve
-into one or more spec changelogs in `spec/changelogs/`:
+**Spec says:** §10.3 describes three layers of handler
+resolution (Local > Module > Project) with project defaults
+configured in `bock.project [effects]`. Appendix A.3 then lists
+`[effects]` and `[effects.overrides.<env>]` as Reserved for
+future versions.
 
-- **A-class amendments** add named flags / commands to §20.1 or
-  fix Appendix A's `bock.project` example.
-- **C-class deferrals** trim §20.1 entries, mark "Reserved" in
-  Appendix A, or remove unshipped surfaces from the spec.
-- **F (K04)** records the section-file numbering decision and
-  shapes how D2–D5 cite the spec.
+**Implementation does:** Local `handling` blocks and module-
+level `handle ... with` are wired. `[effects]` is not read from
+`bock.project`; Appendix A.3 already marks it Reserved.
 
-D2–D5 should not start until those changelogs are merged. D6
-(changelog backfill, per `docs/INVENTORY.md` cross-effort
-dependencies) follows D1's resolutions.
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 826–852 (§10.3 three-layer
+  prose), 2302–2303 (Appendix A.3 `[effects]` Reserved entry)
+- Impl: compiler/crates/bock-ast/src/lib.rs:1020–1022
+  (`ModuleHandleDecl`), compiler/crates/bock-parser/src/lib.rs
+  (handling-block parsing); no reader for `[effects]` in
+  `bock-cli` or `bock-pkg`
+
+**Recommendation for design chat:** Update §10.3 to mark "Layer
+3 — Project defaults" as Reserved for v1.x in line with Appendix
+A.3, or strike it from the resolution diagram for v1. Today's
+text and A.3 disagree on whether Layer 3 exists.
+
+---
+
+## §10.6 — Effect erasure optimization described as a v1 production-mode pass; no pass exists
+
+**Spec says:** "When a handler is statically known, the compiler
+can inline it and erase the indirection entirely (effect erasure
+optimization, applied in `production` mode)."
+
+**Implementation does:** No dedicated effect-erasure pass.
+Interpreter dispatches effect operations through inline-handler
+lookup at runtime; codegen does not specialize on statically
+known handlers.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, line 886 (§10.6)
+- Impl: compiler/crates/bock-interp/src/interp.rs (inline
+  handler dispatch path); no equivalent in bock-codegen
+
+**Recommendation for design chat:** The wording is permissive
+("the compiler can inline"), but reading it as a v1 commitment
+overpromises. Either soften to "MAY apply" with a forward
+reference, or commit a v1.x roadmap entry.
+
+---
+
+## §13.3 — Channel example shows a `buffer:` argument; impl is unbounded with no buffer param
+
+**Spec says:** `let ch = Channel[Message].new(buffer: 10)` and
+`for msg in ch { process(msg) }`.
+
+**Implementation does:** `Channel.new()` takes no arguments and
+returns an unbounded MPSC pair (sender, receiver). No iteration
+syntax over channels is registered.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1156–1167
+- Impl: compiler/crates/bock-core/src/concurrency.rs, lines
+  3–46 (`Channel.new` registration, "unbounded async MPSC")
+
+**Recommendation for design chat:** Decide whether v1 ships
+bounded channels with a buffer parameter or rewrites the §13.3
+example to use the unbounded API. The iteration form
+`for msg in ch` may or may not be intended for v1 — both the
+buffer argument and the iteration desugar need a decision.
+
+---
+
+## §13.4 — Five sync primitives listed; none exposed to Bock code
+
+**Spec says:** "`Mutex[T]`, `RwLock[T]`, `Atomic[T]`,
+`WaitGroup`, `OnceCell[T]` — available from `core.concurrency`."
+
+**Implementation does:** `core.concurrency` registers `Channel`
+methods only. Internal Rust uses of `std::sync::{Mutex, RwLock}`
+in `bock-core` are implementation details, not Bock-visible
+types.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, line 1171 (§13.4)
+- Impl: compiler/crates/bock-core/src/concurrency.rs (Channel
+  registration only); no Mutex/RwLock/Atomic/WaitGroup/OnceCell
+  registrations in `bock-core/src/lib.rs`
+
+**Recommendation for design chat:** Defer in spec — mark §13.4
+"Reserved for v1.x". The full sync surface is a stdlib build-out
+project, not a syntactic feature; v1 ships with channels alone.
+
+---
+
+## §13.5 — Cancellation: only the adaptive-handler integration is wired
+
+**Spec says:** Ambient `Cancel` effect; checkpoint insertion at
+every `await`, every effect operation, explicit `check_cancel()`
+calls, and loop iteration boundaries in `@concurrent` blocks.
+`task.cancel()` API. Target mapping table
+(`tokio::sync::CancellationToken` / `AbortSignal` /
+`context.Context` / `asyncio.Task.cancel()`). Strictness table
+gating per-mode checkpoint requirements.
+
+**Implementation does:** `Cancel` is plumbed through adaptive
+handler combinators (cancellation flag, on_cancel hook). No
+`check_cancel()` builtin, no `task.cancel()`, no checkpoint
+insertion pass, no target-specific cancellation codegen.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1175–1230 (§13.5)
+- Impl: compiler/crates/bock-core/src/adaptive.rs, lines 286,
+  584–608 (cancellation flag in combinators only)
+
+**Recommendation for design chat:** Cancellation is large. Either
+scope it across v1.x milestones (basic `check_cancel` first;
+target mapping with codegen; strictness gating last) or trim
+§13.5 to the adaptive-handler surface that exists and defer the
+remainder.
+
+---
+
+## §14.1 — `native` keyword tokenized; no parser rule for native function declarations
+
+**Spec says:** `@target(js) native fn query_selector(sel: String) -> Optional[Element] { \`document.querySelector(${sel})\` }`
+
+**Implementation does:** Lexer recognizes the `native` keyword.
+No parser production for `native_fn_decl` (§21.14 of the spec),
+no backtick token handling for the inline target code, no
+codegen pass that consumes a native block.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1235–1244 (§14.1), 2169–2175
+  (§21.14 grammar)
+- Impl: compiler/crates/bock-lexer/src/token.rs:266,397,524
+  (`Native` token); no consumer in `bock-parser/src/lib.rs`
+
+**Recommendation for design chat:** Defer §14.1 in spec — mark
+"Reserved for v1.x". FFI surface is a discrete capability that
+ships with its own design pass (backtick tokenization,
+per-target inline code validation, capability gap interaction).
+
+---
+
+## §14.2 — FFI linter warning gated on §14.1
+
+**Spec says:** "FFI usage in multi-target projects triggers a
+linter warning suggesting migration to a platform trait."
+
+**Implementation does:** No native blocks exist (§14.1), so no
+linter rule. Multi-target detection logic is also absent at the
+lint layer.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1246–1248
+- Impl: no linter pass handling FFI patterns
+
+**Recommendation for design chat:** Defer alongside §14.1. The
+warning is meaningless until native blocks parse.
+
+---
+
+## §15 — Annotation taxonomy: 6 annotations parsed but silently dropped at C-AIR
+
+**Spec says:** §15 enumerates: `@concurrent`, `@managed`,
+`@deterministic`, `@inline`, `@deprecated`, `@cold`, `@hot`,
+`@requires`, `@target`, `@platform`, `@context`, `@performance`,
+`@invariant`, `@security`, `@domain`, `@test`, `@test(skip)`,
+`@benchmark`, `@property`, `@derive`.
+
+**Implementation does:** Annotation syntax parses everywhere.
+The C-AIR context interpreter (`bock-air/src/context.rs:195–211`)
+handles `@context`, `@requires`, `@performance`, `@invariant`,
+`@security`, `@domain`, `@concurrent`, `@managed`,
+`@deterministic`, `@inline`, `@cold`, `@hot`, `@deprecated`
+(13 total). The remaining six — `@target`, `@platform`, `@test`,
+`@benchmark`, `@property`, `@derive` — fall through the
+catch-all `_ => {}` arm and are silently dropped. No "unknown
+annotation" diagnostic is emitted for typos.
+
+**Classification:** Spec gap
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1252–1266
+- Impl: compiler/crates/bock-air/src/context.rs:195–211
+
+**Recommendation for design chat:** Two facets:
+1. **Recognition policy:** decide whether unknown annotations
+   warn (catches typos), error (production-strict only?), or
+   pass silently. Spec doesn't say.
+2. **Per-annotation status:** `@test`, `@benchmark`, `@property`
+   are test-framework hooks the test runner may consume directly
+   without going through C-AIR. `@derive` is a codegen hook.
+   `@target` and `@platform` are conditional-compilation hooks
+   that probably belong with FFI / native-block work (§14).
+   Each needs a routing decision; some may be "wired via
+   different path" rather than "missing."
+
+---
+
+## §16.3 — AIR-T and AIR-B serialization formats not implemented
+
+**Spec says:** "**AIR-T (text format):** Human-readable, designed
+for AI consumption. **AIR-B (binary format):** Compact,
+content-addressed, module-level granularity. Used for build
+caches and binary package distribution."
+
+**Implementation does:** AIRNode structures live in
+`bock-air/src/node.rs`; no serializer or deserializer exists for
+either format.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1307–1311
+- Impl: compiler/crates/bock-air/src/node.rs (struct definitions
+  only; no `serde` derives, no `to_text`/`from_binary` paths)
+
+**Recommendation for design chat:** Defer in spec — mark §16.3
+"Post-v1". Both serializers are infrastructure for downstream
+features (build cache reuse, binary package distribution) that
+aren't on the v1 critical path.
+
+---
+
+## §16.4 — Binary package compatibility depends on absent AIR-B
+
+**Spec says:** "Packages distribute pre-compiled T-AIR alongside
+source. ... The compiler checks AIR format version and falls
+back to source compilation transparently when incompatible."
+
+**Implementation does:** No pre-compiled T-AIR distribution
+infrastructure. Packages distribute source.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1313–1321
+- Impl: compiler/crates/bock-pkg/ (manifest, resolver, install
+  cover source distribution only)
+
+**Recommendation for design chat:** Defer with §16.3. Pre-
+compiled T-AIR is a v1.x cache/distribution feature, not a v1
+package-manager capability.
+
+---
+
+## §17.6 — Capability gap synthesis table not systematically realised
+
+**Spec says:** Six-row table mapping AIR constructs to synthesis
+strategies for capability-deficient targets — algebraic types →
+tagged objects + switch (JS); pattern matching → if/else chains
+(Go); ownership → erase (JS, Python); channels → AsyncIterator +
+Queue (JS); refinement types → boundary validation; effects →
+parameter passing.
+
+**Implementation does:** `bock-ai/src/request.rs` carries a
+`CapabilityGap` concept used by the AI provider's Generate
+mode. Specific synthesis strategies per (construct, target)
+pair are not encoded as a single deterministic table; they live
+implicitly in each target's codegen path.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1403–1412
+- Impl: compiler/crates/bock-ai/src/request.rs (gap concept);
+  compiler/crates/bock-codegen/src/{js,ts,python,rust,go}.rs
+  (per-target codegen)
+
+**Recommendation for design chat:** Decide whether the §17.6
+table is normative (codegen must implement these specific
+synthesis strategies) or illustrative (these are examples; the
+synthesis is whatever each target's codegen package chooses).
+Today's impl behaves as if illustrative; the spec reads as
+normative.
+
+---
+
+## §18.3 — Core module list is partial
+
+**Spec says:** §18.3 lists 15 core modules: `core.types`,
+`core.collections`, `core.string`, `core.math`, `core.option`,
+`core.result`, `core.iter`, `core.compare`, `core.convert`,
+`core.error`, `core.effect`, `core.concurrency`, `core.memory`,
+`core.time`, `core.test`.
+
+**Implementation does:** `bock-core` registers `core.time`,
+collections, string primitives, options/results, trait dispatch
+infrastructure, and `core.test`'s assertion shims. Modules
+`core.concurrency`, `core.effect`, `core.error`, `core.math`,
+and `core.memory` are stubs per `bock-core/src/lib.rs` (lines
+21–29, marked "unimplemented").
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1488–1502
+- Impl: compiler/crates/bock-core/src/lib.rs, lines 21–73
+
+**Recommendation for design chat:** Either mark the unstubbed
+modules "Reserved for v1.x" in §18.3 or schedule the build-out
+as a stdlib milestone. The spec implies v1 ships these; today
+the impl ships a fraction.
+
+---
+
+## §18.5 — Trait-language integration claims not end-to-end verified
+
+**Spec says:** "Core traits opt types into language features:
+`Comparable` enables `<`/`>`, `Iterable` enables `for..in`,
+`Displayable` enables `${}` interpolation, `Add`/`Sub`/etc.
+enable operator overloading."
+
+**Implementation does:** `bock-core` exposes `TraitDispatch`
+(`bock-core/src/lib.rs:34`). The wiring between trait
+implementations and the corresponding language constructs is
+not centrally documented and was not verified end-to-end during
+this pass — e.g., does declaring `impl Comparable for MyType`
+make `<` work on `MyType` values in `match` guards and `if`
+conditions, today?
+
+**Classification:** Spec gap
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1605–1607
+- Impl: compiler/crates/bock-core/src/lib.rs:34 (TraitDispatch);
+  no single integration test verifies the four claims
+
+**Recommendation for design chat:** Decide on a normative
+expectation. If `Comparable → </>`, `Iterable → for..in`,
+`Displayable → ${}`, and operator overloading are v1
+commitments, add a §18.5 conformance test surface. If they're
+aspirational, soften the wording. The implementation chat can
+follow up with an audit once the design intent is clear.
+
+---
+
+## §19.7 — Versioning stability tiers not in manifest schema
+
+**Spec says:** "Stability tiers: `stable`, `beta`,
+`experimental`. Production strictness can reject dependencies
+below a stability threshold."
+
+**Implementation does:** `bock.package` manifest carries
+`name`/`version`/`license`/dependencies/features; no stability
+field. The resolver makes no decisions based on stability.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1675–1677
+- Impl: compiler/crates/bock-pkg/src/manifest.rs (no
+  `stability` field), compiler/crates/bock-pkg/src/resolver.rs
+  (no stability-based filtering)
+
+**Recommendation for design chat:** Defer. Stability tiers
+become useful once an ecosystem of packages exists; v1 has none.
+Mark §19.7 "v1.x" or remove the tier sentence until production-
+strictness rejection logic is designed.
+
+---
+
+## §20.1.1 — `--only=<aspect>` / `--brief` spec amendment not implemented in CLI
+
+**Spec says:** As amended by `20260512-1600-specs-changes.md`
+(K04 Batch 3): `bock check --only=<aspect>` accepts comma-
+separated or repeated values; v1 aspects `types` and `context`;
+`--brief` produces compact error output (omits source-context
+snippets).
+
+**Implementation does:** `bock check` still ships the
+pre-amendment surface: `--types`, `--lint`, `--no-context`
+(`bock-cli/src/main.rs:100–110`). The aspect-selection
+mechanism is mutually-exclusive booleans rather than an
+`--only=<aspect>` list.
+
+**Classification:** Direct contradiction
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1692, 1718–1735 (§20.1.1 as
+  amended)
+- Impl: compiler/crates/bock-cli/src/main.rs:96–116, 456–468
+
+**Recommendation for design chat:** This is implementation work,
+not a spec question. The CLI needs the F04 resolution applied:
+add `--only=<aspect>`, rename `--no-context` to `--brief`,
+remove the three pre-amendment flags. Open a follow-up session
+to land the change.
+
+---
+
+## §20.3 — LSP advertises features the impl doesn't have
+
+**Spec says:** §20.3 lists AI Context Panel, Target Preview,
+Capability Graph, Smart Completions, Inline Diagnostics as Bock-
+specific LSP extensions.
+
+**Implementation does:** `bock-lsp` advertises text-document
+sync, hover, definition, and diagnostics. The four
+Bock-specific extensions are not present.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1749–1761
+- Impl: compiler/crates/bock-lsp/src/server.rs:48–60
+
+**Recommendation for design chat:** Defer the four extensions in
+spec — mark "Planned for v1.x" or remove from §20.3 entirely.
+LSP feature parity is a long-tail effort orthogonal to language
+v1.
+
+---
+
+## §20.5 — Built-in interpreter debugger described as v1; UI absent
+
+**Spec says:** "Built-in interpreter debugger with breakpoints,
+stepping, expression evaluation, ownership state inspection,
+effect handler display, and context viewing."
+
+**Implementation does:** `bock-interp` exists. No debug protocol
+(DAP) bridge, no breakpoint/stepping primitives, no
+ownership-state inspection surface.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, lines 1779–1781
+- Impl: compiler/crates/bock-interp/ (interpreter only; no
+  debugger module)
+
+**Recommendation for design chat:** Defer §20.5 to v1.x. Source
+maps in §20.5's second sentence are already covered by
+`--source-map`/`--no-source-map` flags (Batch 1); the debugger
+UI is the deferrable piece.
+
+---
+
+## §20.6 — Build system features (remote cache, build hooks, distributed builds) described as v1; none implemented
+
+**Spec says:** "Remote build cache. Build hooks (Bock scripts).
+Distributed builds for CI."
+
+**Implementation does:** Build pipeline (Parse → ... →
+Assemble) exists in `bock-build`. Remote cache, build hooks, and
+distributed builds are not present. Appendix A.3 already marks
+`[build.hooks]` and `[build.cache] remote` as Reserved.
+
+**Classification:** Spec stale
+
+**Reference:**
+- Spec: spec/bock-spec.md, line 1785 (§20.6 opening paragraph)
+- Impl: compiler/crates/bock-build/ (incremental cache exists;
+  remote/hooks/distributed do not)
+
+**Recommendation for design chat:** Strike or qualify the §20.6
+opening sentence. Appendix A.3 has already deferred the
+configuration surfaces; §20.6's introductory feature list
+should match.
+
+---
+
+## Notes for downstream phases
+
+- **D2/D3 cross-references.** Cite `bock-spec.md` by section
+  number directly. The K04 consolidation removed
+  `spec/sections/`, so no mapping table is needed.
+- **Item B Phase 1.** Three rows in the "Already tracked" table
+  (`--deliverable`, `--no-tests`, `--optimize`) close when Item
+  B Phase 1 lands and add no work to this D1 refresh's design
+  chat. The S22 / S20.6.2 surface area (project mode, deep/
+  shallow tooling config, test inclusion default) is the same
+  Item B work; not separately routed.
+- **§20.1.1 implementation lag** is the one row that does need
+  implementation work, not design discussion. Open a CLI
+  follow-up session to land the `--only=<aspect>` / `--brief`
+  rename.
+- **D6 (changelog backfill)** does not depend on this refresh.
+  Every item above is a spec deferral or a future-work routing;
+  none changes the changelog history.
