@@ -1,7 +1,7 @@
 # Effects
 
-> Stub. Full coverage in
-> [section 8 of the specification](../../../spec/sections/s08-effects.md).
+> Stub. Full coverage in §10 (Effect System) of
+> [`spec/bock-spec.md`](../../../spec/bock-spec.md).
 
 Bock tracks effects on every function. The compiler infers an effect
 set from the body of each function and propagates it to every caller.
@@ -33,4 +33,4 @@ effects its body may perform.
 
 A function calling an effectful function inherits those effects
 unless it consumes them in a controlled way (effect handlers; see
-`spec/sections/s09-context.md`).
+§11 Context System of `spec/bock-spec.md`).

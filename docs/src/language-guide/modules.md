@@ -1,7 +1,7 @@
 # Modules
 
-> Stub. Full coverage in
-> [section 10 of the specification](../../../spec/sections/s10-modules.md).
+> Stub. Full coverage in §12 (Module System) of
+> [`spec/bock-spec.md`](../../../spec/bock-spec.md).
 
 Each Bock file that participates in cross-file imports declares its
 module name on the first non-comment line:
