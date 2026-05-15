@@ -56,17 +56,26 @@ Bock code describes what a program does and what guarantees it requires — not 
 
 ### 1.3 — Supported Targets
 
-| Target     | Language   | Use Cases                       |
-|------------|------------|---------------------------------|
-| js         | JavaScript | Web frontends, Node.js servers  |
-| ts         | TypeScript | Type-safe web/Node.js           |
-| python     | Python     | Data science, scripting, APIs   |
-| rust       | Rust       | Systems, performance-critical   |
-| go         | Go         | Services, CLI tools, networking |
-| java       | Java       | Enterprise, Android             |
-| cpp        | C++        | Systems, games, embedded        |
-| csharp     | C#         | .NET, Unity, Windows            |
-| swift      | Swift      | iOS, macOS                      |
+**Ships in v1.** Bock transpiles to five targets in v1:
+
+| Target | Language   | Use Cases                       |
+|--------|------------|---------------------------------|
+| js     | JavaScript | Web frontends, Node.js servers  |
+| ts     | TypeScript | Type-safe web/Node.js           |
+| python | Python     | Data science, scripting, APIs   |
+| rust   | Rust       | Systems, performance-critical   |
+| go     | Go         | Services, CLI tools, networking |
+
+**Planned for v1.x.** Four additional targets are on the v1.x roadmap:
+
+| Target  | Language | Use Cases                |
+|---------|----------|--------------------------|
+| java    | Java     | Enterprise, Android      |
+| cpp     | C++      | Systems, games, embedded |
+| csharp  | C#       | .NET, Unity, Windows     |
+| swift   | Swift    | iOS, macOS               |
+
+The v1.x list expresses target ambition and informs the design of the AIR and codegen architecture (target profiles, capability gap synthesis); it is not a v1 commitment. Users requiring these targets in v1 should expect to wait for v1.x.
 
 ### 1.4 — Strictness Levels
 
@@ -111,9 +120,7 @@ use app.models.{User, UserError}
 // ─── Types ───
 
 type Email = String
-  where (matches(r"^[^@]+@[^@]+\.[^@]+$"))
 type Username = String
-  where (len(self) >= 3 && len(self) <= 30)
 
 record CreateUserRequest {
   username: Username
@@ -295,39 +302,25 @@ let html = """
 
 ### 3.7 — Operator Precedence
 
-From lowest to highest binding:
+From lowest to highest binding (see §21.9 for the precedence-ordered expression grammar). Lower levels are evaluated last; higher levels bind tightest.
 
-| Level | Category       | Operators                  | Assoc. |
-|-------|----------------|----------------------------|--------|
-| 1     | Assignment     | `= += -= *= /= %=`        | Right  |
-| 2     | Pipe           | `\|>`                      | Left   |
-| 3     | Compose        | `>>`                       | Left   |
-| 4     | Range          | `.. ..=`                   | None   |
-| 5     | Logical OR     | `\|\|`                     | Left   |
-| 6     | Logical AND    | `&&`                       | Left   |
-| 7     | Comparison     | `== != < > <= >= is`       | None   |
-| 8     | Bitwise OR     | `\|`                       | Left   |
-| 9     | Bitwise XOR    | `^`                        | Left   |
-| 10    | Bitwise AND    | `&`                        | Left   |
-| 11    | Additive       | `+ -`                      | Left   |
-| 12    | Multiplicative | `* / %`                    | Left   |
-| 13    | Power          | `**`                       | Right  |
-| 14    | Unary          | `- ! ~`                    | Prefix |
-| 15    | Postfix        | `() [] . .method() ?`      | Left   |
-
-> **Bit shifts:** There are no infix shift operators. Use `Int.shift_left(n)` and `Int.shift_right(n)` methods. `>>` is reserved exclusively for function composition (level 3).
-
-### 3.8 — Delimiters
-
-| Delimiter | Purpose                                              |
-|-----------|------------------------------------------------------|
-| `( )`     | Function args, conditions, constraints, tuples       |
-| `[ ]`     | Generic params, list literals, type parameters       |
-| `{ }`     | Blocks, map literals, record construction            |
-| `#{ }`    | Set literals                                         |
-| `" "`     | Strings                                              |
-| `""" """` | Multi-line strings                                   |
-| `` ` ``   | FFI inline code                                      |
+| Level | Category       | Operators                                       | Associativity |
+|-------|----------------|-------------------------------------------------|---------------|
+| 1     | Assignment     | `=`, `+=`, `-=`, `*=`, `/=`, `%=`               | Right         |
+| 2     | Pipe           | `\|>`                                            | Left          |
+| 3     | Compose        | `>>`                                            | Left          |
+| 4     | Range          | `..`, `..=`                                     | Non-assoc     |
+| 5     | Logical OR     | `\|\|`                                           | Left          |
+| 6     | Logical AND    | `&&`                                            | Left          |
+| 7     | Comparison     | `==`, `!=`, `<`, `>`, `<=`, `>=`, `is`          | Non-assoc     |
+| 8     | Bitwise OR     | `\|`                                             | Left          |
+| 9     | Bitwise XOR    | `^`                                             | Left          |
+| 10    | Bitwise AND    | `&`                                             | Left          |
+| 11    | Additive       | `+`, `-`                                        | Left          |
+| 12    | Multiplicative | `*`, `/`, `%`                                   | Left          |
+| 13    | Power          | `**`                                            | Right         |
+| 14    | Unary          | `-` (prefix), `!`, `~`                          | Right         |
+| 15    | Postfix        | `()`, `[]`, `.IDENT`, `.IDENT()`, `?`           | Left          |
 
 ---
 
@@ -391,16 +384,34 @@ fn merge[A, B, C](left: A, right: B) -> C
 
 ### 4.7 — Refined Types
 
-Types with compile-time or runtime-checked constraints:
+Basic type aliases work in v1:
 
 ```bock
+type Email = String
+type Port = Int
+type NonEmpty[T] = List[T]
+```
+
+These declare type aliases without runtime checking. The alias is structural: an `Email` is interchangeable with `String` at use sites; the alias documents intent and clarifies type signatures.
+
+**Reserved Post-v1: refinement predicates.** Refinement types with predicate clauses are a planned future extension to the type system:
+
+```bock
+// Reserved Post-v1 — does not compile in v1
 type Email = String
   where (matches(r"^[^@]+@[^@]+\.[^@]+$"))
 type Port = Int where (1 <= self <= 65535)
 type NonEmpty[T] = List[T] where (len(self) > 0)
 ```
 
-Refinements are checked at construction: statically for literals, at runtime for dynamic values.
+The design questions for refinement types are substantive:
+
+- Predicate evaluation timing (construction-only, every assignment, every use)
+- Type compatibility under refinement (`Email` assignable to `String`? to another `Email`?)
+- Target codegen costs (runtime predicate checking on every assignment is expensive on hot paths)
+- Interaction with AI capability gap synthesis (predicate-aware synthesis is a research direction)
+
+The worked examples above are retained as design intent for the future design pass. v1 compilers reject `where (...)` clauses on type aliases as a "Reserved Post-v1" diagnostic.
 
 ### 4.8 — Capability Types
 
@@ -477,6 +488,37 @@ fn name[T](param: Type) -> ReturnType
 ```
 
 Functions are private by default. `public` makes them visible everywhere; `internal` makes them visible within the module tree.
+
+**Default parameter values.** Parameters may carry default values that apply at call sites where the argument is omitted:
+
+```bock
+fn greet(name: String, greeting: String = "Hello") -> String {
+  "${greeting}, ${name}!"
+}
+
+greet("Alice")              // returns "Hello, Alice!"
+greet("Bob", "Hi")          // returns "Hi, Bob!"
+```
+
+#### Semantics
+
+**Evaluation timing.** Default value expressions are evaluated per-call at the call site, not once at function definition. Each invocation that omits the parameter evaluates the default expression fresh.
+
+```bock
+fn append_log(msg: String, log: List[String] = List.new()) { ... }
+append_log("a")  // log is a fresh empty List
+append_log("b")  // log is a different fresh empty List
+```
+
+This avoids the Python-style "mutable default argument" gotcha where the default is shared across calls.
+
+**Argument binding order.** Parameters are bound positionally first, then named arguments fill remaining parameters by name. Defaults apply to parameters that remain unbound after positional and named arguments are resolved.
+
+**Type checking.** The default expression must produce a value compatible with the parameter's type. Type checking happens at function definition; an incompatible default is a compile-time error.
+
+**Effect tracking.** If the default expression invokes effectful operations (`List.new()` allocates; a hypothetical `current_time()` would require the `Clock` capability), the effect is attributed to the call site that triggers the default, not the function definition. The function's effect signature reflects defaults conservatively.
+
+**Target codegen consistency.** All targets produce the same observable semantics. Targets with native default parameter support (JavaScript, Python) use the native form with care to match per-call evaluation. Targets without native defaults (Go) synthesize equivalent call-site checks.
 
 ### 6.2 — Records
 
@@ -572,9 +614,7 @@ A bare type name in expression position is only valid when followed by `.method(
 
 ### 6.8 — Type Aliases
 
-```bock
-type UserId = String where (len(self) == 26)
-```
+See §4.7 for type alias syntax. Basic aliases `type UserId = String` are v1; refinement clauses are Reserved Post-v1.
 
 ### 6.9 — Constants
 
@@ -583,9 +623,12 @@ const MAX_RETRIES: Int = 5
 const SESSION_TTL: Duration = 24.hours
 ```
 
-### 6.10 — Derive Macros
+### 6.10 — Derive Macros (Reserved for v1.x)
+
+`@derive` is reserved for v1.x and will be delivered via the plugin system described in Appendix C. v1 has no built-in derive set; v1.x adds derive support as plugins register their derivable trait implementations.
 
 ```bock
+// Reserved for v1.x — does not compile in v1
 @derive(Equatable, Hashable, ToJson, FromJson)
 record User {
   id: UserId
@@ -593,6 +636,8 @@ record User {
   email: Email
 }
 ```
+
+v1 users author trait implementations manually via `impl Trait for Type` (§6.7). The convenience of auto-derivation lands in v1.x once the plugin loader ships.
 
 ---
 
@@ -821,25 +866,9 @@ fn process(data: Data) -> Result[Output, Error]
 
 Effects propagate: if `A` calls `B` which requires `Log`, then `A` must also declare `Log` or provide a handler.
 
-### 10.3 — Handler Resolution (Three Layers)
+### 10.3 — Handler Resolution
 
-**Layer 3 — Project defaults:** Configured in `bock.project`. Applied when no closer handler exists.
-
-```toml
-[effects]
-Log = "std.logging.ConsoleLog"
-Clock = "std.time.SystemClock"
-
-[effects.overrides.test]
-Log = "std.testing.NullLog"
-Clock = "std.testing.MockClock"
-```
-
-**Layer 2 — Module-level:** Override project defaults for a module.
-
-```bock
-handle Log with AuditLogger
-```
+v1 supports two layers of handler resolution. Layer 3 (project-level defaults via `bock.project [effects]`) is **Reserved for v1.x** per Appendix A.3.
 
 **Layer 1 — Local handlers:** Fine-grained control via `handling` blocks.
 
@@ -849,9 +878,19 @@ handling (Log with test_log, Clock with mock_clock) {
 }
 ```
 
-Resolution order: Local > Module > Project. Innermost handler wins (dynamic scoping).
+**Layer 2 — Module-level:** Override defaults for a module.
+
+```bock
+handle Log with AuditLogger
+```
+
+Resolution order: Local > Module. Innermost handler wins (dynamic scoping).
+
+**Layer 3 — Project defaults (Reserved for v1.x).** A future `[effects]` table in `bock.project` will allow project-level default handlers. The table is Reserved in Appendix A.3 pending the design pass for project-scoped effect configuration. In v1, effect handler resolution uses Layers 1 and 2 only; functions that require an effect without a Layer 1 or Layer 2 handler in scope produce a compile-time error.
 
 ### 10.4 — Implementing Handlers
+
+v1 supports one handler form: a `record` (or other type) implementing the effect's trait via an `impl` block.
 
 ```bock
 record ConsoleLog {}
@@ -863,13 +902,24 @@ impl Log for ConsoleLog {
 }
 ```
 
-Lambda-based handlers for quick overrides:
+The handler is then installed via a `handling` block (§10.3):
 
 ```bock
+handling (Log with ConsoleLog {}) {
+  log(Info, "service started")
+}
+```
+
+**Reserved for v1.x: lambda-based handler constructors.** The `Effect.handler(...)` constructor surface (named-field and bare-lambda forms) is Reserved for v1.x as ergonomic shorthand for handlers without state:
+
+```bock
+// Reserved for v1.x — does not compile in v1
 let silent = Log.handler(
   log: (level, message) => {}
 )
 ```
+
+In v1, lambda-style handlers fail at name resolution (the effect name is not bound in the value namespace). The runtime dispatch infrastructure already accepts the value shapes that the lambda forms would produce; v1.x adds parser, AST, and type-checker support for `Effect.handler(...)` as a dedicated constructor that synthesizes the handler value.
 
 ### 10.5 — Effect Categories
 
@@ -883,7 +933,7 @@ let silent = Log.handler(
 
 Effects compile to parameter passing universally. Target-optimized strategies (dependency injection in Java, protocol witnesses in Swift) are applied by the AI transpiler.
 
-When a handler is statically known, the compiler can inline it and erase the indirection entirely (effect erasure optimization, applied in `production` mode).
+Effect erasure is a permissive optimization. The compiler MAY apply effect erasure to code paths where the effect set is provably empty after specialization. Implementation of effect erasure is not required for v1 conformance. v1.x may schedule erasure as a dedicated optimization pass; see ROADMAP.md.
 
 ### 10.7 — Graduated Strictness
 
@@ -1106,9 +1156,20 @@ src/app/auth.bock → module app.auth
 
 ```bock
 use core.collections.{List, Map}
-use app.models.User
+use app.models.{User}
 use app.services.*                 // wildcard (discouraged)
 ```
+
+All named imports use braced form. The braced form scales naturally to multiple names (`use core.collections.{List, Map, Set}`) without a separate single-name shorthand.
+
+**Planned for v1.x: aliased imports.** The `use module as alias` form is planned for v1.x as a syntactic convenience for resolving naming conflicts. v1 ships without aliasing because the first-party stdlib has no naming conflicts; aliasing becomes important once a third-party package ecosystem creates them:
+
+```bock
+// Planned for v1.x — does not compile in v1
+use std.collections.HashMap as Map
+```
+
+In v1, users with naming conflicts resolve them via the braced form's explicit naming or by qualifying the type at the use site.
 
 ### 12.3 — Visibility
 
@@ -1172,16 +1233,37 @@ for msg in ch { process(msg) }
 
 ### 13.5 — Cancellation
 
-Cancellation is modeled as an ambient effect (`Cancel`) available in every async context. It delivers a signal that a task should stop execution at the next cooperative checkpoint. Cancellation is cooperative — a task that never reaches a checkpoint cannot be cancelled.
+Cancellation is modeled as an ambient effect (`Cancel`) available in async contexts. v1 supports cancellation through the adaptive handler integration described in §13.5.1, which exercises the `Cancel` effect at recovery-strategy boundaries. The full cancellation surface described in §13.5.2 (cooperative checkpoints throughout user code, explicit `check_cancel()`, `task.cancel()` API, target mapping, strictness gating) is Reserved for v1.x.
 
-**Checkpoints.** The compiler inserts cancellation checks at well-defined points:
+#### 13.5.1 — Cancellation in adaptive handlers (v1)
+
+Adaptive handlers per §10.8 integrate with cancellation:
+
+- The `RecoveryStrategy` trait's `attempt` method returns `Result[T, E] | Cancelled`, allowing strategies to surface cancellation explicitly
+- The `on_cancel(self, context: RecoveryContext) -> Void` hook (default no-op) fires when the enclosing task is cancelled while a strategy is executing, enabling cleanup of external state
+- Built-in combinators (`retry`, `circuit_break`, `use_cached`, `degrade`, `escalate`) check cancellation at their internal await points
+- A strategy returning `Cancelled` halts the adaptive handler immediately; no further strategies are attempted
+- The adaptive handler propagates `Cancelled` to its caller through the same channel as ordinary errors
+
+v1 user code observes cancellation in two ways:
+
+1. By implementing a custom `RecoveryStrategy` that handles `Cancelled` in its `attempt` return
+2. By being called from within an adaptive handler whose enclosing task is cancelled (cancellation propagates through the handler's `Cancelled` return)
+
+See §10.8 for the full adaptive handler specification including `RecoveryContext`, the built-in combinator semantics, and the manifest treatment of cancellation events.
+
+#### 13.5.2 — Full cancellation surface (Reserved for v1.x)
+
+The broader cancellation model described in this subsection is **Reserved for v1.x**. v1 compilers reject the constructs described below at the relevant pipeline stage (parse, type-check, or codegen) with a "Reserved for v1.x" diagnostic. v1 users who need cancellation observe it through the adaptive handler integration in §13.5.1; the constructs below are the v1.x extension that makes cancellation available throughout user code.
+
+**Cooperative checkpoints.** The compiler inserts cancellation checks at well-defined points:
 
 - Every `await` expression
 - Every effect operation invocation (`with Clock`, `with Network`, etc.)
 - Explicit `check_cancel()` calls for tight loops that don't otherwise reach a checkpoint
 - Loop iteration boundaries in `@concurrent` blocks
 
-At each checkpoint, if cancellation has been signaled, the task propagates a `Cancelled` value through the call stack. This is not an exception — it's a typed return value that the type system tracks like any other `Result`-like outcome.
+At each checkpoint, if cancellation has been signaled, the task propagates a `Cancelled` value through the call stack. This is not an exception; it is a typed return value tracked by the type system like any other `Result`-like outcome.
 
 **Requesting cancellation.** A task handle exposes `cancel()`:
 
@@ -1218,7 +1300,7 @@ The `?` propagates `Cancelled` the same way it propagates `Err`. Functions that 
 | Go     | `context.Context` with `Done()`    |
 | Python | `asyncio.Task.cancel()` + check    |
 
-**Cancellation and cleanup.** Code that holds resources across a checkpoint must handle cancellation explicitly. The `with` handler mechanism provides the standard cleanup pattern — handlers can register cleanup on the `Cancel` effect to release resources when the enclosing task is cancelled.
+**Cancellation and cleanup.** Code that holds resources across a checkpoint must handle cancellation explicitly. The `with` handler mechanism provides the standard cleanup pattern; handlers can register cleanup on the `Cancel` effect to release resources when the enclosing task is cancelled.
 
 **Strictness interaction.**
 
@@ -1228,11 +1310,24 @@ The `?` propagates `Cancelled` the same way it propagates `Err`. Functions that 
 | `development` | Long-running operations (loops, recursion) warned if no `check_cancel()` reachable |
 | `production` | Error if a `@concurrent` or `async` function has no reachable checkpoint within a configurable depth bound |
 
+**v1.x design pass scope.** v1.x cancellation has four implementation layers, each of which warrants its own design pass within the v1.x roadmap:
+
+1. **Builtin and API surface:** `check_cancel()` prelude function, `task.cancel()` method on task handles, `Cancelled` type, `Cancel` effect availability in non-async contexts (if any).
+2. **Compiler-inserted checkpoints:** AIR lowering pass that inserts cancellation checks at `await` expressions, effect operations, and loop boundaries. Interaction with existing AIR optimization passes and effect erasure (§10.6).
+3. **Target mapping codegen:** per-target codegen that maps the `Cancel` effect to the table above. Each target has its own native cancellation primitive with its own propagation semantics; the codegen pass produces equivalent observable behavior per the §20.4 cross-target correctness principle.
+4. **Strictness gating:** static analysis to identify long-running operations without reachable checkpoints; warning and error diagnostics per the strictness table above.
+
+These layers may ship across v1.x point releases rather than all at once. The v1.x roadmap entry decides whether to ship them as a bundle or incrementally.
+
 ---
 
 ## 14. Interop and FFI
 
 ### 14.1 — Native Blocks
+
+**Status:** The `native` keyword is reserved (tokenized) in v1. The full native block surface (parsing, per-target inline code validation, capability gap interaction) is planned for v1.x. v1 code that uses `native` blocks fails at parse time with a "Reserved for v1.x" diagnostic. The keyword reservation prevents v1.x from being a breaking lexical change.
+
+The planned v1.x surface:
 
 ```bock
 @target(js)
@@ -1241,29 +1336,95 @@ native fn query_selector(sel: String) -> Optional[Element] {
 }
 ```
 
+FFI is a discrete capability that warrants its own design pass when the time comes to ship it. The pass needs to resolve several questions including backtick tokenization edge cases, per-target inline code validation, interaction with the capability gap synthesis in §17.6, and interaction with the `@target` and `@platform` annotations (§15) which are deferred alongside this surface.
+
 ### 14.2 — Platform Abstraction Layer
 
-For structured multi-target APIs, `platform trait` defines an interface with per-target implementations.
+**Status:** Reserved for v1.x with §14.1. The platform-trait surface and the FFI linter warning are deferred together; the warning is meaningless until native blocks parse.
 
-FFI usage in multi-target projects triggers a linter warning suggesting migration to a platform trait.
+The planned v1.x surface: for structured multi-target APIs, `platform trait` defines an interface with per-target implementations. FFI usage in multi-target projects triggers a linter warning suggesting migration to a platform trait.
 
 ---
 
 ## 15. Annotations
 
-Annotations use the `@` prefix and form a unified metadata system:
+Annotations use the `@` prefix and form a unified metadata system. The complete v1 taxonomy below is organized by routing: which compiler subsystem consumes each annotation.
 
-**Compiler directives:** `@concurrent`, `@managed`, `@deterministic`, `@inline`, `@deprecated("use X")`, `@cold`, `@hot`.
+### 15.0 — Recognition policy
 
-**Capabilities:** `@requires(Capability.Network)`.
+Unknown annotations are a compile-time error in all strictness modes. A v1 compiler that encounters `@foo` without knowing what `@foo` means rejects the source with an "unknown annotation" diagnostic.
 
-**Target:** `@target(js, rust)`, `@platform(ios: min_version("16.0"))`.
+This policy applies uniformly: there is no "silent" or "warn" tier. Bock is feature-declarative: annotations encode semantic intent (capabilities, security boundaries, performance hints). Silent failure on typos like `@invarient` or `@requirs(Auth)` would be dangerous, and a warn tier creates the question of "which strictness am I in?" that the uniform-error policy eliminates.
 
-**Context:** `@context("...")`, `@performance(...)`, `@invariant(...)`, `@security(...)`, `@domain(...)`.
+Annotations are "known" when they appear in:
 
-**Testing:** `@test`, `@test(skip: "reason")`, `@benchmark`, `@property`.
+- The §15 taxonomy below (built-in annotations)
+- A registered plugin's annotation surface (per Appendix C plugin system, Reserved for v1.x)
 
-**Code generation:** `@derive(Trait1, Trait2)`.
+v1 has no plugin system; the built-in taxonomy is the complete known set. v1.x extends "known" to include plugin-declared annotations.
+
+### 15.1 — Codegen-consumed annotations
+
+These annotations are consumed by the C-AIR context interpreter and inform codegen decisions and AI provider Generate mode context.
+
+| Annotation | Purpose |
+|------------|---------|
+| `@context("...")` | Declares contextual scope for code blocks; flows to AI provider |
+| `@requires(Capability.X)` | Declares required capability; verified at compile time |
+| `@performance` | Marks performance-critical code; influences synthesis (see §15.4 for runtime guardrail v1.x extension) |
+| `@invariant` | Declarative state invariant (see §15.4 for runtime guardrail v1.x extension) |
+| `@security` | Security-relevant marker; interacts with §11.8 PII propagation (see §15.4 for runtime guardrail v1.x extension) |
+| `@domain` | Domain boundary marker (see §15.4 for runtime guardrail v1.x extension) |
+| `@concurrent` | Marks code as concurrent-safe |
+| `@managed` | Marks code as memory-managed (vs. ownership-tracked) |
+| `@deterministic` | Declares pure determinism |
+| `@inline` | Codegen inlining hint |
+| `@cold` | Hot-path optimization hint (cold = rarely executed) |
+| `@hot` | Hot-path optimization hint (hot = frequently executed) |
+| `@deprecated("use X")` | Deprecation marker; produces compile-time diagnostic on use |
+
+### 15.2 — Test-runner-consumed annotations
+
+These annotations are consumed by `bock test`, not by the C-AIR context interpreter. The test runner discovers test functions by annotation and routes them to the configured test framework per target.
+
+| Annotation | Purpose |
+|------------|---------|
+| `@test` | Marks a function as a test; included in `bock test` runs |
+| `@test(skip: "reason")` | Marks a test as skipped without removing it |
+
+The test runner reads these annotations directly from source; they do not flow through C-AIR codegen paths. Test functions are excluded from production builds (`bock build --no-tests` per §20.1).
+
+### 15.3 — Application sites
+
+In v1, annotations apply to individual declarations: `fn`, `record`, `enum`, `trait`, `effect`, `impl` blocks, and module members. Each annotation attaches to the declaration immediately following it.
+
+**Module-level annotations on the `module` declaration itself are Reserved for v1.x.** The form `@context @requires(Auth) module accounts.api { ... }` (applying annotations across every declaration in a module) is planned for v1.x as a syntactic convenience. v1 users who want module-wide annotation semantics annotate each declaration individually.
+
+### 15.4 — Reserved for v1.x
+
+The following annotation surfaces are Reserved for v1.x. The reserved syntax is rejected by v1 compilers per §15.0; v1.x adds the routing.
+
+**Annotation deferrals.**
+
+| Annotation | Routing | Status |
+|------------|---------|--------|
+| `@property` | Property-based testing framework (extends `@test` infrastructure) | Reserved for v1.x pending stdlib property-based testing |
+| `@derive(...)` | Codegen extension (generates impls) | Reserved for v1.x via plugin system (Appendix C) |
+| `@target(...)` | Conditional compilation by codegen target | Reserved for v1.x with FFI (§14.1) |
+| `@platform(...)` | Conditional compilation by platform | Reserved for v1.x with FFI (§14.1) |
+
+**Runtime guardrails.** The semantic context annotations (`@performance`, `@invariant`, `@security`, `@domain`) are compile-time context in v1, used to inform codegen and AI provider Generate mode. v1.x is reserved for runtime guardrail variants of each, distinguished by a verb-keyed payload:
+
+| Annotation form | Verb | Planned runtime semantics |
+|-----------------|------|--------------------------|
+| `@performance(track: ...)` | track | Runtime timing instrumentation with threshold-based reporting |
+| `@invariant(assert: ...)` | assert | Runtime assertion checking; violation fails per configured severity |
+| `@security(audit: ...)` | audit | Runtime audit event emission on access |
+| `@domain(enforce: ...)` | enforce | Runtime domain boundary enforcement at call sites |
+
+The runtime guardrails are not "deferred" in the sense of a half-built feature; they are a named future direction whose design pass happens when v1 stabilizes and concrete use cases inform the verb semantics. v1 compilers reject the verb-keyed payload forms as unknown annotation variants per §15.0.
+
+**Removed entirely.** `@benchmark` was enumerated in earlier spec drafts. It is removed in v1 and not Reserved. Performance benchmarking is delegated to target-native tools (see §20.4); a Bock-level benchmark annotation does not fit the architecture.
 
 ---
 
@@ -1306,19 +1467,23 @@ Children are structurally typed within each `NodeKind` variant rather than store
 
 ### 16.3 — Serialization
 
+**Status:** Reserved Post-v1. AIR is an internal intermediate representation in v1; serialization is not exposed. The AIR-T and AIR-B formats remain in this section as a planning sketch for future cross-tool interop, build cache reuse, and binary package distribution work. Format details are non-normative.
+
 **AIR-T (text format):** Human-readable, designed for AI consumption. This is what the AI transpiler receives.
 
 **AIR-B (binary format):** Compact, content-addressed, module-level granularity. Used for build caches and binary package distribution.
 
 ### 16.4 — Binary Package Compatibility
 
-Packages distribute pre-compiled T-AIR alongside source. Compatibility rules:
+**Status:** Reserved Post-v1 with §16.3. v1 distributes packages in source form only.
+
+The planned mechanism: packages distribute pre-compiled T-AIR alongside source. Compatibility rules:
 
 - Patch releases (1.2.x): Always compatible.
 - Minor releases (1.x.0): Backward compatible (new features not pre-compiled).
 - Major releases (x.0.0): Recompile from source (automatic fallback).
 
-The compiler checks AIR format version and falls back to source compilation transparently when incompatible.
+The compiler would check AIR format version and fall back to source compilation transparently when incompatible.
 
 ---
 
@@ -1400,11 +1565,15 @@ Deliverables are configured via target manifests (`.target` files) specifying pl
 
 ### 17.6 — Capability Gap Resolution
 
-When AIR uses a feature a target lacks, the transpiler synthesizes it:
+At capability gaps (constructs where the target lacks a direct equivalent), codegen invokes the AI provider's Generate mode (§17.8) with the target profile and surrounding context. Generate's output is accepted when its confidence meets or exceeds the threshold in §17.4 (default 0.75 with `--strict` raising to 0.90); below threshold, codegen falls back to the deterministic strategy described in the target profile or surfaces an unrecoverable capability gap to the user.
+
+The synthesis strategies in the table below are illustrative examples of how this principle manifests for common (construct, target) pairs. They are not normative: codegen may produce alternative syntheses that satisfy the confidence threshold and pass target profile verification. The table is informative for users tracking how their code is likely to be synthesized.
+
+#### Illustrative synthesis examples
 
 | AIR Construct    | Gap Example          | Synthesis                    |
 |------------------|----------------------|------------------------------|
-| Algebraic types  | JS (no ADTs)         | Tagged objects + switch       |
+| Algebraic types  | JS (no ADTs)         | Tagged objects + switch      |
 | Pattern matching | Go (no match)        | if/else chains               |
 | Ownership/Move   | JS, Python (GC)      | Erase annotations            |
 | Channels         | JS (no native)       | AsyncIterator + Queue class  |
@@ -1604,7 +1773,37 @@ The default handler (`std.time.SystemClock`) uses the target's native monotonic 
 
 ### 18.5 — Trait-Language Integration
 
-Core traits opt types into language features: `Comparable` enables `<`/`>`, `Iterable` enables `for..in`, `Displayable` enables `${}` interpolation, `Add`/`Sub`/etc. enable operator overloading.
+Core traits opt types into language features. Implementing a trait on a user-defined type enables the corresponding syntactic form for values of that type. The following integrations are normative for v1:
+
+| Trait (from `core.*`) | Language feature enabled |
+|-----------------------|--------------------------|
+| `Equatable` | `==`, `!=` operators |
+| `Comparable` | `<`, `>`, `<=`, `>=` operators |
+| `Iterable` | `for x in collection` loop syntax |
+| `Displayable` | `${expr}` string interpolation |
+| `Add` | `+` binary operator |
+| `Sub` | `-` binary operator |
+| `Mul` | `*` binary operator |
+| `Div` | `/` binary operator |
+| `Mod` | `%` binary operator |
+
+The integration is bidirectional: a type's `impl` block declares trait conformance, and the compiler uses that conformance to permit the corresponding syntactic form for values of that type. A type without `impl Comparable for MyType` cannot use `<` on `MyType` values; the compiler rejects the code at type-check time with a "type does not implement Comparable" diagnostic.
+
+Trait conformance is checked at every site where the syntactic form is used: arithmetic expressions, comparison in `if` conditions, comparison in `match` guards, ordering in sorts, equality in pattern matching, iteration in `for` loops, interpolation in string expressions. The integration is uniform: there are no "Comparable for if-conditions only" partial conformances; declaring `impl Comparable for MyType` enables `<` on `MyType` everywhere the operator is valid.
+
+#### Conformance test surface
+
+Each integration in the table above has a corresponding conformance test in the v1 conformance suite. Per the §20.4 architectural principle (Bock owns cross-target correctness), conformance is verified by running the same test program across all shipping targets and confirming equivalent observable behavior.
+
+The conformance suite for §18.5 verifies, at minimum:
+
+- **Equatable:** a user-defined type implementing `Equatable` supports `==` and `!=` in expressions, `if` conditions, `match` guards, and pattern matching equality checks.
+- **Comparable:** a user-defined type implementing `Comparable` supports `<`, `>`, `<=`, `>=` in expressions, `if` conditions, `match` guards, and as ordering for sort operations. Comparable conformance implies Equatable conformance.
+- **Iterable:** a user-defined type implementing `Iterable` supports `for x in collection` iteration, with correct handling of `break`, `continue`, and exhaustion. Nested iteration over Iterable types must work.
+- **Displayable:** a user-defined type implementing `Displayable` supports `${expr}` string interpolation, producing the implementation's defined output. Interpolation in nested contexts (interpolating a Displayable inside another interpolation) must work.
+- **Numeric operator overloading:** a user-defined type implementing `Add`, `Sub`, `Mul`, `Div`, or `Mod` supports the corresponding binary operator with correct operator precedence, associativity, and type checking on mixed operand types.
+
+A conformance test passes when its program produces equivalent observable output on every shipping target (JavaScript, TypeScript, Python, Rust, Go for v1; Java, C++, C#, Swift when added in v1.x). A failure on any target is a transpilation bug (§20.4), not a user-code bug.
 
 ---
 
@@ -1674,7 +1873,13 @@ core-http = "^1.2"
 
 ### 19.7 — Versioning and Stability
 
-Strict semver. Stability tiers: `stable`, `beta`, `experimental`. Production strictness can reject dependencies below a stability threshold.
+Strict semver applies to all packages in v1.
+
+**Reserved for v1.x: stability tiers.** Stability tiers become useful once an ecosystem of third-party Bock packages exists. v1 ships with first-party stdlib packages only; the tier scheme and the production-strictness rejection logic are Reserved for v1.x. The planned mechanism:
+
+> Stability tiers: `stable`, `beta`, `experimental`. Production strictness can reject dependencies below a stability threshold.
+
+This mechanism is preserved here as design intent for the v1.x release when third-party packages create the conflicts the tier scheme resolves.
 
 ---
 
@@ -1748,17 +1953,17 @@ Zero configuration. One canonical style.
 
 ### 20.3 — Language Server (LSP)
 
-Full LSP implementation plus Bock-specific extensions:
+v1 ships a Full LSP implementation supporting standard protocol capabilities: completion, hover, go-to-definition, and diagnostics.
 
-**AI Context Panel:** Real-time view of what the AI transpiler sees at cursor position — context annotations, capabilities, effects, ownership state, active handlers.
+**Reserved for v1.x: Bock-specific extensions.** The following five Bock-specific LSP extensions are planned for v1.x. They are preserved here as design intent:
 
-**Target Preview:** Live transpiled output for any function, switchable between targets.
+- **AI Context Panel:** Real-time view of what the AI transpiler sees at cursor position — context annotations, capabilities, effects, ownership state, active handlers.
+- **Target Preview:** Live transpiled output for any function, switchable between targets.
+- **Capability Graph:** Visual call-graph with capability and effect propagation.
+- **Smart Completions:** Ownership-aware (marks consuming methods), effect-aware (suggests effect operations), pipe-aware (suggests type-compatible functions).
+- **Inline Diagnostics:** Ownership transfer warnings, capability narrowing hints, AI decision previews.
 
-**Capability Graph:** Visual call-graph with capability and effect propagation.
-
-**Smart Completions:** Ownership-aware (marks consuming methods), effect-aware (suggests effect operations), pipe-aware (suggests type-compatible functions).
-
-**Inline Diagnostics:** Ownership transfer warnings, capability narrowing hints, AI decision previews.
+These extensions go beyond standard LSP and require dedicated UX design work. v1 users get the basic LSP surface; the Bock-specific augmentations ship in v1.x.
 
 ### 20.4 — Testing Tiers
 
@@ -1772,17 +1977,27 @@ Full LSP implementation plus Bock-specific extensions:
 
 Principle: semantic pass + target fail = transpiler bug, not user code bug.
 
+#### Cross-target correctness vs. performance
+
+Bock owns cross-target correctness verification: a `@test` function that passes on JavaScript must also pass on Python, Rust, and every other target the codebase ships to. This is the architectural value of the cross-target testing tier: it operationalizes the cross-target semantic equivalence claim that distinguishes Bock from a target-by-target source-to-source transpiler.
+
+Performance, by contrast, is delegated to target-native tools. Bock does not own benchmarking. Performance varies wildly across targets by design (target choice is itself a performance decision), and every target ships mature benchmark tooling (`cargo bench`, `pytest-benchmark`, `npm run bench`, `go test -bench`). Users who care about performance benchmark the transpiled output with the target's native tools directly. This is why §15 does not include a `@benchmark` annotation; the cross-target value proposition of a unifying benchmark surface does not exist.
+
+Runtime guardrail variants of the semantic context annotations (§15.4) are a separate concern: they verify constraints at runtime (assertions, audit logging, performance thresholds), not benchmark performance for comparison. The guardrails express user-declared invariants that should hold; they do not measure aggregate performance characteristics.
+
 **Project mode validation gate.** When project mode (§20.6.2) includes transpiled tests in build output, Tier 2 transpilation tests serve as the gate that determines whether the output is trustworthy. A target's codegen is considered project-mode-ready when its Tier 2 tests pass on a representative test suite. Targets where Tier 2 tests fail intermittently or on common patterns should not ship project mode by default — they ship source mode (`--source-only`) until the transpilation gap closes. This is not a user-facing distinction but a release-readiness criterion for each target's codegen package.
 
 The gate also includes formatter cleanliness: a target's project mode output must pass the target's configured formatter (`prettier --check`, `gofmt -l`, `rustfmt --check`, `black --check`, etc.) without modification. A formatter that wants to rewrite Bock's emitted code introduces version-control churn on every user's first commit — the validation gate prevents shipping that. For targets with multiple supported formatters (Python's Black and Ruff format), each variant has its own gate; a target may ship project mode with Black support while Ruff format support is still maturing.
 
 ### 20.5 — Debugger
 
-Built-in interpreter debugger with breakpoints, stepping, expression evaluation, ownership state inspection, effect handler display, and context viewing. Source maps enable debugging transpiled code in target-language debuggers.
+**Status:** Source map generation (`--source-map` / `--no-source-map`) ships in v1 and enables external debugger integration through standard target-specific tooling (Node.js inspector, py-spy, rust-gdb, etc.). The built-in interpreter debugger UI described below is **Reserved for v1.x**. The UI design is preserved as v1.x intent.
+
+The planned v1.x UI surface: built-in interpreter debugger with breakpoints, stepping, expression evaluation, ownership state inspection, effect handler display, and context viewing. Source maps enable debugging transpiled code in target-language debuggers.
 
 ### 20.6 — Build System
 
-Incremental builds at module granularity via content hashing. Parallel compilation. Remote build cache. Build hooks (Bock scripts). Distributed builds for CI.
+Bock's build system supports incremental compilation at module granularity via content hashing, parallel builds across packages, and per-target output isolation as described in §20.6.1 and §20.6.2. Additional capabilities including remote cache reuse, build hooks (Bock scripts), and distributed builds for CI are **Reserved for v1.x**; their configuration surfaces are marked Reserved in Appendix A.3.
 
 Build pipeline: Parse → Type Check → Context Resolve → Target Analyze → Code Generate → Verify → Target Compile → Assemble Deliverable.
 
@@ -1802,48 +2017,17 @@ Entry-point selection — which output file is invoked when running the build ar
 - Flag: `--source-only`
 - Output: source files only
 
-**Project mode.** Source files plus target-ecosystem scaffolding — the manifests, configuration, and entry-point wiring needed for the output to be a working project in the target language's normal toolchain. After `bock build --target rust`, the user can `cd build/rust && cargo build`. After `bock build --target js`, the user can `cd build/js && npm install && node main.js`.
-- Flag: default for `bock build --target T`
-- Output: source files + target-ecosystem scaffolding (`package.json` / `Cargo.toml` / `pyproject.toml` / `go.mod` / `tsconfig.json` etc.)
+**Project mode.** Source files plus target-ecosystem scaffolding: package descriptors, entry-point wiring, formatter configs (when applicable), README first-contact instructions. The output is runnable in the target's normal toolchain (`npm test`, `cargo run`, `python -m`, `go test`).
+- Flag: (default)
+- Output: scaffolded target-language project
 
-**Deliverable mode.** Final runnable artifact: bundled JS, compiled binary, container image, mobile package, deployment archive. Deliverable mode may invoke external tooling (target compilers, bundlers, containerizers) beyond Bock's own transpiler. See §17.5 for deliverable types and configuration via target manifests.
+**Deliverable mode.** Final runnable artifact for production deployment. See §17.5 for deliverable types (APK, IPA, Docker, deployment packages) and target manifest configuration.
 - Flag: `--deliverable`
-- Output: target-specific runnable artifact
+- Output: deployable artifact
 
-The default is project mode because `bock build` implies producing something the user can run. Source mode exists for the integration-into-existing-project case; deliverable mode exists for production deployment. The mode flags are mutually exclusive — a single `bock build` invocation produces output in exactly one mode.
+Project mode includes Bock tests transpiled to the target's idiomatic test framework. After `bock build --target js`, users running `npm test` execute the Bock tests as Vitest/Jest tests; `cargo test` executes them as Rust tests; `pytest` executes them as Python tests; and so on.
 
-Per-target scaffolding details (the contents of `package.json`, the structure of a generated `Cargo.toml`, the layout of a Python project) are documented in each target's codegen package. The spec commits to the mode model and the structural distinction; per-target manifest contents evolve with the target ecosystems and are not enumerated here.
-
-**Project kind: bin / lib.** The scaffolder generates target manifests appropriate to whether the project is a binary, a library, or both. Determination follows this rule: presence of `src/main.bock` with a `main` function indicates a binary; presence of `src/lib.bock` indicates a library; both present indicates both (where the target supports it — Rust supports `[[bin]]` + `[lib]` coexistence; targets that don't represent the distinction natively produce a binary and emit a warning that the library surface is not separately exported). Neither present is an error at scaffold time. The `[project] type` field in `bock.project` (`"bin"` | `"lib"` | `"both"`) explicitly overrides inference.
-
-**Per-target naming.** The scaffolder transforms the project name from `bock.project` per target conventions when not explicitly overridden:
-
-- npm/TypeScript: project name preserved as-is (kebab-case is npm-idiomatic)
-- Python: hyphens become underscores, leading digits prefixed, special characters stripped (PEP 8)
-- Rust: same normalization as Python (binary names cannot contain hyphens)
-- Go: a placeholder module path (`example.com/<project-name>`) is generated with a build warning; users must override
-
-Per-target overrides live in `[targets.<T>]` sections of `bock.project`:
-
-```toml
-[targets.go]
-module = "github.com/user/my-project"
-
-[targets.python]
-package = "my_custom_name"
-
-[targets.rust]
-crate = "my_crate"
-
-[targets.npm]
-package = "@scope/my-project"
-```
-
-**Lockfile policy.** The scaffolder does not generate lockfiles. `package-lock.json`, `Cargo.lock`, `poetry.lock`, `go.sum`, and equivalents are the responsibility of each target's package manager. The scaffolded README instructs users to run the appropriate install command on first contact (`npm install`, `cargo build`, `pip install -e .`, `go mod tidy`), which generates the lockfile correctly through the target ecosystem's normal flow.
-
-**Test inclusion.** Project mode includes Bock tests transpiled to the target's idiomatic test framework by default. After `bock build --target js`, users running `npm test` execute the Bock tests as Vitest/Jest tests; `cargo test` executes them as Rust tests; `pytest` executes them as Python tests; and so on. Per-target test framework mapping is documented in each target's codegen package.
-
-Including transpiled tests is part of how Bock makes its semantic equivalence claim verifiable to users: the same tests that pass on the Bock interpreter (Tier 1, §20.4) pass on the target after transpilation (Tier 2, §20.4). If they don't, that's a transpilation bug — the principle stated in §20.4 ("semantic pass + target fail = transpiler bug, not user code bug") becomes empirically checkable in user CI.
+If they don't, that's a transpilation bug — the principle stated in §20.4 ("semantic pass + target fail = transpiler bug, not user code bug") becomes empirically checkable in user CI.
 
 `--no-tests` opts out of test inclusion for project mode output. Use cases: vendor distribution where tests should not ship, library consumers who only want runtime code, security-sensitive contexts. Test inclusion is the default because it's the validation surface that distinguishes Bock's cross-target semantic equivalence claim from a "good enough" transpiler's.
 
@@ -2363,25 +2547,25 @@ Security model: explicit capability grants in project manifest, WASM sandboxing 
 | Platform Trait       | `platform trait Name { ... }`              |
 | Effect               | `effect Name { fn op() -> T }`             |
 | Composite Effect     | `effect Name = A + B + C`                  |
-| Generic              | `fn name[T: Bound](x: T) -> T`            |
-| Where Clause         | `where (T: Bound, U: Bound)`              |
+| Generic              | `fn name[T: Bound](x: T) -> T`             |
+| Where Clause         | `where (T: Bound, U: Bound)`               |
 | Lambda               | `(params) => expr`                         |
-| Pipe                 | `x \|> f \|> g`                            |
+| Pipe                 | `x \|> f \|> g`                             |
 | Compose              | `f >> g >> h`                              |
 | Partial Application  | `f(_, arg2)`                               |
 | Match                | `match val { Pattern => expr }`            |
-| If (expression)      | `let x = if (cond) { a } else { b }`      |
-| If-Let               | `if (let Some(x) = expr) { ... }`         |
+| If (expression)      | `let x = if (cond) { a } else { b }`       |
+| If-Let               | `if (let Some(x) = expr) { ... }`          |
 | Guard                | `guard (cond) else { return }`             |
 | For Loop             | `for item in collection { ... }`           |
 | While Loop           | `while (cond) { ... }`                     |
 | Infinite Loop        | `loop { ... break }`                       |
 | Range (exclusive)    | `0..10`                                    |
-| Range (inclusive)     | `0..=10`                                   |
+| Range (inclusive)    | `0..=10`                                   |
 | String Interpolation | `"hello ${name}"`                          |
 | Raw String           | `r"no ${interpolation}"`                   |
 | Multi-line String    | `"""..."""`                                |
-| List Literal         | `[1, 2, 3]`                               |
+| List Literal         | `[1, 2, 3]`                                |
 | Map Literal          | `{"key": value}`                           |
 | Set Literal          | `#{"a", "b"}`                              |
 | Tuple                | `(a, b, c)`                                |
@@ -2394,13 +2578,13 @@ Security model: explicit capability grants in project manifest, WASM sandboxing 
 | Effect Clause        | `fn f() with Log, Trace`                   |
 | Handling Block       | `handling (Log with handler) { ... }`      |
 | Module Handler       | `handle Log with AuditLogger`              |
-| Native FFI           | `` native fn f() { `target code` } ``     |
+| Native FFI           | `` native fn f() { `target code` } ``      |
 | Doc Comment          | `/// text`                                 |
 | Module Doc           | `//! text`                                 |
 | Async                | `async fn f() { await expr }`              |
-| Concurrent           | `@concurrent fn f()` / `@concurrent { }`  |
+| Concurrent           | `@concurrent fn f()` / `@concurrent { }`   |
 | Derive               | `@derive(Trait1, Trait2)`                  |
-| Type Alias           | `type Name = Type where (pred)`            |
+| Type Alias           | `type Name = Type`                         |
 | Spread               | `Record { field: v, ..other }`             |
 | Type Check           | `value is Type`                            |
 | Numeric Suffix       | `42_u8`, `3.14_f64`                        |
