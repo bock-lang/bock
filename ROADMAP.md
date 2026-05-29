@@ -1,82 +1,53 @@
+<!-- DO NOT EDIT — generated from tracking/ by tools/scripts/gen-tracking-views.sh -->
+
 # Roadmap
 
-This file tracks forward-looking plans. For the present state of
-the repo, see [`STATUS.md`](STATUS.md).
-
-## Current Phase
-
-**M.4 — Compiler migration.** Complete. The compiler crates,
-stdlib, conformance suite, examples, spec, extension, and docs
-have all been ported from the internal `aura-dev` working tree
-into this repository under the Bock identity.
+## Current phase
+**M.4 — Compiler migration. Complete.** Compiler crates, conformance
+suite, examples, spec, extension, and docs ported into this repo under
+the Bock identity.
 
 ## v1.0 — Public Release
+**Theme:** ship what's already done — verify, polish, announce.
+- **Property claims:** "one language, many targets" (JS/TS/Py/Rust/Go
+  codegen parity on examples); "effects on every function"; "targeted
+  output, not a runtime".
+- **Release actions (all escalate — external/irreversible):** CI live;
+  VS Code extension → marketplace; `bock` → crates.io + GitHub
+  Releases; docs site deploy; announcement post.
+- **Mapped items:** `Q-stdlib` (core stdlib — v1-blocking), `D4`, `D5`,
+  `ItemB` (project-mode codegen), `Q-20.1-xref`, `Q-cl-dates`,
+  `Q-cl-0515`, `Q-fconf`, `Q-vscode-test`.
+- **Acceptance:** conformance passes per target; all 20 examples
+  `check`/`build`/`test` clean on ≥ JS+Py+Rust; clippy clean.
 
-**Theme:** Ship what's already done. Verify, polish, announce.
+## v1.1 — Editor & Tooling Polish
+**Theme:** delight in the editor; close interpreter gaps.
+- AIR tree view; target preview; standalone LSP; incremental
+  compilation + persistent cache; diagnostics quick-fixes; hover-card
+  improvements. (Mapped items: TBD as scoped.)
 
-- Property claims locked in:
-  - "One language, many targets" — codegen parity across JS, TS,
-    Python, Rust, Go on the example projects.
-  - "Effects on every function" — effect inference + reporting in
-    the CLI and editor.
-  - "Targeted output, not a runtime" — generated code is idiomatic
-    in each target with no Bock-specific runtime.
-- CI live on GitHub Actions: build + test + clippy + fmt + mdbook.
-- VS Code extension published to the marketplace.
-- `bock` binary released via crates.io and GitHub Releases.
-- Documentation site deployed.
-- Announcement post.
-
-**Acceptance criteria:**
-- Conformance suite passes on every supported target.
-- All 20 example projects `bock check`, `bock build`, and (where
-  applicable) `bock test` clean on at least JS + Python + Rust.
-- `cargo clippy --workspace -- -D warnings` clean.
-
-## v1.1 — Editor and Tooling Polish
-
-**Theme:** Make the editor a delight; close interpreter gaps.
-
-- AIR tree view in the VS Code extension (visualize the
-  intermediate representation per file).
-- Target preview (live transpile-and-show in side panel).
-- Standalone language server (LSP), decoupled from the VS Code
-  extension so other editors can consume it.
-- Incremental compilation with persistent build cache.
-- Diagnostics quick-fixes (error → suggested edit).
-- Hover-card improvements: effect set, target equivalence per
-  symbol.
-
-## v1.2 — Closing Deferred Loose Ends
-
-**Theme:** Finish the items deferred from v1.0.
-
-- **Cancel runtime.** Wire cooperative cancellation through the
-  interpreter and into each codegen target.
-- **AUDIT-006.** Address the outstanding implementation audit
-  finding.
-- **`std.time.SystemClock` live impl.** Replace the stub with a
-  per-target live clock that still respects the deterministic
-  test path.
-- Documentation depth: complete the language-guide stubs left
-  brief in v1.0.
+## v1.2 — Deferred Loose Ends
+**Theme:** finish what v1.0 deferred.
+- Cancel runtime; AUDIT-006; `std.time.SystemClock` live impl;
+  language-guide depth. (See `snapshot.md` "Deferred".)
 
 ## v2 — Ecosystem Growth
+**Theme:** from compiler to ecosystem.
+- Stdlib **expansion** (HTTP server primitives, structured logging,
+  config loading, async streaming — note: distinct from the *core*
+  stdlib, see MS-stdlib); additional targets (Swift/Kotlin/C#);
+  package registry; macros; self-hosting; LLVM native; WASM;
+  distributed type-checking. Order intentionally unfixed.
 
-**Theme:** From compiler to ecosystem.
+---
 
-- Stdlib expansion: HTTP server primitives, structured logging,
-  config loading, async streaming.
-- Additional codegen targets (candidates: Swift, Kotlin, C#) — one
-  at a time, evaluated against current generation patterns.
-- Package registry and dependency resolution beyond the local
-  lockfile.
-- Macro system (syntactic, hygienic).
-- Self-hosting: compile the Bock compiler itself with Bock.
-- Native compilation via LLVM backend.
-- WebAssembly target with first-class browser bindings.
-- Distributed type-checking for monorepo scale.
-
-The order of v2 items is intentionally not fixed; individual items
-will graduate to versioned milestones as designs solidify and
-contributor capacity allows.
+## MS-stdlib — DECIDED: v1-blocking (operator, 2026-05-29)
+The **core** standard library (`core.collections/string/math/iter/…`,
+§18.3) ships in **v1** and **blocks v1.0** (→ `queue.md` Q-stdlib). This
+resolves the earlier "ship what's done vs §18-full-stdlib" tension in
+favor of shipping it. Distinct from v2's stdlib *expansion*
+(HTTP/logging/etc.). **Still open (escalated to Design):** the precise
+core-module SCOPE for v1 — which of the ~15 §18.3 modules, at what
+surface (`design-questions.md` DQ5 / `escalations.md`). Phase planning
+of Q-stdlib proceeds once that returns. Links: DV1, Q-stdlib, DQ5.

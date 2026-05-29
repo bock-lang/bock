@@ -201,3 +201,12 @@ jobs:
           curl -fsSL "$url" | tar -xz -C "$HOME/.local/bin" mdbook
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: mdbook build docs
+
+  tracking-views:
+    name: tracking views in sync
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - run: bash tools/scripts/gen-tracking-views.sh --check
