@@ -114,12 +114,10 @@ use core.collections.{List, Map}
 use core.net.http.{get, post, Response}
 use app.models.{User, UserError}
 
-@context("""
-  User management module.
-  Handles CRUD operations for user accounts.
-  All user data must be validated before persistence.
-  Email uniqueness is enforced at the application layer.
-""")
+// Module-wide intent. In v1, annotations attach to individual declarations
+// (§15.3); attaching @context to the `module` itself is Reserved for v1.x.
+// v1 code documents module intent in the `//!` header above and carries
+// per-declaration @context on the public items below.
 
 // ─── Types ───
 
@@ -1070,14 +1068,28 @@ Context is structured semantic metadata that serves the AI transpiler (informing
 
 ### 11.2 — `@context` — Free-Form Intent
 
+In v1, `@context` attaches to an individual declaration (§15.3):
+
 ```bock
 @context("""
-  Payment processing module.
+  Payment processing for the checkout flow.
   PCI-DSS compliance required.
   All card data must be tokenized before storage.
 """)
+public fn process_payment(req: PaymentRequest) -> Result[Receipt, PaymentError] { ... }
+```
+
+The illustrative *module-level* form —
+
+```bock
+// Reserved for v1.x — does not compile in v1 (see §15.3)
+@context("""Payment processing module. PCI-DSS compliance required.""")
 module app.payments
 ```
+
+— applies `@context` to the `module` declaration itself; module-level
+annotations are **Reserved for v1.x** (§15.3) and have no v1 syntax. In v1 each
+declaration carries its own `@context`.
 
 Supports optional structured markers within the free-form text:
 
@@ -1127,12 +1139,29 @@ Prevents accidental logging, generates audit trails, triggers secure coding patt
 
 ### 11.7 — `@domain` — Domain Tags
 
+In v1, `@domain` attaches to an individual declaration, like every other
+annotation (§15.3):
+
 ```bock
+@domain("e-commerce", "checkout")
+public fn place_order(cart: Cart) -> OrderId { ... }
+```
+
+Helps the AI manage its context window across large codebases.
+
+**Module-level application is Reserved for v1.x.** The form that places
+`@domain` (or any annotation) directly on the `module` declaration to tag every
+declaration in the module at once —
+
+```bock
+// Reserved for v1.x — does not compile in v1 (see §15.3)
 @domain("e-commerce", "checkout")
 module app.checkout
 ```
 
-Helps the AI manage its context window across large codebases.
+— is the module-level annotation surface **Reserved for v1.x** per §15.3. v1
+has no syntax to annotate a `module`; v1 users tag each declaration
+individually.
 
 ### 11.8 — Context Composition
 
@@ -1143,6 +1172,16 @@ Module context is inherited by declarations. Declaration-level annotations overr
 This is type-level analysis, not value-level taint tracking. The compiler checks what types cross function signature boundaries, not what happens to data inside function bodies.
 
 The compiler enforces context completeness in `production` mode.
+
+**v1 context-completeness is per-item.** In v1, the production-mode
+completeness requirement applies to individual declarations: every *public*
+declaration must carry `@context`. It is **not** applied at module granularity.
+Module-level completeness — requiring the `module` itself to carry `@context` —
+is **Reserved for v1.x** because module-level annotations have no v1 syntax
+(§15.3); a v1 module-level requirement would be unsatisfiable. The module-level
+completeness rule ships in v1.x together with the Reserved module-level
+annotation syntax. (See §20.1.1 for how `bock check`'s `context` aspect surfaces
+this gating.)
 
 ---
 
@@ -1403,6 +1442,8 @@ The test runner reads these annotations directly from source; they do not flow t
 In v1, annotations apply to individual declarations: `fn`, `record`, `enum`, `trait`, `effect`, `impl` blocks, and module members. Each annotation attaches to the declaration immediately following it.
 
 **Module-level annotations on the `module` declaration itself are Reserved for v1.x.** The form `@context @requires(Auth) module accounts.api { ... }` (applying annotations across every declaration in a module) is planned for v1.x as a syntactic convenience. v1 users who want module-wide annotation semantics annotate each declaration individually.
+
+Because there is no v1 syntax to annotate a `module`, the production-mode context-completeness rule (§11.8) cannot apply at module granularity in v1: a module-level `@context` requirement would be unsatisfiable. v1 context-completeness is therefore **per-item** (every public declaration carries `@context`); module-level completeness ships in v1.x together with this Reserved module-level annotation syntax.
 
 ### 15.4 — Reserved for v1.x
 
@@ -1898,7 +1939,7 @@ Single binary containing all tooling. The CLI surface is designed for ergonomic 
 `bock new` — Project scaffolding with interactive or flag-based configuration. Generates `bock.project` with a commented-out `[ai]` block for opt-in AI configuration; see §20.7.
 `bock build` — Transpile and compile. Produces a scaffolded project (project mode) by default; see §20.6.2 for output modes. Flags: `--target`, `--all-targets`, `--source-only`, `--deliverable`, `--no-tests`, `--source-map` / `--no-source-map` (default on), `--strict`, `--pin-all`, `--deterministic`, `--optimize`, `--release`. `--strict` forces production strictness for the build (fails on unpinned build-scope decisions); `--pin-all` pins every build-scope decision after a successful build. The pair enables the develop → ship workflow: build with `--pin-all`, commit the resulting pins, then ship with `--strict`. See §17.4 for the pinning model.
 `bock run` — Build and execute. Default uses interpreter. `--target` for specific language. `--watch` for hot reload.
-`bock check` — Type check, lint, context validation. `--only=<aspect>` restricts the check to specific aspects (e.g., `--only=types`, `--only=context`, `--only=types,context`); see §20.1.1 for the aspect surface. `--brief` produces compact error output (omits source-context snippets).
+`bock check` — Type check, lint, context validation. `--only=<aspect>` restricts the check to specific aspects (e.g., `--only=types`, `--only=context`, `--only=types,context`); see §20.1.1 for the aspect surface. `--brief` produces compact error output (omits source-context snippets). `--strict` forces production strictness for the check: completeness gaps that are warnings at the default development strictness (e.g. a public declaration missing `@context`; completeness is per-item, §20.1.1) become errors and a non-zero exit. Mirrors `bock build --strict`. `bock check` exits non-zero if and only if the check produces at least one error; warnings never fail the check.
 `bock test` — Run tests. Default uses interpreter (fast). `--filter <pattern>` selects tests by name. Cross-target testing (`--target`, `--all-targets`, `--smart`), coverage, and snapshot testing are planned for v1.x; see §20.4.
 `bock fmt` — Format (one style, zero configuration). `--check` for CI.
 `bock repl` — Interactive REPL with `:type`, `:air`, `:target` commands.
@@ -1936,12 +1977,14 @@ bock check --only=types --only=context
 
 **v1 aspects:**
 - `types` — type checking
-- `context` — context-system validation (§11)
+- `context` — context-system validation (§11). This aspect runs two compiler-verified §11 passes: capability (`@requires`) verification, and the **context-validation pass** — annotation consistency (security-level monotonicity, performance-budget validity, known capability/security names) plus **per-item completeness** (every *public* declaration carries `@context`). Completeness is checked per item, not per module: module-level `@context` completeness is **Reserved for v1.x** because module-level annotations have no v1 syntax (§15.3, §11.8), so the `module` itself is never flagged in v1. Completeness is **gated by strictness**: at the default development strictness, missing-context findings are warnings; under `bock check --strict` (production strictness) they are errors. PII/security context **composition** — cross-module leak detection that traces sensitive data across module boundaries — is **Reserved for v1.x** (a dedicated security pass); it is *not* part of the `context` aspect in v1.
 
 **v1.x aspects** (ship alongside `bock fix`):
 - `lint` — lint pass; the underlying pass exists in v1 (`bock check` runs it by default) but `--only=lint` ships when `bock fix` provides the ergonomic counterpart
 
 Omitting `--only` runs all aspects (the default full check). Unknown aspect values produce a build error with the list of valid aspects. Adding a new aspect later does not require a new flag — it becomes a new valid value for `--only`.
+
+The context-validation pass's strictness profile follows the project strictness ladder (§1.4): `sketch` runs only error-level consistency checks (no completeness), `development` adds per-item completeness warnings, and `production` (selected by `--strict`) promotes per-item completeness gaps to errors. (Completeness is per-item in v1; module-level completeness is Reserved for v1.x — §15.3, §11.8.)
 
 ### 20.2 — Formatter
 

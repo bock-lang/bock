@@ -28,8 +28,32 @@
   and may be repeated (`--only=types --only=context`); omitting it
   runs the full check. Unknown aspects are rejected with the list
   of valid values.
+  - `--only=types` runs type checking.
+  - `--only=context` runs the context-system validation aspect:
+    capability (`@requires`) verification **and** the
+    context-validation pass — annotation consistency (security-level
+    monotonicity, performance-budget validity, recognized
+    capability/security names) plus **per-item** completeness (every
+    public declaration carrying `@context`). Completeness is checked
+    per item, not per module: module-level `@context` completeness is
+    Reserved for v1.x (module-level annotations have no v1 syntax —
+    spec §15.3), so the `module` itself is never flagged in v1.
+    Completeness is gated by strictness (see `--strict` below).
+    Cross-module PII/security
+    *composition* is not part of this aspect in v1 — it is reserved
+    for a future dedicated security pass.
 - `bock check --brief` produces compact, one-line diagnostics
   without source-context snippets.
+- `bock check --strict` forces production strictness for the check
+  (mirrors `bock build --strict`). At the default development
+  strictness, completeness gaps — a **public declaration** missing
+  `@context` — are **warnings**, so the check still exits 0. Under
+  `--strict` those same gaps become **errors** and the check exits
+  non-zero. `bock check` exits non-zero if and only if it produces
+  at least one error; warnings never fail the check. Completeness is
+  per-item: a module whose public items each carry `@context` passes
+  `--strict` cleanly. Module-level `@context` completeness is
+  Reserved for v1.x (spec §15.3).
 - `bock build -t <target> --source-only` emits transpiled source
   but does not invoke the target toolchain.
 - `bock build --all-targets` builds every target listed in

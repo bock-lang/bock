@@ -9,8 +9,12 @@
 //! 2. **Capability propagation verification**: if a function body uses capabilities
 //!    (via `@requires` on called declarations), the calling function must also
 //!    declare those capabilities.
-//! 3. **Production completeness**: all modules have `@context`, all public functions
-//!    have `@context`, all capabilities are declared, all effects are declared.
+//! 3. **Production completeness** (per-item): all public functions have
+//!    `@context`, all capabilities are declared, all effects are declared.
+//!    Module-level `@context` completeness is **Reserved for v1.x** (spec
+//!    §15.3): v1 has no syntax to attach `@context` to a `module`, so a
+//!    module-level requirement is unsatisfiable and is not enforced. v1
+//!    completeness is per-item only.
 //!
 //! # Diagnostic codes
 //!
@@ -18,7 +22,6 @@
 //! |-------|-------------------------------------------------------|
 //! | E8020 | Unhandled effect operation (no handler or `with` clause) |
 //! | E8021 | Missing capability declaration (callee requires it)   |
-//! | E8022 | Production: module missing `@context`                 |
 //! | E8023 | Production: public function missing `@context`        |
 //! | W8020 | Effect declared in `with` clause but never used       |
 //! | W8021 | Capability declared but never used by body            |
@@ -36,8 +39,9 @@ use crate::stubs::Capability;
 pub enum VerificationMode {
     /// Development mode: only verify effect handler completeness.
     Development,
-    /// Production mode: full verification — all modules and public functions
-    /// must have `@context`, all capabilities declared, all effects handled.
+    /// Production mode: full verification — all public functions must have
+    /// `@context`, all capabilities declared, all effects handled. Module-level
+    /// `@context` completeness is Reserved for v1.x (§15.3) and is not enforced.
     Production,
 }
 
@@ -46,9 +50,12 @@ pub enum VerificationMode {
 /// Summarises the verification results for use by `bock check --context`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletenessReport {
-    /// Total number of modules analysed.
+    /// Total number of modules analysed (informational only — module-level
+    /// `@context` completeness is Reserved for v1.x per §15.3, so this does not
+    /// gate [`is_complete`](CompletenessReport::is_complete) in v1).
     pub total_modules: usize,
-    /// Number of modules with `@context` annotations.
+    /// Number of modules with `@context` annotations (informational only; see
+    /// [`total_modules`](CompletenessReport::total_modules)).
     pub modules_with_context: usize,
     /// Total number of public functions analysed.
     pub total_public_fns: usize,
@@ -68,8 +75,12 @@ impl CompletenessReport {
     /// Returns `true` if the codebase is fully complete for production.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.total_modules == self.modules_with_context
-            && self.total_public_fns == self.public_fns_with_context
+        // Module-level `@context` completeness is Reserved for v1.x (spec
+        // §15.3): v1 has no syntax to attach `@context` to a `module`, so it is
+        // intentionally NOT part of the v1 completeness criterion. Completeness
+        // is per-item: public functions annotated, effects handled, capabilities
+        // declared.
+        self.total_public_fns == self.public_fns_with_context
             && self.total_effect_ops == self.handled_effect_ops
             && self
                 .used_capabilities
@@ -80,8 +91,10 @@ impl CompletenessReport {
     #[must_use]
     pub fn summary(&self) -> String {
         let mut lines = Vec::new();
+        // Informational only — module-level @context completeness is Reserved
+        // for v1.x (§15.3) and does not affect the COMPLETE/INCOMPLETE status.
         lines.push(format!(
-            "Modules with @context: {}/{}",
+            "Modules with @context (informational): {}/{}",
             self.modules_with_context, self.total_modules
         ));
         lines.push(format!(
@@ -117,7 +130,8 @@ impl CompletenessReport {
 /// This is the final C-AIR pass. It checks:
 /// - All effect operations are handled (either by `handling` blocks or `with` clauses).
 /// - All capabilities used by child declarations are declared by parent scopes.
-/// - In production mode: all modules and public functions have `@context`.
+/// - In production mode: all public functions have `@context` (module-level
+///   `@context` completeness is Reserved for v1.x per §15.3 and is not checked).
 ///
 /// Returns a tuple of ([`DiagnosticBag`], [`CompletenessReport`]).
 #[must_use]
@@ -153,17 +167,14 @@ fn verify_module(
 ) {
     if let NodeKind::Module { items, .. } = &module.kind {
         report.total_modules += 1;
+        // Module-level `@context` completeness is Reserved for v1.x (spec
+        // §15.3): v1 has no syntax to attach `@context` to a `module`, so a
+        // module-level requirement would be unsatisfiable (E8022 would fire on
+        // every module). We count modules with context for informational
+        // reporting only and never emit E8022 in v1. Per-item completeness
+        // (public functions below) is the v1 production requirement.
         if module.context.is_some() {
             report.modules_with_context += 1;
-        } else if mode == VerificationMode::Production {
-            diags.error(
-                DiagnosticCode {
-                    prefix: 'E',
-                    number: 8022,
-                },
-                "module is missing @context annotation (required in production mode)".to_string(),
-                module.span,
-            );
         }
 
         // Collect module-level declared capabilities.
@@ -1306,21 +1317,35 @@ mod tests {
     // ── Production mode completeness ─────────────────────────────────────────
 
     #[test]
-    fn production_module_without_context_error() {
+    fn production_module_without_context_is_clean() {
+        // §15.3: module-level `@context` completeness is Reserved for v1.x.
+        // An empty module (no public items) without a module-level `@context`
+        // produces no diagnostics under production — E8022 was dropped as
+        // unsatisfiable in v1. The counters still report the module for
+        // informational purposes.
         let id_gen = NodeIdGen::new();
         let module = module_with(&id_gen, vec![]);
 
         let (diags, report) = verify_capabilities(&[&module], VerificationMode::Production);
-        assert!(
-            diags.error_count() > 0,
-            "should error on module without @context"
+        assert_eq!(
+            diags.error_count(),
+            0,
+            "production must not error on a module missing module-level @context (§15.3)"
         );
         assert_eq!(report.total_modules, 1);
         assert_eq!(report.modules_with_context, 0);
+        // Informational counters don't gate completeness in v1.
+        assert!(
+            report.is_complete(),
+            "an empty module with no public items is complete in v1 (per-item only)"
+        );
     }
 
     #[test]
     fn production_module_with_context_ok() {
+        // Sanity: a module carrying context produces no diagnostics and is
+        // counted as having context (informational). (In v1 a module is never
+        // flagged regardless — §15.3.)
         let id_gen = NodeIdGen::new();
         let mut module = module_with(&id_gen, vec![]);
         module.context = Some(ContextBlock {
@@ -1575,6 +1600,9 @@ mod tests {
 
     #[test]
     fn completeness_report_incomplete() {
+        // Incompleteness here is driven by per-item gaps (public fns 2/3,
+        // effects 0/1, undeclared capability) — not by the module counters,
+        // which no longer gate completeness in v1 (§15.3).
         let report = CompletenessReport {
             total_modules: 2,
             modules_with_context: 1,
@@ -1587,6 +1615,29 @@ mod tests {
         };
         assert!(!report.is_complete());
         assert!(report.summary().contains("INCOMPLETE"));
+    }
+
+    #[test]
+    fn completeness_report_module_only_gap_is_still_complete() {
+        // Regression for §15.3: a report whose ONLY gap is module-level
+        // `@context` (modules_with_context < total_modules) is still COMPLETE in
+        // v1 — module-level completeness is Reserved for v1.x and does not gate
+        // [`CompletenessReport::is_complete`]. All per-item dimensions match.
+        let report = CompletenessReport {
+            total_modules: 3,
+            modules_with_context: 0,
+            total_public_fns: 2,
+            public_fns_with_context: 2,
+            total_effect_ops: 1,
+            handled_effect_ops: 1,
+            declared_capabilities: ["Network".to_string()].into(),
+            used_capabilities: ["Network".to_string()].into(),
+        };
+        assert!(
+            report.is_complete(),
+            "module-level @context gap must not make a report incomplete in v1 (§15.3)"
+        );
+        assert!(report.summary().contains("COMPLETE"));
     }
 
     // ── Unused effect warning ────────────────────────────────────────────────
