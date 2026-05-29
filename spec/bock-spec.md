@@ -87,13 +87,17 @@ The v1.x list expresses target ambition and informs the design of the AIR and co
 
 ### 1.5 — Paradigm Configuration
 
-Projects configure a paradigm mode that controls which language features are available:
+**Status:** v1 ships a single, fixed paradigm in which all language features are available simultaneously; bindings are immutable by default. Configurable paradigm *modes* and the `[paradigm]` project-configuration field that selects between them are **Reserved for v1.x** (see Appendix A.3). The mode descriptions below are the planned v1.x surface; they are informative for users tracking the roadmap, not normative for v1.
+
+**v1 behavior (normative).** All features are available in every v1 project: `class` declarations (§6.4), trait composition (§6.5), and functional patterns coexist with no project-level switch. Bindings are immutable by default; mutation requires an explicit `let mut` binding or a `mut` borrow (§5). v1 does not parse a `[paradigm]` field and does not gate `class`, `mut`, or `@mutable` on any paradigm mode. This v1 behavior corresponds to the **Multi mode** described below; v1 has no way to opt out of it.
+
+**Planned for v1.x: paradigm modes.** A future `[paradigm]` field in `bock.project` will let a project select a paradigm mode that restricts which language features are available:
 
 **FP mode:** All values immutable by default. No `class` keyword. Composition via traits. The `mut` keyword is a compile error outside `@mutable` scopes.
 
 **OOP mode:** `class` keyword with single inheritance. Mutable by default for local variables. Encapsulation enforced (private by default).
 
-**Multi mode (default):** All features available. Immutable by default. Both `class` and functional patterns supported.
+**Multi mode (default):** All features available. Immutable by default. Both `class` and functional patterns supported. This is the only mode v1 implements, and it is the mode v1.x will default to when `[paradigm]` is omitted.
 
 ---
 
@@ -544,7 +548,7 @@ enum AuthError {
 }
 ```
 
-### 6.4 — Classes (OOP and Multi mode)
+### 6.4 — Classes
 
 ```bock
 class Button : Component, Renderable {
@@ -557,7 +561,7 @@ class Button : Component, Renderable {
 }
 ```
 
-Single inheritance, multiple trait implementation.
+Single inheritance, multiple trait implementation. Classes are always available in v1; the paradigm modes that could restrict their use are Reserved for v1.x (§1.5).
 
 ### 6.5 — Traits
 
@@ -2484,6 +2488,7 @@ These fields appear in older spec drafts and may be implemented in v1.x or later
 
 - **`[project] authors`** — Author metadata. Activated alongside `bock pkg publish` (§19).
 - **`[strictness.overrides]`** — Per-path glob-based strictness mappings (e.g., `"src/experiments/**" = "sketch"`). v1 ships flat project-level strictness; layered strictness is v1.x.
+- **`[paradigm]`** — Paradigm-mode selection (`FP`, `OOP`, `Multi`). v1 ships a single fixed paradigm equivalent to `Multi` mode, in which all language features are available and bindings are immutable by default; it does not parse this field or gate `class`, `mut`, or `@mutable` on a mode. Configurable paradigm modes are Reserved for v1.x pending a design pass for feature-gating semantics (§1.5).
 - **`[effects]` and `[effects.overrides.<env>]`** — Project-level effect handler routing. v1 ships inline + module-level handler resolution via §10 mechanisms; project-level routing may be unnecessary and will only be introduced if real-world usage demonstrates need.
 - **`[plugins]`** — Plugin declarations. Reserved pending the plugin loader (Appendix C describes the planned plugin system).
 - **`[testing]`** — Smart target selection thresholds. Reserved alongside the deferred cross-target test flags (§20.4).
