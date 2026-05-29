@@ -15,7 +15,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process;
 
 use bock_air::{lower_module, resolve_names_with_registry, ModuleRegistry, NodeIdGen, SymbolTable};
 use bock_build::dep_graph::{self, DepGraph};
@@ -47,11 +46,40 @@ impl Default for CheckOptions {
     }
 }
 
+/// The pass/fail result of a check run.
+///
+/// [`run`] returns this instead of terminating the process directly, so the
+/// pass/fail decision is testable at the function level and the single
+/// outcome-to-exit-code mapping lives in `main`. The `anyhow::Result` wrapper
+/// around this type is reserved for *unexpected* failures (e.g. an unreadable
+/// directory during discovery); ordinary check failures (parse/type/analysis
+/// errors, a dependency cycle, no files found, an unreadable input file) are
+/// reported as [`CheckOutcome::Failed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckOutcome {
+    /// The check completed with no errors. Maps to a successful (zero) exit.
+    Clean,
+    /// The check found at least one error (or no files to check). Maps to a
+    /// non-zero exit.
+    Failed,
+}
+
+impl CheckOutcome {
+    /// Whether this outcome represents a clean (error-free) check.
+    pub fn is_clean(self) -> bool {
+        matches!(self, CheckOutcome::Clean)
+    }
+}
+
 /// Run the check command on the given file paths with the specified options.
 ///
 /// Uses the multi-file pipeline: parse all → dependency sort → compile in order
 /// with cross-file name resolution via [`bock_air::registry::ModuleRegistry`].
-pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<()> {
+///
+/// Returns the pass/fail [`CheckOutcome`] rather than exiting the process, so the
+/// outcome is testable and the exit-code decision is centralized in `main`. The
+/// `Err` arm is reserved for unexpected I/O failures surfaced via `?`.
+pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckOutcome> {
     let files = if files.is_empty() {
         discover_bock_files(".")?
     } else {
@@ -60,7 +88,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<()> {
 
     if files.is_empty() {
         eprintln!("No .bock files found.");
-        process::exit(1);
+        return Ok(CheckOutcome::Failed);
     }
 
     let mut found_errors = false;
@@ -77,7 +105,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<()> {
     }
 
     if found_errors {
-        process::exit(1);
+        return Ok(CheckOutcome::Failed);
     }
 
     // ── Phase 2: Build dependency graph ───────────────────────────────────────
@@ -96,7 +124,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<()> {
         Some(order) => order,
         None => {
             eprintln!("error: circular module dependency detected");
-            process::exit(1);
+            return Ok(CheckOutcome::Failed);
         }
     };
 
@@ -185,13 +213,13 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<()> {
     }
 
     if found_errors {
-        process::exit(1);
+        return Ok(CheckOutcome::Failed);
     }
 
     let file_count = files.len();
     let label = if file_count == 1 { "file" } else { "files" };
     println!("check: {file_count} {label} checked, no errors.");
-    Ok(())
+    Ok(CheckOutcome::Clean)
 }
 
 /// A successfully parsed source file, ready for compilation.
@@ -443,5 +471,62 @@ mod tests {
 
         let files = discover_bock_files(&dir.path().to_string_lossy()).unwrap();
         assert_eq!(files.len(), 1);
+    }
+
+    // ── Exit-code contract (function-level) ───────────────────────────────
+    //
+    // `run` returns a `CheckOutcome` instead of calling `process::exit`, so
+    // the pass/fail decision is unit-testable without spawning a subprocess.
+
+    #[test]
+    fn run_clean_file_returns_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.bock");
+        fs::write(&path, "fn add(a: Int, b: Int) -> Int { a + b }\n").unwrap();
+
+        let outcome = run(vec![path], &CheckOptions::default()).unwrap();
+        assert_eq!(outcome, CheckOutcome::Clean);
+        assert!(outcome.is_clean());
+    }
+
+    #[test]
+    fn run_parse_error_returns_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.bock");
+        fs::write(&path, "fn { broken\n").unwrap();
+
+        let outcome = run(vec![path], &CheckOptions::default()).unwrap();
+        assert_eq!(outcome, CheckOutcome::Failed);
+        assert!(!outcome.is_clean());
+    }
+
+    #[test]
+    fn run_missing_file_returns_failed() {
+        // A path that does not exist is an input error, not an unexpected
+        // I/O failure: it is reported as `Failed`, not as `Err`.
+        let path = PathBuf::from("/nonexistent/definitely-not-here-12345.bock");
+        let outcome = run(vec![path], &CheckOptions::default()).unwrap();
+        assert_eq!(outcome, CheckOutcome::Failed);
+    }
+
+    #[test]
+    fn run_analysis_error_returns_failed() {
+        // Use-after-move of a record triggers an ownership (analysis) error.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ownership.bock");
+        fs::write(
+            &path,
+            "record Thing { id: Int }\nfn process() {\n    let data = Thing { id: 1 }\n    let archive = data\n    let x = data\n}\n",
+        )
+        .unwrap();
+
+        let outcome = run(vec![path], &CheckOptions::default()).unwrap();
+        assert_eq!(outcome, CheckOutcome::Failed);
+    }
+
+    #[test]
+    fn check_outcome_is_clean_helper() {
+        assert!(CheckOutcome::Clean.is_clean());
+        assert!(!CheckOutcome::Failed.is_clean());
     }
 }

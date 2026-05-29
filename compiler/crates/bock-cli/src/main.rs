@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
@@ -414,8 +415,15 @@ enum ModelCommand {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
+
+    // The process exit code is decided in exactly one place: this binding,
+    // seeded to success and overridden only by commands (currently `check`)
+    // whose pass/fail outcome must map to a non-zero exit. Subcommand handlers
+    // return their outcome rather than calling `process::exit`, keeping the
+    // exit contract centralized and the handlers testable.
+    let mut exit_code = ExitCode::SUCCESS;
 
     match cli.command {
         Command::New { name } => new::run(&name)?,
@@ -466,7 +474,9 @@ async fn main() -> anyhow::Result<()> {
                 lint: !types,
                 context: !no_context,
             };
-            check::run(files, &options)?;
+            if !check::run(files, &options)?.is_clean() {
+                exit_code = ExitCode::FAILURE;
+            }
         }
         Command::Test { filter, files } => test::run(filter, files).await?,
         Command::Fmt { check } => fmt::run(check)?,
@@ -558,7 +568,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Lsp { stdio: _ } => bock_lsp::run_stdio().await,
     }
 
-    Ok(())
+    Ok(exit_code)
 }
 
 fn stub(name: &str) {
