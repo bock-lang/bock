@@ -1,7 +1,7 @@
 # Functions
 
-> Stub. The authoritative reference is
-> [section 4 of the specification](../../../spec/sections/s04-declarations.md).
+> Stub. The authoritative reference is §6 (Declarations) of
+> [`spec/bock-spec.md`](../../../spec/bock-spec.md).
 
 Functions are the unit of abstraction in Bock. Declare with `fn`,
 optionally annotate `pure`, and parameters always carry types.
@@ -28,7 +28,7 @@ let lengths = words |> map((w) => length(w)) |> filter((n) => n > 3)
 ```
 
 The pipe operator `|>` desugars to function application; see
-`spec/sections/s05-expressions.md`.
+§7 Expressions of `spec/bock-spec.md`.
 
 ## Generics and Constraints
 

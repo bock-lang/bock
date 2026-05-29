@@ -50,7 +50,7 @@ pub enum AiError {
 
     /// The provider returned a response that failed structural validation —
     /// for example, a `select()` response whose `selected_id` was not in
-    /// the provided option set (see [`validate_select_response`]).
+    /// the provided option set (see `validate_select_response`).
     #[error("invalid AI provider response: {0}")]
     InvalidResponse(String),
 }

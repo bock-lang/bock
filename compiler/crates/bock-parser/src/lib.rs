@@ -10,10 +10,9 @@ use bock_ast::{
     Annotation, AnnotationArg, Arg, AssignOp, AssociatedType, BinOp, Block, ClassDecl, ConstDecl,
     EffectDecl, EnumDecl, EnumVariant, Expr, FnDecl, ForLoop, GenericParam, GuardStmt, HandlerPair,
     HandlingBlock, Ident, ImplBlock, ImportDecl, ImportItems, ImportedName, InterpolationPart,
-    Item, LetStmt, Literal, MatchArm, Module, ModuleHandleDecl, ModulePath, NodeId,
-    Param, Pattern, RecordDecl, RecordDeclField, RecordField, RecordPatternField, RecordSpread,
-    Stmt, TraitDecl, TypeAliasDecl, TypeConstraint, TypeExpr, TypePath, UnaryOp, Visibility,
-    WhileLoop,
+    Item, LetStmt, Literal, MatchArm, Module, ModuleHandleDecl, ModulePath, NodeId, Param, Pattern,
+    RecordDecl, RecordDeclField, RecordField, RecordPatternField, RecordSpread, Stmt, TraitDecl,
+    TypeAliasDecl, TypeConstraint, TypeExpr, TypePath, UnaryOp, Visibility, WhileLoop,
 };
 use bock_errors::{DiagnosticBag, DiagnosticCode, Span};
 use bock_lexer::{Token, TokenKind};
@@ -1333,9 +1332,7 @@ impl<'src> Parser<'src> {
                     // arguments which the interpreter can discard (dispatch
                     // is by qualified name), so consume and continue the
                     // postfix loop so `.method(...)` parses normally.
-                    if Self::expr_is_simple_type_name(&expr)
-                        && self.is_type_args_before_dot()
-                    {
+                    if Self::expr_is_simple_type_name(&expr) && self.is_type_args_before_dot() {
                         let _ = self.advance(); // consume `[`
                         self.skip_newlines();
                         while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
@@ -2306,9 +2303,7 @@ impl<'src> Parser<'src> {
 
         // Continuation rule (spec §3.2 rule 8): next line starts with `else`
         // → allow `else` on a new line after closing brace.
-        if self.at(TokenKind::Newline)
-            && self.peek_past_newlines_kind() == Some(TokenKind::Else)
-        {
+        if self.at(TokenKind::Newline) && self.peek_past_newlines_kind() == Some(TokenKind::Else) {
             self.skip_newlines();
         }
 
@@ -2554,9 +2549,7 @@ impl<'src> Parser<'src> {
                 let tok = self.advance();
                 // For keyword tokens (Ok, Err, Some, None), `literal` is None,
                 // so fall back to the token kind's display name.
-                let name = tok
-                    .literal
-                    .unwrap_or_else(|| tok.kind.to_string());
+                let name = tok.literal.unwrap_or_else(|| tok.kind.to_string());
                 let path_name = Ident {
                     name,
                     span: tok.span,
@@ -3006,7 +2999,6 @@ impl<'src> Parser<'src> {
         }
     }
 
-
     /// Parse `loop { body }` as an expression.
     fn parse_loop_expr(&mut self) -> Expr {
         let id = self.alloc_id();
@@ -3245,7 +3237,10 @@ impl<'src> Parser<'src> {
                                 prefix: 'E',
                                 number: 2031,
                             },
-                            format!("expected parameter name after `mut`, found `{}`", self.peek().kind),
+                            format!(
+                                "expected parameter name after `mut`, found `{}`",
+                                self.peek().kind
+                            ),
                             start,
                         );
                         Pattern::Wildcard {
@@ -6418,7 +6413,13 @@ use app.services.*\n\
             _ => panic!(),
         };
         // The if-else is the block's tail expression
-        let tail = fn_decl.body.as_ref().unwrap().tail.as_ref().expect("expected tail expr");
+        let tail = fn_decl
+            .body
+            .as_ref()
+            .unwrap()
+            .tail
+            .as_ref()
+            .expect("expected tail expr");
         match tail.as_ref() {
             Expr::If { else_block, .. } => {
                 assert!(else_block.is_some(), "expected else block across lines");
@@ -6437,7 +6438,13 @@ use app.services.*\n\
             Item::Fn(f) => f,
             _ => panic!(),
         };
-        let tail = fn_decl.body.as_ref().unwrap().tail.as_ref().expect("expected tail expr");
+        let tail = fn_decl
+            .body
+            .as_ref()
+            .unwrap()
+            .tail
+            .as_ref()
+            .expect("expected tail expr");
         match tail.as_ref() {
             Expr::If { else_block, .. } => {
                 let inner = else_block.as_ref().expect("expected else-if chain");

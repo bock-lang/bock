@@ -637,11 +637,9 @@ fn check_args_for_pii(
 fn extract_expr_type_refs(node: &AIRNode) -> Vec<String> {
     let mut refs = Vec::new();
     match &node.kind {
-        NodeKind::Identifier { name } => {
+        NodeKind::Identifier { name } if name.name.starts_with(|c: char| c.is_uppercase()) => {
             // Capitalized identifiers are likely type references or constructors.
-            if name.name.starts_with(|c: char| c.is_uppercase()) {
-                refs.push(name.name.clone());
-            }
+            refs.push(name.name.clone());
         }
         NodeKind::RecordConstruct { path, .. } => {
             if let Some(seg) = path.segments.last() {

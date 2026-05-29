@@ -1,5 +1,5 @@
 //! Prelude vocabulary — names that are always in scope without an explicit
-//! `use`. Mirrors the seed lists in [`crate::resolve::SymbolTable::seed_prelude`].
+//! `use`. Mirrors the seed lists in `SymbolTable::seed_prelude`.
 //!
 //! Exposed so that tooling (vocab emitter, editor extensions, documentation)
 //! can render the prelude without re-hardcoding it. The resolver's internal
@@ -22,8 +22,8 @@ pub const PRELUDE_FUNCTIONS: &[&str] = &[
 
 /// Prelude types — builtin type names.
 pub const PRELUDE_TYPES: &[&str] = &[
-    "Int", "Float", "Bool", "String", "Char", "Void", "Never", "Optional", "Result",
-    "List", "Map", "Set", "Fn", "Duration", "Instant", "Channel",
+    "Int", "Float", "Bool", "String", "Char", "Void", "Never", "Optional", "Result", "List", "Map",
+    "Set", "Fn", "Duration", "Instant", "Channel",
 ];
 
 /// Prelude enum variant constructors (Optional, Result).
@@ -42,6 +42,4 @@ pub const PRELUDE_TRAITS: &[&str] = &[
 ];
 
 /// Primitive type names.
-pub const PRIMITIVE_TYPES: &[&str] = &[
-    "Int", "Float", "Bool", "String", "Char", "Void", "Never",
-];
+pub const PRIMITIVE_TYPES: &[&str] = &["Int", "Float", "Bool", "String", "Char", "Void", "Never"];

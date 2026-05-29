@@ -31,8 +31,7 @@ pub trait AiProvider: Send + Sync {
     /// # Errors
     /// Returns an [`AiError`] on transport failure, provider error, or
     /// an invalid response.
-    async fn generate(&self, request: &GenerateRequest)
-        -> Result<GenerateResponse, AiError>;
+    async fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, AiError>;
 
     /// Repair failing generated code using the compiler error (§17.7).
     ///
@@ -46,8 +45,7 @@ pub trait AiProvider: Send + Sync {
     /// # Errors
     /// Returns an [`AiError`] on transport failure, provider error, or
     /// an invalid response.
-    async fn optimize(&self, request: &OptimizeRequest)
-        -> Result<OptimizeResponse, AiError>;
+    async fn optimize(&self, request: &OptimizeRequest) -> Result<OptimizeResponse, AiError>;
 
     /// Select from a closed set of options (§10.8).
     ///

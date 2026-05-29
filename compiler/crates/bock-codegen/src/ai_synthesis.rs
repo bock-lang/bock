@@ -24,12 +24,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use bock_air::{AIRNode, NodeKind};
 use bock_ai::{
     compute_key, node_kind_name, AiCache, AiError, AiProvider, Decision, DecisionType,
-    GenerateRequest, GenerateResponse, ManifestWriter, ModuleContext, RuleCache,
-    StrictnessPolicy,
+    GenerateRequest, GenerateResponse, ManifestWriter, ModuleContext, RuleCache, StrictnessPolicy,
 };
+use bock_air::{AIRNode, NodeKind};
 use bock_types::{AIRModule, Strictness};
 use chrono::Utc;
 
@@ -362,9 +361,7 @@ impl AiSynthesisDriver {
                     node_kind,
                     confidence,
                 } => {
-                    self.record_rule_applied(
-                        node, target, code, rule_id, node_kind, *confidence,
-                    )?;
+                    self.record_rule_applied(node, target, code, rule_id, node_kind, *confidence)?;
                 }
                 _ => {}
             }
@@ -467,7 +464,10 @@ impl AiSynthesisDriver {
     fn lookup_rule(&self, node: &AIRNode, target: &TargetProfile) -> Option<SynthesisOutcome> {
         let cache = self.rule_cache.as_ref()?;
         let production_only = matches!(self.config.strictness, Strictness::Production);
-        let rule = cache.lookup(&target.id, node, production_only).ok().flatten()?;
+        let rule = cache
+            .lookup(&target.id, node, production_only)
+            .ok()
+            .flatten()?;
         Some(SynthesisOutcome::RuleApplied {
             code: rule.template.clone(),
             rule_id: rule.id.clone(),
@@ -546,9 +546,7 @@ impl AiSynthesisDriver {
         let Some(manifest) = &self.manifest else {
             return Ok(());
         };
-        let mut mw = manifest
-            .lock()
-            .expect("manifest writer mutex poisoned");
+        let mut mw = manifest.lock().expect("manifest writer mutex poisoned");
 
         let model_id = self
             .provider
@@ -588,9 +586,7 @@ impl AiSynthesisDriver {
         let Some(manifest) = &self.manifest else {
             return Ok(());
         };
-        let mut mw = manifest
-            .lock()
-            .expect("manifest writer mutex poisoned");
+        let mut mw = manifest.lock().expect("manifest writer mutex poisoned");
 
         let id = decision_id(node, target);
         let policy = StrictnessPolicy::for_level(self.config.strictness);

@@ -1,6 +1,6 @@
 //! Cross-file module registry for the Bock compiler.
 //!
-//! The [`ModuleRegistry`] is built incrementally as modules are compiled in
+//! The [`crate::registry::ModuleRegistry`] is built incrementally as modules are compiled in
 //! dependency order. Each module's public symbols are collected into a
 //! [`ModuleExports`] entry after compilation, and downstream modules query
 //! the registry during name resolution and type checking to resolve imports.
@@ -46,10 +46,7 @@ impl std::fmt::Display for RegistryError {
                 write!(f, "symbol `{name}` not found in module `{module_id}`")
             }
             RegistryError::NotVisible { module_id, name } => {
-                write!(
-                    f,
-                    "symbol `{name}` in module `{module_id}` is not visible"
-                )
+                write!(f, "symbol `{name}` in module `{module_id}` is not visible")
             }
         }
     }
@@ -174,11 +171,7 @@ impl ModuleRegistry {
     ///
     /// Convenience wrapper around [`resolve_symbol`](Self::resolve_symbol)
     /// that returns just the [`TypeRef`].
-    pub fn get_type(
-        &self,
-        module_id: &str,
-        name: &str,
-    ) -> Result<&TypeRef, RegistryError> {
+    pub fn get_type(&self, module_id: &str, name: &str) -> Result<&TypeRef, RegistryError> {
         self.resolve_symbol(module_id, name).map(|sym| &sym.ty)
     }
 
@@ -229,8 +222,10 @@ impl ModuleExports {
         source_module: impl Into<String>,
         original_name: impl Into<String>,
     ) {
-        self.reexports
-            .insert(local_name.into(), (source_module.into(), original_name.into()));
+        self.reexports.insert(
+            local_name.into(),
+            (source_module.into(), original_name.into()),
+        );
     }
 }
 
@@ -349,7 +344,7 @@ mod tests {
             ExportedSymbol {
                 kind: ExportKind::Function,
                 visibility: vis,
-                ty: TypeRef(format!("Fn() -> Void")),
+                ty: TypeRef("Fn() -> Void".to_string()),
                 detail: ExportDetail::None,
             },
         )
@@ -484,7 +479,11 @@ mod tests {
         let sym = reg.resolve_symbol("app.models", "User").unwrap();
         assert_eq!(sym.kind, ExportKind::Record);
         match &sym.detail {
-            ExportDetail::Record { fields, generic_params, .. } => {
+            ExportDetail::Record {
+                fields,
+                generic_params,
+                ..
+            } => {
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].0, "id");
                 assert!(generic_params.is_empty());
@@ -607,9 +606,7 @@ mod tests {
         let mut reg = ModuleRegistry::new();
         reg.register(sample_module());
 
-        let err = reg
-            .resolve_symbol("app.models", "nonexistent")
-            .unwrap_err();
+        let err = reg.resolve_symbol("app.models", "nonexistent").unwrap_err();
         assert_eq!(
             err,
             RegistryError::SymbolNotFound {

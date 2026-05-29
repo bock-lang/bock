@@ -357,13 +357,13 @@ mod tests {
             .unwrap();
 
         let first = r
-            .call(TypeTag::Iterator, "next", &[iter_val.clone()])
+            .call(TypeTag::Iterator, "next", std::slice::from_ref(&iter_val))
             .unwrap()
             .unwrap();
         assert_eq!(first, Value::Optional(Some(Box::new(Value::Int(10)))));
 
         let second = r
-            .call(TypeTag::Iterator, "next", &[iter_val.clone()])
+            .call(TypeTag::Iterator, "next", std::slice::from_ref(&iter_val))
             .unwrap()
             .unwrap();
         assert_eq!(second, Value::Optional(Some(Box::new(Value::Int(20)))));
@@ -386,7 +386,7 @@ mod tests {
         let mut results = Vec::new();
         loop {
             let v = r
-                .call(TypeTag::Iterator, "next", &[iter_val.clone()])
+                .call(TypeTag::Iterator, "next", std::slice::from_ref(&iter_val))
                 .unwrap()
                 .unwrap();
             match v {
@@ -409,7 +409,7 @@ mod tests {
         let mut results = Vec::new();
         loop {
             let v = r
-                .call(TypeTag::Iterator, "next", &[iter_val.clone()])
+                .call(TypeTag::Iterator, "next", std::slice::from_ref(&iter_val))
                 .unwrap()
                 .unwrap();
             match v {

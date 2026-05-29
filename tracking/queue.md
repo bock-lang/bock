@@ -1,0 +1,166 @@
+# Work Queue
+
+Orchestrator working memory. Read at the start of every work
+block; update as work moves. Committed to the repo as project
+state.
+
+Last updated: 2026-05-29 (Block 1 COMPLETE + chore sweep COMPLETE. main 49211c9.
+See audit.md DAILY DIGEST + CHORE SWEEP entries 2026-05-29.)
+
+**Block 1 status: COMPLETE ✓** (H3 #73, H2 #74, H1 #75, C1 #76). Zero escalations.
+
+**Chore sweep status: COMPLETE ✓** (operator-directed, 2026-05-29; main 49211c9):
+- Deps: ALL 21 dependabot PRs resolved (#78 website, #79 cargo incl. dashmap 5→6,
+  #80 vscode incl. 4 majors, #81 GitHub-Actions); superseded PRs closed. Only the
+  non-dependabot #21 (Cloudflare) remains open.
+- CI: the post-merge Changelog workflow (the only red) REPLACED with a
+  generate-don't-push design (#82) — removed the CI write-back; added
+  tools/scripts/gen-changelog.sh + read-only release verify + backfill. No CI
+  write surface. Largely completes D6.
+
+**OPEN → Design (pending):**
+- O1 [H1] `bock check` warnings-only exit code — fail on warnings? (behavior preserved)
+- O2 [C1] §20.1.1/§11 `--only=context`: adopt the dead-code validate_context pass?
+
+**FOUND / follow-ups (queued):**
+- **peaceiris/actions-mdbook@v2.0.0 Node-20 → forced Node-24 on 2026-06-02 (~4 days).**
+  mdbook job (docs.yml) may break. **Handle before 2026-06-02.** HIGHEST near-term.
+- F-conf [H2] per-target conformance execution NOT wired — suite is parse/discovery
+  only. Candidate: "wire conformance execution."
+- SEC [website] npm audit: 1 high (devalue) + 5 moderate (yaml/@astrojs/check). Pre-existing.
+- TEST-INFRA [vscode] extension has no test script/files — add test infra.
+- F-exit [H1] build/run/test/fmt share the process::exit anti-pattern — follow-up.
+- F-lint [C1] lint warnings now always surfaced (matches §20.1.1) — informational.
+- (benign) dashmap 5.5.3 lingers transitively via tower-lsp — no action.
+
+**Doc reconciliations:** CLAUDE.md "Implementation playbook" path fixed → Contributing
+guide docs/src/contributing.md (this PR). docs/INVENTORY.md + SPEC-ALIGNMENT.md still
+mark F04/§20.1.1/F15 as drift — now resolved by C1/H3; update those meta-docs (D-series).
+
+---
+
+## Ready to dispatch
+
+Work that's unblocked and ready for engineering sessions.
+
+### Block 1 (first agentic block — the three handoffs + §20.1.1)
+
+| ID | Work | Type | Sub-agents? | Conflict notes |
+|----|------|------|-------------|----------------|
+| H3 | §1.5 paradigm cleanup | spec edit | No | None. Solo spec session |
+| H2 | Effect handler conformance fixtures | test coverage | Yes (Pattern 1: per-target) | None. Touches conformance/ only |
+| H1 | `bock check` exit-code bug | bug fix | No | **Touches bock-cli/main.rs — conflicts with §20.1.1** |
+| C1 | §20.1.1 `--only`/`--brief` flag alignment | impl | No | **Touches bock-cli/main.rs — conflicts with H1** |
+
+**Coordination for H1 + C1:** Both modify
+`compiler/crates/bock-cli/src/main.rs`. Do NOT run concurrently.
+Either:
+- Combine into one bock-cli session (exit-code fix + flag
+  alignment), one PR, OR
+- Sequence: run one, merge, rebase the other.
+
+Implementation chat's read favored sequential for cleaner
+per-PR review; Orchestrator's call within that guidance.
+
+**H1 owned-files (confirmed):** the whole
+`compiler/crates/bock-cli/` crate. Exit-code logic is in
+`src/check.rs`; the audit spans other command sources in `src/`
+(build, test, run, fmt). CLI integration tests are colocated at
+`compiler/crates/bock-cli/tests/` — there is **no** central
+`compiler/tests/cli/`, and the H1 handoff's instruction to create
+one is wrong. The exit-code tests extend the existing
+`tests/check_command.rs`. Both H1 and C1 touch this crate, so
+conflict-avoidance applies — never concurrent.
+
+**H3 timestamp note:** The drop-in changelog hard-codes
+`20260515-0434`. Use `date -u` at session execution; if landing
+meaningfully after that time, re-timestamp filename and content
+date.
+
+---
+
+## Blocked
+
+Work waiting on dependencies.
+
+| ID | Work | Blocked on | Notes |
+|----|------|------------|-------|
+| D3 | Tooling reference (docs) | §20.3/§20.5/§20.6/§20.1.1 resolutions | Spec resolutions landed in revision; §20.1.1 needs C1 to land first |
+| D4 | Stdlib reference (docs) | §18.3/§18.5/§19.7 resolutions | Spec resolutions landed; verify before dispatch |
+| D5 | Contributor docs + cleanup | D2-D4 complete | Deletes INVENTORY.md/SPEC-ALIGNMENT.md — grep for refs before deletion |
+| D2-polish | D2 final polish | D2-FOUND items resolved | Most resolved in spec revision; verify remaining |
+| ItemB-P1 | Project mode codegen Phase 1 | Documentation buildout D5 | 8-12h scope; per-target Phases 2-5 parallelize via sub-agents after P1 |
+| ItemD | /get-started project-mode evolution | Item B Phase 6 | Deferred; external-facing (escalate for copy) |
+
+---
+
+## Independent (can run anytime)
+
+| ID | Work | Type | Sub-agents? | Notes |
+|----|------|------|-------------|-------|
+| D6 | Changelog backfill | docs | No | Independent after D1 resolved (it is). CHANGELOG.md regeneration |
+
+---
+
+## Deferred (no action; tracked for completeness)
+
+| ID | Work | Trigger |
+|----|------|---------|
+| ItemC | /get-started AI configuration section | Real-world AI usage characterization (post-launch) |
+
+---
+
+## Dependency graph
+
+```
+Block 1 (H3, H2, H1+C1) ──┐
+                          │ C1 unblocks ──→ D3
+                          │
+D3 ─┐                     │
+D4 ─┼──→ D5 ──→ ItemB-P1 ──→ ItemB-P2..5 (sub-agent fan-out)
+D2-polish ─┘                              ──→ ItemB-P6 ──→ ItemD
+
+D6 (independent) ─── runs anytime
+```
+
+**Critical path to v1.0:** Block 1 → D3/D4 → D5 → Item B → v1.0
+release actions (all escalate).
+
+---
+
+## Escalation-pending
+
+(none at seed — populated as the Orchestrator surfaces items)
+
+---
+
+## Recently landed (for orchestrator context, not action)
+
+- Agentic infrastructure (PR #70, 2026-05-29) — tracking/,
+  orchestrator contract, operating model. Coordination layer
+  only; touches no Block 1 work.
+- Spec changelog re-add (PR #69, 2026-05-29) —
+  20260514-0548-spec-revision-artifact.md.
+- D1+D2 spec alignment consolidation: 14 changelogs + spec
+  revision artifact (20260514-0548) — 21 sections updated
+- §10.4 handler form verification report (20260514-0540)
+- §13.5 cancellation restructure (20260514-0449)
+- §15 annotation taxonomy (20260514-0408)
+- K04 spec consolidation (20260512-1700) — spec/sections/ deleted
+
+---
+
+## Notes for the orchestrator
+
+- **v1.0 is the active milestone.** "Ship what's already done."
+  Coordinating toward release means external/irreversible actions
+  ahead (publish, announce, deploy) — all escalate.
+- **bock-cli is a hot file.** H1 and C1 both touch main.rs.
+  Sequence or combine; never concurrent. This is the conflict-
+  avoidance rule's first real test.
+- **Conformance sub-agents must surface per-target FOUND tags
+  explicitly.** Don't let "4/5 passed" bury a per-target codegen
+  failure. The parent aggregates but does not hide.
+- **D5 deletion sweep.** When D5 runs, grep for INVENTORY.md /
+  SPEC-ALIGNMENT.md references before deleting them; expand scope
+  or coordinate per the owned-files discipline.

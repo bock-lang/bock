@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
@@ -97,17 +98,15 @@ enum Command {
         /// Paths to .bock files to check. If omitted, checks all .bock files in the current directory.
         files: Vec<PathBuf>,
 
-        /// Run only type checking (skip lint warnings).
-        #[arg(long)]
-        types: bool,
+        /// Restrict the check to specific aspects. Valid aspects: types, context.
+        /// Accepts a comma-separated list (--only=types,context) and may be
+        /// repeated (--only=types --only=context); omitting it runs the full check.
+        #[arg(long, value_name = "ASPECT")]
+        only: Vec<String>,
 
-        /// Run only lint checks (skip type checking).
+        /// Brief output: compact, one-line diagnostics with no source-context snippets.
         #[arg(long)]
-        lint: bool,
-
-        /// Disable source context in diagnostic output.
-        #[arg(long)]
-        no_context: bool,
+        brief: bool,
     },
     /// Run tests.
     Test {
@@ -265,7 +264,16 @@ enum Command {
         format: String,
     },
     /// Start the Bock language server over stdio.
-    Lsp,
+    Lsp {
+        /// Use stdio transport (default; provided for LSP convention).
+        ///
+        /// `--stdio` is the universal LSP convention. We accept it for
+        /// compatibility with LSP clients (VS Code, neovim, emacs
+        /// lsp-mode, etc.) but stdio is already the default and only
+        /// transport at v1.
+        #[arg(long)]
+        stdio: bool,
+    },
 }
 
 /// `bock inspect` subcommands.
@@ -405,8 +413,15 @@ enum ModelCommand {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
+
+    // The process exit code is decided in exactly one place: this binding,
+    // seeded to success and overridden only by commands (currently `check`)
+    // whose pass/fail outcome must map to a non-zero exit. Subcommand handlers
+    // return their outcome rather than calling `process::exit`, keeping the
+    // exit contract centralized and the handlers testable.
+    let mut exit_code = ExitCode::SUCCESS;
 
     match cli.command {
         Command::New { name } => new::run(&name)?,
@@ -444,21 +459,21 @@ async fn main() -> anyhow::Result<()> {
                 run::run(file, program_args).await?;
             }
         }
-        Command::Check {
-            files,
-            types,
-            lint,
-            no_context,
-        } => {
-            let options = check::CheckOptions {
-                // If --types is passed, only run types. If --lint is passed, only run lint.
-                // If neither is passed, run both.
-                types: !lint,
-                lint: !types,
-                context: !no_context,
-            };
-            check::run(files, &options)?;
-        }
+        Command::Check { files, only, brief } => match check::AspectSelection::from_raw(&only) {
+            Ok(aspects) => {
+                let options = check::CheckOptions { aspects, brief };
+                if !check::run(files, &options)?.is_clean() {
+                    exit_code = ExitCode::FAILURE;
+                }
+            }
+            Err(unknown) => {
+                eprintln!(
+                    "error: unknown check aspect '{unknown}'. Valid aspects: {}",
+                    check::Aspect::valid_list()
+                );
+                exit_code = ExitCode::FAILURE;
+            }
+        },
         Command::Test { filter, files } => test::run(filter, files).await?,
         Command::Fmt { check } => fmt::run(check)?,
         Command::Repl => repl::run().await?,
@@ -546,10 +561,10 @@ async fn main() -> anyhow::Result<()> {
             output,
             format,
         } => doc::run(path, output, &format)?,
-        Command::Lsp => bock_lsp::run_stdio().await,
+        Command::Lsp { stdio: _ } => bock_lsp::run_stdio().await,
     }
 
-    Ok(())
+    Ok(exit_code)
 }
 
 fn stub(name: &str) {
@@ -585,5 +600,25 @@ fn run_inspect(cmd: InspectCommand) -> anyhow::Result<()> {
         InspectCommand::Decision { id, json } => inspect::run_decision(&id, json),
         InspectCommand::Cache { size } => inspect::run_cache(size),
         InspectCommand::Rules { target } => inspect::run_rules(target.as_deref()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn lsp_accepts_stdio_flag() {
+        let cli = Cli::try_parse_from(["bock", "lsp", "--stdio"])
+            .expect("`bock lsp --stdio` should parse cleanly");
+        assert!(matches!(cli.command, Command::Lsp { stdio: true }));
+    }
+
+    #[test]
+    fn lsp_works_without_stdio_flag() {
+        let cli = Cli::try_parse_from(["bock", "lsp"])
+            .expect("`bock lsp` (no flag) should parse cleanly");
+        assert!(matches!(cli.command, Command::Lsp { stdio: false }));
     }
 }

@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use futures::future::BoxFuture;
 use bock_interp::{BockString, BuiltinRegistry, CallbackInvoker, RuntimeError, TypeTag, Value};
+use futures::future::BoxFuture;
 
 /// Register all List methods and trait implementations.
 pub fn register(registry: &mut BuiltinRegistry) {
@@ -279,129 +279,156 @@ fn list_zip(args: &[Value]) -> Result<Value, RuntimeError> {
 // ─── Higher-order methods ─────────────────────────────────────────────────────
 // These validate arguments but require interpreter support for callback invocation.
 
-fn list_map<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn list_map<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let items = expect_list(args, 0, "map")?;
-    let f = expect_fn(args, 1, "map")?;
-    let mut result = Vec::with_capacity(items.len());
-    for item in items {
-        result.push(invoker.invoke(f, std::slice::from_ref(item)).await?);
-    }
-    Ok(Value::List(result))
-})
-}
-
-fn list_filter<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
-    Box::pin(async move {
-    let items = expect_list(args, 0, "filter")?;
-    let f = expect_fn(args, 1, "filter")?;
-    let mut result = Vec::new();
-    for item in items {
-        if let Value::Bool(true) = invoker.invoke(f, std::slice::from_ref(item)).await? {
-            result.push(item.clone());
+        let items = expect_list(args, 0, "map")?;
+        let f = expect_fn(args, 1, "map")?;
+        let mut result = Vec::with_capacity(items.len());
+        for item in items {
+            result.push(invoker.invoke(f, std::slice::from_ref(item)).await?);
         }
-    }
-    Ok(Value::List(result))
-})
+        Ok(Value::List(result))
+    })
 }
 
-fn list_fold<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn list_filter<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let items = expect_list(args, 0, "fold")?;
-    let init = args.get(1).ok_or(RuntimeError::ArityMismatch {
-        expected: 3,
-        got: args.len(),
-    })?;
-    let f = expect_fn(args, 2, "fold")?;
-    let mut acc = init.clone();
-    for item in items {
-        acc = invoker.invoke(f, &[acc, item.clone()]).await?;
-    }
-    Ok(acc)
-})
-}
-
-fn list_reduce<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
-    Box::pin(async move {
-    let items = expect_list(args, 0, "reduce")?;
-    let f = expect_fn(args, 1, "reduce")?;
-    if items.is_empty() {
-        return Err(RuntimeError::TypeError(
-            "List.reduce called on empty list".to_string(),
-        ));
-    }
-    let mut acc = items[0].clone();
-    for item in &items[1..] {
-        acc = invoker.invoke(f, &[acc, item.clone()]).await?;
-    }
-    Ok(acc)
-})
-}
-
-fn list_for_each<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
-    Box::pin(async move {
-    let items = expect_list(args, 0, "for_each")?;
-    let f = expect_fn(args, 1, "for_each")?;
-    for item in items {
-        invoker.invoke(f, std::slice::from_ref(item)).await?;
-    }
-    Ok(Value::Void)
-})
-}
-
-fn list_any<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
-    Box::pin(async move {
-    let items = expect_list(args, 0, "any")?;
-    let f = expect_fn(args, 1, "any")?;
-    for item in items {
-        if let Value::Bool(true) = invoker.invoke(f, std::slice::from_ref(item)).await? {
-            return Ok(Value::Bool(true));
+        let items = expect_list(args, 0, "filter")?;
+        let f = expect_fn(args, 1, "filter")?;
+        let mut result = Vec::new();
+        for item in items {
+            if let Value::Bool(true) = invoker.invoke(f, std::slice::from_ref(item)).await? {
+                result.push(item.clone());
+            }
         }
-    }
-    Ok(Value::Bool(false))
-})
+        Ok(Value::List(result))
+    })
 }
 
-fn list_all<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn list_fold<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let items = expect_list(args, 0, "all")?;
-    let f = expect_fn(args, 1, "all")?;
-    for item in items {
-        if let Value::Bool(false) = invoker.invoke(f, std::slice::from_ref(item)).await? {
-            return Ok(Value::Bool(false));
+        let items = expect_list(args, 0, "fold")?;
+        let init = args.get(1).ok_or(RuntimeError::ArityMismatch {
+            expected: 3,
+            got: args.len(),
+        })?;
+        let f = expect_fn(args, 2, "fold")?;
+        let mut acc = init.clone();
+        for item in items {
+            acc = invoker.invoke(f, &[acc, item.clone()]).await?;
         }
-    }
-    Ok(Value::Bool(true))
-})
+        Ok(acc)
+    })
 }
 
-fn list_find<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn list_reduce<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let items = expect_list(args, 0, "find")?;
-    let f = expect_fn(args, 1, "find")?;
-    for item in items {
-        if let Value::Bool(true) = invoker.invoke(f, std::slice::from_ref(item)).await? {
-            return Ok(Value::Optional(Some(Box::new(item.clone()))));
+        let items = expect_list(args, 0, "reduce")?;
+        let f = expect_fn(args, 1, "reduce")?;
+        if items.is_empty() {
+            return Err(RuntimeError::TypeError(
+                "List.reduce called on empty list".to_string(),
+            ));
         }
-    }
-    Ok(Value::Optional(None))
-})
+        let mut acc = items[0].clone();
+        for item in &items[1..] {
+            acc = invoker.invoke(f, &[acc, item.clone()]).await?;
+        }
+        Ok(acc)
+    })
 }
 
-fn list_flat_map<'a>(args: &'a [Value], invoker: &'a mut dyn CallbackInvoker) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+fn list_for_each<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
     Box::pin(async move {
-    let items = expect_list(args, 0, "flat_map")?;
-    let f = expect_fn(args, 1, "flat_map")?;
-    let mut result = Vec::new();
-    for item in items {
-        let mapped = invoker.invoke(f, std::slice::from_ref(item)).await?;
-        match mapped {
-            Value::List(inner) => result.extend(inner),
-            other => result.push(other),
+        let items = expect_list(args, 0, "for_each")?;
+        let f = expect_fn(args, 1, "for_each")?;
+        for item in items {
+            invoker.invoke(f, std::slice::from_ref(item)).await?;
         }
-    }
-    Ok(Value::List(result))
-})
+        Ok(Value::Void)
+    })
+}
+
+fn list_any<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+    Box::pin(async move {
+        let items = expect_list(args, 0, "any")?;
+        let f = expect_fn(args, 1, "any")?;
+        for item in items {
+            if let Value::Bool(true) = invoker.invoke(f, std::slice::from_ref(item)).await? {
+                return Ok(Value::Bool(true));
+            }
+        }
+        Ok(Value::Bool(false))
+    })
+}
+
+fn list_all<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+    Box::pin(async move {
+        let items = expect_list(args, 0, "all")?;
+        let f = expect_fn(args, 1, "all")?;
+        for item in items {
+            if let Value::Bool(false) = invoker.invoke(f, std::slice::from_ref(item)).await? {
+                return Ok(Value::Bool(false));
+            }
+        }
+        Ok(Value::Bool(true))
+    })
+}
+
+fn list_find<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+    Box::pin(async move {
+        let items = expect_list(args, 0, "find")?;
+        let f = expect_fn(args, 1, "find")?;
+        for item in items {
+            if let Value::Bool(true) = invoker.invoke(f, std::slice::from_ref(item)).await? {
+                return Ok(Value::Optional(Some(Box::new(item.clone()))));
+            }
+        }
+        Ok(Value::Optional(None))
+    })
+}
+
+fn list_flat_map<'a>(
+    args: &'a [Value],
+    invoker: &'a mut dyn CallbackInvoker,
+) -> BoxFuture<'a, Result<Value, RuntimeError>> {
+    Box::pin(async move {
+        let items = expect_list(args, 0, "flat_map")?;
+        let f = expect_fn(args, 1, "flat_map")?;
+        let mut result = Vec::new();
+        for item in items {
+            let mapped = invoker.invoke(f, std::slice::from_ref(item)).await?;
+            match mapped {
+                Value::List(inner) => result.extend(inner),
+                other => result.push(other),
+            }
+        }
+        Ok(Value::List(result))
+    })
 }
 
 fn list_take(args: &[Value]) -> Result<Value, RuntimeError> {

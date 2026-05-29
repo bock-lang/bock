@@ -9,7 +9,7 @@
 //!
 //! # Algorithm
 //!
-//! Walk the AIR, maintaining a per-variable [`VarOwnership`] map. At
+//! Walk the AIR, maintaining a per-variable `VarOwnership` map. At
 //! control-flow join points (if/else, match, guard) merge branch states:
 //! diverging branches are excluded; among non-diverging branches, any move
 //! makes the variable considered moved at the join.
@@ -401,8 +401,8 @@ impl OwnershipAnalyzer {
                 value,
                 ..
             } => {
-                let is_managed = self.in_managed
-                    || node.metadata.get("managed") == Some(&Value::Bool(true));
+                let is_managed =
+                    self.in_managed || node.metadata.get("managed") == Some(&Value::Bool(true));
 
                 self.analyze_move(value);
 
@@ -935,7 +935,11 @@ mod tests {
         )
     }
 
-    fn fn_decl_with(gen: &NodeIdGen, body: AIRNode, annotations: Vec<bock_ast::Annotation>) -> AIRNode {
+    fn fn_decl_with(
+        gen: &NodeIdGen,
+        body: AIRNode,
+        annotations: Vec<bock_ast::Annotation>,
+    ) -> AIRNode {
         node(
             gen,
             NodeKind::FnDecl {

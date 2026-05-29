@@ -75,14 +75,15 @@ pub fn run_clear(options: &ClearOptions) -> anyhow::Result<()> {
 }
 
 fn validate_clear_options(options: &ClearOptions) -> anyhow::Result<()> {
-    let flag_count = [options.decisions, options.rules].iter().filter(|b| **b).count();
+    let flag_count = [options.decisions, options.rules]
+        .iter()
+        .filter(|b| **b)
+        .count();
     if flag_count > 1 {
         anyhow::bail!("bock cache clear: pass at most one of --decisions or --rules");
     }
     if (options.runtime || options.build) && !options.decisions {
-        anyhow::bail!(
-            "bock cache clear: --runtime and --build only apply with --decisions"
-        );
+        anyhow::bail!("bock cache clear: --runtime and --build only apply with --decisions");
     }
     if options.runtime && options.build {
         anyhow::bail!("bock cache clear: --runtime and --build are mutually exclusive");
@@ -251,9 +252,7 @@ mod tests {
     fn clear_ai_wipes_cache_directory() {
         let dir = tempdir().unwrap();
         let cache = AiCache::new(dir.path());
-        cache
-            .put(&"req".to_string(), &"resp".to_string())
-            .unwrap();
+        cache.put(&"req".to_string(), &"resp".to_string()).unwrap();
         assert!(cache.stats().unwrap().entries > 0);
         clear_ai(dir.path()).unwrap();
         assert_eq!(cache.stats().unwrap().entries, 0);

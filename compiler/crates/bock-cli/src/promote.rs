@@ -326,22 +326,12 @@ fn analyze(files: &[PathBuf], target_strictness: Strictness) -> anyhow::Result<V
 
         // Surface effect/capability diagnostics as issues too (read-only;
         // users must declare these manually).
-        append_diag_issues(
-            &effect_diags,
-            &pf.path,
-            &source_file.content,
-            &mut issues,
-        );
+        append_diag_issues(&effect_diags, &pf.path, &source_file.content, &mut issues);
         append_diag_issues(&cap_diags, &pf.path, &source_file.content, &mut issues);
 
         // Fresh `with` clauses are offered as fixes: walk the module again to
         // pair each undeclared-effect diagnostic with the inferred effect set.
-        augment_effect_fixes(
-            &air_module,
-            &pf.path,
-            target_strictness,
-            &mut issues,
-        );
+        augment_effect_fixes(&air_module, &pf.path, target_strictness, &mut issues);
 
         if !has_errors_in(&effect_diags) && !has_errors_in(&cap_diags) {
             let exports = collect_exports(module_id, &pf.path, &checker, &air_module);
@@ -362,12 +352,7 @@ fn has_errors_in(bag: &DiagnosticBag) -> bool {
     bag.iter().any(|d| d.severity == Severity::Error)
 }
 
-fn append_diag_issues(
-    bag: &DiagnosticBag,
-    path: &Path,
-    source: &str,
-    issues: &mut Vec<Issue>,
-) {
+fn append_diag_issues(bag: &DiagnosticBag, path: &Path, source: &str, issues: &mut Vec<Issue>) {
     for diag in bag.iter() {
         let (line, column) = line_col(source, diag.span.start);
         issues.push(Issue {
@@ -495,9 +480,7 @@ fn collect_fn_issues(
     // Parameters without a type annotation.
     for p in params {
         if let NodeKind::Param {
-            ty: None,
-            pattern,
-            ..
+            ty: None, pattern, ..
         } = &p.kind
         {
             let pname = param_bind_name(pattern).unwrap_or_else(|| "_".to_string());
@@ -550,9 +533,7 @@ fn is_printable_type(ty: &Type) -> bool {
         Type::Tuple(elems) => elems.iter().all(is_printable_type),
         Type::Optional(inner) => is_printable_type(inner),
         Type::Result(ok, err) => is_printable_type(ok) && is_printable_type(err),
-        Type::Function(f) => {
-            f.params.iter().all(is_printable_type) && is_printable_type(&f.ret)
-        }
+        Type::Function(f) => f.params.iter().all(is_printable_type) && is_printable_type(&f.ret),
         Type::Refined(base, _) => is_printable_type(base),
         Type::TypeVar(_) | Type::Flexible(_) | Type::Error => false,
     }
@@ -603,12 +584,7 @@ fn param_bind_name(pattern: &AIRNode) -> Option<String> {
 /// Walk the module and, for every function with undeclared effects at
 /// `target` strictness, build a `with`-clause insertion fix. Attaches one
 /// fix per function to the first matching undeclared-effect issue.
-fn augment_effect_fixes(
-    module: &AIRNode,
-    path: &Path,
-    target: Strictness,
-    issues: &mut [Issue],
-) {
+fn augment_effect_fixes(module: &AIRNode, path: &Path, target: Strictness, issues: &mut [Issue]) {
     let mut fixes: HashMap<String, (usize, Vec<String>)> = HashMap::new();
     collect_effect_fixes(module, target, &mut fixes);
 
@@ -656,10 +632,7 @@ fn collect_effect_fixes(
     compute_missing(module, target, &declared_map, out);
 }
 
-fn collect_declared(
-    node: &AIRNode,
-    out: &mut HashMap<String, std::collections::HashSet<String>>,
-) {
+fn collect_declared(node: &AIRNode, out: &mut HashMap<String, std::collections::HashSet<String>>) {
     match &node.kind {
         NodeKind::Module { items, .. } => {
             for item in items {
@@ -677,7 +650,9 @@ fn collect_declared(
             }
         }
         NodeKind::FnDecl {
-            name, effect_clause, ..
+            name,
+            effect_clause,
+            ..
         } => {
             let set: std::collections::HashSet<String> = effect_clause
                 .iter()
@@ -733,18 +708,14 @@ fn compute_missing(
                 return;
             }
 
-            let declared = declared_map
-                .get(&name.name)
-                .cloned()
-                .unwrap_or_default();
+            let declared = declared_map.get(&name.name).cloned().unwrap_or_default();
 
             // Direct effects used in the body.
             let direct = bock_types::infer_effects(node);
 
             // Propagated effects: walk the body for called function names and
             // union their declared effects.
-            let mut callees: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            let mut callees: std::collections::HashSet<String> = std::collections::HashSet::new();
             collect_callees(body, &mut callees);
             let mut propagated: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
@@ -864,7 +835,11 @@ fn parse_file(path: &Path, source_map: &mut SourceMap) -> anyhow::Result<ParsedF
     let source_file = source_map.get_file(file_id);
     let mut lexer = Lexer::new(source_file);
     let tokens = lexer.tokenize();
-    if lexer.diagnostics().iter().any(|d| d.severity == Severity::Error) {
+    if lexer
+        .diagnostics()
+        .iter()
+        .any(|d| d.severity == Severity::Error)
+    {
         anyhow::bail!("lex errors in {}", path.display());
     }
     let mut parser = Parser::new(tokens, source_file);
@@ -966,7 +941,10 @@ mod tests {
 
     #[test]
     fn next_level_steps_through_ladder() {
-        assert_eq!(next_level(Strictness::Sketch), Some(Strictness::Development));
+        assert_eq!(
+            next_level(Strictness::Sketch),
+            Some(Strictness::Development)
+        );
         assert_eq!(
             next_level(Strictness::Development),
             Some(Strictness::Production)

@@ -293,14 +293,7 @@ mod tests {
         let cache = AiCache::new(dir.path());
         let r = req("generate");
         assert!(!cache.contains(&r));
-        cache
-            .put(
-                &r,
-                &Resp {
-                    body: "x".into(),
-                },
-            )
-            .unwrap();
+        cache.put(&r, &Resp { body: "x".into() }).unwrap();
         assert!(cache.contains(&r));
     }
 
@@ -309,14 +302,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = AiCache::new(dir.path());
         let r = req("generate");
-        cache
-            .put(
-                &r,
-                &Resp {
-                    body: "x".into(),
-                },
-            )
-            .unwrap();
+        cache.put(&r, &Resp { body: "x".into() }).unwrap();
 
         let key = compute_key(&r).unwrap();
         let shard_dir = cache.root().join(&key[..2]);
@@ -329,22 +315,8 @@ mod tests {
     fn stats_count_entries_and_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let cache = AiCache::new(dir.path());
-        cache
-            .put(
-                &req("a"),
-                &Resp {
-                    body: "one".into(),
-                },
-            )
-            .unwrap();
-        cache
-            .put(
-                &req("b"),
-                &Resp {
-                    body: "two".into(),
-                },
-            )
-            .unwrap();
+        cache.put(&req("a"), &Resp { body: "one".into() }).unwrap();
+        cache.put(&req("b"), &Resp { body: "two".into() }).unwrap();
         let stats = cache.stats().unwrap();
         assert_eq!(stats.entries, 2);
         assert!(stats.total_bytes > 0);
@@ -354,14 +326,7 @@ mod tests {
     fn clear_removes_all_entries() {
         let dir = tempfile::tempdir().unwrap();
         let cache = AiCache::new(dir.path());
-        cache
-            .put(
-                &req("a"),
-                &Resp {
-                    body: "x".into(),
-                },
-            )
-            .unwrap();
+        cache.put(&req("a"), &Resp { body: "x".into() }).unwrap();
         cache.clear().unwrap();
         assert_eq!(cache.stats().unwrap().entries, 0);
         assert!(!cache.root().exists());

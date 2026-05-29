@@ -4,9 +4,7 @@ use std::env;
 use std::path::Path;
 
 use bock_pkg::commands;
-use bock_pkg::install::{
-    self, InstallOptions, CACHE_SUBDIR,
-};
+use bock_pkg::install::{self, InstallOptions, CACHE_SUBDIR};
 use bock_pkg::manifest::Manifest;
 use bock_pkg::network::{default_registry_url, NetworkRegistry};
 use bock_pkg::resolver::PackageRegistry;
@@ -60,8 +58,7 @@ pub fn run(command: Option<PkgCommand>) -> anyhow::Result<()> {
                 offline,
                 version_req: version.clone(),
             };
-            let installed =
-                install::install_package(&project_dir, &net, &name, &options)?;
+            let installed = install::install_package(&project_dir, &net, &name, &options)?;
 
             let source_note = if installed.source == "cache" {
                 " (from cache)".to_string()

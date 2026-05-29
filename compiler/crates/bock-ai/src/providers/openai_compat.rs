@@ -23,9 +23,9 @@ use crate::config::AiConfig;
 use crate::error::AiError;
 use crate::provider::{validate_select_response, AiProvider};
 use crate::request::{
-    Alternative, CandidateRule, GenerateRequest, GenerateResponse, ModuleContext,
-    OptimizationHint, OptimizeRequest, OptimizeResponse, RepairRequest, RepairResponse,
-    SelectContext, SelectRequest, SelectResponse, TargetProfile,
+    Alternative, CandidateRule, GenerateRequest, GenerateResponse, ModuleContext, OptimizationHint,
+    OptimizeRequest, OptimizeResponse, RepairRequest, RepairResponse, SelectContext, SelectRequest,
+    SelectResponse, TargetProfile,
 };
 use bock_air::AIRNode;
 
@@ -69,9 +69,7 @@ impl OpenAiCompatProvider {
         let client = Client::builder()
             .timeout(StdDuration::from_secs(config.timeout_seconds.max(1)))
             .build()
-            .map_err(|e| {
-                AiError::ProviderError(format!("failed to build reqwest client: {e}"))
-            })?;
+            .map_err(|e| AiError::ProviderError(format!("failed to build reqwest client: {e}")))?;
 
         Ok(Self {
             config,
@@ -117,9 +115,10 @@ impl OpenAiCompatProvider {
         let resp = req.send().await.map_err(map_send_error)?;
         let status = resp.status();
         if status.is_success() {
-            let value: JsonValue = resp.json().await.map_err(|e| {
-                AiError::InvalidResponse(format!("response body not JSON: {e}"))
-            })?;
+            let value: JsonValue = resp
+                .json()
+                .await
+                .map_err(|e| AiError::InvalidResponse(format!("response body not JSON: {e}")))?;
             extract_message_content(&value)
         } else {
             let body_text = resp.text().await.unwrap_or_default();
@@ -130,10 +129,7 @@ impl OpenAiCompatProvider {
 
 #[async_trait]
 impl AiProvider for OpenAiCompatProvider {
-    async fn generate(
-        &self,
-        request: &GenerateRequest,
-    ) -> Result<GenerateResponse, AiError> {
+    async fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, AiError> {
         let (system, user) = build_generate_messages(request);
         let content = self.chat(&system, &user).await?;
         parse_generate_content(&content)
@@ -145,10 +141,7 @@ impl AiProvider for OpenAiCompatProvider {
         parse_repair_content(&content)
     }
 
-    async fn optimize(
-        &self,
-        request: &OptimizeRequest,
-    ) -> Result<OptimizeResponse, AiError> {
+    async fn optimize(&self, request: &OptimizeRequest) -> Result<OptimizeResponse, AiError> {
         let (system, user) = build_optimize_messages(request);
         let content = self.chat(&system, &user).await?;
         parse_optimize_content(&content)
@@ -443,9 +436,7 @@ fn render_air_node(node: &AIRNode) -> String {
 fn parse_generate_content(content: &str) -> Result<GenerateResponse, AiError> {
     let (code, tail) = split_code_and_tail(content);
     let code = code.ok_or_else(|| {
-        AiError::InvalidResponse(
-            "generate response missing markdown code block".into(),
-        )
+        AiError::InvalidResponse("generate response missing markdown code block".into())
     })?;
     let confidence = extract_confidence(tail.as_ref());
     let reasoning = extract_string(tail.as_ref(), "reasoning");
@@ -461,9 +452,7 @@ fn parse_generate_content(content: &str) -> Result<GenerateResponse, AiError> {
 fn parse_optimize_content(content: &str) -> Result<OptimizeResponse, AiError> {
     let (code, tail) = split_code_and_tail(content);
     let code = code.ok_or_else(|| {
-        AiError::InvalidResponse(
-            "optimize response missing markdown code block".into(),
-        )
+        AiError::InvalidResponse("optimize response missing markdown code block".into())
     })?;
     let confidence = extract_confidence(tail.as_ref());
     let reasoning = extract_string(tail.as_ref(), "reasoning");
@@ -490,9 +479,7 @@ fn parse_repair_content(content: &str) -> Result<RepairResponse, AiError> {
     let fixed_code = json
         .get("fixed_code")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            AiError::InvalidResponse("repair response missing 'fixed_code'".into())
-        })?
+        .ok_or_else(|| AiError::InvalidResponse("repair response missing 'fixed_code'".into()))?
         .to_string();
     let confidence = extract_confidence(Some(&json));
     let reasoning = extract_string(Some(&json), "reasoning");
@@ -513,9 +500,7 @@ fn parse_select_content(content: &str) -> Result<SelectResponse, AiError> {
     let selected_id = json
         .get("selected_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            AiError::InvalidResponse("select response missing 'selected_id'".into())
-        })?
+        .ok_or_else(|| AiError::InvalidResponse("select response missing 'selected_id'".into()))?
         .to_string();
     let confidence = extract_confidence(Some(&json));
     let reasoning = extract_string(Some(&json), "reasoning");
@@ -620,9 +605,8 @@ fn parse_json_object(content: &str) -> Result<JsonValue, AiError> {
         }
     }
     // Last resort: find the first balanced {...} slice.
-    extract_first_json_object(trimmed).ok_or_else(|| {
-        AiError::InvalidResponse("response did not contain a JSON object".into())
-    })
+    extract_first_json_object(trimmed)
+        .ok_or_else(|| AiError::InvalidResponse("response did not contain a JSON object".into()))
 }
 
 fn extract_first_json_object(s: &str) -> Option<JsonValue> {
@@ -745,12 +729,10 @@ mod tests {
 
     #[test]
     fn chat_url_appends_endpoint() {
-        let p = OpenAiCompatProvider::new(local_config("http://localhost:8080/v1", "m"))
-            .unwrap();
+        let p = OpenAiCompatProvider::new(local_config("http://localhost:8080/v1", "m")).unwrap();
         assert_eq!(p.chat_url(), "http://localhost:8080/v1/chat/completions");
 
-        let p2 = OpenAiCompatProvider::new(local_config("http://127.0.0.1:8080/v1/", "m"))
-            .unwrap();
+        let p2 = OpenAiCompatProvider::new(local_config("http://127.0.0.1:8080/v1/", "m")).unwrap();
         assert_eq!(p2.chat_url(), "http://127.0.0.1:8080/v1/chat/completions");
     }
 
@@ -952,8 +934,7 @@ mod tests {
 
     #[test]
     fn confidence_clamped_to_unit_interval() {
-        let content =
-            "```\nx\n```\n{\"confidence\": 1.5, \"reasoning\": \"overeager\"}";
+        let content = "```\nx\n```\n{\"confidence\": 1.5, \"reasoning\": \"overeager\"}";
         let r = parse_generate_content(content).expect("parsed");
         assert!((r.confidence - 1.0).abs() < 1e-9);
     }
@@ -976,10 +957,8 @@ mod tests {
                 description: "fallback".into(),
             },
         ];
-        let resp = parse_select_content(
-            "{\"selected_id\": \"escalate\", \"confidence\": 0.9}",
-        )
-        .unwrap();
+        let resp =
+            parse_select_content("{\"selected_id\": \"escalate\", \"confidence\": 0.9}").unwrap();
         let err = validate_select_response(&options, &resp).unwrap_err();
         assert!(matches!(err, AiError::InvalidResponse(_)));
     }

@@ -76,10 +76,7 @@ impl Default for StubProvider {
 
 #[async_trait]
 impl AiProvider for StubProvider {
-    async fn generate(
-        &self,
-        request: &GenerateRequest,
-    ) -> Result<GenerateResponse, AiError> {
+    async fn generate(&self, request: &GenerateRequest) -> Result<GenerateResponse, AiError> {
         Ok(GenerateResponse {
             code: format!("// stub generate for target '{}'\n", request.target.id),
             confidence: 1.0,
@@ -97,10 +94,7 @@ impl AiProvider for StubProvider {
         })
     }
 
-    async fn optimize(
-        &self,
-        request: &OptimizeRequest,
-    ) -> Result<OptimizeResponse, AiError> {
+    async fn optimize(&self, request: &OptimizeRequest) -> Result<OptimizeResponse, AiError> {
         Ok(OptimizeResponse {
             optimized_code: request.working_code.clone(),
             confidence: 1.0,
@@ -110,9 +104,10 @@ impl AiProvider for StubProvider {
     }
 
     async fn select(&self, request: &SelectRequest) -> Result<SelectResponse, AiError> {
-        let first = request.options.first().ok_or_else(|| {
-            AiError::InvalidResponse("stub select: empty option set".into())
-        })?;
+        let first = request
+            .options
+            .first()
+            .ok_or_else(|| AiError::InvalidResponse("stub select: empty option set".into()))?;
         let response = SelectResponse {
             selected_id: first.id.clone(),
             confidence: 1.0,
@@ -144,9 +139,7 @@ pub fn make_provider(config: AiConfig) -> Result<Box<dyn AiProvider>, AiError> {
         "stub" => Ok(Box::new(StubProvider::new(config))),
         "openai-compatible" => Ok(Box::new(OpenAiCompatProvider::new(config)?)),
         "anthropic" => Ok(Box::new(AnthropicProvider::new(config)?)),
-        other => Err(AiError::ProviderError(format!(
-            "unknown provider: {other}"
-        ))),
+        other => Err(AiError::ProviderError(format!("unknown provider: {other}"))),
     }
 }
 

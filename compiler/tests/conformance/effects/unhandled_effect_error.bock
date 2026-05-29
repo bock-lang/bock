@@ -1,0 +1,17 @@
+// TEST: effect_unhandled_no_handler_in_scope
+// EXPECT: error E8020 at 16:3
+// §10.3: a function that invokes an effect operation with NO Layer-1 (`handling`
+// block) and NO Layer-2 (`handle ... with`) handler in scope, and which does not
+// declare the effect in its own `with` clause, is a compile-time error. Here
+// `main` invokes the `Log` effect operation `log` with no handler installed and
+// no `with Log` clause, so the unhandled-effect-operation error (E8020, per the
+// capability-verification pass) is expected at the `log(...)` call site (16:3).
+module effects_unhandled_effect_error
+
+effect Log {
+  fn log(message: String) -> Void
+}
+
+fn main() {
+  log("no handler is installed for Log")
+}

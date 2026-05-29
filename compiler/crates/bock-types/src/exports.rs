@@ -1,9 +1,9 @@
-//! Export collection pass — extracts public declarations into the [`ModuleRegistry`].
+//! Export collection pass — extracts public declarations into the [`bock_air::registry::ModuleRegistry`].
 //!
 //! After a module is fully compiled (resolve → lower → check → analyze),
 //! [`collect_exports`] scans its top-level AIR items and the [`TypeChecker`]'s
 //! internal tables to build a [`ModuleExports`] entry for the
-//! [`ModuleRegistry`].
+//! [`bock_air::registry::ModuleRegistry`].
 //!
 //! # Type Representation
 //!
@@ -115,7 +115,7 @@ fn format_primitive(p: &PrimitiveType) -> String {
 ///
 /// Walks the module's top-level AIR items and queries the [`TypeChecker`]
 /// to extract type information, building a [`ModuleExports`] suitable for
-/// registration in the [`ModuleRegistry`].
+/// registration in the [`bock_air::registry::ModuleRegistry`].
 ///
 /// Both `Public` and `Internal` declarations are exported. `Private`
 /// declarations are registered but flagged as non-public (the registry
@@ -173,10 +173,8 @@ pub fn collect_exports(
                     })
                     .unwrap_or_default();
 
-                let gp_names: Vec<String> = generic_params
-                    .iter()
-                    .map(|g| g.name.name.clone())
-                    .collect();
+                let gp_names: Vec<String> =
+                    generic_params.iter().map(|g| g.name.name.clone()).collect();
 
                 let methods = checker
                     .method_types()
@@ -211,15 +209,17 @@ pub fn collect_exports(
                 ..
             } => {
                 let enum_name = &name.name;
-                let gp_names: Vec<String> = generic_params
-                    .iter()
-                    .map(|g| g.name.name.clone())
-                    .collect();
+                let gp_names: Vec<String> =
+                    generic_params.iter().map(|g| g.name.name.clone()).collect();
 
                 let variant_exports: Vec<EnumVariantExport> = variants
                     .iter()
                     .filter_map(|v| {
-                        if let NodeKind::EnumVariant { name: vname, payload } = &v.kind {
+                        if let NodeKind::EnumVariant {
+                            name: vname,
+                            payload,
+                        } = &v.kind
+                        {
                             Some(collect_enum_variant(vname.name.as_str(), payload, checker))
                         } else {
                             None
@@ -286,9 +286,7 @@ pub fn collect_exports(
             }
 
             NodeKind::EffectDecl {
-                visibility,
-                name,
-                ..
+                visibility, name, ..
             } => {
                 let effect_name = &name.name;
                 let operations: Vec<(String, TypeRef)> = checker
@@ -696,11 +694,18 @@ mod tests {
         let mut checker = TypeChecker::new();
         checker.check_module(&mut air_module);
 
-        let exports =
-            collect_exports("app.greet", Path::new("src/greet.bock"), &checker, &air_module);
+        let exports = collect_exports(
+            "app.greet",
+            Path::new("src/greet.bock"),
+            &checker,
+            &air_module,
+        );
 
         assert_eq!(exports.module_id, "app.greet");
-        let sym = exports.symbols.get("greet").expect("greet should be exported");
+        let sym = exports
+            .symbols
+            .get("greet")
+            .expect("greet should be exported");
         assert_eq!(sym.kind, ExportKind::Function);
         assert_eq!(sym.visibility, Visibility::Public);
         assert_eq!(sym.ty.0, "Fn(String) -> String");
@@ -740,10 +745,17 @@ mod tests {
         let mut checker = TypeChecker::new();
         checker.check_module(&mut air_module);
 
-        let exports =
-            collect_exports("app.models", Path::new("models.bock"), &checker, &air_module);
+        let exports = collect_exports(
+            "app.models",
+            Path::new("models.bock"),
+            &checker,
+            &air_module,
+        );
 
-        let sym = exports.symbols.get("User").expect("User should be exported");
+        let sym = exports
+            .symbols
+            .get("User")
+            .expect("User should be exported");
         assert_eq!(sym.kind, ExportKind::Record);
         assert_eq!(sym.visibility, Visibility::Public);
         match &sym.detail {
@@ -811,10 +823,12 @@ mod tests {
         let mut checker = TypeChecker::new();
         checker.check_module(&mut air_module);
 
-        let exports =
-            collect_exports("app.roles", Path::new("roles.bock"), &checker, &air_module);
+        let exports = collect_exports("app.roles", Path::new("roles.bock"), &checker, &air_module);
 
-        let sym = exports.symbols.get("Role").expect("Role should be exported");
+        let sym = exports
+            .symbols
+            .get("Role")
+            .expect("Role should be exported");
         assert_eq!(sym.kind, ExportKind::Enum);
         match &sym.detail {
             ExportDetail::Enum {
@@ -903,8 +917,12 @@ mod tests {
         let mut checker = TypeChecker::new();
         checker.check_module(&mut air_module);
 
-        let exports =
-            collect_exports("app.traits", Path::new("traits.bock"), &checker, &air_module);
+        let exports = collect_exports(
+            "app.traits",
+            Path::new("traits.bock"),
+            &checker,
+            &air_module,
+        );
 
         let sym = exports
             .symbols
@@ -969,8 +987,12 @@ mod tests {
         let mut checker = TypeChecker::new();
         checker.check_module(&mut air_module);
 
-        let exports =
-            collect_exports("app.effects", Path::new("effects.bock"), &checker, &air_module);
+        let exports = collect_exports(
+            "app.effects",
+            Path::new("effects.bock"),
+            &checker,
+            &air_module,
+        );
 
         let sym = exports
             .symbols
@@ -1026,8 +1048,7 @@ mod tests {
         let mut checker = TypeChecker::new();
         checker.check_module(&mut air_module);
 
-        let exports =
-            collect_exports("app.util", Path::new("util.bock"), &checker, &air_module);
+        let exports = collect_exports("app.util", Path::new("util.bock"), &checker, &air_module);
 
         let sym = exports
             .symbols
@@ -1107,8 +1128,7 @@ mod tests {
         let mut checker = TypeChecker::new();
         checker.check_module(&mut air_module);
 
-        let exports =
-            collect_exports("app.mixed", Path::new("mixed.bock"), &checker, &air_module);
+        let exports = collect_exports("app.mixed", Path::new("mixed.bock"), &checker, &air_module);
 
         assert_eq!(exports.symbols.len(), 3);
         assert_eq!(exports.symbols["public_fn"].visibility, Visibility::Public);
@@ -1133,10 +1153,7 @@ mod tests {
                 annotations: vec![],
                 visibility: Visibility::Public,
                 name: dummy_ident("Pair"),
-                generic_params: vec![
-                    make_generic_param(&gen, "A"),
-                    make_generic_param(&gen, "B"),
-                ],
+                generic_params: vec![make_generic_param(&gen, "A"), make_generic_param(&gen, "B")],
                 fields: vec![
                     make_record_field(&gen, "first", "A"),
                     make_record_field(&gen, "second", "B"),
@@ -1159,10 +1176,17 @@ mod tests {
         let mut checker = TypeChecker::new();
         checker.check_module(&mut air_module);
 
-        let exports =
-            collect_exports("app.generics", Path::new("generics.bock"), &checker, &air_module);
+        let exports = collect_exports(
+            "app.generics",
+            Path::new("generics.bock"),
+            &checker,
+            &air_module,
+        );
 
-        let sym = exports.symbols.get("Pair").expect("Pair should be exported");
+        let sym = exports
+            .symbols
+            .get("Pair")
+            .expect("Pair should be exported");
         assert_eq!(sym.kind, ExportKind::Record);
         match &sym.detail {
             ExportDetail::Record {
@@ -1215,8 +1239,12 @@ mod tests {
         let mut checker = TypeChecker::new();
         checker.check_module(&mut air_module);
 
-        let module_exports =
-            collect_exports("app.process", Path::new("process.bock"), &checker, &air_module);
+        let module_exports = collect_exports(
+            "app.process",
+            Path::new("process.bock"),
+            &checker,
+            &air_module,
+        );
 
         // Register in the ModuleRegistry and verify it's queryable.
         let mut registry = ModuleRegistry::new();

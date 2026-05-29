@@ -235,11 +235,7 @@ impl NetworkRegistry {
     ///
     /// When the tarball is already cached, the checksum in the returned meta
     /// is still fetched from the registry to keep lockfile entries accurate.
-    pub fn fetch_package(
-        &self,
-        name: &str,
-        version: &str,
-    ) -> Result<FetchedPackage, PkgError> {
+    pub fn fetch_package(&self, name: &str, version: &str) -> Result<FetchedPackage, PkgError> {
         let meta = self.fetch_version_meta(name, version)?;
         let cache_path = self.cache_dir.join(format!("{name}-{version}.tar.gz"));
 
@@ -544,7 +540,8 @@ mod tests {
     fn download_package_rejects_bad_checksum() {
         let mut server = Server::new();
         let tarball = b"bytes that do not match";
-        let body = r#"{"manifest":{"dependencies":{}},"checksum":"sha256:deadbeef","download_url":""}"#;
+        let body =
+            r#"{"manifest":{"dependencies":{}},"checksum":"sha256:deadbeef","download_url":""}"#;
         let _meta = server
             .mock("GET", "/packages/foo/1.0.0")
             .with_status(200)
@@ -621,9 +618,7 @@ mod tests {
         // Point at a URL with no server listening; with a fallback, hydration
         // should swallow the transport error and return the fallback entries.
         let mut fallback = PackageRegistry::new();
-        fallback
-            .register("foo", "1.0.0", BTreeMap::new())
-            .unwrap();
+        fallback.register("foo", "1.0.0", BTreeMap::new()).unwrap();
 
         let (_tmp, cache) = tmp_cache();
         let reg = NetworkRegistry::new("http://127.0.0.1:1/", cache)

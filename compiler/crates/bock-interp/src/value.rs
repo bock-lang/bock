@@ -233,7 +233,7 @@ static NEXT_ITER_ID: AtomicU64 = AtomicU64::new(1);
 /// on demand via [`IteratorKind::next`]. Combinators like `map` and `filter`
 /// require interpreter support to invoke Bock closures — these store the
 /// function value but their `next()` returns a special
-/// [`IteratorNext::NeedsCallback`] signal.
+/// `IteratorNext::NeedsCallback` signal.
 #[derive(Debug)]
 pub enum IteratorKind {
     /// Iterate over a list of values.
@@ -1092,7 +1092,7 @@ mod tests {
     #[test]
     fn display_primitives() {
         assert_eq!(Value::Int(42).to_string(), "42");
-        assert_eq!(Value::Float(OrdF64(3.14)).to_string(), "3.14");
+        assert_eq!(Value::Float(OrdF64(3.5)).to_string(), "3.5");
         assert_eq!(Value::Bool(true).to_string(), "true");
         assert_eq!(Value::Bool(false).to_string(), "false");
         assert_eq!(Value::String(BockString::new("hi")).to_string(), "hi");

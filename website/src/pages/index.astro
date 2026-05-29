@@ -12,7 +12,7 @@ import homepageSample from '../content/homepage-sample.bock?raw';
 const HOMEPAGE_BOCK_SAMPLE = homepageSample.replace(/\n$/, '');
 ---
 
-<BaseLayout title="Bock — A feature-declarative programming language">
+<BaseLayout title="Bock - A feature-declarative programming language">
   <Nav current="/" />
   <main>
     <Hero
@@ -73,7 +73,7 @@ const HOMEPAGE_BOCK_SAMPLE = homepageSample.replace(/\n$/, '');
 </BaseLayout>
 
 <script>
-  // Code-block "Copy" button — wires every CodeBlock instance.
+  // Code-block "Copy" button - wires every CodeBlock instance.
   document.querySelectorAll<HTMLButtonElement>('[data-bock-copy]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const code = btn.dataset.code ?? '';

@@ -111,7 +111,10 @@ pub async fn run(filter: Option<String>, files: Vec<PathBuf>) -> anyhow::Result<
 }
 
 /// Compile a single file and run all `@test` functions found in it.
-async fn run_tests_in_file(path: &Path, filter: &Option<String>) -> anyhow::Result<Vec<TestResult>> {
+async fn run_tests_in_file(
+    path: &Path,
+    filter: &Option<String>,
+) -> anyhow::Result<Vec<TestResult>> {
     let content =
         std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
 
@@ -263,28 +266,23 @@ async fn run_single_test(items: &[bock_air::AIRNode], test_name: &str) -> Result
     for item in items {
         match &item.kind {
             NodeKind::FnDecl {
-                name, params, body, is_async, ..
+                name,
+                params,
+                body,
+                is_async,
+                ..
             } => {
                 let param_names: Vec<String> =
                     params.iter().filter_map(extract_param_name).collect();
-                interp.register_fn_with_async(
-                    &name.name,
-                    param_names,
-                    *body.clone(),
-                    *is_async,
-                );
+                interp.register_fn_with_async(&name.name, param_names, *body.clone(), *is_async);
             }
-            NodeKind::EnumDecl {
-                name, variants, ..
-            } => {
+            NodeKind::EnumDecl { name, variants, .. } => {
                 interp.register_enum(&name.name, variants);
             }
-            NodeKind::ConstDecl { name, value, .. } => {
-                match interp.eval_expr(value).await {
-                    Ok(val) => interp.env.define(&name.name, val),
-                    Err(e) => return Err(format!("setup error: {e}")),
-                }
-            }
+            NodeKind::ConstDecl { name, value, .. } => match interp.eval_expr(value).await {
+                Ok(val) => interp.env.define(&name.name, val),
+                Err(e) => return Err(format!("setup error: {e}")),
+            },
             NodeKind::ImplBlock {
                 target, methods, ..
             } => {

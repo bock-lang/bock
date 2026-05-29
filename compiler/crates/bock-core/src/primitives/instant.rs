@@ -30,7 +30,11 @@ pub fn register(registry: &mut BuiltinRegistry) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-fn expect_instant(args: &[Value], pos: usize, method: &str) -> Result<std::time::Instant, RuntimeError> {
+fn expect_instant(
+    args: &[Value],
+    pos: usize,
+    method: &str,
+) -> Result<std::time::Instant, RuntimeError> {
     match args.get(pos) {
         Some(Value::Instant(i)) => Ok(*i),
         Some(other) => Err(RuntimeError::TypeError(format!(

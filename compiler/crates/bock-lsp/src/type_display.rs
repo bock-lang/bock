@@ -132,10 +132,7 @@ mod tests {
     #[test]
     fn primitive() {
         assert_eq!(format_type(&int()), "Int");
-        assert_eq!(
-            format_type(&Type::Primitive(PrimitiveType::Void)),
-            "Void"
-        );
+        assert_eq!(format_type(&Type::Primitive(PrimitiveType::Void)), "Void");
     }
 
     #[test]

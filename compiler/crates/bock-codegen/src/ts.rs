@@ -91,16 +91,16 @@ impl CodeGenerator for TsGenerator {
         ctx.emit_node(module)?;
         let (content, mappings) = ctx.finish();
         let source_map = SourceMap {
-            generated_file: "output.ts".to_string(),
+            generated_file: String::new(),
             mappings,
             ..Default::default()
         };
         Ok(GeneratedCode {
             files: vec![OutputFile {
-                path: PathBuf::from("output.ts"),
+                path: PathBuf::new(),
                 content,
+                source_map: Some(source_map),
             }],
-            source_map: Some(source_map),
         })
     }
 
@@ -904,8 +904,7 @@ impl TsEmitCtx {
                         name.name,
                         comp_names.join(" + ")
                     ));
-                    self.composite_effects
-                        .insert(name.name.clone(), comp_names);
+                    self.composite_effects.insert(name.name.clone(), comp_names);
                     return Ok(());
                 }
                 // Record effect operations for Call → handler.op rewriting.
@@ -987,8 +986,7 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::ModuleHandle { effect, handler } => {
-                let effect_name =
-                    effect.segments.last().map_or("effect", |s| s.name.as_str());
+                let effect_name = effect.segments.last().map_or("effect", |s| s.name.as_str());
                 let var_name = format!("__{}", to_camel_case(effect_name));
                 let type_name = effect_name;
                 let ind = self.indent_str();
@@ -1472,8 +1470,11 @@ impl TsEmitCtx {
                 self.indent += 1;
                 let old_handler_vars = self.current_handler_vars.clone();
                 for h in handlers {
-                    let effect_name =
-                        h.effect.segments.last().map_or("effect", |s| s.name.as_str());
+                    let effect_name = h
+                        .effect
+                        .segments
+                        .last()
+                        .map_or("effect", |s| s.name.as_str());
                     let var_name = format!("__{}", to_camel_case(effect_name));
                     let type_name = effect_name;
                     let ind = self.indent_str();
@@ -1740,11 +1741,7 @@ impl TsEmitCtx {
                 fields,
                 spread,
             } => {
-                let type_name = path
-                    .segments
-                    .last()
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("");
+                let type_name = path.segments.last().map(|s| s.name.as_str()).unwrap_or("");
                 let is_class = self.record_names.contains(type_name);
                 if is_class {
                     let _ = write!(self.buf, "new {type_name}(");
@@ -2519,11 +2516,12 @@ mod tests {
     }
 
     #[test]
-    fn output_has_ts_extension() {
+    fn generate_project_uses_source_mirrored_path_for_ts() {
         let gen = TsGenerator::new();
         let m = module(vec![], vec![]);
-        let result = gen.generate_module(&m).unwrap();
-        assert_eq!(result.files[0].path.to_str().unwrap(), "output.ts");
+        let src_path = std::path::Path::new("src/lib.bock");
+        let result = gen.generate_project(&[(&m, src_path)]).unwrap();
+        assert_eq!(result.files[0].path, std::path::PathBuf::from("lib.ts"));
     }
 
     // ── Type annotations ────────────────────────────────────────────────────
@@ -2941,8 +2939,10 @@ mod tests {
         );
         let m = module(vec![], vec![main_fn]);
         let gen = TsGenerator::new();
-        let out = gen.generate_project(&[&m]).unwrap();
+        let src_path = std::path::Path::new("src/main.bock");
+        let out = gen.generate_project(&[(&m, src_path)]).unwrap();
         let src = &out.files[0].content;
+        assert_eq!(out.files[0].path, std::path::PathBuf::from("main.ts"));
         assert!(src.contains("async function main()"), "got: {src}");
         assert!(
             src.contains("(async () => { await main(); })();"),

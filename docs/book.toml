@@ -3,7 +3,6 @@ title = "Bock Language Documentation"
 description = "Reference and tutorial for the Bock programming language"
 authors = ["Bock Language Contributors"]
 language = "en"
-multilingual = false
 src = "src"
 
 [build]

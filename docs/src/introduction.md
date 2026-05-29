@@ -22,7 +22,7 @@ compiler emits idiomatic source code in any of its supported targets.
 ## Status
 
 Bock is in active development. The language reference is at
-`spec/bock-spec.md`; the formal grammar is in `spec/sections/`. See
+`spec/bock-spec.md`; the formal grammar is §21 of the same file. See
 [Getting Started](./getting-started.md) for the first end-to-end
 example.
 

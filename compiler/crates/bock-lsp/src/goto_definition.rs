@@ -194,13 +194,16 @@ impl DefinitionFinder {
         for item in &module.items {
             match item {
                 Item::Fn(d) => {
-                    self.toplevel_by_name.insert(d.name.name.clone(), d.name.span);
+                    self.toplevel_by_name
+                        .insert(d.name.name.clone(), d.name.span);
                 }
                 Item::Record(d) => {
-                    self.toplevel_by_name.insert(d.name.name.clone(), d.name.span);
+                    self.toplevel_by_name
+                        .insert(d.name.name.clone(), d.name.span);
                 }
                 Item::Enum(d) => {
-                    self.toplevel_by_name.insert(d.name.name.clone(), d.name.span);
+                    self.toplevel_by_name
+                        .insert(d.name.name.clone(), d.name.span);
                     for v in &d.variants {
                         let (name, span) = match v {
                             EnumVariant::Unit { name, .. }
@@ -211,19 +214,24 @@ impl DefinitionFinder {
                     }
                 }
                 Item::Class(d) => {
-                    self.toplevel_by_name.insert(d.name.name.clone(), d.name.span);
+                    self.toplevel_by_name
+                        .insert(d.name.name.clone(), d.name.span);
                 }
                 Item::Trait(d) | Item::PlatformTrait(d) => {
-                    self.toplevel_by_name.insert(d.name.name.clone(), d.name.span);
+                    self.toplevel_by_name
+                        .insert(d.name.name.clone(), d.name.span);
                 }
                 Item::Effect(d) => {
-                    self.toplevel_by_name.insert(d.name.name.clone(), d.name.span);
+                    self.toplevel_by_name
+                        .insert(d.name.name.clone(), d.name.span);
                 }
                 Item::TypeAlias(d) => {
-                    self.toplevel_by_name.insert(d.name.name.clone(), d.name.span);
+                    self.toplevel_by_name
+                        .insert(d.name.name.clone(), d.name.span);
                 }
                 Item::Const(d) => {
-                    self.toplevel_by_name.insert(d.name.name.clone(), d.name.span);
+                    self.toplevel_by_name
+                        .insert(d.name.name.clone(), d.name.span);
                 }
                 Item::Impl(_)
                 | Item::ModuleHandle(_)

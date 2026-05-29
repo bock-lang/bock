@@ -218,7 +218,7 @@ impl BuiltinRegistry {
     /// additional arguments. Returns `None` if no method is registered,
     /// allowing the interpreter to fall back to other dispatch mechanisms.
     ///
-    /// Note: this does NOT check higher-order methods. Use [`get_ho_method`]
+    /// Note: this does NOT check higher-order methods. Use `get_ho_method`
     /// for those, since they require a [`CallbackInvoker`].
     pub fn call(
         &self,
@@ -816,7 +816,7 @@ mod tests {
         let reg = make_registry();
         let recv = Value::String(BockString::new("test"));
         let result = reg
-            .call(TypeTag::String, "to_string", &[recv.clone()])
+            .call(TypeTag::String, "to_string", std::slice::from_ref(&recv))
             .unwrap()
             .unwrap();
         assert_eq!(result, recv);

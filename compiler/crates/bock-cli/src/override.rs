@@ -110,8 +110,8 @@ fn pin(
     force_runtime: bool,
     reason: Option<&str>,
 ) -> anyhow::Result<()> {
-    let (decision, scope) = resolve_id(writer, id, None)
-        .map_err(|e| anyhow::anyhow!("bock override: {e}"))?;
+    let (decision, scope) =
+        resolve_id(writer, id, None).map_err(|e| anyhow::anyhow!("bock override: {e}"))?;
     if force_runtime && scope != ManifestScope::Runtime {
         anyhow::bail!(
             "bock override: `--runtime` was requested but id `{id}` is a {} decision",
@@ -166,8 +166,8 @@ fn replace_choice(
     new_choice: String,
     reason: Option<&str>,
 ) -> anyhow::Result<()> {
-    let (decision, scope) = resolve_id(writer, id, None)
-        .map_err(|e| anyhow::anyhow!("bock override: {e}"))?;
+    let (decision, scope) =
+        resolve_id(writer, id, None).map_err(|e| anyhow::anyhow!("bock override: {e}"))?;
     if force_runtime && scope != ManifestScope::Runtime {
         anyhow::bail!(
             "bock override: `--runtime` was requested but id `{id}` is a {} decision",
@@ -184,9 +184,10 @@ fn replace_choice(
         if entry.id == decision.id {
             entry.choice = new_choice.clone();
             entry.pinned = true;
-            entry.pin_reason = Some(reason.map(str::to_owned).unwrap_or_else(|| {
-                format!("override via `bock override <id> <choice>` by {who}")
-            }));
+            entry.pin_reason =
+                Some(reason.map(str::to_owned).unwrap_or_else(|| {
+                    format!("override via `bock override <id> <choice>` by {who}")
+                }));
             entry.pinned_at = Some(now);
             entry.pinned_by = Some(who.clone());
             found = true;
@@ -222,9 +223,7 @@ fn promote(
     let (decision, scope) = match resolve_id(writer, id, None) {
         Ok(pair) => pair,
         Err(e) => {
-            anyhow::bail!(
-                "bock override --promote: no decision found with id `{id}` ({e})"
-            );
+            anyhow::bail!("bock override --promote: no decision found with id `{id}` ({e})");
         }
     };
     if scope != ManifestScope::Runtime {
@@ -339,11 +338,7 @@ mod tests {
     }
 
     fn seed_runtime(root: &Path, decisions: &[Decision]) {
-        let path = manifest_file_path(
-            root,
-            ManifestScope::Runtime,
-            &decisions[0].module,
-        );
+        let path = manifest_file_path(root, ManifestScope::Runtime, &decisions[0].module);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, serde_json::to_vec_pretty(decisions).unwrap()).unwrap();
     }
@@ -366,8 +361,7 @@ mod tests {
             ManifestScope::Build,
             &PathBuf::from("src/api.bock"),
         );
-        let build: Vec<Decision> =
-            serde_json::from_slice(&fs::read(&build_path).unwrap()).unwrap();
+        let build: Vec<Decision> = serde_json::from_slice(&fs::read(&build_path).unwrap()).unwrap();
         assert_eq!(build.len(), 1);
         assert_eq!(build[0].id, "rt1+promoted");
         assert_eq!(build[0].decision_type, DecisionType::HandlerChoice);
@@ -456,8 +450,7 @@ mod tests {
             ManifestScope::Build,
             &PathBuf::from("src/api.bock"),
         );
-        let build: Vec<Decision> =
-            serde_json::from_slice(&fs::read(&build_path).unwrap()).unwrap();
+        let build: Vec<Decision> = serde_json::from_slice(&fs::read(&build_path).unwrap()).unwrap();
         assert_eq!(build.len(), 2);
         let mut ids: Vec<_> = build.into_iter().map(|d| d.id).collect();
         ids.sort();
@@ -498,10 +491,7 @@ mod tests {
 
         let entries: Vec<Decision> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(entries[0].pinned);
-        assert_eq!(
-            entries[0].pin_reason.as_deref(),
-            Some("reviewed by @alice")
-        );
+        assert_eq!(entries[0].pin_reason.as_deref(), Some("reviewed by @alice"));
         assert!(entries[0].pinned_at.is_some());
         assert!(entries[0].pinned_by.is_some());
     }

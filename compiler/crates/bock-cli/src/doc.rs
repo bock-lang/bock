@@ -96,11 +96,7 @@ struct ProjectMeta {
 }
 
 /// Run `bock doc`.
-pub fn run(
-    path: Option<String>,
-    output_dir: Option<String>,
-    format: &str,
-) -> anyhow::Result<()> {
+pub fn run(path: Option<String>, output_dir: Option<String>, format: &str) -> anyhow::Result<()> {
     let format = DocFormat::parse(format)?;
     let input = PathBuf::from(path.as_deref().unwrap_or("."));
 
@@ -110,7 +106,10 @@ pub fn run(
         files.sort();
         (files, input.join("docs"), input.clone())
     } else if input.is_file() {
-        let parent = input.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let parent = input
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         (vec![input.clone()], parent.join("docs"), parent)
     } else {
         eprintln!("error: path does not exist: {}", input.display());
@@ -417,7 +416,10 @@ fn md_fn(out: &mut String, d: &FnDecl, source: &str, heading: &str) {
 fn md_record(out: &mut String, d: &RecordDecl, source: &str) {
     let vis = vis_str(d.visibility);
     let generics = format_generics_plain(&d.generic_params);
-    out.push_str(&format!("### `{vis}record {}{}`\n\n", d.name.name, generics));
+    out.push_str(&format!(
+        "### `{vis}record {}{}`\n\n",
+        d.name.name, generics
+    ));
     let docs = docs_for(source, declaration_start(d.span.start, &d.annotations));
     append_docs_md(out, &docs);
 
@@ -464,9 +466,16 @@ fn md_enum(out: &mut String, d: &EnumDecl, source: &str) {
 
 fn md_trait(out: &mut String, d: &TraitDecl, source: &str) {
     let vis = vis_str(d.visibility);
-    let kind = if d.is_platform { "platform trait" } else { "trait" };
+    let kind = if d.is_platform {
+        "platform trait"
+    } else {
+        "trait"
+    };
     let generics = format_generics_plain(&d.generic_params);
-    out.push_str(&format!("### `{vis}{kind} {}{}`\n\n", d.name.name, generics));
+    out.push_str(&format!(
+        "### `{vis}{kind} {}{}`\n\n",
+        d.name.name, generics
+    ));
     let docs = docs_for(source, declaration_start(d.span.start, &d.annotations));
     append_docs_md(out, &docs);
 
@@ -481,7 +490,10 @@ fn md_trait(out: &mut String, d: &TraitDecl, source: &str) {
 fn md_effect(out: &mut String, d: &EffectDecl, source: &str) {
     let vis = vis_str(d.visibility);
     let generics = format_generics_plain(&d.generic_params);
-    out.push_str(&format!("### `{vis}effect {}{}`\n\n", d.name.name, generics));
+    out.push_str(&format!(
+        "### `{vis}effect {}{}`\n\n",
+        d.name.name, generics
+    ));
     let docs = docs_for(source, declaration_start(d.span.start, &d.annotations));
     append_docs_md(out, &docs);
 
@@ -647,7 +659,11 @@ fn wrap_html_page(
     let mut sidebar = String::new();
     sidebar.push_str("<nav class=\"sidebar\">\n");
     sidebar.push_str("<h2>Index</h2>\n<ul>\n");
-    let index_current = if current_slug.is_none() { " class=\"current\"" } else { "" };
+    let index_current = if current_slug.is_none() {
+        " class=\"current\""
+    } else {
+        ""
+    };
     sidebar.push_str(&format!(
         "  <li><a href=\"index.html\"{index_current}>Overview</a></li>\n"
     ));
@@ -805,7 +821,11 @@ fn html_enum(out: &mut String, d: &EnumDecl, source: &str, ctx: &RenderCtx<'_>) 
 
 fn html_trait(out: &mut String, d: &TraitDecl, source: &str, ctx: &RenderCtx<'_>) {
     let vis = vis_str(d.visibility);
-    let kind = if d.is_platform { "platform trait" } else { "trait" };
+    let kind = if d.is_platform {
+        "platform trait"
+    } else {
+        "trait"
+    };
     let generics = format_generics_html(&d.generic_params, ctx);
     let anchor = anchor_for(&d.name.name);
     let vis_html = kw_html_prefix(vis);
@@ -932,8 +952,7 @@ fn format_type_html(t: &TypeExpr, ctx: &RenderCtx<'_>) -> String {
             if args.is_empty() {
                 base
             } else {
-                let arg_strs: Vec<String> =
-                    args.iter().map(|a| format_type_html(a, ctx)).collect();
+                let arg_strs: Vec<String> = args.iter().map(|a| format_type_html(a, ctx)).collect();
                 format!("{}[{}]", base, arg_strs.join(", "))
             }
         }
@@ -1358,7 +1377,10 @@ mod tests {
             strip_field("version=\"0.1.0\"", "version"),
             Some("0.1.0".to_string())
         );
-        assert_eq!(strip_field("version = 0.1", "version"), Some("0.1".to_string()));
+        assert_eq!(
+            strip_field("version = 0.1", "version"),
+            Some("0.1".to_string())
+        );
         assert_eq!(strip_field("other = 1", "name"), None);
     }
 }

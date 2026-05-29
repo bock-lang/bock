@@ -172,10 +172,7 @@ fn build_stdlib() -> schema::StdlibVocab {
         .map(|(receiver, methods)| schema::BuiltinMethodGroup { receiver, methods })
         .collect();
 
-    let mut builtin_globals: Vec<String> = registry
-        .global_names()
-        .map(|s| s.to_string())
-        .collect();
+    let mut builtin_globals: Vec<String> = registry.global_names().map(|s| s.to_string()).collect();
     builtin_globals.sort();
     builtin_globals.dedup();
 
@@ -285,7 +282,10 @@ fn command_catalog() -> Vec<(&'static str, &'static str)> {
         ("test", "Run tests."),
         ("fmt", "Format Bock source files."),
         ("repl", "Start an interactive REPL session."),
-        ("inspect", "Browse AI decisions, rule cache, and AI response cache."),
+        (
+            "inspect",
+            "Browse AI decisions, rule cache, and AI response cache.",
+        ),
         ("pin", "Pin AI decisions so they replay deterministically."),
         ("unpin", "Clear pin metadata from a decision."),
         ("override", "Override or promote an AI decision."),

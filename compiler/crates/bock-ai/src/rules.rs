@@ -7,7 +7,7 @@
 //! into a pure lookup.
 //!
 //! The cache is append-only from the compiler's perspective: repair
-//! produces a [`CandidateRule`](crate::request::CandidateRule) which is
+//! produces a [`crate::request::CandidateRule`] which is
 //! upgraded to a [`Rule`] (with provenance, id, timestamp) and written
 //! to disk. Human curation (pinning, deleting) happens through
 //! `bock override` and is out of scope for this module.
@@ -114,8 +114,7 @@ pub fn compute_rule_id(target_id: &str, node_kind: &str, template: &str) -> Stri
         kind: node_kind,
         template,
     };
-    compute_key(&keyed)
-        .unwrap_or_else(|_| format!("fallback-{target_id}-{node_kind}"))
+    compute_key(&keyed).unwrap_or_else(|_| format!("fallback-{target_id}-{node_kind}"))
 }
 
 // ─── RuleCache ───────────────────────────────────────────────────────────────

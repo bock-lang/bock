@@ -307,7 +307,11 @@ impl Repl {
             for item in &items {
                 match &item.kind {
                     NodeKind::FnDecl {
-                        name, params, body, is_async, ..
+                        name,
+                        params,
+                        body,
+                        is_async,
+                        ..
                     } => {
                         let param_names: Vec<String> =
                             params.iter().filter_map(extract_param_name).collect();
@@ -318,9 +322,7 @@ impl Repl {
                             *is_async,
                         );
                     }
-                    NodeKind::EnumDecl {
-                        name, variants, ..
-                    } => {
+                    NodeKind::EnumDecl { name, variants, .. } => {
                         self.interp.register_enum(&name.name, variants);
                     }
                     NodeKind::ConstDecl { name, value, .. } => {
@@ -882,7 +884,9 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_expression() {
         let mut repl_state = Repl::new().unwrap();
-        let result = repl_state.run_pipeline("fn __repl_1__() { 42 }", "<test>", false).await;
+        let result = repl_state
+            .run_pipeline("fn __repl_1__() { 42 }", "<test>", false)
+            .await;
         assert!(result.is_ok(), "pipeline error: {}", result.unwrap_err());
         let val = result.unwrap();
         assert_eq!(val, Some(Value::Int(42)));
@@ -892,14 +896,18 @@ mod tests {
     async fn test_pipeline_let_binding() {
         let mut repl_state = Repl::new().unwrap();
         // First define a variable
-        let result = repl_state.run_pipeline("fn __repl_1__() { let x = 10 }", "<test>", false).await;
+        let result = repl_state
+            .run_pipeline("fn __repl_1__() { let x = 10 }", "<test>", false)
+            .await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_pipeline_fn_declaration() {
         let mut repl_state = Repl::new().unwrap();
-        let result = repl_state.run_pipeline("fn double(x: Int) -> Int { x * 2 }", "<test>", true).await;
+        let result = repl_state
+            .run_pipeline("fn double(x: Int) -> Int { x * 2 }", "<test>", true)
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
         // Verify function is registered
@@ -909,7 +917,9 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_parse_error() {
         let mut repl_state = Repl::new().unwrap();
-        let result = repl_state.run_pipeline("fn __repl_1__() { @@@invalid }", "<test>", false).await;
+        let result = repl_state
+            .run_pipeline("fn __repl_1__() { @@@invalid }", "<test>", false)
+            .await;
         assert!(result.is_err());
     }
 
@@ -918,7 +928,9 @@ mod tests {
         let mut repl_state = Repl::new().unwrap();
 
         // Define a function
-        let _ = repl_state.run_pipeline("fn add(a: Int, b: Int) -> Int { a + b }", "<test>", true).await;
+        let _ = repl_state
+            .run_pipeline("fn add(a: Int, b: Int) -> Int { a + b }", "<test>", true)
+            .await;
 
         // The function should be callable
         assert!(repl_state.interp.env.get("add").is_some());

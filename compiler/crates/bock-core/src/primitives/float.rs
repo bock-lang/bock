@@ -250,8 +250,8 @@ mod tests {
     #[test]
     fn negate_ok() {
         let r = reg();
-        let result = r.call(TypeTag::Float, "negate", &[f(3.14)]);
-        assert_eq!(result.unwrap().unwrap(), f(-3.14));
+        let result = r.call(TypeTag::Float, "negate", &[f(3.5)]);
+        assert_eq!(result.unwrap().unwrap(), f(-3.5));
     }
 
     #[test]
@@ -271,10 +271,10 @@ mod tests {
     #[test]
     fn display_float() {
         let r = reg();
-        let result = r.call(TypeTag::Float, "display", &[f(3.14)]);
+        let result = r.call(TypeTag::Float, "display", &[f(3.5)]);
         assert_eq!(
             result.unwrap().unwrap(),
-            Value::String(BockString::new("3.14"))
+            Value::String(BockString::new("3.5"))
         );
     }
 
@@ -366,11 +366,11 @@ mod tests {
     fn hash_code_deterministic() {
         let r = reg();
         let h1 = r
-            .call(TypeTag::Float, "hash_code", &[f(3.14)])
+            .call(TypeTag::Float, "hash_code", &[f(3.5)])
             .unwrap()
             .unwrap();
         let h2 = r
-            .call(TypeTag::Float, "hash_code", &[f(3.14)])
+            .call(TypeTag::Float, "hash_code", &[f(3.5)])
             .unwrap()
             .unwrap();
         assert_eq!(h1, h2);

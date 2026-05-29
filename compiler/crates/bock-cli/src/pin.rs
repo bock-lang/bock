@@ -49,9 +49,7 @@ pub fn run_pin(options: &PinOptions) -> anyhow::Result<()> {
     .count();
 
     if bulk_flags_set > 1 {
-        anyhow::bail!(
-            "bock pin: pass at most one of --all-in, --all-build, --all-runtime"
-        );
+        anyhow::bail!("bock pin: pass at most one of --all-in, --all-build, --all-runtime");
     }
     if bulk_flags_set == 0 && options.id.is_none() {
         anyhow::bail!(
@@ -324,7 +322,12 @@ mod tests {
         seed(
             dir.path(),
             ManifestScope::Build,
-            &[mk_decision("abc", "src/a.bock", DecisionType::Codegen, false)],
+            &[mk_decision(
+                "abc",
+                "src/a.bock",
+                DecisionType::Codegen,
+                false,
+            )],
         );
 
         let writer = ManifestWriter::new(dir.path());
@@ -423,8 +426,13 @@ mod tests {
             )],
         );
         let writer = ManifestWriter::new(dir.path());
-        let count =
-            pin_bulk(dir.path(), &writer, BulkFilter::Scope(ManifestScope::Runtime), None).unwrap();
+        let count = pin_bulk(
+            dir.path(),
+            &writer,
+            BulkFilter::Scope(ManifestScope::Runtime),
+            None,
+        )
+        .unwrap();
         assert_eq!(count, 1);
 
         let build_entries = read_manifest_file(&manifest_file_path(

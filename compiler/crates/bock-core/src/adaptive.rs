@@ -311,9 +311,8 @@ impl CancelCheckpoint {
 /// The operation the adaptive handler will re-run on each attempt.
 ///
 /// It is a plain `async` closure returning `StrategyOutcome<T, E>`.
-pub type RecoveryOperation<T, E> = Arc<
-    dyn Fn() -> futures::future::BoxFuture<'static, StrategyOutcome<T, E>> + Send + Sync,
->;
+pub type RecoveryOperation<T, E> =
+    Arc<dyn Fn() -> futures::future::BoxFuture<'static, StrategyOutcome<T, E>> + Send + Sync>;
 
 /// A cached lookup function. Used by [`use_cached`].
 pub type CacheLookup<T> = Arc<dyn Fn() -> Option<T> + Send + Sync>;
@@ -456,9 +455,7 @@ where
             // only reachable if `max == 0`, which RetryStrategy's
             // constructor discourages; callers who want max=0 should
             // use `escalate()` instead.
-            None => unreachable!(
-                "retry(max=0) configured; use escalate() for no-op recovery"
-            ),
+            None => unreachable!("retry(max=0) configured; use escalate() for no-op recovery"),
         }
     }
 
@@ -646,7 +643,9 @@ where
         let is_open = {
             let mut state = self.state.lock().expect("breaker state poisoned");
             match *state {
-                BreakerState::Open { opened_at } if now.duration_since(opened_at) < self.reset_after => {
+                BreakerState::Open { opened_at }
+                    if now.duration_since(opened_at) < self.reset_after =>
+                {
                     true
                 }
                 BreakerState::Open { .. } => {
@@ -676,7 +675,9 @@ where
             StrategyOutcome::Err(e) => {
                 let mut state = self.state.lock().expect("breaker state poisoned");
                 let next = match *state {
-                    BreakerState::Closed { consecutive_failures } => consecutive_failures + 1,
+                    BreakerState::Closed {
+                        consecutive_failures,
+                    } => consecutive_failures + 1,
                     BreakerState::Open { .. } => 1,
                 };
                 if next >= self.threshold {
@@ -839,7 +840,7 @@ pub struct AdaptiveHandler<T, E> {
 }
 
 /// Builder for [`AdaptiveHandler`]. Returned by [`adaptive`] /
-/// [`Effect::adaptive`]-style callers.
+/// `Effect::adaptive`-style callers.
 pub struct AdaptiveHandlerBuilder<T, E> {
     strategies: Vec<BoxedStrategy<T, E>>,
     provider: Option<Arc<dyn AiProvider>>,
@@ -1067,11 +1068,10 @@ where
                     let req = SelectRequest {
                         options: options.clone(),
                         context: select_context_from_recovery(&context, operation),
-                        rationale_prompt:
-                            "Select the recovery strategy best suited to this error \
+                        rationale_prompt: "Select the recovery strategy best suited to this error \
                              given the operation context and annotations. The closed \
                              set of options is authoritative — choose exactly one."
-                                .into(),
+                            .into(),
                     };
                     match provider.select(&req).await {
                         Ok(resp) => SelectionRecord {
@@ -1170,10 +1170,7 @@ where
 fn select_context_from_recovery(ctx: &RecoveryContext, operation: &str) -> SelectContext {
     let mut metadata = HashMap::new();
     metadata.insert("operation".into(), operation.to_string());
-    metadata.insert(
-        "elapsed_ms".into(),
-        ctx.elapsed.as_millis().to_string(),
-    );
+    metadata.insert("elapsed_ms".into(), ctx.elapsed.as_millis().to_string());
     metadata.insert("attempt".into(), ctx.attempt.to_string());
     SelectContext {
         error: Some(ctx.error.display()),
@@ -1218,19 +1215,12 @@ mod tests {
     ) -> RecoveryOperation<T, SimpleError> {
         Arc::new(move || {
             Box::pin(async move {
-                StrategyOutcome::<T, SimpleError>::Err(err(
-                    "Boom",
-                    "always fails",
-                    Vec::new(),
-                ))
+                StrategyOutcome::<T, SimpleError>::Err(err("Boom", "always fails", Vec::new()))
             })
         })
     }
 
-    fn op_fail_then_ok<T>(
-        n_fails: Arc<AtomicU32>,
-        ok: T,
-    ) -> RecoveryOperation<T, SimpleError>
+    fn op_fail_then_ok<T>(n_fails: Arc<AtomicU32>, ok: T) -> RecoveryOperation<T, SimpleError>
     where
         T: Clone + Send + Sync + 'static,
     {
@@ -1240,11 +1230,7 @@ mod tests {
             Box::pin(async move {
                 let left = n.fetch_sub(1, Ordering::SeqCst);
                 if left > 0 {
-                    StrategyOutcome::<T, SimpleError>::Err(err(
-                        "Transient",
-                        "retrying",
-                        Vec::new(),
-                    ))
+                    StrategyOutcome::<T, SimpleError>::Err(err("Transient", "retrying", Vec::new()))
                 } else {
                     StrategyOutcome::Ok(ok)
                 }
@@ -1348,13 +1334,7 @@ mod tests {
         let op = op_always_fail::<i32>(0);
         let cancel = CancelCheckpoint::new();
         let res = handler
-            .recover(
-                err("X", "x", Vec::new()),
-                "op",
-                ctx,
-                op,
-                &cancel,
-            )
+            .recover(err("X", "x", Vec::new()), "op", ctx, op, &cancel)
             .await
             .expect("ok");
         assert_eq!(res.selection.selected, "degrade");
@@ -1374,13 +1354,7 @@ mod tests {
         let op = op_always_fail::<i32>(0);
         let cancel = CancelCheckpoint::new();
         let res = handler
-            .recover(
-                err("X", "x", Vec::new()),
-                "op",
-                ctx,
-                op,
-                &cancel,
-            )
+            .recover(err("X", "x", Vec::new()), "op", ctx, op, &cancel)
             .await
             .expect("ok");
         assert_eq!(res.selection.selected, "escalate");
@@ -1397,13 +1371,7 @@ mod tests {
         let op = op_always_fail::<i32>(0);
         let cancel = CancelCheckpoint::new();
         let err = handler
-            .recover(
-                err("X", "x", Vec::new()),
-                "op",
-                ctx,
-                op,
-                &cancel,
-            )
+            .recover(err("X", "x", Vec::new()), "op", ctx, op, &cancel)
             .await
             .expect_err("should require pin");
         assert!(matches!(err, AdaptiveError::UnpinnedInProduction { .. }));
@@ -1423,13 +1391,7 @@ mod tests {
         let op = op_always_fail::<i32>(0);
         let cancel = CancelCheckpoint::new();
         let res = handler
-            .recover(
-                err("X", "x", Vec::new()),
-                "op",
-                ctx,
-                op,
-                &cancel,
-            )
+            .recover(err("X", "x", Vec::new()), "op", ctx, op, &cancel)
             .await
             .expect("ok");
         assert_eq!(res.selection.selected, "degrade");
@@ -1510,18 +1472,12 @@ mod tests {
     async fn retry_eventually_succeeds() {
         let left = Arc::new(AtomicU32::new(2));
         let op = op_fail_then_ok(left.clone(), 100);
-        let strat: BoxedStrategy<i32, SimpleError> =
-            retry(3, Backoff::Fixed(StdDuration::ZERO));
+        let strat: BoxedStrategy<i32, SimpleError> = retry(3, Backoff::Fixed(StdDuration::ZERO));
         let e = Arc::new(err("T", "t", Vec::new())) as Arc<dyn ErrorValue>;
         let ctx = RecoveryContext::first_attempt(e.clone(), "op", Annotations::default());
         let cancel = CancelCheckpoint::new();
         let out = strat
-            .attempt(
-                &err("T", "t", Vec::new()),
-                &ctx,
-                op,
-                &cancel,
-            )
+            .attempt(&err("T", "t", Vec::new()), &ctx, op, &cancel)
             .await;
         match out {
             StrategyOutcome::Ok(v) => assert_eq!(v, 100),
@@ -1531,8 +1487,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_observes_cancel() {
-        let strat: BoxedStrategy<i32, SimpleError> =
-            retry(5, Backoff::Fixed(StdDuration::ZERO));
+        let strat: BoxedStrategy<i32, SimpleError> = retry(5, Backoff::Fixed(StdDuration::ZERO));
         let op = op_always_fail::<i32>(0);
         let e = Arc::new(err("T", "t", Vec::new())) as Arc<dyn ErrorValue>;
         let ctx = RecoveryContext::first_attempt(e.clone(), "op", Annotations::default());
@@ -1547,8 +1502,7 @@ mod tests {
     #[tokio::test]
     async fn use_cached_returns_cached_value() {
         let lookup: CacheLookup<i32> = Arc::new(|| Some(777));
-        let strat: BoxedStrategy<i32, SimpleError> =
-            use_cached(StdDuration::from_secs(60), lookup);
+        let strat: BoxedStrategy<i32, SimpleError> = use_cached(StdDuration::from_secs(60), lookup);
         let op = op_always_fail::<i32>(0);
         let e = Arc::new(err("T", "t", Vec::new())) as Arc<dyn ErrorValue>;
         let ctx = RecoveryContext::first_attempt(e.clone(), "op", Annotations::default());
@@ -1644,10 +1598,7 @@ mod tests {
         ) -> Result<bock_ai::OptimizeResponse, AiError> {
             unreachable!()
         }
-        async fn select(
-            &self,
-            _request: &SelectRequest,
-        ) -> Result<SelectResponse, AiError> {
+        async fn select(&self, _request: &SelectRequest) -> Result<SelectResponse, AiError> {
             Ok(SelectResponse {
                 selected_id: self.choice.clone(),
                 confidence: 0.9,
@@ -1704,10 +1655,7 @@ mod tests {
         ) -> Result<bock_ai::OptimizeResponse, AiError> {
             unreachable!()
         }
-        async fn select(
-            &self,
-            _r: &SelectRequest,
-        ) -> Result<SelectResponse, AiError> {
+        async fn select(&self, _r: &SelectRequest) -> Result<SelectResponse, AiError> {
             Err(AiError::Unavailable("test: offline".into()))
         }
         fn model_id(&self) -> String {
@@ -1771,8 +1719,9 @@ mod tests {
             }
         }
         let fired = Arc::new(AtomicU32::new(0));
-        let strat: BoxedStrategy<i32, SimpleError> =
-            Arc::new(CountCancel { fired: fired.clone() });
+        let strat: BoxedStrategy<i32, SimpleError> = Arc::new(CountCancel {
+            fired: fired.clone(),
+        });
         let e = Arc::new(err("X", "x", Vec::new())) as Arc<dyn ErrorValue>;
         let ctx = RecoveryContext::first_attempt(e.clone(), "op", Annotations::default());
         let handler = adaptive::<i32, SimpleError>(vec![strat])

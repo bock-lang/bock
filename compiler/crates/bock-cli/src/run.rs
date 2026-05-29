@@ -4,7 +4,7 @@
 //! 1. Discover the entry file + all project `.bock` files
 //! 2. Lex + parse all files
 //! 3. Build dependency graph → topological sort
-//! 4. Compile in dependency order (with [`ModuleRegistry`] for cross-file imports)
+//! 4. Compile in dependency order (with [`bock_air::registry::ModuleRegistry`] for cross-file imports)
 //! 5. Interpret the entry module's `main` function
 
 use std::collections::HashMap;
@@ -22,12 +22,14 @@ use bock_interp::{BockString, Interpreter, RuntimeError, Value};
 use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
-use bock_types::{collect_exports, seed_imports, FnType, PrimitiveType, Strictness, Type, TypeChecker};
+use bock_types::{
+    collect_exports, seed_imports, FnType, PrimitiveType, Strictness, Type, TypeChecker,
+};
 
 /// Run the `bock run` command.
 ///
 /// Uses the multi-file pipeline: discover all project files, compile in
-/// dependency order with [`ModuleRegistry`], then interpret the main module.
+/// dependency order with [`bock_air::registry::ModuleRegistry`], then interpret the main module.
 ///
 /// If `file` is `None`, looks for `main.bock` or `src/main.bock` in the current directory.
 /// `program_args` are arguments passed after `--` for the program to consume.
@@ -58,11 +60,9 @@ pub async fn run(file: Option<String>, program_args: Vec<String>) -> anyhow::Res
     let entry_canonical = entry_path
         .canonicalize()
         .unwrap_or_else(|_| entry_path.clone());
-    let entry_in_list = files.iter().any(|f| {
-        f.canonicalize()
-            .unwrap_or_else(|_| f.clone())
-            == entry_canonical
-    });
+    let entry_in_list = files
+        .iter()
+        .any(|f| f.canonicalize().unwrap_or_else(|_| f.clone()) == entry_canonical);
     if !entry_in_list {
         files.push(entry_path.clone());
     }
@@ -220,8 +220,7 @@ async fn run_project(
         // 4a. Name resolution with registry
         let mut symbols = SymbolTable::new();
         register_builtins(&mut symbols);
-        let resolve_diags =
-            resolve_names_with_registry(&pf.module, &mut symbols, &registry);
+        let resolve_diags = resolve_names_with_registry(&pf.module, &mut symbols, &registry);
         collect_diagnostics(&mut all_diagnostics, &resolve_diags);
 
         if has_errors(&all_diagnostics) {
@@ -280,15 +279,10 @@ async fn run_project(
     let entry_idx = parsed_files
         .iter()
         .position(|pf| {
-            pf.path
-                .canonicalize()
-                .unwrap_or_else(|_| pf.path.clone())
-                == entry_canonical
+            pf.path.canonicalize().unwrap_or_else(|_| pf.path.clone()) == entry_canonical
         })
         .unwrap_or_else(|| {
-            eprintln!(
-                "error: internal: entry file not found in parsed files"
-            );
+            eprintln!("error: internal: entry file not found in parsed files");
             process::exit(1);
         });
 
@@ -347,9 +341,7 @@ async fn run_project(
             match h {
                 Some(jh) => match jh.await {
                     Ok(inner) => inner,
-                    Err(e) => Err(RuntimeError::TypeError(format!(
-                        "async main panicked: {e}"
-                    ))),
+                    Err(e) => Err(RuntimeError::TypeError(format!("async main panicked: {e}"))),
                 },
                 None => Ok(Value::Void),
             }
@@ -382,31 +374,26 @@ async fn register_module_in_interpreter(
     for item in &items {
         match &item.kind {
             NodeKind::FnDecl {
-                name, params, body, is_async, ..
+                name,
+                params,
+                body,
+                is_async,
+                ..
             } => {
                 let param_names: Vec<String> =
                     params.iter().filter_map(extract_param_name).collect();
-                interp.register_fn_with_async(
-                    &name.name,
-                    param_names,
-                    *body.clone(),
-                    *is_async,
-                );
+                interp.register_fn_with_async(&name.name, param_names, *body.clone(), *is_async);
             }
-            NodeKind::EnumDecl {
-                name, variants, ..
-            } => {
+            NodeKind::EnumDecl { name, variants, .. } => {
                 interp.register_enum(&name.name, variants);
             }
-            NodeKind::ConstDecl { name, value, .. } => {
-                match interp.eval_expr(value).await {
-                    Ok(val) => interp.env.define(&name.name, val),
-                    Err(e) => {
-                        eprintln!("runtime error: {e}");
-                        process::exit(1);
-                    }
+            NodeKind::ConstDecl { name, value, .. } => match interp.eval_expr(value).await {
+                Ok(val) => interp.env.define(&name.name, val),
+                Err(e) => {
+                    eprintln!("runtime error: {e}");
+                    process::exit(1);
                 }
-            }
+            },
             NodeKind::ImplBlock {
                 target, methods, ..
             } => {
@@ -638,14 +625,14 @@ mod tests {
         )
         .unwrap();
 
-        let result = run_project(&[file_path.clone()], &file_path, &[]).await;
+        let result = run_project(std::slice::from_ref(&file_path), &file_path, &[]).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_program_args_to_value() {
         // Verify that program args are correctly converted to a List[String] value
-        let args = vec!["arg1".to_string(), "arg2".to_string(), "arg3".to_string()];
+        let args = ["arg1".to_string(), "arg2".to_string(), "arg3".to_string()];
         let args_value = Value::List(
             args.iter()
                 .map(|s| Value::String(BockString::new(s)))
@@ -682,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_program_args_nonempty_passes_list() {
-        let program_args = vec!["hello".to_string()];
+        let program_args = ["hello".to_string()];
         let args_value = Value::List(
             program_args
                 .iter()

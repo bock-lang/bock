@@ -1,15 +1,15 @@
 import { defineConfig } from 'astro/config';
 
-import cloudflare from "@astrojs/cloudflare";
+import cloudflare from '@astrojs/cloudflare';
 
 export default defineConfig({
   site: 'https://bocklang.org',
-  output: "hybrid",
+  output: 'static',
   trailingSlash: 'never',
 
   build: {
     format: 'directory',
   },
 
-  adapter: cloudflare()
+  adapter: cloudflare(),
 });

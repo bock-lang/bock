@@ -14,16 +14,28 @@ fn write_temp_file(content: &str) -> NamedTempFile {
     f
 }
 
+/// Assert that a finished process exited with exactly the given code.
+///
+/// The check command's exit contract is binary: 0 on a clean check, 1 on any
+/// error. Asserting the exact code (not just `success()`/`!success()`) pins the
+/// contract so the refactor away from scattered `process::exit(1)` to a
+/// centralized `ExitCode` mapping cannot silently drift.
+fn assert_exit_code(output: &std::process::Output, expected: i32, ctx: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(expected),
+        "{ctx}: expected exit {expected}, got {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[test]
 fn check_valid_file_exits_0() {
     let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
     let output = bock_bin().arg("check").arg(f.path()).output().unwrap();
-    assert!(
-        output.status.success(),
-        "expected exit 0, got {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr),
-    );
+    assert_exit_code(&output, 0, "clean check");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("no errors"), "stdout: {stdout}");
 }
@@ -32,11 +44,7 @@ fn check_valid_file_exits_0() {
 fn check_syntax_error_exits_1() {
     let f = write_temp_file("fn { broken\n");
     let output = bock_bin().arg("check").arg(f.path()).output().unwrap();
-    assert!(
-        !output.status.success(),
-        "expected non-zero exit, got {}",
-        output.status,
-    );
+    assert_exit_code(&output, 1, "parse error");
 }
 
 #[test]
@@ -57,55 +65,153 @@ fn check_file_not_found_exits_1() {
     );
 }
 
+// ─── Aspect surface: --only / --brief (§20.1.1) ────────────────────────────
+//
+// These migrate the pre-amendment `--types` / `--lint` / `--no-context` cases
+// to the spec-aligned `--only=<aspect>` / `--brief` surface and add coverage
+// for comma-separated lists, repeated flags, and unknown-aspect rejection.
+
 #[test]
-fn check_no_context_flag_disables_source_context() {
+fn check_brief_flag_disables_source_context() {
+    // Migrated from --no-context: --brief yields compact one-line diagnostics
+    // with no source-context snippet (no caret/underline render).
     let f = write_temp_file("fn { broken\n");
     let output = bock_bin()
         .arg("check")
-        .arg("--no-context")
+        .arg("--brief")
         .arg(f.path())
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // With --no-context, output should be simple one-line format
+    // Brief format is the bracketed one-line form: `error[CODE]: msg (at file:..)`.
     assert!(
         stderr.contains("error["),
-        "should show error in bracket format: {stderr}",
+        "brief output should use bracket format: {stderr}",
+    );
+    assert!(
+        stderr.contains("(at "),
+        "brief output should include the compact `(at file:..)` location: {stderr}",
+    );
+    // Compact output omits source-context rendering: the rich renderer draws a
+    // source snippet with box-drawing connectors (╭ │ ┬ ╰); brief never does.
+    for snippet_char in ['\u{256d}', '\u{2502}', '\u{252c}', '\u{2570}'] {
+        assert!(
+            !stderr.contains(snippet_char),
+            "brief output should omit source-context snippets (found {snippet_char:?}): {stderr}",
+        );
+    }
+    // Every error line is the single-line bracketed form; the diagnostic count
+    // equals the number of `error[` lines (no multi-line snippet spans).
+    let diag_lines = stderr.lines().filter(|l| l.contains("error[")).count();
+    assert!(
+        diag_lines >= 1,
+        "expected at least one diagnostic: {stderr}"
     );
 }
 
 #[test]
-fn check_types_flag() {
+fn check_only_types_passes_clean_file() {
+    // Migrated from --types: --only=types runs just the type-checking aspect.
     let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
     let output = bock_bin()
         .arg("check")
-        .arg("--types")
+        .arg("--only=types")
         .arg(f.path())
         .output()
         .unwrap();
+    assert_exit_code(&output, 0, "--only=types on a clean file");
+}
+
+#[test]
+fn check_only_context_passes_clean_file() {
+    // The `context` aspect maps to §11 capability verification.
+    let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+    let output = bock_bin()
+        .arg("check")
+        .arg("--only=context")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 0, "--only=context on a clean file");
+}
+
+#[test]
+fn check_only_comma_list_passes_clean_file() {
+    let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+    let output = bock_bin()
+        .arg("check")
+        .arg("--only=types,context")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 0, "--only=types,context on a clean file");
+}
+
+#[test]
+fn check_only_repeated_flag_passes_clean_file() {
+    // Repeated --only is equivalent to a comma-separated list.
+    let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+    let output = bock_bin()
+        .arg("check")
+        .arg("--only=types")
+        .arg("--only=context")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 0, "repeated --only on a clean file");
+}
+
+#[test]
+fn check_only_unknown_aspect_is_rejected() {
+    // `lint` is a v1.x aspect — rejected as unknown in v1, just like a typo.
+    for bad in ["lint", "ownership", "typos"] {
+        let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+        let output = bock_bin()
+            .arg("check")
+            .arg(format!("--only={bad}"))
+            .arg(f.path())
+            .output()
+            .unwrap();
+        assert_exit_code(&output, 1, &format!("--only={bad}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(bad),
+            "error should name the offending aspect '{bad}': {stderr}",
+        );
+        // The error must list the valid v1 aspects.
+        assert!(
+            stderr.contains("types") && stderr.contains("context"),
+            "error should list valid aspects (types, context): {stderr}",
+        );
+    }
+}
+
+#[test]
+fn check_only_unknown_aspect_in_list_is_rejected() {
+    // A bad value mixed with a good one still rejects the whole invocation.
+    let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+    let output = bock_bin()
+        .arg("check")
+        .arg("--only=types,bogus")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "--only=types,bogus");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "expected exit 0 with --types, got {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr),
+        stderr.contains("bogus"),
+        "error should name the offending aspect: {stderr}",
     );
 }
 
 #[test]
-fn check_lint_flag() {
+fn check_no_flag_runs_full_check() {
+    // Omitting --only runs the full check (all passes), unchanged from before.
     let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
-    let output = bock_bin()
-        .arg("check")
-        .arg("--lint")
-        .arg(f.path())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "expected exit 0 with --lint, got {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr),
-    );
+    let output = bock_bin().arg("check").arg(f.path()).output().unwrap();
+    assert_exit_code(&output, 0, "full check, no --only");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("no errors"), "stdout: {stdout}");
 }
 
 #[test]
@@ -116,10 +222,7 @@ fn check_no_files_in_empty_dir() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(
-        !output.status.success(),
-        "expected non-zero exit when no .bock files found",
-    );
+    assert_exit_code(&output, 1, "no .bock files found");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("No .bock files found"), "stderr: {stderr}",);
 }
@@ -218,10 +321,7 @@ fn check_circular_dependency_detected() {
         .current_dir(dir.path())
         .output()
         .unwrap();
-    assert!(
-        !output.status.success(),
-        "expected non-zero exit for circular dependency",
-    );
+    assert_exit_code(&output, 1, "circular dependency");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("circular"),
@@ -235,16 +335,8 @@ fn check_multifile_error_shows_correct_path() {
     // should reference the correct file path.
     let dir = tempfile::tempdir().unwrap();
 
-    std::fs::write(
-        dir.path().join("good.bock"),
-        "fn helper() -> Int { 42 }\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.path().join("bad.bock"),
-        "fn broken( { }\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join("good.bock"), "fn helper() -> Int { 42 }\n").unwrap();
+    std::fs::write(dir.path().join("bad.bock"), "fn broken( { }\n").unwrap();
 
     let output = bock_bin()
         .arg("check")
@@ -573,4 +665,29 @@ fn greet(name: String) -> Void with Logger {
         output.status.success(),
         "cross-file effect operations should pass\nstderr: {stderr}",
     );
+}
+
+// ─── Exit-code contract (subprocess) ───────────────────────────────────────
+//
+// `bock check` now decides its exit code in one place (the `ExitCode` binding
+// in `main`, fed by `check::run`'s `CheckOutcome`). These tests pin the binary
+// contract end-to-end: clean => 0, any error => 1.
+
+#[test]
+fn check_file_not_found_exits_exactly_1() {
+    let output = bock_bin()
+        .arg("check")
+        .arg("/tmp/nonexistent_bock_file_for_exit_code_test.bock")
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "missing input file");
+}
+
+#[test]
+fn check_ownership_error_exits_exactly_1() {
+    let f = write_temp_file(
+        "record Thing { id: Int }\nfn process() {\n    let data = Thing { id: 1 }\n    let archive = data\n    let x = data\n}\n",
+    );
+    let output = bock_bin().arg("check").arg(f.path()).output().unwrap();
+    assert_exit_code(&output, 1, "ownership (analysis) error");
 }
