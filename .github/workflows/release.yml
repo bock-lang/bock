@@ -9,6 +9,23 @@ permissions:
   contents: read
 
 jobs:
+  # Read-only guard: the Unreleased changelog section must be in sync with
+  # git history before a release goes out. This NEVER writes the repo, uses
+  # no token, and opens no PR — it regenerates into a temp file and diffs.
+  # If it fails, run `tools/scripts/gen-changelog.sh` locally, commit via the
+  # normal PR flow, and re-tag. `fetch-depth: 0` is required because the
+  # generator walks full first-parent history (there are no release tags yet).
+  verify-changelog:
+    name: verify changelog is in sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Check Unreleased section against git history
+        run: tools/scripts/gen-changelog.sh --check
+
   build-binaries:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
