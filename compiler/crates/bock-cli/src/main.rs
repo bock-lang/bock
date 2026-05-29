@@ -98,17 +98,15 @@ enum Command {
         /// Paths to .bock files to check. If omitted, checks all .bock files in the current directory.
         files: Vec<PathBuf>,
 
-        /// Run only type checking (skip lint warnings).
-        #[arg(long)]
-        types: bool,
+        /// Restrict the check to specific aspects. Valid aspects: types, context.
+        /// Accepts a comma-separated list (--only=types,context) and may be
+        /// repeated (--only=types --only=context); omitting it runs the full check.
+        #[arg(long, value_name = "ASPECT")]
+        only: Vec<String>,
 
-        /// Run only lint checks (skip type checking).
+        /// Brief output: compact, one-line diagnostics with no source-context snippets.
         #[arg(long)]
-        lint: bool,
-
-        /// Disable source context in diagnostic output.
-        #[arg(long)]
-        no_context: bool,
+        brief: bool,
     },
     /// Run tests.
     Test {
@@ -461,23 +459,21 @@ async fn main() -> anyhow::Result<ExitCode> {
                 run::run(file, program_args).await?;
             }
         }
-        Command::Check {
-            files,
-            types,
-            lint,
-            no_context,
-        } => {
-            let options = check::CheckOptions {
-                // If --types is passed, only run types. If --lint is passed, only run lint.
-                // If neither is passed, run both.
-                types: !lint,
-                lint: !types,
-                context: !no_context,
-            };
-            if !check::run(files, &options)?.is_clean() {
+        Command::Check { files, only, brief } => match check::AspectSelection::from_raw(&only) {
+            Ok(aspects) => {
+                let options = check::CheckOptions { aspects, brief };
+                if !check::run(files, &options)?.is_clean() {
+                    exit_code = ExitCode::FAILURE;
+                }
+            }
+            Err(unknown) => {
+                eprintln!(
+                    "error: unknown check aspect '{unknown}'. Valid aspects: {}",
+                    check::Aspect::valid_list()
+                );
                 exit_code = ExitCode::FAILURE;
             }
-        }
+        },
         Command::Test { filter, files } => test::run(filter, files).await?,
         Command::Fmt { check } => fmt::run(check)?,
         Command::Repl => repl::run().await?,
