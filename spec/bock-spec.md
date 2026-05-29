@@ -1119,6 +1119,8 @@ fn sort_results(items: List[SearchResult]) -> List[SearchResult]
 
 Informs AI optimization decisions. Can generate runtime monitoring.
 
+**Literal syntax.** `@performance` budgets require unit-suffixed numeric literals. Time budgets use `.ns`, `.us`, `.ms`, `.s`, `.min`, `.h`; memory budgets use `.b`, `.kb`, `.mb`, `.gb`, `.tb`. Bare integers produce E8003. The unit suffix is part of the literal, not a method call (`100.ms` is a literal, not `100 . ms()`). Time units match the `Duration` constructor names in §18.3.1; memory units use decimal scaling (1 kb = 1000 b).
+
 ### 11.5 — `@invariant` — Verified Constraints
 
 ```bock
@@ -1259,6 +1261,8 @@ async fn pipeline(input: Data) -> Result[Output, Error] {
 
 ### 13.3 — Channels
 
+**Reserved for v1.x.** Channels are not part of the v1 surface; they bundle with `core.concurrency`, which is Reserved for v1.x (see §18.3). v1 compilers reject channel constructs at the relevant pipeline stage. The example below is preserved as design intent for the v1.x extension.
+
 ```bock
 let ch = Channel[Message].new(buffer: 10)
 
@@ -1271,6 +1275,8 @@ for msg in ch { process(msg) }
 ```
 
 ### 13.4 — Synchronization Primitives
+
+**Reserved for v1.x.** Synchronization primitives are not part of the v1 surface; they bundle with `core.concurrency`, which is Reserved for v1.x (see §18.3). v1 compilers reject these constructs at the relevant pipeline stage. The enumeration below is preserved as design intent for the v1.x extension.
 
 `Mutex[T]`, `RwLock[T]`, `Atomic[T]`, `WaitGroup`, `OnceCell[T]` — available from `core.concurrency`.
 
@@ -1699,21 +1705,28 @@ Always available without import: `Int`, `Float`, `Bool`, `String`, `Char`, `Void
 
 ### 18.3 — Core Modules
 
-`core.types` — Sized integers and floats, `BigInt`, `Decimal`.
-`core.collections` — `List`, `Map`, `Set`, `Deque`, `SortedMap`, `SortedSet`, `Stack`, `Queue`, `BitSet`, `Array[T, N]`.
-`core.string` — String manipulation, `StringBuilder`, `Regex`. `String.len()` returns the count of Unicode scalar values (characters), not bytes; use `byte_len()` for byte count.
-`core.math` — Constants, functions, numeric traits.
-`core.option` — `Optional[T]` utilities.
-`core.result` — `Result[T, E]` utilities.
-`core.iter` — `Iterator` trait and combinators.
-`core.compare` — `Ordering`, `Comparable`, `Equatable`.
-`core.convert` — `Into`, `From`, `TryFrom`, `Displayable`.
-`core.error` — `Error` base trait.
-`core.effect` — Effect system primitives.
-`core.concurrency` — `Channel`, `Mutex`, `RwLock`, `Atomic`, `WaitGroup`.
-`core.memory` — `Rc`, `Arc` for `@managed` contexts.
-`core.time` — `Duration`, `Instant`, `sleep`, monotonic time primitives, `Clock` effect.
-`core.test` — Assertions, BDD grouping, mocking, property testing, benchmarking.
+The 15 `core.*` modules are tiered: 11 ship in **v1**, 4 are **Reserved for v1.x**. A v1 module ships its **minimum-useful subset**, not the full surface listed; acceptance for a v1 module = the conformance suite **and** a representative example compile and run on every shipping target. Deferred items within a shipping module are noted inline below and remain design intent until v1.x.
+
+**v1.**
+
+`core.option` (v1) — `Optional[T]` utilities.
+`core.result` (v1) — `Result[T, E]` utilities.
+`core.collections` (v1) — `List`, `Map`, `Set`, `SortedSet`. Reserved for v1.x: `Deque`, `SortedMap`, `Stack`, `Queue`, `BitSet`, `Array[T, N]`.
+`core.string` (v1) — String manipulation, `StringBuilder`. `String.len()` returns the count of Unicode scalar values (characters), not bytes; use `byte_len()` for byte count. Reserved for v1.x: `Regex`.
+`core.iter` (v1) — `Iterator` trait and combinators.
+`core.compare` (v1) — `Ordering`, `Comparable`, `Equatable`.
+`core.convert` (v1) — `Into`, `From`, `TryFrom`, `Displayable`.
+`core.error` (v1) — `Error` base trait.
+`core.effect` (v1) — Effect system primitives.
+`core.time` (v1) — `Duration`, `Instant`, `sleep`, monotonic time primitives, `Clock` effect (see §18.3.1).
+`core.test` (v1) — Assertions, BDD grouping, mocking, benchmarking. Reserved for v1.x: property testing, snapshot testing.
+
+**Reserved for v1.x.**
+
+`core.types` (Reserved for v1.x) — `BigInt`, `Decimal` (sized integers and floats are primitives, not part of this module's deferred surface).
+`core.math` (Reserved for v1.x) — Constants, advanced functions, numeric traits.
+`core.memory` (Reserved for v1.x) — `Rc`, `Arc` for `@managed` contexts; bundles with FFI / §14.
+`core.concurrency` (Reserved for v1.x) — `Channel`, `Mutex`, `RwLock`, `Atomic`, `WaitGroup`, `OnceCell` (see §13.3, §13.4).
 
 ### 18.3.1 — core.time
 
