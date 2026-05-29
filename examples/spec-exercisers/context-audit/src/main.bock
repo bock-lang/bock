@@ -38,9 +38,10 @@ public fn refresh_profile(user_id: Int) -> Result[String, String] {
 
 // === @performance — Budgets ===
 
-/// max_latency (ms) and max_memory (MB) guide transpiler optimization.
+/// max_latency and max_memory guide transpiler optimization.
+/// Budgets use unit-suffixed literals (time: .ms/.s/...; memory: .mb/.gb/...).
 /// Tight budgets may lead to approximate/early-exit algorithms.
-@performance(max_latency: 100, max_memory: 50)
+@performance(max_latency: 100.ms, max_memory: 50.mb)
 public fn fast_search(items: List[Int], target: Int) -> Optional[Int] {
   let mut i = 0
   let result = loop {

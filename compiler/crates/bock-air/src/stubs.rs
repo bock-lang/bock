@@ -184,6 +184,10 @@ pub enum TimeUnit {
     Ms,
     /// Seconds.
     S,
+    /// Minutes.
+    Min,
+    /// Hours.
+    H,
 }
 
 /// A byte size value with unit.
@@ -206,6 +210,8 @@ pub enum SizeUnit {
     Mb,
     /// Gigabytes.
     Gb,
+    /// Terabytes.
+    Tb,
 }
 
 /// Security classification from `@security(...)`.

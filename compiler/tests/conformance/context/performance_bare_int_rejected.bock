@@ -1,0 +1,10 @@
+// TEST: performance_bare_int_rejected
+// EXPECT: error E8003 at 9:27
+// EXPECT: error E8003 at 9:44
+// Bare integers without a unit suffix are rejected (Design Q3): a
+// `@performance` budget value must carry a time or byte-size unit. Each
+// unit-less argument raises E8003.
+module perf_bare
+
+@performance(max_latency: 100, max_memory: 50)
+public fn query() -> Int { 0 }

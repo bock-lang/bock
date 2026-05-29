@@ -1,0 +1,11 @@
+// TEST: performance_extended_units_no_errors
+// EXPECT: no_errors
+// The full normative unit set is accepted: time `.min`/`.h` (alongside
+// `.ns`/`.us`/`.ms`/`.s`) and byte size `.tb` (alongside `.b`/`.kb`/`.mb`/`.gb`).
+module perf_units
+
+@performance(max_latency: 5.min, max_memory: 2.tb)
+public fn query_a() -> Int { 0 }
+
+@performance(max_latency: 1.h, max_memory: 512.kb)
+public fn query_b() -> Int { 0 }
