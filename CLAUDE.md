@@ -48,7 +48,7 @@ cd extensions/vscode && npm test          # extension tests
 ## Where to Find What
  
 - **Language reference:** `spec/bock-spec.md`
-- **Implementation playbook:** `docs/src/contributing/playbook.md`
+- **Contributing guide:** `docs/src/contributing.md`
 - **Architecture overview:** `ARCHITECTURE.md` (start here for new contributors)
 - **Current state:** `STATUS.md`
 - **Forward plans:** `ROADMAP.md`

@@ -4,36 +4,38 @@ Orchestrator working memory. Read at the start of every work
 block; update as work moves. Committed to the repo as project
 state.
 
-Last updated: 2026-05-29 (Block 1 COMPLETE — all 4 merged, main acb9094.
-Chore sweep in progress: dep updates + Changelog-workflow rearchitect. See
-audit.md DAILY DIGEST 2026-05-29.)
+Last updated: 2026-05-29 (Block 1 COMPLETE + chore sweep COMPLETE. main 49211c9.
+See audit.md DAILY DIGEST + CHORE SWEEP entries 2026-05-29.)
 
-**Block 1 status: COMPLETE ✓** (main acb9094)
-- H3 #73 merged — spec §1.5 paradigm reconciliation
-- H2 #74 merged — 7 effect-handler conformance fixtures
-- H1 #75 merged — bock check exit-code centralized
-- C1 #76 merged — bock check --only/--brief (§20.1.1)
-Zero escalations. OPEN/FOUND items recorded below.
+**Block 1 status: COMPLETE ✓** (H3 #73, H2 #74, H1 #75, C1 #76). Zero escalations.
 
-**OPEN → Design (from Block 1):**
+**Chore sweep status: COMPLETE ✓** (operator-directed, 2026-05-29; main 49211c9):
+- Deps: ALL 21 dependabot PRs resolved (#78 website, #79 cargo incl. dashmap 5→6,
+  #80 vscode incl. 4 majors, #81 GitHub-Actions); superseded PRs closed. Only the
+  non-dependabot #21 (Cloudflare) remains open.
+- CI: the post-merge Changelog workflow (the only red) REPLACED with a
+  generate-don't-push design (#82) — removed the CI write-back; added
+  tools/scripts/gen-changelog.sh + read-only release verify + backfill. No CI
+  write surface. Largely completes D6.
+
+**OPEN → Design (pending):**
 - O1 [H1] `bock check` warnings-only exit code — fail on warnings? (behavior preserved)
 - O2 [C1] §20.1.1/§11 `--only=context`: adopt the dead-code validate_context pass?
 
-**FOUND → triage (from Block 1):**
+**FOUND / follow-ups (queued):**
+- **peaceiris/actions-mdbook@v2.0.0 Node-20 → forced Node-24 on 2026-06-02 (~4 days).**
+  mdbook job (docs.yml) may break. **Handle before 2026-06-02.** HIGHEST near-term.
 - F-conf [H2] per-target conformance execution NOT wired — suite is parse/discovery
-  only. Candidate: "wire conformance execution." (operator-flagged in digest)
+  only. Candidate: "wire conformance execution."
+- SEC [website] npm audit: 1 high (devalue) + 5 moderate (yaml/@astrojs/check). Pre-existing.
+- TEST-INFRA [vscode] extension has no test script/files — add test infra.
 - F-exit [H1] build/run/test/fmt share the process::exit anti-pattern — follow-up.
 - F-lint [C1] lint warnings now always surfaced (matches §20.1.1) — informational.
+- (benign) dashmap 5.5.3 lingers transitively via tower-lsp — no action.
 
-**Chore sweep (in progress, 2026-05-29, operator-directed):**
-- Dependency updates incl. majors — 21 dependabot PRs across cargo/website/vscode/
-  GitHub-Actions. Per-ecosystem sessions; close superseded PRs after each lands.
-- CI: rearchitect the Changelog workflow to PR-based (was failing on every PR —
-  missing CHANGELOG_BOT_TOKEN + pushes to protected main). Combined with the
-  GitHub-Actions version bumps (same .github/workflows/ tree).
-
-**Doc reconciliation (orchestrator/D-series):** docs/INVENTORY.md + SPEC-ALIGNMENT.md
-still mark F04/§20.1.1/F15 as drift — now resolved by C1/H3; update those meta-docs.
+**Doc reconciliations:** CLAUDE.md "Implementation playbook" path fixed → Contributing
+guide docs/src/contributing.md (this PR). docs/INVENTORY.md + SPEC-ALIGNMENT.md still
+mark F04/§20.1.1/F15 as drift — now resolved by C1/H3; update those meta-docs (D-series).
 
 ---
 
