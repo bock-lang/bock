@@ -314,9 +314,10 @@ contract (Main integration & tracking PRs).
 - Sessions touching the same crate/file do not run concurrently.
   Known hot file: compiler/crates/bock-cli/src/main.rs (exit-code
   fix + §20.1.1 flag work both touch it). Sequence or combine.
-- Documentation phases that delete shared scratch (D5 deletes
-  INVENTORY.md / SPEC-ALIGNMENT.md) grep for references before
-  deletion; expand scope or coordinate.
+- Sessions that delete shared files grep for references first, then
+  update or accept each (e.g. the tracking consolidation retired
+  INVENTORY.md / SPEC-ALIGNMENT.md / tracking.md after migrating their
+  content into the hub); expand scope or coordinate.
 
 ## Escalation-fast triggers
 
