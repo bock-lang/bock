@@ -1937,7 +1937,7 @@ Single binary containing all tooling. The CLI surface is designed for ergonomic 
 **Build and execute:**
 
 `bock new` — Project scaffolding with interactive or flag-based configuration. Generates `bock.project` with a commented-out `[ai]` block for opt-in AI configuration; see §20.7.
-`bock build` — Transpile and compile. Produces a scaffolded project (project mode) by default; see §20.6.2 for output modes. Flags: `--target`, `--all-targets`, `--source-only`, `--deliverable`, `--no-tests`, `--source-map` / `--no-source-map` (default on), `--strict`, `--pin-all`, `--deterministic`, `--optimize`, `--release`. `--strict` forces production strictness for the build (fails on unpinned build-scope decisions); `--pin-all` pins every build-scope decision after a successful build. The pair enables the develop → ship workflow: build with `--pin-all`, commit the resulting pins, then ship with `--strict`. See §17.4 for the pinning model.
+`bock build` — Transpile and compile. Produces a scaffolded project (project mode) by default; see §20.6.2 for output modes. v1 flags: `--target`, `--all-targets`, `--source-only`, `--source-map` / `--no-source-map` (default on), `--strict`, `--pin-all`, `--deterministic` (alias `--no-ai`), `--release`. `--strict` forces production strictness for the build (fails on unpinned build-scope decisions); `--pin-all` pins every build-scope decision after a successful build. The pair enables the develop → ship workflow: build with `--pin-all`, commit the resulting pins, then ship with `--strict`. See §17.4 for the pinning model. The `--deliverable` (deliverable-mode), `--no-tests` (test-inclusion opt-out), and `--optimize` (Tier-3 AI optimization, §17.2) flags are **Reserved for v1.x**: they ship with the project-mode build work and are described in §20.6.2 (modes) and §17.2 (optimization tier).
 `bock run` — Build and execute. Default uses interpreter. `--target` for specific language. `--watch` for hot reload.
 `bock check` — Type check, lint, context validation. `--only=<aspect>` restricts the check to specific aspects (e.g., `--only=types`, `--only=context`, `--only=types,context`); see §20.1.1 for the aspect surface. `--brief` produces compact error output (omits source-context snippets). `--strict` forces production strictness for the check: completeness gaps that are warnings at the default development strictness (e.g. a public declaration missing `@context`; completeness is per-item, §20.1.1) become errors and a non-zero exit. Mirrors `bock build --strict`. `bock check` exits non-zero if and only if the check produces at least one error; warnings never fail the check.
 `bock test` — Run tests. Default uses interpreter (fast). `--filter <pattern>` selects tests by name. Cross-target testing (`--target`, `--all-targets`, `--smart`), coverage, and snapshot testing are planned for v1.x; see §20.4.
@@ -1946,10 +1946,10 @@ Single binary containing all tooling. The CLI surface is designed for ergonomic 
 
 **Decision and rule manifest management:**
 
-`bock inspect` — Read-only browsing of AI decisions, rule cache, and AI response cache. Defaults to build decisions; `--runtime` for runtime decisions, `--all` for both. `--diff` for changes since last build.
-`bock pin <decision-id>` — Pin a decision so it replays deterministically. `--all` to pin every unpinned decision (production readiness).
+`bock inspect` — Read-only browsing of AI decisions, rule cache, and AI response cache. Defaults to build decisions; `--runtime` for runtime decisions, `--all` for both (with prefixed ids); `--unpinned`, `--module`, `--type`, and `--json` filter the listing. Subcommands: `decisions` (default), `decision <id>`, `cache`, `rules`. The `--diff` view (changes since last build) is **Reserved for v1.x**.
+`bock pin [decision-id]` — Pin a decision so it replays deterministically. Pass a single id, or a bulk flag: `--all-build` (every unpinned build-scope decision), `--all-runtime` (every unpinned runtime-scope decision), or `--all-in <substring>` (every unpinned decision whose module path contains the substring). `--reason <text>` records a free-form reason on the pin metadata. (A bare `--all` alias spanning every scope is planned for v1.x.)
 `bock unpin <decision-id>` — Remove pin metadata from a decision.
-`bock override <decision-id> --choice=<alternative>` — Change which alternative is selected for an existing decision. `--promote <runtime-id>` migrates a stabilized runtime decision into the build manifest (§10.8).
+`bock override [decision-id] [new-choice]` — Override or promote an AI decision. With a bare id it pins the decision in place; with a replacement value (the `[new-choice]` positional, or `--from-file <file>`) it replaces the decision's `choice` and auto-pins; `--runtime` scopes a bare-id pin to a runtime decision. `--promote` copies a pinned runtime decision (the positional `[decision-id]`) into the build manifest (§10.8); `--reason <text>` records a reason alongside the pin.
 `bock cache` — Manage on-disk caches (AI response cache, rule cache, decision manifests). Subcommands: `stats`, `clear`. (`list` and `prune` planned for v1.x.)
 
 **Project lifecycle:**
@@ -2155,7 +2155,7 @@ The generated `bock.project` includes a commented-out `[ai]` block that document
 
 The scaffolder does not prompt interactively for provider configuration during `bock new`. Interactive flows fail awkwardly in CI and scripted contexts and demand provider knowledge from users whose first interaction with Bock is project creation. Users who want AI-assisted codegen uncomment and complete the block; users who do not delete it.
 
-`bock.project` supports several optional fields that influence project mode output (§20.6.2):
+`bock.project` reserves several optional per-target fields that will influence project mode output (§20.6.2). **The v1 compiler does not yet parse these `[targets.<T>]` / `[targets.<T>.scaffolding]` tables — they are Reserved for v1.x** (consistent with Appendix A.3): v1 `bock build` selects targets from `--target` / `--all-targets` (which builds all five built-in targets) and uses target-appropriate defaults, so the tables below have no effect today. They are shown here for forward reference (the `[project] type` field is v1 — see Appendix A.1):
 
 ```toml
 [project]
@@ -2184,7 +2184,7 @@ linter = "eslint"
 package_manager = "pnpm"
 ```
 
-The two sections per target are conceptually distinct: `[targets.<T>]` configures choices that change what Bock emits (deep configuration); `[targets.<T>.scaffolding]` configures choices that just add files alongside the emitted code (shallow configuration). See §20.6.2 for the v1-supported variant matrix per target.
+The two sections per target are conceptually distinct: `[targets.<T>]` configures choices that change what Bock emits (deep configuration); `[targets.<T>.scaffolding]` configures choices that just add files alongside the emitted code (shallow configuration). See §20.6.2 for the planned v1-supported variant matrix per target. Both tables are **Reserved for v1.x** until the project-mode build work parses them.
 
 Inference rules and override semantics are specified in §20.6.2. `bock new` does not generate these fields by default — they're added by users when needed. Generated projects rely on inference and target-appropriate defaults for the common case.
 
@@ -2466,6 +2466,8 @@ TargetProfile {
 
 #### A.1 — `bock.project` (v1)
 
+The v1 compiler reads `[project]`, `[strictness]`, `[ai]`, and `[registries]`. The `[targets.<T>]` and `[targets.<T>.scaffolding]` tables shown below are **Reserved for v1.x** (see A.3): v1 `bock build` selects targets via `--target` / `--all-targets` (which builds all five built-in targets) and uses target-appropriate defaults; it does not parse these tables. They are kept in this example for forward reference.
+
 ```toml
 [project]
 name = "my-app"
@@ -2531,6 +2533,7 @@ These fields appear in older spec drafts and may be implemented in v1.x or later
 
 - **`[project] authors`** — Author metadata. Activated alongside `bock pkg publish` (§19).
 - **`[strictness.overrides]`** — Per-path glob-based strictness mappings (e.g., `"src/experiments/**" = "sketch"`). v1 ships flat project-level strictness; layered strictness is v1.x.
+- **`[targets.<T>]` and `[targets.<T>.scaffolding]`** — Per-target deep configuration (`test_framework`, `formatter`, `package`, Go `module`) and shallow configuration (`linter`, `package_manager`). v1 `bock build` selects targets via `--target` / `--all-targets` (building all five built-in targets) and emits with target-appropriate defaults; it does not yet parse these tables. The variant matrix is specified in §20.6.2 and ships with the project-mode build work.
 - **`[paradigm]`** — Paradigm-mode selection (`FP`, `OOP`, `Multi`). v1 ships a single fixed paradigm equivalent to `Multi` mode, in which all language features are available and bindings are immutable by default; it does not parse this field or gate `class`, `mut`, or `@mutable` on a mode. Configurable paradigm modes are Reserved for v1.x pending a design pass for feature-gating semantics (§1.5).
 - **`[effects]` and `[effects.overrides.<env>]`** — Project-level effect handler routing. v1 ships inline + module-level handler resolution via §10 mechanisms; project-level routing may be unnecessary and will only be introduced if real-world usage demonstrates need.
 - **`[plugins]`** — Plugin declarations. Reserved pending the plugin loader (Appendix C describes the planned plugin system).
