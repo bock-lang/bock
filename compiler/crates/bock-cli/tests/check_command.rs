@@ -691,3 +691,139 @@ fn check_ownership_error_exits_exactly_1() {
     let output = bock_bin().arg("check").arg(f.path()).output().unwrap();
     assert_exit_code(&output, 1, "ownership (analysis) error");
 }
+
+// ─── --strict / context-validation completeness gate (§20.1, O1+O2) ────────
+//
+// `bock check --strict` forces production strictness. Under the default
+// (development) strictness, a public item missing `@context` is a completeness
+// *warning* (exit 0); under `--strict` it becomes an *error* (exit 1). These
+// pin the end-to-end exit-code composition through the binary.
+
+/// A public function in a declared module with no `@context` annotation: the
+/// canonical completeness-gap fixture.
+const PUBLIC_FN_NO_CONTEXT: &str = "module Lib\n\npublic fn add(a: Int, b: Int) -> Int { a + b }\n";
+
+#[test]
+fn check_strict_flag_is_accepted_and_runs() {
+    // `--strict` is accepted on the check command (mirrors `bock build --strict`)
+    // and drives production strictness. A bare file (no module `@context`)
+    // trips the production-mode module-completeness rule (E8014), so the run
+    // exits 1 — proving the flag is wired through to production strictness, not
+    // ignored. (See the FOUND note in the PR: module-level `@context` is not yet
+    // interpreted onto the module node, so E8014 fires for every module under
+    // production strictness regardless of any module annotation.)
+    let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+    let output = bock_bin()
+        .arg("check")
+        .arg("--strict")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "--strict drives production strictness");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("production mode"),
+        "production-strictness completeness diagnostic expected: {stderr}",
+    );
+}
+
+#[test]
+fn check_default_strictness_does_not_error_on_bare_file() {
+    // Sanity counterpart: the same bare file at the default (development)
+    // strictness exits 0 — the module-completeness gap is a warning, not an
+    // error. This isolates the --strict flag as the thing that flips the exit.
+    let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+    let output = bock_bin().arg("check").arg(f.path()).output().unwrap();
+    assert_exit_code(&output, 0, "default strictness on a bare file");
+}
+
+#[test]
+fn check_missing_context_is_warning_by_default_exits_0() {
+    // Default check: missing @context on a public item is a warning, not an
+    // error — the check still exits 0 and prints the "no errors" summary.
+    let f = write_temp_file(PUBLIC_FN_NO_CONTEXT);
+    let output = bock_bin().arg("check").arg(f.path()).output().unwrap();
+    assert_exit_code(&output, 0, "missing @context, default strictness");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("no errors"), "stdout: {stdout}");
+    // The warning is surfaced on stderr (W8013 for the public fn).
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing context") || stderr.contains("W8013"),
+        "stderr should carry the completeness warning: {stderr}",
+    );
+}
+
+#[test]
+fn check_strict_missing_context_is_error_exits_1() {
+    // `--strict` flips the same completeness gap from warning to error, so the
+    // check fails (exit 1). This is the O1+O2 composition proved end-to-end.
+    let f = write_temp_file(PUBLIC_FN_NO_CONTEXT);
+    let output = bock_bin()
+        .arg("check")
+        .arg("--strict")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "missing @context, --strict (production)");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing context") || stderr.contains("E8013"),
+        "stderr should carry the completeness error: {stderr}",
+    );
+}
+
+#[test]
+fn check_strict_only_context_missing_context_is_error_exits_1() {
+    // `--only=context --strict` runs the context-validation pass (not just
+    // capability verification): the missing @context still becomes an error.
+    let f = write_temp_file(PUBLIC_FN_NO_CONTEXT);
+    let output = bock_bin()
+        .arg("check")
+        .arg("--strict")
+        .arg("--only=context")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "--strict --only=context, missing @context");
+}
+
+#[test]
+fn check_only_context_runs_context_validation_warning_exits_0() {
+    // `--only=context` without --strict surfaces the completeness gap as a
+    // warning (proving validate_context runs under the context aspect) while
+    // still exiting 0.
+    let f = write_temp_file(PUBLIC_FN_NO_CONTEXT);
+    let output = bock_bin()
+        .arg("check")
+        .arg("--only=context")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 0, "--only=context, default strictness");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing context") || stderr.contains("W8013"),
+        "--only=context should run validate_context and emit the warning: {stderr}",
+    );
+}
+
+#[test]
+fn check_strict_only_types_does_not_flag_missing_context_exits_0() {
+    // The context-validation pass is gated by the `context` aspect: under
+    // `--only=types --strict` it does NOT run, so a public item missing
+    // @context stays clean (exit 0).
+    let f = write_temp_file(PUBLIC_FN_NO_CONTEXT);
+    let output = bock_bin()
+        .arg("check")
+        .arg("--strict")
+        .arg("--only=types")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(
+        &output,
+        0,
+        "--strict --only=types should not run context validation",
+    );
+}

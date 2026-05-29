@@ -10,7 +10,7 @@
 //!    b. Lower to S-AIR
 //!    c. Type-check (T-AIR) — runs for the `types` aspect
 //!    d. Ownership + effect analysis — full check only
-//!    e. Context-system validation (§11) — runs for the `context` aspect
+//!    e. Context interpretation (C-AIR) then context-system validation (§11) — runs for the `context` aspect (capability verification + the strictness-gated context-validation pass)
 //!    f. Collect exports → register in [`bock_air::registry::ModuleRegistry`]
 //! 6. Report accumulated diagnostics
 //!
@@ -22,7 +22,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use bock_air::{lower_module, resolve_names_with_registry, ModuleRegistry, NodeIdGen, SymbolTable};
+use bock_air::{
+    interpret_context, lower_module, resolve_names_with_registry, validate_context, ModuleRegistry,
+    NodeIdGen, StrictnessLevel, SymbolTable,
+};
 use bock_build::dep_graph::{self, DepGraph};
 use bock_errors::{Diagnostic, DiagnosticBag, Severity};
 use bock_lexer::Lexer;
@@ -163,6 +166,27 @@ pub struct CheckOptions {
     /// Brief output: omit source-context snippets, one line per diagnostic
     /// (§20.1.1 `--brief`). `false` is the default rich rendering.
     pub brief: bool,
+    /// Force production strictness for the check (§20.1 `--strict`). When
+    /// `false` (the default) the check runs at development strictness, so
+    /// completeness gaps (e.g. a public item missing `@context`) are warnings
+    /// and the check still exits clean. When `true`, those gaps become errors
+    /// and the check fails. Mirrors `bock build --strict`.
+    pub strict: bool,
+}
+
+impl CheckOptions {
+    /// The [`Strictness`] this check runs at: production under `--strict`,
+    /// development otherwise. `check` never selects sketch strictness — the
+    /// flag is a binary override matching `bock build --strict`, not the full
+    /// sketch/development/production ladder (§1.4).
+    #[must_use]
+    pub fn strictness(&self) -> Strictness {
+        if self.strict {
+            Strictness::Production
+        } else {
+            Strictness::Development
+        }
+    }
 }
 
 impl Default for CheckOptions {
@@ -170,7 +194,28 @@ impl Default for CheckOptions {
         Self {
             aspects: AspectSelection::All,
             brief: false,
+            strict: false,
         }
+    }
+}
+
+/// Map a [`Strictness`] (the CLI's sketch/development/production ladder, §1.4)
+/// to the context-validation pass's [`StrictnessLevel`] profile.
+///
+/// - [`Strictness::Sketch`] → [`StrictnessLevel::Lax`] (error-level checks only;
+///   no completeness diagnostics).
+/// - [`Strictness::Development`] → [`StrictnessLevel::Standard`] (completeness
+///   gaps are warnings).
+/// - [`Strictness::Production`] → [`StrictnessLevel::Strict`] (completeness gaps
+///   are errors).
+///
+/// `check` only ever passes development (default) or production (`--strict`);
+/// sketch is mapped for completeness so the function is total.
+fn context_strictness_level(strictness: Strictness) -> StrictnessLevel {
+    match strictness {
+        Strictness::Sketch => StrictnessLevel::Lax,
+        Strictness::Development => StrictnessLevel::Standard,
+        Strictness::Production => StrictnessLevel::Strict,
     }
 }
 
@@ -285,9 +330,15 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
             continue;
         }
 
-        // 4b. Lower to S-AIR
+        // 4b. Lower to S-AIR, then interpret context annotations (C-AIR) so the
+        // `context` slot is populated on every node before any context-aware
+        // pass (capability verification, context validation) reads it. The
+        // interpreter's own diagnostics (e.g. unknown capability names) are
+        // collected unconditionally — they are not gated behind an aspect.
         let id_gen = NodeIdGen::new();
         let mut air_module = lower_module(&pf.module, &id_gen, &symbols);
+        let context_diags = interpret_context(&mut air_module);
+        collect_diagnostics(&mut all_diagnostics, &context_diags);
 
         // 4c. Type checking (T-AIR) — runs for the `types` aspect (and the
         // full check). The checker is always constructed and seeded so that
@@ -301,7 +352,9 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
             collect_diagnostics(&mut all_diagnostics, &checker.diags);
         }
 
-        let strictness = Strictness::Development;
+        // The chosen strictness (development by default, production under
+        // `--strict`) threads through every strictness-gated pass below.
+        let strictness = options.strictness();
 
         // 4d. Ownership and effect analysis — part of the default full check.
         // Neither is a v1 `--only` aspect, so they run only when no `--only`
@@ -315,11 +368,23 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
         }
 
         // 4e. Context-system validation (§11) — runs for the `context` aspect
-        // (and the full check). In v1 this is capability (`@requires`)
-        // verification, the compiler-verified §11 surface.
+        // (and the full check). Two compiler-verified §11 surfaces run here:
+        //   * capability (`@requires`) verification, and
+        //   * the context-validation pass (annotation consistency +
+        //     completeness), gated by strictness via `validate_context`.
+        // Both are gated by the chosen strictness, so under `--strict`
+        // (production) completeness gaps become errors → non-zero exit, while
+        // under the default (development) they stay warnings → exit 0. Note
+        // PII/security context *composition* (cross-module leak detection via
+        // `bock_air::compose_context`) is intentionally NOT wired here: it is
+        // reserved for a dedicated v1.x security pass (spec §20.1.1).
         if options.aspects.runs(Aspect::Context) {
             let capability_diags = bock_types::verify_capabilities(&air_module, strictness);
             collect_diagnostics(&mut all_diagnostics, &capability_diags);
+
+            let context_validation_diags =
+                validate_context(&air_module, context_strictness_level(strictness));
+            collect_diagnostics(&mut all_diagnostics, &context_validation_diags);
         }
 
         // Report diagnostics for this module. The lint pass runs as part of the
@@ -766,6 +831,7 @@ mod tests {
         let options = CheckOptions {
             aspects: AspectSelection::Only([Aspect::Types].into_iter().collect()),
             brief: false,
+            strict: false,
         };
         let outcome = run(vec![path], &options).unwrap();
         assert_eq!(outcome, CheckOutcome::Clean);
@@ -780,6 +846,7 @@ mod tests {
         let options = CheckOptions {
             aspects: AspectSelection::Only([Aspect::Context].into_iter().collect()),
             brief: false,
+            strict: false,
         };
         let outcome = run(vec![path], &options).unwrap();
         assert_eq!(outcome, CheckOutcome::Clean);
@@ -794,8 +861,149 @@ mod tests {
         let options = CheckOptions {
             aspects: AspectSelection::All,
             brief: true,
+            strict: false,
         };
         let outcome = run(vec![path], &options).unwrap();
         assert_eq!(outcome, CheckOutcome::Clean);
+    }
+
+    // ── --strict / strictness mapping (§20.1) ─────────────────────────────
+
+    #[test]
+    fn check_options_strictness_maps_strict_flag() {
+        // Default check runs at development strictness.
+        let dev = CheckOptions::default();
+        assert!(!dev.strict);
+        assert_eq!(dev.strictness(), Strictness::Development);
+
+        // `--strict` forces production strictness.
+        let prod = CheckOptions {
+            aspects: AspectSelection::All,
+            brief: false,
+            strict: true,
+        };
+        assert_eq!(prod.strictness(), Strictness::Production);
+    }
+
+    #[test]
+    fn context_strictness_level_maps_profiles() {
+        // Sketch→Lax, Development→Standard, Production→Strict (the
+        // validate_context profile ladder, mirroring §1.4 strictness).
+        assert_eq!(
+            context_strictness_level(Strictness::Sketch),
+            StrictnessLevel::Lax
+        );
+        assert_eq!(
+            context_strictness_level(Strictness::Development),
+            StrictnessLevel::Standard
+        );
+        assert_eq!(
+            context_strictness_level(Strictness::Production),
+            StrictnessLevel::Strict
+        );
+    }
+
+    /// A public item with no `@context` annotation. Under development
+    /// strictness this is a completeness *warning*; under production it is an
+    /// *error*. (`module Lib` itself also lacks `@context`, exercising the
+    /// module-level completeness rule.)
+    const PUBLIC_ITEM_NO_CONTEXT: &str = "module Lib
+
+public fn add(a: Int, b: Int) -> Int { a + b }
+";
+
+    #[test]
+    fn default_check_treats_missing_context_as_warning_clean_exit() {
+        // Without --strict, a public item missing @context is a warning: the
+        // check still exits clean (warnings never fail the check).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.bock");
+        fs::write(&path, PUBLIC_ITEM_NO_CONTEXT).unwrap();
+
+        let outcome = run(vec![path], &CheckOptions::default()).unwrap();
+        assert_eq!(
+            outcome,
+            CheckOutcome::Clean,
+            "missing @context must be a warning (exit clean) at development strictness"
+        );
+    }
+
+    #[test]
+    fn strict_check_treats_missing_context_as_error_failed_exit() {
+        // With --strict, the same missing @context becomes an error: the check
+        // fails. This is the O1+O2 composition — validate_context's
+        // completeness gate flips from warning to error under production
+        // strictness and that error drives the non-zero exit (H1's contract).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.bock");
+        fs::write(&path, PUBLIC_ITEM_NO_CONTEXT).unwrap();
+
+        let options = CheckOptions {
+            aspects: AspectSelection::All,
+            brief: false,
+            strict: true,
+        };
+        let outcome = run(vec![path], &options).unwrap();
+        assert_eq!(
+            outcome,
+            CheckOutcome::Failed,
+            "missing @context must be an error (exit failed) under --strict / production"
+        );
+    }
+
+    #[test]
+    fn only_context_runs_validate_context_completeness_gate() {
+        // `--only=context` must run the context-validation pass (not just
+        // capability verification): under --strict it flips the same
+        // missing-@context completeness gap to an error.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.bock");
+        fs::write(&path, PUBLIC_ITEM_NO_CONTEXT).unwrap();
+
+        // --only=context, development: warning → clean.
+        let dev = CheckOptions {
+            aspects: AspectSelection::Only([Aspect::Context].into_iter().collect()),
+            brief: false,
+            strict: false,
+        };
+        assert_eq!(
+            run(vec![path.clone()], &dev).unwrap(),
+            CheckOutcome::Clean,
+            "--only=context at development strictness must surface completeness as a warning"
+        );
+
+        // --only=context, --strict: error → failed. If validate_context were
+        // not wired into the context aspect, this would still be Clean.
+        let strict = CheckOptions {
+            aspects: AspectSelection::Only([Aspect::Context].into_iter().collect()),
+            brief: false,
+            strict: true,
+        };
+        assert_eq!(
+            run(vec![path], &strict).unwrap(),
+            CheckOutcome::Failed,
+            "--only=context --strict must flag missing @context as an error"
+        );
+    }
+
+    #[test]
+    fn only_types_does_not_run_context_validation() {
+        // The context-validation pass must be gated by the `context` aspect:
+        // `--only=types --strict` does NOT run it, so a public item missing
+        // @context stays clean (no completeness error from the types aspect).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.bock");
+        fs::write(&path, PUBLIC_ITEM_NO_CONTEXT).unwrap();
+
+        let options = CheckOptions {
+            aspects: AspectSelection::Only([Aspect::Types].into_iter().collect()),
+            brief: false,
+            strict: true,
+        };
+        assert_eq!(
+            run(vec![path], &options).unwrap(),
+            CheckOutcome::Clean,
+            "--only=types must not run context completeness validation even under --strict"
+        );
     }
 }

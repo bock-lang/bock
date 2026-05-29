@@ -1898,7 +1898,7 @@ Single binary containing all tooling. The CLI surface is designed for ergonomic 
 `bock new` — Project scaffolding with interactive or flag-based configuration. Generates `bock.project` with a commented-out `[ai]` block for opt-in AI configuration; see §20.7.
 `bock build` — Transpile and compile. Produces a scaffolded project (project mode) by default; see §20.6.2 for output modes. Flags: `--target`, `--all-targets`, `--source-only`, `--deliverable`, `--no-tests`, `--source-map` / `--no-source-map` (default on), `--strict`, `--pin-all`, `--deterministic`, `--optimize`, `--release`. `--strict` forces production strictness for the build (fails on unpinned build-scope decisions); `--pin-all` pins every build-scope decision after a successful build. The pair enables the develop → ship workflow: build with `--pin-all`, commit the resulting pins, then ship with `--strict`. See §17.4 for the pinning model.
 `bock run` — Build and execute. Default uses interpreter. `--target` for specific language. `--watch` for hot reload.
-`bock check` — Type check, lint, context validation. `--only=<aspect>` restricts the check to specific aspects (e.g., `--only=types`, `--only=context`, `--only=types,context`); see §20.1.1 for the aspect surface. `--brief` produces compact error output (omits source-context snippets).
+`bock check` — Type check, lint, context validation. `--only=<aspect>` restricts the check to specific aspects (e.g., `--only=types`, `--only=context`, `--only=types,context`); see §20.1.1 for the aspect surface. `--brief` produces compact error output (omits source-context snippets). `--strict` forces production strictness for the check: completeness gaps that are warnings at the default development strictness (e.g. a public item or module missing `@context`) become errors and a non-zero exit. Mirrors `bock build --strict`. `bock check` exits non-zero if and only if the check produces at least one error; warnings never fail the check.
 `bock test` — Run tests. Default uses interpreter (fast). `--filter <pattern>` selects tests by name. Cross-target testing (`--target`, `--all-targets`, `--smart`), coverage, and snapshot testing are planned for v1.x; see §20.4.
 `bock fmt` — Format (one style, zero configuration). `--check` for CI.
 `bock repl` — Interactive REPL with `:type`, `:air`, `:target` commands.
@@ -1936,12 +1936,14 @@ bock check --only=types --only=context
 
 **v1 aspects:**
 - `types` — type checking
-- `context` — context-system validation (§11)
+- `context` — context-system validation (§11). This aspect runs two compiler-verified §11 passes: capability (`@requires`) verification, and the **context-validation pass** — annotation consistency (security-level monotonicity, performance-budget validity, known capability/security names) plus **completeness** (public items and modules carrying `@context`). Completeness is **gated by strictness**: at the default development strictness, missing-context findings are warnings; under `bock check --strict` (production strictness) they are errors. PII/security context **composition** — cross-module leak detection that traces sensitive data across module boundaries — is **Reserved for v1.x** (a dedicated security pass); it is *not* part of the `context` aspect in v1.
 
 **v1.x aspects** (ship alongside `bock fix`):
 - `lint` — lint pass; the underlying pass exists in v1 (`bock check` runs it by default) but `--only=lint` ships when `bock fix` provides the ergonomic counterpart
 
 Omitting `--only` runs all aspects (the default full check). Unknown aspect values produce a build error with the list of valid aspects. Adding a new aspect later does not require a new flag — it becomes a new valid value for `--only`.
+
+The context-validation pass's strictness profile follows the project strictness ladder (§1.4): `sketch` runs only error-level consistency checks (no completeness), `development` adds completeness warnings, and `production` (selected by `--strict`) promotes completeness gaps to errors.
 
 ### 20.2 — Formatter
 

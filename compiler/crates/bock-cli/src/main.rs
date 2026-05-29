@@ -107,6 +107,13 @@ enum Command {
         /// Brief output: compact, one-line diagnostics with no source-context snippets.
         #[arg(long)]
         brief: bool,
+
+        /// Force production strictness for the check. Without this flag the
+        /// check runs at development strictness (completeness gaps are
+        /// warnings); with it, completeness gaps become errors and a
+        /// non-zero exit. Mirrors `bock build --strict`.
+        #[arg(long)]
+        strict: bool,
     },
     /// Run tests.
     Test {
@@ -459,9 +466,18 @@ async fn main() -> anyhow::Result<ExitCode> {
                 run::run(file, program_args).await?;
             }
         }
-        Command::Check { files, only, brief } => match check::AspectSelection::from_raw(&only) {
+        Command::Check {
+            files,
+            only,
+            brief,
+            strict,
+        } => match check::AspectSelection::from_raw(&only) {
             Ok(aspects) => {
-                let options = check::CheckOptions { aspects, brief };
+                let options = check::CheckOptions {
+                    aspects,
+                    brief,
+                    strict,
+                };
                 if !check::run(files, &options)?.is_clean() {
                     exit_code = ExitCode::FAILURE;
                 }
@@ -620,5 +636,19 @@ mod tests {
         let cli = Cli::try_parse_from(["bock", "lsp"])
             .expect("`bock lsp` (no flag) should parse cleanly");
         assert!(matches!(cli.command, Command::Lsp { stdio: false }));
+    }
+
+    #[test]
+    fn check_accepts_strict_flag() {
+        let cli = Cli::try_parse_from(["bock", "check", "--strict", "main.bock"])
+            .expect("`bock check --strict` should parse cleanly");
+        assert!(matches!(cli.command, Command::Check { strict: true, .. }));
+    }
+
+    #[test]
+    fn check_strict_defaults_false() {
+        let cli = Cli::try_parse_from(["bock", "check", "main.bock"])
+            .expect("`bock check` should parse cleanly");
+        assert!(matches!(cli.command, Command::Check { strict: false, .. }));
     }
 }
