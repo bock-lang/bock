@@ -4,7 +4,9 @@
 //! 1. **Capability consistency**: child `@requires` propagate to parents (additive).
 //! 2. **Security consistency**: security levels don't contradict in parent-child.
 //! 3. **Performance budget validity**: values are positive and well-formed.
-//! 4. **Completeness**: in strict mode, public items must have context annotations.
+//! 4. **Completeness**: in strict mode, public *items* must have context
+//!    annotations. Module-level completeness is Reserved for v1.x (spec §15.3),
+//!    so v1 checks per-item completeness only — never module-level.
 
 use std::collections::HashSet;
 
@@ -20,7 +22,8 @@ use crate::stubs::{security_level_rank, Capability, ContextBlock, SecurityInfo, 
 /// - **Lax** (sketch mode): only error-level validations — contradictions, invalid
 ///   values. No completeness warnings. Auto-inference is assumed at this level.
 /// - **Standard** (development mode): lax checks + **warnings** on public items
-///   and modules missing context annotations.
+///   missing context annotations. (Module-level completeness is Reserved for
+///   v1.x per §15.3, so it is not checked in v1.)
 /// - **Strict** (production mode): standard checks but missing context annotations
 ///   become **errors** instead of warnings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +32,8 @@ pub enum StrictnessLevel {
     /// No completeness warnings; auto-infer capabilities.
     Lax,
     /// Standard / Development: lax + warnings for public items without context
-    /// and undeclared effects.
+    /// and undeclared effects. (Module-level completeness is Reserved for v1.x,
+    /// §15.3, and is not checked.)
     Standard,
     /// Strict / Production: standard but missing context / undeclared effects
     /// are errors, not warnings.
@@ -62,7 +66,8 @@ impl StrictnessLevel {
 /// - Security levels are consistent (children don't have lower sensitivity than parents).
 /// - Capabilities propagate upward correctly.
 /// - Performance budget values are positive.
-/// - In strict mode: all public items and modules have context annotations.
+/// - In strict mode: all public items have context annotations (module-level
+///   completeness is Reserved for v1.x per §15.3 and is not checked).
 ///
 /// Returns a [`DiagnosticBag`] with any errors/warnings.
 #[must_use]
@@ -222,40 +227,29 @@ fn validate_performance_budget(
     }
 }
 
-/// Check that public items and modules have context annotations.
+/// Check that public items have context annotations.
 ///
 /// In **Standard** mode, missing annotations produce **warnings**.
 /// In **Strict** mode, missing annotations produce **errors**.
+///
+/// Only *items* are checked. Module-level `@context` completeness is Reserved
+/// for v1.x (spec §15.3): v1 has no syntax to annotate a `module`, so a
+/// module-level requirement would be unsatisfiable. v1 completeness is
+/// per-item only; the module-level rule ships in v1.x.
 fn validate_completeness(node: &AIRNode, strictness: StrictnessLevel, diags: &mut DiagnosticBag) {
     let is_strict = strictness == StrictnessLevel::Strict;
     let mode_label = if is_strict { "production" } else { "standard" };
 
     match &node.kind {
-        NodeKind::Module { .. } if node.context.is_none() => {
-            if is_strict {
-                diags.error(
-                    DiagnosticCode {
-                        prefix: 'E',
-                        number: 8014,
-                    },
-                    format!(
-                        "module is missing @context annotation (required in {mode_label} mode)"
-                    ),
-                    node.span,
-                );
-            } else {
-                diags.warning(
-                    DiagnosticCode {
-                        prefix: 'W',
-                        number: 8014,
-                    },
-                    format!(
-                        "module is missing @context annotation (recommended in {mode_label} mode)"
-                    ),
-                    node.span,
-                );
-            }
-        }
+        // Module-level `@context` completeness is intentionally NOT checked in
+        // v1. Per spec §15.3, annotations on the `module` declaration are
+        // *Reserved for v1.x*: v1 has no syntax to attach `@context` (or any
+        // annotation) to a module, and the parser rejects it. A module-level
+        // completeness requirement would therefore be unsatisfiable — it would
+        // fire (E8014/W8014) on *every* module regardless of authored intent,
+        // breaking `bock check --strict`. v1 completeness is per-item only (the
+        // arms below). The module-level rule ships in v1.x alongside the
+        // Reserved module-level annotation syntax.
         NodeKind::FnDecl {
             visibility: Visibility::Public,
             name,
@@ -932,20 +926,28 @@ mod tests {
     }
 
     #[test]
-    fn completeness_standard_module_without_context_warns() {
+    fn completeness_standard_module_without_context_is_clean() {
+        // §15.3: module-level annotations are Reserved for v1.x, so v1 never
+        // flags a module for a missing module-level `@context`. An empty module
+        // (no public items) is therefore clean even in standard mode — the
+        // module-level completeness requirement was dropped as unsatisfiable.
         let id_gen = NodeIdGen::new();
         let module = module_with_items(&id_gen, vec![]);
 
         let diags = validate_context(&module, StrictnessLevel::Standard);
-        assert!(
-            diags.warning_count() > 0,
-            "standard mode should warn on module without context"
+        assert_eq!(
+            diags.warning_count(),
+            0,
+            "standard mode must not warn on a module missing module-level @context (§15.3)"
         );
         assert_eq!(diags.error_count(), 0);
     }
 
     #[test]
     fn completeness_standard_module_with_context_ok() {
+        // Sanity: a module carrying context produces no diagnostics. (In v1 the
+        // module is never flagged regardless — §15.3 — but this guards against a
+        // module-level context block triggering a spurious diagnostic.)
         let id_gen = NodeIdGen::new();
         let mut module = module_with_items(&id_gen, vec![]);
         module.context = Some(ContextBlock {
@@ -986,19 +988,29 @@ mod tests {
     }
 
     #[test]
-    fn completeness_strict_module_without_context_errors() {
+    fn completeness_strict_module_without_context_is_clean() {
+        // §15.3: module-level completeness is Reserved for v1.x. Under strict
+        // (production) the empty module is clean — no E8014 — because v1 has no
+        // syntax to attach `@context` to a module, so the rule was unsatisfiable
+        // and has been dropped. This is the core of the PR #87 fix: `--strict`
+        // is no longer broken by an always-firing module-level requirement.
         let id_gen = NodeIdGen::new();
         let module = module_with_items(&id_gen, vec![]);
 
         let diags = validate_context(&module, StrictnessLevel::Strict);
-        assert!(
-            diags.error_count() > 0,
-            "strict mode should error on module without context"
+        assert_eq!(
+            diags.error_count(),
+            0,
+            "strict mode must not error on a module missing module-level @context (§15.3)"
         );
+        assert_eq!(diags.warning_count(), 0);
     }
 
     #[test]
     fn completeness_strict_module_with_context_ok() {
+        // Sanity: a module carrying context produces no diagnostics. (In v1 the
+        // module is never flagged regardless — §15.3 — but this guards against a
+        // module-level context block triggering a spurious diagnostic.)
         let id_gen = NodeIdGen::new();
         let mut module = module_with_items(&id_gen, vec![]);
         module.context = Some(ContextBlock {
@@ -1008,6 +1020,44 @@ mod tests {
 
         let diags = validate_context(&module, StrictnessLevel::Strict);
         assert_eq!(diags.error_count(), 0);
+    }
+
+    #[test]
+    fn completeness_strict_module_clean_when_public_items_have_context() {
+        // Regression for PR #87 / §15.3: a module whose PUBLIC items each carry
+        // `@context` is clean under strict (production) — the module itself is
+        // never flagged (module-level completeness is Reserved for v1.x), and
+        // every public item satisfies the per-item completeness rule. This is
+        // the satisfiable strict-mode case that the (now-removed) module-level
+        // requirement made impossible in v1.
+        let id_gen = NodeIdGen::new();
+
+        // Public fn carrying @context — interpret so the context block is set.
+        let mut public_fn = fn_node_named(
+            &id_gen,
+            "process",
+            vec![ann("context", vec![str_expr("Processes a request.")])],
+            Visibility::Public,
+        );
+        let _ = interpret_context(&mut public_fn);
+
+        // Private fn with no context — never requires completeness.
+        let private_fn = fn_node_named(&id_gen, "helper", vec![], Visibility::Private);
+
+        // Module carries NO module-level context (v1 has no syntax for it).
+        let module = module_with_items(&id_gen, vec![public_fn, private_fn]);
+
+        let diags = validate_context(&module, StrictnessLevel::Strict);
+        assert_eq!(
+            diags.error_count(),
+            0,
+            "strict: module with all public items annotated must be clean"
+        );
+        assert_eq!(
+            diags.warning_count(),
+            0,
+            "strict: no warnings when public items carry @context and module is never flagged"
+        );
     }
 
     // ── Strictness level mapping tests ──────────────────────────────────────
@@ -1095,7 +1145,12 @@ mod tests {
     }
 
     #[test]
-    fn three_levels_differ_on_module_without_context() {
+    fn module_without_context_is_clean_at_every_strictness() {
+        // §15.3: module-level completeness is Reserved for v1.x. An empty module
+        // (no public items) is silent at *every* strictness level in v1 — the
+        // module itself is never flagged for a missing module-level `@context`.
+        // (Per-item completeness still differentiates the levels; see
+        // `three_levels_differ_on_public_fn_without_context`.)
         let id_gen = NodeIdGen::new();
 
         let mod_lax = module_with_items(&id_gen, vec![]);
@@ -1106,14 +1161,13 @@ mod tests {
         let d_std = validate_context(&mod_std, StrictnessLevel::Standard);
         let d_strict = validate_context(&mod_strict, StrictnessLevel::Strict);
 
-        assert_eq!(
-            d_lax.warning_count() + d_lax.error_count(),
-            0,
-            "lax: silent"
-        );
-        assert!(d_std.warning_count() > 0, "standard: warns");
-        assert_eq!(d_std.error_count(), 0, "standard: no errors");
-        assert!(d_strict.error_count() > 0, "strict: errors");
+        for (d, label) in [(&d_lax, "lax"), (&d_std, "standard"), (&d_strict, "strict")] {
+            assert_eq!(
+                d.warning_count() + d.error_count(),
+                0,
+                "{label}: an empty module must be silent (no module-level completeness, §15.3)"
+            );
+        }
     }
 
     // ── Invariant type-check tests ──────────────────────────────────────────

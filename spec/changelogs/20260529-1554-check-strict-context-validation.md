@@ -1,7 +1,7 @@
 # `bock check --strict` + context-validation scope
 
 **Date:** 2026-05-29
-**Affects:** §20.1 (`bock check`), §20.1.1 (`bock check` Aspect Surface)
+**Affects:** §20.1 (`bock check`), §20.1.1 (`bock check` Aspect Surface), §2 (Language Overview), §11.2 (`@context`), §11.7 (`@domain`), §11.8 (Context Composition), §15.3 (Application sites)
 **Type:** addition / clarification
 
 ## Change
@@ -36,6 +36,40 @@ Two implementation-driven amendments to the `bock check` surface:
    cross-module leak detection -- is **Reserved for v1.x** (a
    dedicated security pass) and is *not* part of the `context`
    aspect in v1.
+
+3. **v1 context-completeness is per-item; module-level
+   completeness is Reserved for v1.x (§11.2, §11.7, §11.8,
+   §15.3, §20.1.1 — reconciliation).** Module-level annotations
+   on the `module` declaration are Reserved for v1.x (§15.3):
+   v1 has no syntax to attach `@context` (or any annotation) to a
+   `module`, and the parser rejects it. The context-completeness
+   checks therefore cannot apply a *module-level* requirement in
+   v1 — it would be unsatisfiable, firing on every module
+   regardless of authored intent and making `bock check --strict`
+   impossible to pass. The decision (design-decided on PR #87):
+   in v1 the **module-level** completeness requirement is
+   **dropped**; v1 completeness is **per-item** (every public
+   declaration must carry `@context`), which is satisfiable. The
+   module-level rule ships in v1.x alongside the Reserved
+   module-level annotation syntax.
+
+   Spec reconciliation accompanying the decision:
+   - **§20.1.1** now states the `context` aspect checks **per-item**
+     completeness (public declarations carrying `@context`), not
+     "public items and modules", and cross-references §15.3/§11.8
+     for why module-level completeness is Reserved.
+   - **§11.8** gains an explicit "v1 context-completeness is
+     per-item" note.
+   - **§15.3** gains a forward note that the unsatisfiable
+     module-level requirement is why v1 completeness is per-item.
+   - **§11.2** (`@context`) and **§11.7** (`@domain`) examples
+     previously showed `@annotation ... module <path>` —
+     module-level application that §15.3 Reserves for v1.x and that
+     v1 parsers reject. Both are rewritten to show the v1-valid
+     per-declaration form and to mark the module-level form clearly
+     as **Reserved for v1.x** (cross-referencing §15.3). The §2
+     Language Overview example's dangling module-level `@context`
+     block is likewise replaced with a clarifying comment.
 
 ## Rationale
 
@@ -77,14 +111,26 @@ No source migration. Behavioral notes for tooling/CI:
   `bock.project`'s strictness default. If `check` should instead
   honor the project's configured level by default, that is a
   separate design decision.
-- **FOUND: `bock_air::interpret_context` does not interpret
-  module-level annotations.** `interpret_context` extracts
-  annotations only from item nodes (functions, records, enums,
-  classes, traits, impls, effects, type aliases, consts), not from
-  the `Module` node. Consequently module-level `@context` does not
-  populate the module node's context block, so the
-  production-mode module-completeness rule (E8014) fires for
-  *every* module under `--strict` regardless of any module-level
-  `@context`. This is a pre-existing `bock-air` gap, left
-  unchanged here (out of this change's scope); it should be fixed
-  in a follow-up so module-level `@context` suppresses E8014.
+- **RESOLVED (was FOUND): module-level `@context` completeness
+  was unsatisfiable in v1.** The original PR #87 noted that
+  `bock_air::interpret_context` never populates a `Module` node's
+  context block (annotations attach only to item nodes), so the
+  production-mode module-completeness rules (E8014 in
+  `validate_context`, E8022 in `bock_air::verify_capabilities`)
+  fired on *every* module under `--strict` regardless of any
+  module-level `@context`. The root cause is deeper than an
+  interpretation gap: v1 has **no syntax** to attach `@context` to
+  a `module` at all — that surface is Reserved for v1.x (§15.3).
+  A module-level completeness requirement is therefore
+  intrinsically unsatisfiable in v1. **Resolution (this
+  follow-up):** drop the module-level completeness requirement in
+  v1 rather than try to satisfy it. The E8014 module arm in
+  `validate_context` and the E8022 emission in
+  `bock_air::verify_capabilities` are removed (the latter's
+  `is_complete()` no longer counts the module dimension; module
+  counters remain as informational reporting only). Per-item
+  completeness (E8013/W8013 on public items; E8023 on public
+  functions) is unchanged. `bock check --strict` is now
+  satisfiable: a module whose public items each carry `@context`
+  passes clean. The module-level completeness rule returns in v1.x
+  with the Reserved module-level annotation syntax.
