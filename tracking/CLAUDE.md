@@ -4,19 +4,48 @@ This subtree is the orchestrator's working memory. The files here
 are project state, committed to the repo, read by the orchestrator
 at the start of every work block.
 
-## Files
+## Files — the planning hub
 
 ```
 tracking/
-  queue.md         Work queue across all chats — status, dependencies,
-                   dependency graph. The orchestrator's view of what's
-                   ready, blocked, deferred.
-  routing.md       Routing rules and conflict-avoidance constraints.
-                   How the orchestrator decides where work goes.
-  audit.md         Decision log (reasoning per action) + daily digests.
-                   The human's review surface.
-  escalations.md   Items awaiting the human's decision, with responses.
+  queue.md            Active work items (the one work list).
+  divergences.md      Spec ↔ impl factual mismatches + disposition.
+  design-questions.md Open design decisions (core-spec → escalated).
+  milestones.md       Version milestones; item→version mapping.
+  snapshot.md         Current project-state facts (build, what works).
+  routing.md          Routing rules + conflict-avoidance.
+  audit.md            Decision log (reasoning per action) + digests.
+  escalations.md      Items awaiting the human / Design, with responses.
+  designs/, plans/    Approved design specs + implementation plans.
 ```
+
+`ROADMAP.md` and `STATUS.md` at the repo root are **generated** from
+this hub by `tools/scripts/gen-tracking-views.sh` (milestones → ROADMAP;
+snapshot + queue summary → STATUS). Do NOT hand-edit them; the
+`Tracking Views` CI workflow `--check`s they stay in sync. Run the
+generator after changing the hub.
+
+## Hub file boundaries (every item has exactly one home)
+
+| File | The one question it owns |
+|------|--------------------------|
+| `queue.md` | What work is to-be / being done? (actionable) |
+| `divergences.md` | Where does impl differ from spec, and what's the disposition? |
+| `design-questions.md` | What design decisions are open? |
+| `milestones.md` | What ships in which version? |
+| `snapshot.md` | What is the current project state? |
+| `audit.md` | What happened / was decided? (history) |
+| `escalations.md` | What needs the human / Design? |
+
+Disambiguation: **actionable → `queue.md`** (incl. triaged FOUND-bugs
+and actionable doc gaps); **factual mismatch → `divergences.md`**;
+**undecided behavior → `design-questions.md`** (core-spec ones are
+escalated to Design, never decided here — see orchestrator.md "Design
+authority"); **version mapping → `milestones.md`** (mapping only;
+detail by ID in queue); **present-state → `snapshot.md`** (never future
+work). Items carry stable IDs and are named once, referenced by ID
+elsewhere — never duplicated across files. Raw OPEN/FOUND tags arrive
+via PR descriptions; the orchestrator triages them into the right file.
 
 ## Authority
 

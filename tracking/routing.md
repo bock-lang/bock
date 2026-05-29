@@ -34,10 +34,11 @@
   Known hot file: `compiler/crates/bock-cli/src/main.rs`
   (exit-code fix H1 + §20.1.1 flag work C1 both touch it).
   Sequence or combine; the orchestrator decides, never concurrent.
-- Documentation phases that delete shared scratch (D5 deletes
-  `docs/INVENTORY.md` / `docs/SPEC-ALIGNMENT.md`) grep for
-  references before deletion; expand scope or coordinate per the
-  owned-files discipline.
+- Sessions that delete shared files grep for references first, then
+  update or accept each before deletion (e.g. the tracking
+  consolidation retired `docs/INVENTORY.md` / `docs/SPEC-ALIGNMENT.md`
+  / `tracking/tracking.md` after migrating their content into the hub).
+  Expand scope or coordinate per the owned-files discipline.
 - Sessions whose verification gate scans repo-wide (e.g.,
   "no refs to X remain") must either declare the full reachable
   set as owned-files or carry explicit SCOPE EXPANSION

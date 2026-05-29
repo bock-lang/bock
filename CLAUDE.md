@@ -50,11 +50,13 @@ cd extensions/vscode && npm test          # extension tests
 - **Language reference:** `spec/bock-spec.md`
 - **Contributing guide:** `docs/src/contributing.md`
 - **Architecture overview:** `ARCHITECTURE.md` (start here for new contributors)
-- **Current state:** `STATUS.md`
-- **Forward plans:** `ROADMAP.md`
+- **Current state:** `STATUS.md` (generated from `tracking/` — do not hand-edit)
+- **Forward plans:** `ROADMAP.md` (generated from `tracking/milestones.md` — do not hand-edit)
 - **How the project is run (agentic):** `.claude/agentic-operating-model.md`
 - **Orchestrator contract:** `.claude/agents/orchestrator.md`
-- **Work queue + orchestrator state:** `tracking/` (queue, routing, audit, escalations)
+- **Planning hub (single source of truth):** `tracking/` — `queue` (work),
+  `divergences`, `design-questions`, `milestones`, `snapshot`, plus `routing`,
+  `audit`, `escalations`. See `tracking/CLAUDE.md` for the file boundaries.
 
 ## Pre-PR Verification
 
@@ -137,10 +139,12 @@ chat does not resolve spec divergences unilaterally.
 
 ## Tracking File Alignment
 
-`STATUS.md` and `ROADMAP.md` describe the same project at different
-time horizons. When a milestone completes, both must be updated in
-the same PR. If they disagree, the most recent commit on each file
-wins until reconciled. Do not let drift persist across sessions.
+`STATUS.md` and `ROADMAP.md` are **generated** from the `tracking/` hub
+(`snapshot` + `queue` → STATUS; `milestones` → ROADMAP) by
+`tools/scripts/gen-tracking-views.sh`. Do not hand-edit them — update
+the hub and regenerate. The `Tracking Views` CI workflow `--check`s they
+stay in sync, so drift cannot persist. The hub itself is the single
+forward-looking source of truth (see `tracking/CLAUDE.md`).
 
 ## Session Workflow
 
