@@ -22,8 +22,9 @@ the Bock identity.
 - **Release actions (all escalate — external/irreversible):** CI live;
   VS Code extension → marketplace; `bock` → crates.io + GitHub
   Releases; docs site deploy; announcement post.
-- **Mapped items:** `D4`, `D5`, `ItemB` (project-mode codegen),
-  `Q-20.1-xref`, `Q-cl-dates`, `Q-cl-0515`, `Q-fconf`, `Q-vscode-test`.
+- **Mapped items:** `Q-stdlib` (core stdlib — v1-blocking), `D4`, `D5`,
+  `ItemB` (project-mode codegen), `Q-20.1-xref`, `Q-cl-dates`,
+  `Q-cl-0515`, `Q-fconf`, `Q-vscode-test`.
 - **Acceptance:** conformance passes per target; all 20 examples
   `check`/`build`/`test` clean on ≥ JS+Py+Rust; clippy clean.
 
@@ -48,13 +49,12 @@ the Bock identity.
 
 ---
 
-## MS-stdlib — UNSCHEDULED (needs a milestone decision)
+## MS-stdlib — DECIDED: v1-blocking (operator, 2026-05-29)
 The **core** standard library (`core.collections/string/math/iter/…`,
-§18.3) is presented by the spec as v1, but is unimplemented
-(`stdlib/` empty) and has **no milestone home**: v1.0 is "ship what's
-done" (implies it's done — it isn't) and v2 is *expansion* (HTTP/logging,
-not the core modules). Decision needed: is the core stdlib a v1.0
-deliverable (and thus a v1.0 blocker), a new milestone (e.g. v1.0.x /
-v1.1), or explicitly Reserved with §18 reconciled to match?
-Links: `divergences.md` DV1, `queue.md` Q-stdlib, `design-questions.md`
-DQ5. **This is the highest-leverage open planning decision.**
+§18.3) ships in **v1** and **blocks v1.0** (→ `queue.md` Q-stdlib). This
+resolves the earlier "ship what's done vs §18-full-stdlib" tension in
+favor of shipping it. Distinct from v2's stdlib *expansion*
+(HTTP/logging/etc.). **Still open (escalated to Design):** the precise
+core-module SCOPE for v1 — which of the ~15 §18.3 modules, at what
+surface (`design-questions.md` DQ5 / `escalations.md`). Phase planning
+of Q-stdlib proceeds once that returns. Links: DV1, Q-stdlib, DQ5.

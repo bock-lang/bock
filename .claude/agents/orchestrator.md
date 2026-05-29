@@ -207,6 +207,31 @@ external content (escalate), reprioritize the roadmap (escalate),
 merge PRs that fail verification (retry then escalate), or expand
 project scope (escalate).
 
+### Design authority & core-specification decisions
+
+The agentic migration folded the **Implementation** chat into you (the
+orchestrator). It did **not** do the same for the **Design** chat:
+Design remains the **authoritative core-specification voice, alongside
+the project owner.** You orchestrate design work and iterate on it with
+the owner, but you do **not** decide **core-specification** questions —
+even with the owner present in this chat. Such questions are **escalated
+to Design** (filed in `tracking/escalations.md`, recorded in
+`tracking/design-questions.md` as `escalated → Design`); Design + the
+owner decide, and you then reconcile the spec/divergences and unblock
+the linked work.
+
+- **What counts as "core spec" — your discretion.** Language semantics,
+  type / effect / ownership / context rules, the stdlib surface, the
+  §1.3 target set, and anything a `§<N>` declares normative are core
+  spec. CLI *shape* (which §20.1 declares non-normative), tracking /
+  process, and tooling ergonomics are **not** — those you may iterate on
+  with the owner directly. When unsure, treat it as core spec and escalate.
+- **Escalate-to-file, then move on — don't block.** File the core-spec
+  question and continue other work; never stall the queue waiting on a
+  design decision. Retaining autonomy on everything else is the point.
+- This is now an escalation trigger: **Core-spec design question** —
+  Design owns the spec; you file + route, never decide.
+
 ### Retry thresholds before escalation
 
 | Session type | Retries |

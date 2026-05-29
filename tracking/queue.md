@@ -47,13 +47,19 @@ repo wins). Most prior items landed this session — see audit.md._
   CLAUDE.md + the `/project:run-conformance` skill but does NOT exist.
   Create the runner + wire fixture execution + fix both references.
 
+## v1-blocking
+
+- **[Q-stdlib] Implement the core standard library** — impl ·
+  **v1-BLOCKING** · `stdlib/` · blocked-by: DQ5 (core-module scope —
+  escalated to Design) · links DV1, MS-stdlib · note: **DECIDED a v1
+  deliverable** (operator, 2026-05-29). §18.3 lists ~15 core.* modules;
+  `stdlib/` is empty (0 modules; prelude = ~9 builtins). Large, phased.
+  The work is scheduled for v1; the precise core-module SCOPE is a
+  core-spec question escalated to Design (DQ5 / escalations.md) —
+  phase planning proceeds when that returns. Don't block other work on it.
+
 ## Blocked
 
-- **[Q-stdlib] Implement the core standard library** — impl · blocked ·
-  `stdlib/` · blocked-by: milestone decision (MS-stdlib) · links DV1,
-  DQ5 · note: §18.3 lists ~15 core.* modules as v1; `stdlib/` is empty
-  (0 modules; prelude = ~9 builtins). Large, phased; currently has NO
-  milestone home — needs scheduling (see milestones.md MS-stdlib).
 - **[D4] Stdlib reference docs** — docs · blocked · `docs/src/reference/`
   · blocked-by: Q-stdlib · note: scaffolding-only until stdlib lands
   (a stub exists); the real reference cycle follows the implementation.
@@ -93,7 +99,7 @@ DQ2 ──→ Q-perf-example
 (independent / ready: Q-cl-dates, Q-cl-0515, Q-20.1-xref, Q-vscode-test, Q-fconf)
 ```
 
-**Critical path to v1.0:** the stdlib decision (MS-stdlib / Q-stdlib) and
-the D-series → ItemB. The "ship what's done" framing of v1.0
-(milestones.md) is in tension with §18 presenting a full stdlib as v1 —
-see DV1.
+**Critical path to v1.0:** Q-stdlib (now DECIDED v1-blocking) → D4 →
+D5 → ItemB. The earlier "ship what's done" vs §18-full-stdlib tension is
+resolved in favor of shipping the core stdlib in v1; the remaining open
+piece is its core-module SCOPE (DQ5, escalated to Design — see DV1).
