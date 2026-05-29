@@ -309,7 +309,9 @@ fn is_known_capability(name: &str) -> bool {
 /// Interpret a `@performance(max_latency: 100.ms, max_memory: 50.mb)` annotation.
 ///
 /// Since the parser strips named argument labels, we identify parameters by
-/// the suffix method call: `.ms`/`.s`/`.us`/`.ns` → duration, `.mb`/`.gb`/`.kb`/`.b` → byte size.
+/// the unit-suffixed literal (`100.ms`): `.ms`/`.s`/`.us`/`.ns`/`.min`/`.h` →
+/// duration, `.mb`/`.gb`/`.kb`/`.b`/`.tb` → byte size. The parenthesized
+/// method-call form (`100.ms()`) is accepted as a lenient alias.
 fn interpret_performance_annotation(
     ann: &Annotation,
     block: &mut ContextBlock,
@@ -342,42 +344,62 @@ fn interpret_performance_annotation(
     block.performance = Some(budget);
 }
 
-/// Try to parse a method-call expression as a duration value (e.g. `100.ms`).
-fn parse_duration(expr: &Expr) -> Option<Duration> {
-    if let Expr::MethodCall {
-        receiver, method, ..
-    } = expr
-    {
-        let unit = match method.name.as_str() {
-            "ns" => TimeUnit::Ns,
-            "us" => TimeUnit::Us,
-            "ms" => TimeUnit::Ms,
-            "s" => TimeUnit::S,
-            _ => return None,
-        };
-        let value = extract_numeric_value(receiver)?;
-        return Some(Duration { value, unit });
+/// Extract the (numeric receiver, unit suffix) pair from a unit-suffixed
+/// performance literal. Accepts the canonical no-parens literal form
+/// (`100.ms`, parsed as field access) and the parenthesized form
+/// (`100.ms()`, parsed as an argument-less method call) as a lenient alias.
+fn unit_suffixed(expr: &Expr) -> Option<(&Expr, &str)> {
+    match expr {
+        Expr::FieldAccess { object, field, .. } => Some((object.as_ref(), field.name.as_str())),
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } if args.is_empty() => Some((receiver.as_ref(), method.name.as_str())),
+        _ => None,
     }
-    None
 }
 
-/// Try to parse a method-call expression as a byte size value (e.g. `50.mb`).
+/// Try to parse an expression as a duration value (e.g. `100.ms`).
+///
+/// Accepts the unit-suffixed literal form (`100.ms`); the parenthesized
+/// method-call form (`100.ms()`) is accepted as a lenient alias.
+fn parse_duration(expr: &Expr) -> Option<Duration> {
+    let (value_expr, suffix) = unit_suffixed(expr)?;
+    let unit = match suffix {
+        "ns" => TimeUnit::Ns,
+        "us" => TimeUnit::Us,
+        "ms" => TimeUnit::Ms,
+        "s" => TimeUnit::S,
+        "min" => TimeUnit::Min,
+        "h" => TimeUnit::H,
+        _ => return None,
+    };
+    Some(Duration {
+        value: extract_numeric_value(value_expr)?,
+        unit,
+    })
+}
+
+/// Try to parse an expression as a byte size value (e.g. `50.mb`).
+///
+/// Accepts the unit-suffixed literal form (`50.mb`); the parenthesized
+/// method-call form (`50.mb()`) is accepted as a lenient alias.
 fn parse_byte_size(expr: &Expr) -> Option<ByteSize> {
-    if let Expr::MethodCall {
-        receiver, method, ..
-    } = expr
-    {
-        let unit = match method.name.as_str() {
-            "b" => SizeUnit::B,
-            "kb" => SizeUnit::Kb,
-            "mb" => SizeUnit::Mb,
-            "gb" => SizeUnit::Gb,
-            _ => return None,
-        };
-        let value = extract_numeric_value(receiver)?;
-        return Some(ByteSize { value, unit });
-    }
-    None
+    let (value_expr, suffix) = unit_suffixed(expr)?;
+    let unit = match suffix {
+        "b" => SizeUnit::B,
+        "kb" => SizeUnit::Kb,
+        "mb" => SizeUnit::Mb,
+        "gb" => SizeUnit::Gb,
+        "tb" => SizeUnit::Tb,
+        _ => return None,
+    };
+    Some(ByteSize {
+        value: extract_numeric_value(value_expr)?,
+        unit,
+    })
 }
 
 /// Extract a numeric value (int or float) from a literal expression.
@@ -694,6 +716,20 @@ mod tests {
         }
     }
 
+    /// Helper to create a unit-suffixed literal like `100.ms`, parsed as a
+    /// field-access expression (the canonical no-parens form).
+    fn unit_literal_expr(value: &str, suffix: &str) -> Expr {
+        Expr::FieldAccess {
+            id: 0,
+            span: test_span(),
+            object: Box::new(int_expr(value)),
+            field: Ident {
+                name: suffix.to_string(),
+                span: test_span(),
+            },
+        }
+    }
+
     /// Helper to create an annotation.
     fn ann(name: &str, args: Vec<Expr>) -> Annotation {
         Annotation {
@@ -823,6 +859,106 @@ mod tests {
         let mem = perf.max_memory.unwrap();
         assert!((mem.value - 50.0).abs() < f64::EPSILON);
         assert_eq!(mem.unit, SizeUnit::Mb);
+    }
+
+    #[test]
+    fn performance_no_parens_literal_parsed() {
+        // Design Q3: `100.ms` / `50.mb` are literals (field-access), not method
+        // calls. The interpreter must accept the no-parens canonical form.
+        let id_gen = NodeIdGen::new();
+        let mut node = fn_node(
+            &id_gen,
+            vec![ann(
+                "performance",
+                vec![
+                    unit_literal_expr("100", "ms"),
+                    unit_literal_expr("50", "mb"),
+                ],
+            )],
+        );
+        let diags = interpret_context(&mut node);
+        assert_eq!(diags.error_count(), 0);
+        let ctx = node.context.as_ref().unwrap();
+        let perf = ctx.performance.as_ref().unwrap();
+        let lat = perf.max_latency.unwrap();
+        assert!((lat.value - 100.0).abs() < f64::EPSILON);
+        assert_eq!(lat.unit, TimeUnit::Ms);
+        let mem = perf.max_memory.unwrap();
+        assert!((mem.value - 50.0).abs() < f64::EPSILON);
+        assert_eq!(mem.unit, SizeUnit::Mb);
+    }
+
+    #[test]
+    fn performance_extended_units_parsed() {
+        // The full normative unit set: `.min`/`.h` for time, `.tb` for size.
+        let id_gen = NodeIdGen::new();
+        let mut node = fn_node(
+            &id_gen,
+            vec![ann(
+                "performance",
+                vec![unit_literal_expr("5", "min"), unit_literal_expr("2", "tb")],
+            )],
+        );
+        let diags = interpret_context(&mut node);
+        assert_eq!(diags.error_count(), 0);
+        let ctx = node.context.as_ref().unwrap();
+        let perf = ctx.performance.as_ref().unwrap();
+        assert_eq!(perf.max_latency.unwrap().unit, TimeUnit::Min);
+        assert_eq!(perf.max_memory.unwrap().unit, SizeUnit::Tb);
+
+        // `.h` (hours) is also accepted.
+        let id_gen2 = NodeIdGen::new();
+        let mut node2 = fn_node(
+            &id_gen2,
+            vec![ann("performance", vec![unit_literal_expr("1", "h")])],
+        );
+        let diags2 = interpret_context(&mut node2);
+        assert_eq!(diags2.error_count(), 0);
+        assert_eq!(
+            node2
+                .context
+                .as_ref()
+                .unwrap()
+                .performance
+                .as_ref()
+                .unwrap()
+                .max_latency
+                .unwrap()
+                .unit,
+            TimeUnit::H
+        );
+    }
+
+    #[test]
+    fn performance_bare_int_rejected() {
+        // Design Q3: a unit-less integer is not a valid budget value; each
+        // argument without a recognized unit suffix raises E8003.
+        let id_gen = NodeIdGen::new();
+        let mut node = fn_node(
+            &id_gen,
+            vec![ann("performance", vec![int_expr("100"), int_expr("50")])],
+        );
+        let diags = interpret_context(&mut node);
+        assert_eq!(diags.error_count(), 2);
+    }
+
+    #[test]
+    fn performance_parens_method_call_alias_parsed() {
+        // The parenthesized method-call form (`100.ms()`) is still accepted as
+        // a lenient alias for the canonical no-parens literal.
+        let id_gen = NodeIdGen::new();
+        let mut node = fn_node(
+            &id_gen,
+            vec![ann(
+                "performance",
+                vec![method_call_expr("100", "ms"), method_call_expr("50", "mb")],
+            )],
+        );
+        let diags = interpret_context(&mut node);
+        assert_eq!(diags.error_count(), 0);
+        let perf = node.context.as_ref().unwrap().performance.as_ref().unwrap();
+        assert_eq!(perf.max_latency.unwrap().unit, TimeUnit::Ms);
+        assert_eq!(perf.max_memory.unwrap().unit, SizeUnit::Mb);
     }
 
     #[test]

@@ -1,0 +1,9 @@
+// TEST: performance_literal_units_no_errors
+// EXPECT: no_errors
+// @performance accepts the canonical no-parens unit-suffixed literal form
+// (`100.ms`, `50.mb`) per Design Q3 ("`100.ms` is a literal, not a method
+// call"). The interpreter parses these as field-access expressions.
+module perf_literal
+
+@performance(max_latency: 100.ms, max_memory: 50.mb)
+public fn query() -> Int { 0 }
