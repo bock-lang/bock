@@ -4,9 +4,9 @@ Orchestrator working memory. Read at the start of every work
 block; update as work moves. Committed to the repo as project
 state.
 
-Last updated: 2026-05-29 (Block 1 + chore sweep + #21/#84/#85 all COMPLETE.
-main e71c878. NO open PRs. CI gate restored; Cloudflare deploy green.
-See audit.md entries 2026-05-29, latest = the 15:32 #21/#84/#85 entry.)
+Last updated: 2026-05-29 (Block 1 + chore sweep + #21/#84/#85 + design calls O1/O2
+all COMPLETE. main 8f37366. NO open PRs. **SESSION PAUSED** (operator-requested, for
+token-limit reset ~1h45m from 16:28 UTC). See audit.md 16:28 O1/O2 entry + PAUSE note.)
 
 **Block 1 status: COMPLETE ✓** (H3 #73, H2 #74, H1 #75, C1 #76). Zero escalations.
 
@@ -21,9 +21,14 @@ See audit.md entries 2026-05-29, latest = the 15:32 #21/#84/#85 entry.)
   bindings on the static site. Verified externally — deploy:success.
 - **NO open PRs remain.**
 
-**OPEN → Design (pending):**
-- O1 [H1] `bock check` warnings-only exit code — fail on warnings? (behavior preserved)
-- O2 [C1] §20.1.1/§11 `--only=context`: adopt the dead-code validate_context pass?
+**OPEN → Design: RESOLVED ✓** (operator-decided, landed in #87 -> main 8f37366):
+- O1: keep errors-only exit + added `bock check --strict` (forces production strictness).
+- O2: wired validate_context (per-item annotation consistency + completeness, strictness-
+  gated); compose_context (PII/security) deferred to v1.x. Also dropped the unsatisfiable
+  v1 module-level completeness + reconciled spec §11.7/§15.3 (module annotations Reserved v1.x).
+- Smaller OPEN parked: should `check` default to bock.project strictness vs explicit --strict?
+- NEW FOUND: examples/spec-exercisers/context-audit/src/main.bock comment presents module-level
+  @context as a v1 concept — align with §15.3 in a later examples sweep.
 
 **FOUND / follow-ups (queued):**
 - ~~peaceiris Node-20 deprecation~~ RESOLVED in #84 (peaceiris removed entirely).

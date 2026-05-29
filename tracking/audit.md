@@ -424,3 +424,53 @@ Machinery validation (Block 1's purpose): the full coordination cycle exercised
     5 moderate yaml) security pass; vscode test-infra gap; F-conf (per-target
     conformance execution not wired); root CLAUDE.md references a nonexistent
     tools/scripts/run-conformance.sh (minor doc drift). Next substantive item: D3.
+
+[2026-05-29 16:28 UTC] DESIGN: O1 + O2 resolved and landed (#87)
+  Input: Operator: "work through the design calls." Facilitated both as Design;
+    operator decided; routed to implementation.
+  DECISIONS:
+    - O1 (bock check warnings exit): keep exit-non-zero-iff-errors; ADD
+      `bock check --strict` to force production strictness (mirrors build --strict).
+      The strictness model promotes the issues that matter to errors; no -Werror.
+    - O2 (--only=context scope): WIRE validate_context (annotation consistency +
+      completeness, strictness-gated); DEFER compose_context (PII/security) to a
+      future dedicated pass (Reserved for v1.x).
+  IMPLEMENTATION (#87, merged -> main 8f37366; CI fully green):
+    --strict flag + CheckOptions.strictness(); interpret_context + validate_context
+    wired into check::run; Strictness->StrictnessLevel mapping (Sketch=Lax,
+    Development=Standard, Production=Strict). Spec §20.1/§20.1.1 amended + changelog
+    20260529-1554; docs/cli.md updated.
+  COURSE-CORRECTION (the chain): implementing O2 surfaced that the module-level
+    @context-completeness check (E8014 in validate_context, E8022 in
+    verify_capabilities) is UNSATISFIABLE in v1 — module-level annotations are
+    Reserved for v1.x (§15.3), so a module can never carry @context, yet --strict
+    required it -> every module errored, unfixably. My initial one-line "extract
+    Module annotations" fix was WRONG (a no-op: parser/AST/lowering carry no module
+    annotations in v1); the engineer verified empirically and STOPPED rather than
+    apply it (verify/OPEN discipline working). Also exposed a spec inconsistency:
+    §11.7's @domain example used the Reserved module-level form.
+  RESOLUTION (operator-decided: "disable v1 module-completeness; fix §11.7";
+    Option B = build the v1.x feature was a scope expansion, declined): dropped the
+    MODULE-level completeness in validate_context (E8014/W8014) AND verify_capabilities
+    (E8022) for v1, kept per-item (E8013/E8023) — the active CLI path's
+    bock_types::capabilities::verify had no module check. Reconciled spec §11.7/§11.2/
+    §2/§11.8/§15.3/§20.1.1 to "module-level annotations Reserved for v1.x; v1
+    completeness is per-item." Changelog FOUND->RESOLVED. Regression test: a module
+    with per-item @context passes --strict clean (exit 0). All in #87.
+  Net: `bock check --strict` now USABLE (per-item completeness, satisfiable);
+    `--only=context` validates per-item annotation consistency + completeness;
+    compose_context (PII/security) remains Reserved. main 8f37366; 0 open PRs.
+  NEW FOUND (out of scope): examples/spec-exercisers/context-audit/src/main.bock
+    (~L127-130) has a COMMENT presenting module-level @context propagation as a v1
+    concept (actual annotations per-fn; compiles fine). Align with §15.3 in a later
+    examples sweep.
+  Smaller OPEN (parked, low priority): should `bock check` default to bock.project's
+    configured strictness rather than requiring explicit --strict? Kept explicit
+    (matches build). Revisit later.
+
+  ── PAUSE (operator-requested) ──
+  Paused here to let the token limit reset (~1h45m from 16:28 UTC). main 8f37366,
+  clean, 0 open PRs, no in-flight sessions. On resume, candidate next items: D3
+  (Tooling docs, ready); quality follow-ups (website npm-audit / vscode test-infra /
+  F-conf conformance execution); the parked smaller OPEN; examples-comment + CLAUDE.md
+  run-conformance.sh doc cleanups. Await operator direction.
