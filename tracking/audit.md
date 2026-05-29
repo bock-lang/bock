@@ -518,3 +518,48 @@ Machinery validation (Block 1's purpose): the full coordination cycle exercised
     D4 (Stdlib reference) -> D5 -> Item B -> v1.0. Other follow-ups: §20.1 reconciliation
     (above OPENs), F-conf (incl. run-conformance), vscode test-infra, @performance check,
     the parked smaller OPEN (check default strictness).
+
+[2026-05-29 19:08 UTC] §20.1 reconciliation landed (#92); stdlib-documentation audit
+  Input: Operator chose "2 (§20.1 reconcile) then/parallel 1 (D4), 3 (F-conf) only if
+    nothing hotter surfaces." Dispatched §20.1 reconciliation; while scoping D4,
+    confirmed the stdlib is essentially unimplemented; operator clarified it's known
+    pending work and asked for an audit of where pending work is documented (non-spec).
+
+  §20.1 reconciliation (#92 -> main 747fe04): the five spec-ahead-of-impl §20 surfaces
+    reconciled to actual v1 — build --optimize/--deliverable/--no-tests + inspect --diff
+    + pin --all marked Reserved-for-v1.x; pin/override rewritten to the real v1 flag
+    forms; [targets.<T>]/[.scaffolding] tables marked Reserved (§20.7/Appendix A.1/A.3).
+    Changelog 20260529-1905. Spec-only; no CI gate.
+  FOLLOW-UP (editorial doc-sync, out of #92 scope): three cross-refs still cite the old
+    forms and want alignment — §17.2 (bock build --optimize), §15 (bock build --no-tests),
+    §10.8/§10.4 (bock override --promote <selection-id>). Each already points at §20.1 as
+    normative, so these are editorial, not design. Queue for a small spec doc-sync.
+
+  STDLIB-DOCUMENTATION AUDIT (operator-requested — where pending work is documented
+    outside specs). Finding: the v1 stdlib is essentially unimplemented (stdlib/ = only
+    CLAUDE.md; 0 .bock files; 0 public fns; no core.*/std.* modules; prelude = ~9
+    builtins + a few type-checker-modeled intrinsics). The EMPTINESS is documented
+    DESCRIPTIVELY but the IMPLEMENTATION is SCHEDULED NOWHERE:
+    - docs/INVENTORY.md: most explicit — "Stdlib .bock files: 0 / public fns: 0"; D4 is
+      a "placeholder — stdlib currently empty / scaffolding phase only"; "real stdlib
+      doc cycle happens once stdlib/std/<name>/ lands."
+    - docs/SPEC-ALIGNMENT.md: "§18.4 std.* — Stdlib empty; D4 scaffolds reference"; core.*
+      "as a stdlib milestone. The spec implies v1 ships these; today [they don't]."
+    - ROADMAP.md: ONLY stdlib item is v2 "Stdlib EXPANSION" (HTTP/logging/config/streaming)
+      — NOT the core §18.3 modules (collections/string/math/iter/option/result). The core
+      build-out has NO v1.0/1.1/1.2/v2 milestone.
+    - tracking/queue.md: has D4 (stdlib REFERENCE docs, a scaffolding placeholder); NO
+      work item to BUILD the stdlib.
+    - STATUS.md: stdlib not in "Deferred Items"; "Phase E — Stdlib Bridging: Complete"
+      is easy to MISREAD (it's the compiler<->bock-core method registry, not the modules).
+    GAP/TENSION: §18 (spec) presents the core stdlib as v1; v1.0 theme is "ship what's
+    done" (implies done); reality + roadmap treat it as unscheduled/future. So the core
+    stdlib is acknowledged-everywhere but scheduled-nowhere, and spec-vs-plan disagree on
+    whether it's a v1 deliverable. (Other pending items — Item B [queue], v1.1/1.2 editor/
+    runtime [ROADMAP], deferred bits [STATUS] — ARE captured. Stdlib is the standout gap.)
+  PENDING OPERATOR DECISION: offered to (a) draft a reconciliation — add a tracked
+    stdlib-implementation item (roadmap milestone + queue phasing like Item B), align
+    STATUS/ROADMAP + clarify "Phase E" wording, and fold a §18 v1-status reconciliation
+    into the spec-alignment pass — for approval before landing; or (b) keep this as the
+    map. ROADMAP/scope changes are the operator's call; not moving them unilaterally.
+  State: main 747fe04; 0 open PRs; no in-flight sessions.
