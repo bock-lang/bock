@@ -1,0 +1,37 @@
+name: Tracking Views
+
+# Drift guard for the generated ROADMAP.md / STATUS.md. Lives in its own
+# workflow (NOT ci.yml) on purpose: ci.yml has `paths-ignore: ['**.md']`,
+# which would skip the check on the most common drift case — a PR that
+# edits only the tracking/ hub markdown and forgets to regenerate the
+# views. This workflow triggers exactly on the hub + generated files +
+# the generator, so the `--check` always runs when drift is possible.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tracking/**'
+      - 'ROADMAP.md'
+      - 'STATUS.md'
+      - 'tools/scripts/gen-tracking-views.sh'
+      - '.github/workflows/tracking-views.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'tracking/**'
+      - 'ROADMAP.md'
+      - 'STATUS.md'
+      - 'tools/scripts/gen-tracking-views.sh'
+      - '.github/workflows/tracking-views.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: tracking views in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - run: bash tools/scripts/gen-tracking-views.sh --check
