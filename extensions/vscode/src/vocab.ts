@@ -117,6 +117,7 @@ async function readVocab(vocabPath: string): Promise<Vocab> {
     throw new Error(
       `Failed to load Bock vocabulary from ${vocabPath}: ${(err as Error).message}. ` +
         `Run scripts/sync-vscode-assets.sh to regenerate.`,
+      { cause: err },
     );
   }
 }

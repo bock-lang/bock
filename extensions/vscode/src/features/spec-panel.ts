@@ -10,7 +10,7 @@
 // the foundation that those links open into.
 
 import * as vscode from 'vscode';
-import { marked, Renderer } from 'marked';
+import { marked, Renderer, Tokens } from 'marked';
 import { VocabService } from '../vocab';
 import { escapeHtml } from '../shared/webview';
 
@@ -293,13 +293,15 @@ function normalizeRef(ref: string, index: SpecIndex): string | undefined {
 
 function buildMarkedRenderer(): Renderer {
   const renderer = new Renderer();
+  // marked v5+ passes a Tokens.Code object to renderer.code instead of
+  // positional (code, infostring, escaped) arguments.
   const baseCode = renderer.code.bind(renderer);
-  renderer.code = (code: string, infostring?: string) => {
-    const lang = (infostring ?? '').split(/\s+/)[0];
+  renderer.code = (token: Tokens.Code) => {
+    const lang = (token.lang ?? '').split(/\s+/)[0];
     if (lang === 'bock') {
-      return `<pre class="bock-code"><code class="lang-bock">${highlightBock(code)}</code></pre>`;
+      return `<pre class="bock-code"><code class="lang-bock">${highlightBock(token.text)}</code></pre>`;
     }
-    return baseCode(code, infostring, false);
+    return baseCode(token);
   };
   return renderer;
 }

@@ -377,18 +377,18 @@
     "publish": "vsce publish"
   },
   "dependencies": {
-    "marked": "^11.1.1",
-    "mermaid": "^11.14.0",
+    "marked": "^18.0.4",
+    "mermaid": "^11.15.0",
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
-    "@types/node": "^20.10.0",
-    "@types/vscode": "^1.75.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.9.1",
+    "@types/vscode": "^1.120.0",
     "@vscode/vsce": "^3.9.1",
     "esbuild": "^0.20.0",
-    "eslint": "^9.0.0",
+    "eslint": "^10.4.0",
     "typescript": "^5.3.3",
-    "typescript-eslint": "^8.0.0"
+    "typescript-eslint": "^8.59.4"
   }
 }
