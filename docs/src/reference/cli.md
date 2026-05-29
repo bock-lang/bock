@@ -22,6 +22,14 @@
 
 - `bock check` runs over the current directory by default; pass
   paths to limit it.
+- `bock check --only=<aspect>` restricts the check to specific
+  aspects of analysis; the v1 aspects are `types` and `context`.
+  The flag accepts a comma-separated list (`--only=types,context`)
+  and may be repeated (`--only=types --only=context`); omitting it
+  runs the full check. Unknown aspects are rejected with the list
+  of valid values.
+- `bock check --brief` produces compact, one-line diagnostics
+  without source-context snippets.
 - `bock build -t <target> --source-only` emits transpiled source
   but does not invoke the target toolchain.
 - `bock build --all-targets` builds every target listed in
