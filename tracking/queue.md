@@ -4,8 +4,16 @@ Orchestrator working memory. Read at the start of every work
 block; update as work moves. Committed to the repo as project
 state.
 
-Last updated: 2026-05-29 (startup reconciliation vs repo HEAD 56b67f4 —
-Block 1 intact, nothing landed; see audit.md startup entry)
+Last updated: 2026-05-29 13:26 UTC (Block 1 DISPATCHED — H3/H2/H1 launched as
+engineer sessions; C1 sequenced after H1 lands. Repo HEAD 4210186; no Block 1
+drift. See audit.md 13:26 STARTUP + DISPATCH entry.)
+
+**Block 1 status (in flight):**
+- H3 `spec/paradigm-cleanup` — dispatched
+- H2 `test/effect-handler-conformance` — dispatched (per-target fan-out
+  contingent on harness reality; see audit)
+- H1 `fix/check-exit-code` — dispatched
+- C1 `feat/check-aspect-flags` — queued, dispatch after H1 merges
 
 ---
 

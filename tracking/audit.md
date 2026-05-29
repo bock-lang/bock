@@ -126,3 +126,102 @@ Notes: <anything the human should know>
     3. On H1 merge: dispatch C1 rebased onto it.
     4. Produce the Block 1 daily digest on completion or at the day boundary,
        whichever comes first — include any H2 per-target FOUND items.
+
+[2026-05-29 13:26 UTC] STARTUP + DISPATCH — Block 1 (sessions launched this block)
+  Input: Operator re-launched the orchestrator ("Continue", then re-pasted the
+    full launch prompt) directing autonomous Block 1 dispatch: "Operate
+    autonomously within your authority. Do not wait for my input between
+    dispatches." This is the resume of the 05-29 05:49 staged plan.
+
+  Model/effort floor (global, transitive over the whole delegation tree):
+    Opus 4.8 (claude-opus-4-8, 1M context) @ effort xhigh. Every engineer
+    session and sub-agent runs at model >= Opus 4.8 AND effort >= xhigh.
+    Engineer sub-agents spawned with model=opus; prompts instruct max rigor
+    (xhigh-equivalent), no downgrade. Cost concerns escalate; never downgrade.
+
+  Repo reconciliation (repo wins; protocol step 5):
+    - HEAD is now 4210186. Since the 05:49 assessment HEAD (56b67f4), only
+      PR #71 (main-integration convention) and PR #72 (the staged assessment
+      itself) landed — NEITHER touches Block 1. Re-confirmed H3/H2/H1/C1 all
+      still READY; no PR/branch exists for any. No drift in Block 1.
+    - Open PRs are all dependabot dependency bumps (#37–#68) — out of Block 1
+      scope; not actioned this block.
+
+  Substance reconciliation (the gap, and how it was resolved):
+    - The handoff *substance* (the "drop-in changelog", the six H2 fixtures,
+      the H1 exit-code bug definition) was NEVER persisted to the repo —
+      confirmed: no such files in any ref/stash/history; the referenced
+      changelog 20260515-0434 never existed as a file. It lived only in the
+      original launch prompt. The 05:49 staging persisted the dispatch *plan*
+      (owned-files, sequencing, sub-agent patterns), not the *content*.
+    - Resolution: re-anchored each item to authoritative repo sources and
+      dispatch with scoped prompts carrying an explicit OPEN/FOUND escape
+      hatch — the engineer session derives specifics; any genuine design
+      question surfaces as OPEN and routes to Design via the orchestrator
+      (normal flow, NOT a human escalation). Anchors:
+        * H3 — spec §1.5 (Paradigm Configuration, bock-spec.md:88) +
+          INVENTORY.md F15 ([paradigm] config: spec'd, unimplemented, "drift").
+        * H2 — spec §10.3/§10.4 (v1 = ONE handler form: record + impl;
+          lambda/Effect.handler forms Reserved for v1.x, must fail at name
+          resolution) + the directive-based conformance harness.
+        * H1 — bock-cli/src/check.rs scattered process::exit(1) (:63/:80/:99/
+          :188); reconcile to a testable, centralized exit-code contract.
+        * C1 — spec §20.1.1 (fully specified) + INVENTORY.md F04
+          (--context/--no-context polarity drift).
+
+  Queue-vs-repo reconciliation on H2 (repo wins):
+    - The conformance harness (compiler/tests/harness/mod.rs) is DIRECTIVE-based
+      (`// TEST:` / `// EXPECT:` inside the .bock file), and its own doc says
+      execution is "wired in as compiler phases are implemented." Per-target
+      codegen execution across {js,ts,python,rust,go} may NOT be wired. So the
+      queue's "Pattern-1 per-target fan-out" is CONTINGENT on repo reality. H2
+      session instructed: determine the actual execution model FIRST; fan out
+      per-target only if the harness supports it; otherwise add fixtures scoped
+      to what the harness verifies and surface FOUND that per-target execution
+      isn't wired. Don't fabricate a 5-target matrix the harness can't run.
+    - tools/scripts/run-conformance.sh (referenced in root CLAUDE.md) is ABSENT.
+      Doc drift; noted for a later tracking/docs cleanup, not actioned here.
+
+  Dispatch mechanism: contract's alternative path. /project:session restructures
+    the *current* session into one worktree session and cannot drive parallel
+    orchestration, so engineer work is dispatched as spawned engineer
+    sub-agents, each pinned to a pre-created worktree at
+    /opt/claude-projects/bock-worktrees/<slug> (worktrees created serially by
+    the orchestrator to avoid racing the shared main checkout; settings.local
+    symlinked in for permissions; per-branch CARGO_TARGET_DIR). Each sub-agent
+    does work → runs the session.md pre-push gate (fmt/clippy --all-targets/
+    test --workspace, + mdbook where docs/ changes) → push → gh pr create →
+    reports PR URL + OPEN/FOUND. Engineer sessions do NOT merge; the
+    orchestrator merges gate-clean PRs.
+
+  Block 1 dispatch (this block):
+    Parallel wave (independent file trees):
+      - H3  branch spec/paradigm-cleanup            owned: spec/
+      - H2  branch test/effect-handler-conformance  owned: compiler/tests/conformance/effects/
+      - H1  branch fix/check-exit-code              owned: compiler/crates/bock-cli/
+    Sequenced after H1 merges:
+      - C1  branch feat/check-aspect-flags          owned: compiler/crates/bock-cli/
+
+  H1 + C1 sequencing decision: SEQUENCE (H1 -> C1), reaffirming the 05:49
+    decision. Reasoning unchanged: conflict-avoidance forbids concurrent (same
+    crate); sequence over combine to exercise the dispatch->merge->rebase->
+    dispatch coordination cycle that is Block 1's validation purpose; H1 first
+    as the contained correctness fix, giving a stable exit-code contract for
+    C1's flag work to build on; cleaner per-PR review and bisect history.
+    Adaptation: if H1 surfaces an OPEN that routes to Design and stalls, C1 may
+    proceed in the interim — the constraint is non-concurrency, satisfiable
+    when H1 is paused awaiting design input.
+
+  Escalations: none. Re-checked every trigger (strategic / external / target-
+    provider-tooling / roadmap / scope / cross-role conflict / repeated
+    failure) — none of H3/H2/H1/C1 qualifies. The earlier AskUserQuestion was a
+    coordination clarification about missing substance, not a Block-1-content
+    escalation; resolved by re-anchoring to repo sources per the line above.
+
+  Follow-up:
+    1. Monitor the three PRs; merge each whose verification gate is clean.
+    2. On H1 merge: dispatch C1 rebased onto landed H1.
+    3. Produce the Block 1 daily digest at completion or the day boundary —
+       include any H2 per-target FOUND items and the H2 harness reconciliation.
+    4. Open this tracking PR (chore/tracking-20260529-1326) at the block
+       boundary / session end and re-sync local main.
