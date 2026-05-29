@@ -666,3 +666,39 @@ vscode test-infra, conformance execution Q-fconf), @performance example (pending
     (stdlib/core/<m>/ source + per-target shims + conformance), which also forces a
     decision on the Q-fconf execution gap; validate the pattern, then fan out R1→R2→R3.
     main 7b478fb; this tracking PR open; no in-flight engineer sessions.
+
+[2026-05-29 23:57 UTC] STDLIB PHASE KICKOFF: recon → plan → core.error pilot dispatched
+  Input: operator authorized proceeding autonomously on stdlib once the Design
+    reconciliation landed (it did — #100/#101 merged, main a1a8074). Scouted the
+    infrastructure before dispatching (the earlier stall taught: don't hand a session
+    an undiagnosed hard problem).
+  Recon (read-only Explore): stdlib/ is EMPTY; the module registry (bock-air/registry.rs)
+    + import seeding (bock-types/seed_imports.rs) work for cross-file modules, BUT nothing
+    wires the compiler to discover/compile stdlib/core/* — so `use core.error` would not
+    resolve today. Builtins are type-checker INTRINSICS (checker.rs), not Bock source.
+    "Phase E — Stdlib Bridging: Complete" = the interpreter's bock-core method registry,
+    NOT the module stdlib. Codegen is monolithic; no per-target runtime/shim dirs exist.
+    Conformance harness discovers/parses but does NOT execute (confirms F-conf/Q-fconf).
+    core vs std is a real normative tier (§18.1/§18.3 core ships-with-compiler;
+    §18.4 std = package-manager) → stdlib/core/error/ is correct.
+  Plan (Plan agent → tracking/plans/2026-05-29-stdlib-loading-error-pilot-plan.md):
+    loading mechanism = source-compiled into the existing registry, stdlib sources
+    EMBEDDED in the binary (build.rs + include_dir, + $BOCK_STDLIB dev override) and
+    PREPENDED to the parsed-files set before the user loop in check/build/run — reuses
+    the proven pipeline, zero new registry machinery. Pilot = core.error (pure Bock:
+    Error trait + SimpleError + error(); NO shim needed — the reason to pilot it).
+    Verification = type-check + `--source-only` compile per target (js/ts/py/rs/go);
+    actual execution DEFERRED to Q-fconf. T1 front-loads the loading risk behind a
+    STOP-and-surface gate.
+  Decision discipline: 3 genuine CORE-SPEC questions surfaced → ESCALATED to Design
+    (DQ6 normative §18 impl model; DQ7 canonical core.error surface; DQ8 module-qualified
+    imports). Filed in design-questions.md + escalations.md; the pilot proceeds on safe
+    defaults (Design's tracking-level model, minimal surface, named imports) — NOT blocked.
+    All three are ratification/extension, not pilot blockers.
+  Dispatched: engineer session feat/stdlib-error-pilot (Opus 4.8 @ xhigh, background),
+    executing T1-T7 with the STOP gate. Owns bock-cli/ + stdlib/core/error/ +
+    conformance/stdlib/error/ + stdlib/CLAUDE.md — disjoint from this tracking PR.
+  This tracking PR (chore/tracking-20260529-2357): landed the plan doc; filed DQ6-DQ8 +
+    the escalation entry; marked Q-stdlib pilot in-flight. main a1a8074; pilot running.
+  Follow-up: on pilot PR — verify gate + CI green, review the loading mechanism, merge;
+    record DQ6-DQ8 outcomes when Design returns; then fan out R1 (the other 4 modules).
