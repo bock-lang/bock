@@ -4,7 +4,8 @@ Orchestrator working memory. Read at the start of every work
 block; update as work moves. Committed to the repo as project
 state.
 
-Last updated: 2026-05-15 (initial seed at agentic migration)
+Last updated: 2026-05-29 (startup reconciliation vs repo HEAD 56b67f4 —
+Block 1 intact, nothing landed; see audit.md startup entry)
 
 ---
 
@@ -105,6 +106,11 @@ release actions (all escalate).
 
 ## Recently landed (for orchestrator context, not action)
 
+- Agentic infrastructure (PR #70, 2026-05-29) — tracking/,
+  orchestrator contract, operating model. Coordination layer
+  only; touches no Block 1 work.
+- Spec changelog re-add (PR #69, 2026-05-29) —
+  20260514-0548-spec-revision-artifact.md.
 - D1+D2 spec alignment consolidation: 14 changelogs + spec
   revision artifact (20260514-0548) — 21 sections updated
 - §10.4 handler form verification report (20260514-0540)
