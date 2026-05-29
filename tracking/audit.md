@@ -474,3 +474,47 @@ Machinery validation (Block 1's purpose): the full coordination cycle exercised
   (Tooling docs, ready); quality follow-ups (website npm-audit / vscode test-infra /
   F-conf conformance execution); the parked smaller OPEN; examples-comment + CLAUDE.md
   run-conformance.sh doc cleanups. Await operator direction.
+
+[2026-05-29 18:47 UTC] RESUME: quick cleanups (#89) + D3 tooling reference (#90)
+  Input: Operator resumed post-pause: "2 then 1, in parallel if practical." Ran the
+    quick cleanups and D3 concurrently (disjoint trees: website+examples vs docs/src).
+  Re-grounded clean on resume (main 6ae4522, 0 open PRs, no drift).
+  Landed:
+    - #89 (chore/quick-cleanups -> main ddb2799): `npm audit fix` (non-breaking)
+      cleared the website HIGH-sev devalue (5.8.0->5.8.1); 5 moderate yaml advisories
+      under @astrojs/check left (dev-only; breaking to fix). examples/spec-exercisers/
+      context-audit comment reworded to match §15.3 (module-level annotations Reserved
+      v1.x; no code change). CI green (note: examples/ change triggered the matrix; I
+      merged while test jobs were pending then confirmed green via watch — going
+      forward, wait-for-green on examples/-touching PRs).
+    - #90 (docs/d3-tooling-reference -> main 8474438): D3 Tooling Reference. cli.md
+      expanded to all 17 subcommands+flags+examples; new tooling.md (build/output-modes/
+      REPL/LSP/testing/debugger) + project-schema.md (bock.project parsed-vs-Reserved);
+      SUMMARY.md wired. Verified against real `bock --help` (binary is `bock`, not
+      bock-cli); every non-v1 surface marked Reserved-for-v1.x. mdbook clean. Docs-only
+      -> no CI gate (path-filtered, like spec-only PRs).
+  OPEN (-> Design; §20.1 spec-ahead-of-impl — D3 docs reflect ACTUAL v1, not the spec):
+    candidate §20.1 reconciliation pass (same pattern as §11.7). Divergences:
+    - `bock build --optimize/--deliverable/--no-tests` — in spec §20.1, NOT in v1 --help.
+    - `bock inspect --diff` — not implemented in v1.
+    - `bock pin --all` — v1 has --all-build/--all-runtime/--all-in, no bare --all.
+    - `bock override --choice=<alt>` — v1 uses positional [NEW_CHOICE] or --from-file.
+    - `[targets.<T>]` / `[targets.<T>.scaffolding]` config (Appendix A.1/§20.7 present as
+      v1) — v1 build does NOT parse them; `--all-targets` builds all 5 built-ins.
+  FOUND:
+    - @perf [#89] examples/spec-exercisers/context-audit/src/main.bock L43-44:
+      `@performance(max_latency: 100, max_memory: 50)` uses bare ints; checker wants
+      unit-suffixed (100.ms / 50.mb) -> 2x E8003. Pre-existing, ungated, not introduced.
+      Example-bug vs §11.4 @performance-syntax — a design check. Fix the example's
+      literals OR reconcile §11.4.
+    - run-conformance [F-conf-related] `./tools/scripts/run-conformance.sh` is
+      referenced by BOTH root CLAUDE.md (Testing Commands) AND the
+      /project:run-conformance skill, but the script DOES NOT EXIST. This is a symptom
+      of F-conf (conformance suite has no runner + bock-test-harness doesn't execute
+      fixtures). RESOLUTION PLAN: handle as part of F-conf — create the runner + wire
+      execution + fix both references coherently. NOT half-fixed (a cargo-test repoint
+      would misrepresent what conformance does today).
+  State: main 8474438; 0 open PRs; no in-flight sessions. Critical path remaining:
+    D4 (Stdlib reference) -> D5 -> Item B -> v1.0. Other follow-ups: §20.1 reconciliation
+    (above OPENs), F-conf (incl. run-conformance), vscode test-infra, @performance check,
+    the parked smaller OPEN (check default strictness).

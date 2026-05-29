@@ -4,9 +4,27 @@ Orchestrator working memory. Read at the start of every work
 block; update as work moves. Committed to the repo as project
 state.
 
-Last updated: 2026-05-29 (Block 1 + chore sweep + #21/#84/#85 + design calls O1/O2
-all COMPLETE. main 8f37366. NO open PRs. **SESSION PAUSED** (operator-requested, for
-token-limit reset ~1h45m from 16:28 UTC). See audit.md 16:28 O1/O2 entry + PAUSE note.)
+Last updated: 2026-05-29 (Resumed post-pause. Quick cleanups #89 + D3 tooling reference
+#90 LANDED. main 8474438. NO open PRs. See audit.md 18:47 entry.)
+
+**Resume work (2026-05-29, operator: "2 then 1, parallel"):**
+- #89 quick cleanups: website devalue high-sev cleared (npm audit fix); context-audit
+  §15.3 comment aligned. (5 dev-only yaml moderates left.)
+- #90 D3 Tooling Reference: cli.md (17 subcommands) + new tooling.md + project-schema.md;
+  verified vs real `bock --help`; Reserved-for-v1.x marked. mdbook clean.
+
+**Critical path remaining:** D4 (Stdlib reference) -> D5 (after D2-D4) -> Item B -> v1.0.
+
+**Follow-ups (queued, not blocking):**
+- §20.1 reconciliation (Design): spec-ahead-of-impl divergences D3 found — build
+  --optimize/--deliverable/--no-tests, inspect --diff, pin --all, override --choice,
+  [targets.<T>] config. Reconcile spec to v1 reality (mark Reserved) — pattern as §11.7.
+- F-conf: wire conformance execution (harness only parses/discovers) + create the missing
+  tools/scripts/run-conformance.sh (referenced by CLAUDE.md AND /project:run-conformance,
+  both broken) + fix those references — handle together.
+- @perf FOUND: context-audit example @performance bare-int literals -> E8003; example-bug
+  vs §11.4 syntax (design check).
+- vscode test-infra (no test script/files); parked smaller OPEN (check default strictness).
 
 **Block 1 status: COMPLETE ✓** (H3 #73, H2 #74, H1 #75, C1 #76). Zero escalations.
 
