@@ -42,12 +42,14 @@ the Bock identity.
 
 ---
 
-## MS-stdlib — DECIDED: v1-blocking (operator, 2026-05-29)
-The **core** standard library (`core.collections/string/math/iter/…`,
-§18.3) ships in **v1** and **blocks v1.0** (→ `queue.md` Q-stdlib). This
-resolves the earlier "ship what's done vs §18-full-stdlib" tension in
-favor of shipping it. Distinct from v2's stdlib *expansion*
-(HTTP/logging/etc.). **Still open (escalated to Design):** the precise
-core-module SCOPE for v1 — which of the ~15 §18.3 modules, at what
-surface (`design-questions.md` DQ5 / `escalations.md`). Phase planning
-of Q-stdlib proceeds once that returns. Links: DV1, Q-stdlib, DQ5.
+## MS-stdlib — DECIDED: v1-blocking + SCOPE decided (operator + Design, 2026-05-29)
+The **core** standard library (§18.3) ships in **v1** and **blocks v1.0**
+(→ `queue.md` Q-stdlib). Resolves the "ship what's done vs §18-full-stdlib"
+tension in favor of shipping it. Distinct from v2's stdlib *expansion*
+(HTTP/logging/etc.). **SCOPE (Design 2026-05-29; §18.3 reframed with v1/v1.x
+tiering in #100):** v1 = **11 modules** at minimum-useful surface —
+`option, result, collections, string, iter, compare, convert, error,
+effect, time, test`; **Reserved for v1.x** — `types, math, memory,
+concurrency`. Q-stdlib implements them over three rounds (R1
+effect/error/compare/convert/iter · R2 option/result/string/time · R3
+collections/test), pilot-first. Links: DV1, Q-stdlib, DQ5, #100.

@@ -8,7 +8,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 
 - Ready: 5
 - v1-blocking: 1
-- Blocked: 6
+- Blocked: 5
 - Deferred: 1
 
 ## Build status (as of main, 2026-05-29)
@@ -21,7 +21,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 | `mdbook build docs` | clean |
 | CI on `main` | green (build matrix · clippy · rustfmt · cargo doc · mdbook · vscode · pages) |
 | Conformance fixtures | parse/discover only — execution not wired (queue Q-fconf) |
-| `bock check` on examples | 20/20 exit 0 (one example has a pre-existing E8003, queue Q-perf-example) |
+| `bock check` on examples | 20/20 exit 0 (the context-audit `@performance` E8003 fixed in #100) |
 
 ## What works today
 

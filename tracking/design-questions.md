@@ -32,40 +32,58 @@ decided→link)`
   Non-core; parked as a smaller follow-up.
 - **Status:** open
 
-## Escalated to Design (core spec — filed in `escalations.md`, not decided here)
+## Decided by Design (core spec — 2026-05-29; reconciled in #100)
 
-These touch core specification (§11/§13/§18 language + stdlib surface).
-Filed and routed to the Design Chat; work proceeds elsewhere meanwhile.
+These touched core specification (§11/§13/§18 language + stdlib surface),
+were escalated to the Design Chat, and the Design Chat (with the operator)
+decided them on 2026-05-29. The orchestrator reconciled the spec **and**
+the implementation in #100 (changelog `20260529-2251-specs-changes.md`).
 
 ### DQ2 — `@performance` budget literal syntax
 - **Question:** should `@performance(max_latency: 100, ...)` accept bare
   integers, or require unit-suffixed literals (`100.ms`, `50.mb`)?
-- **§:** §11.4 · **context:** the context-audit example uses bare ints
-  → E8003. Blocks `queue.md Q-perf-example`.
-- **Status:** escalated → Design (escalations.md)
+- **§:** §11.4 · **context:** the context-audit example used bare ints
+  → E8003.
+- **Decision:** require unit-suffixed literals; bare ints stay E8003.
+  Time units `.ns/.us/.ms/.s/.min/.h`; memory units `.b/.kb/.mb/.gb/.tb`
+  (decimal scaling). §11.4 normative paragraph added. Reconciling this
+  also exposed and fixed an impl divergence (interpreter required the
+  parenthesized `100.ms()` form; now accepts the no-parens literal) — see
+  `divergences.md` DV3. Closes `queue.md Q-perf-example`.
+- **Status:** decided → Design 2026-05-29; reconciled #100.
 
 ### DQ3 — §13.3 channels: bounded-channel v1 status
 - **Question:** are bounded channels (`Channel.new(buffer: N)`) v1, or
   Reserved for v1.x?
-- **§:** §13.3 · **context:** see `divergences.md` DV2 — spec lists
-  channels as plain v1, but the 0449 changelog asserts a never-applied
-  Reserved decision. The decision then lets DV2 reconcile spec vs changelog.
-- **Status:** escalated → Design (escalations.md)
+- **§:** §13.3 · **context:** see `divergences.md` DV2.
+- **Decision:** Reserved for v1.x (bundles with `core.concurrency`, itself
+  Reserved per DQ5). §13.3 leading note added; example preserved as design
+  intent. Resolves DV2.
+- **Status:** decided → Design 2026-05-29; reconciled #100.
 
 ### DQ4 — §13.4 synchronization primitives: v1 vs Reserved
 - **Question:** which of `Mutex/RwLock/Atomic/WaitGroup/OnceCell` ship
   in v1 vs Reserved for v1.x?
 - **§:** §13.4 · **context:** same unapplied-0449-claim as DQ3 (DV2).
-- **Status:** escalated → Design (escalations.md)
+- **Decision:** all Reserved for v1.x (bundle with `core.concurrency`).
+  §13.4 leading note added; enumeration preserved as design intent.
+  Resolves DV2.
+- **Status:** decided → Design 2026-05-29; reconciled #100.
 
 ### DQ5 — §18.3 core-module scope for v1
 - **Question:** which of the ~15 §18.3 `core.*` modules are in the v1
   stdlib, and at what surface? (Q-stdlib is decided v1-blocking; this is
   its SCOPE.)
-- **§:** §18.3 · **context:** seeds `queue.md Q-stdlib` phase planning;
-  also confirm whether the historical D1-refresh §18.3 row was substantive
-  or just the resolved core.time expansion.
-- **Status:** escalated → Design (escalations.md)
+- **§:** §18.3 · **context:** seeds `queue.md Q-stdlib` phase planning.
+- **Decision:** **11 v1 modules** — `core.option`, `result`, `collections`,
+  `string`, `iter`, `compare`, `convert`, `error`, `effect`, `time`,
+  `test` — each at its **minimum-useful subset**; **4 Reserved for v1.x** —
+  `core.types`, `math`, `memory`, `concurrency`. §18.3 reframed with the
+  tiering + acceptance criterion (conformance + a representative example
+  compile/run on every shipping target). Scopes `queue.md Q-stdlib` into
+  three rounds: R1 effect/error/compare/convert/iter · R2
+  option/result/string/time · R3 collections/test.
+- **Status:** decided → Design 2026-05-29; reconciled #100.
 
 ---
 
@@ -76,4 +94,5 @@ Filed and routed to the Design Chat; work proceeds elsewhere meanwhile.
 §19.7, §20.6, §1.3, §15, §17.6, §12.2 (×2), §4.7, §7.6, §6.1, §11
 module-level annotations. Evidence: the per-section changelogs + the
 20260514-0548 spec-revision artifact (confirmed applied to the live
-spec). Only DQ2-DQ5 (escalated) + DQ1 (non-core) remain.
+spec). Only DQ1 (non-core) remains open; DQ2–DQ5 were decided by Design
+2026-05-29 and reconciled in #100 (see "Decided by Design" above).

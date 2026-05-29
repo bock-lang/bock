@@ -591,3 +591,78 @@ orchestrator.md, routing.md, the operating model, and tracking/CLAUDE.md.
 Carry-forward (in queue.md): Q-stdlib (v1, pending DQ5 scope), the D-series → ItemB
 chain, the ready chores (changelog hygiene Q-cl-dates/Q-cl-0515, §20.1 cross-refs,
 vscode test-infra, conformance execution Q-fconf), @performance example (pending DQ2).
+
+[2026-05-29 23:38 UTC] DESIGN RECONCILIATION: Q1/Q2/Q3 → spec + impl (#100); DQ2-DQ5 closed
+  Input: Design Chat (with the operator) returned decisions on the three escalated
+    core-spec questions (grouped from DQ2-DQ5): Q1 stdlib scope (§18.3), Q2 concurrency
+    (§13.3/§13.4), Q3 @performance (§11.4). Operator: "decisions ready for spec
+    reconciliation"; then stepped away with explicit authorization to proceed
+    autonomously on stdlib once ready. Per the Design-authority rule, these are now
+    DECIDED by Design (authoritative) — the orchestrator RECONCILES, does not re-decide.
+  DECISIONS (filed in design-questions.md / escalations.md):
+    - Q3/DQ2: unit-suffixed literals normative; bare ints stay E8003. Time
+      .ns/.us/.ms/.s/.min/.h; memory .b/.kb/.mb/.gb/.tb (decimal).
+    - Q2/DQ3+DQ4: §13.3 channels + §13.4 sync primitives BOTH Reserved for v1.x
+      (bundle with core.concurrency). The "four questions" was a grouping artifact —
+      DQ3+DQ4 merged into one concurrency question; nothing dropped.
+    - Q1/DQ5: 11 v1 core modules at minimum-useful surface (option/result/collections/
+      string/iter/compare/convert/error/effect/time/test); 4 Reserved v1.x (types/
+      math/memory/concurrency). Q-stdlib scoped into R1/R2/R3.
+
+  Dispatch 1 (spec reconciliation) — STALLED. Spawned a spec-only session to apply
+    Q1/Q2/Q3 to the spec + a changelog + fix the context-audit example. It wrote good
+    spec prose (§11.4 literal para, §13.3/§13.4 Reserved notes, §18.3 tiering, 0449
+    cross-ref fix, new changelog 20260529-2251) but DIED on the watchdog (600s no
+    progress) — it hit a wall it could not diagnose: the Design-decided example
+    `@performance(max_latency: 100.ms, max_memory: 50.mb)` STILL failed E8003, and it
+    spiraled in speculation (its dying stream wrongly claimed "100.ms works, 50.mb
+    fails").
+
+  Diagnosis (orchestrator, empirical — the session could not): root cause = an
+    impl/spec divergence. bock-air/context.rs interpret_performance_annotation only
+    matched Expr::MethodCall, i.e. the PARENS form `100.ms()`; the no-parens literal
+    `100.ms` parses as Expr::FieldAccess and was rejected. So the impl REQUIRED the
+    method-call form Design explicitly ruled out ("a literal, not 100.ms()"), and the
+    spec's own example was uncompilable. Confirmed by reproduction: `100.ms()` (parens)
+    passes, `100.ms`/`50.mb` (no parens) → E8003 on BOTH args (not the asymmetry the
+    dead agent guessed). Also missing units: parse_duration lacked .min/.h, parse_byte_size
+    lacked .tb. Filed as DV3 (divergences.md). NOT a new design question — Design already
+    ruled the surface; this is impl-to-match-decided-spec, within orchestrator autonomy.
+
+  Salvage + Dispatch 2 (finishing). Committed the dead session's good spec prose as a
+    WIP checkpoint (54e5419) so nothing was lost, then spawned a finishing session with
+    the DIAGNOSIS ALREADY DONE (the lesson from the stall: the agent failed at diagnosis,
+    not execution — so I handed it the fix, not a mystery). It: added a unit_suffixed
+    helper accepting the no-parens FieldAccess literal (+ argless MethodCall as a lenient
+    alias), rewrote parse_duration/parse_byte_size over it with .min/.h/.tb, added
+    TimeUnit::Min/H + SizeUnit::Tb, kept bare-int→E8003, added 4 interpreter unit tests +
+    3 conformance fixtures, finalized the changelog. NO non-exhaustive matches needed
+    fixing (TimeUnit/SizeUnit consumed only in bock-air — the task's suspected consumer
+    list didn't apply in this repo).
+  Merge (#100 → main 7b478fb): all 12 CI checks green (full test matrix incl. windows);
+    reviewed the impl diff myself before merging; squash-merged under orchestrator
+    authority; worktree + branch cleaned; local main re-synced. Waited for full-matrix
+    green before merging (the examples/+compiler/ touch triggers CI) — honoring the
+    earlier discipline note.
+
+  Findings from the finishing session (notable):
+    - Conformance format is INLINE `// TEST:`/`// EXPECT:` directives, not separate
+      .expected files. And the harness DISCOVERS/PARSES but does NOT EXECUTE fixtures
+      (confirms F-conf / Q-fconf). The session added interpreter unit tests as the real
+      enforcement + verified each fixture directly via `bock check`. → Q-fconf is a
+      genuine prerequisite for the stdlib pilot (whose acceptance leans on conformance).
+    - Bare-int → E8003 reproduces only with a NON-keyword fn name (`handle` is a Bock
+      keyword → parse errors mask it; `query` works). Minor gotcha for re-derivation.
+
+  Tracking reconciliation (THIS PR, chore/tracking-20260529-2339): design-questions.md
+    DQ2-DQ5 → decided (with the decisions); divergences.md DV2 → resolved (#100), DV3
+    added + resolved (#100), DV1 disposition updated (scope decided, impl pending);
+    escalations.md 20:24 entry → resolved (response + authorized actions); queue.md
+    Q-stdlib scoped + unblocked (R1/R2/R3, pilot-first) and Q-perf-example removed (done
+    in #100); milestones.md MS-stdlib scope recorded; snapshot.md examples line updated;
+    STATUS.md/ROADMAP.md regenerated.
+
+  Follow-up: stdlib pilot — one R1 module (effect/error/compare/convert/iter) end-to-end
+    (stdlib/core/<m>/ source + per-target shims + conformance), which also forces a
+    decision on the Q-fconf execution gap; validate the pattern, then fan out R1→R2→R3.
+    main 7b478fb; this tracking PR open; no in-flight engineer sessions.

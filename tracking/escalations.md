@@ -54,4 +54,25 @@ spec/divergences and unblocks the linked queue items.
 **Recommendation:** none offered on the merits (core-spec is Design's
 call). DQ5 is the most leverage — it scopes the v1 stdlib (Q-stdlib).
 **Awaiting:** Design Chat (with the operator) decisions, routed back here.
-**Status:** pending
+**Status:** resolved
+
+**Response (2026-05-29 22:44 UTC):** Design Chat (with the operator) decided
+all of them:
+- **DQ2 (§11.4 @performance):** require unit-suffixed literals; bare ints
+  stay E8003. Time `.ns/.us/.ms/.s/.min/.h`; memory `.b/.kb/.mb/.gb/.tb`
+  (decimal).
+- **DQ3 + DQ4 (§13.3/§13.4 concurrency):** both Reserved for v1.x; they
+  bundle with `core.concurrency`. (The escalation said "four questions";
+  DQ3 and DQ4 were grouped into one concurrency question in the Design
+  prompt — no question was dropped, the count was a grouping artifact.)
+- **DQ5 (§18.3 stdlib scope):** 11 v1 modules at minimum-useful surface
+  (option/result/collections/string/iter/compare/convert/error/effect/
+  time/test); 4 Reserved for v1.x (types/math/memory/concurrency).
+
+**Authorized actions:** the orchestrator reconciled the spec **and** the
+implementation in #100 (changelog `20260529-2251-specs-changes.md`):
+`design-questions.md` DQ2–DQ5 → decided; `divergences.md` DV2 resolved +
+DV3 added (a parens-vs-literal impl divergence found and fixed in the same
+PR); `queue.md` Q-stdlib scoped + unblocked and Q-perf-example closed;
+`milestones.md` MS-stdlib scope recorded. The stdlib implementation (R1/R2/
+R3) follows, starting with a one-module pilot.
