@@ -124,16 +124,19 @@ public fn build_dashboard(title: String) -> String {
 public fn pure_hash(input: String) -> String { "hash:${input}" }
 
 // === Context Inheritance (concept demo) ===
-// In multi-file projects, module-level @context propagates to all functions:
-//   @context("User management module.")
+// Per §15.3, v1 annotations apply to individual declarations; attaching
+// @context/@requires to the `module` declaration itself (so they propagate
+// to every function) is a syntactic convenience Reserved for v1.x:
+//   @context("User management module.")   // Reserved for v1.x — no v1 syntax
 //   @requires(Capability.Storage)
 //   module app.users
 //
-// INHERITANCE RULES:
-// - @context on a function OVERRIDES module-level @context
-// - @requires is ADDITIVE (union with module-level)
-// - @security on a function OVERRIDES module-level @security
-// Checker is single-file, so we annotate functions directly here.
+// PLANNED v1.x INHERITANCE RULES (informative, not v1 behavior):
+// - @context on a declaration OVERRIDES module-level @context
+// - @requires is ADDITIVE (declaration capabilities union with module-level)
+// - @security on a declaration OVERRIDES module-level @security
+// v1 has no module-level annotation syntax, so we annotate each declaration
+// directly below, as v1 context-completeness is per-item (§15.3).
 
 @context("User sync — inherits module context for user management.")
 @requires(Capability.Network, Capability.Storage)
