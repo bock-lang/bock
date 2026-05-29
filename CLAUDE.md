@@ -46,12 +46,15 @@ cd extensions/vscode && npm test          # extension tests
 ```
 
 ## Where to Find What
-
+ 
 - **Language reference:** `spec/bock-spec.md`
 - **Implementation playbook:** `docs/src/contributing/playbook.md`
 - **Architecture overview:** `ARCHITECTURE.md` (start here for new contributors)
 - **Current state:** `STATUS.md`
 - **Forward plans:** `ROADMAP.md`
+- **How the project is run (agentic):** `.claude/agentic-operating-model.md`
+- **Orchestrator contract:** `.claude/agents/orchestrator.md`
+- **Work queue + orchestrator state:** `tracking/` (queue, routing, audit, escalations)
 
 ## Pre-PR Verification
 
