@@ -31,6 +31,17 @@ process decision, not routine orchestrator activity. The
 orchestrator follows routing.md; it does not rewrite the rules
 without surfacing the change.
 
+## Integration
+
+These files land on `main` like everything else: via a
+`chore/tracking-<UTC>` branch and PR, never a direct commit to local
+`main` (which is ruleset-protected, PR-only). The orchestrator batches
+tracking writes across a block and merges one tracking PR at a natural
+boundary — block completion, daily digest, or session end — then
+re-syncs local `main` with a fast-forward. Because `tracking/` touches
+no code, these PRs never conflict with feature PRs. Full mechanism:
+`.claude/agents/orchestrator.md` (Main integration & tracking PRs).
+
 ## Timestamps
 
 All dated entries use UTC via `date -u`. Audit entries, digests,
