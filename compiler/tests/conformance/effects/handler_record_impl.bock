@@ -1,0 +1,25 @@
+// TEST: effect_handler_record_impl_no_errors
+// EXPECT: no_errors
+// v1 happy path (§10.4): the ONE supported handler form is a record (or other
+// type) implementing the effect's trait via an `impl` block, installed through
+// a `handling` block. The effect operation `log` is invoked inside the handling
+// block that binds `Log` to the `ConsoleLog {}` handler, so resolution succeeds.
+module effects_handler_record_impl
+
+effect Log {
+  fn log(message: String) -> Void
+}
+
+record ConsoleLog {}
+
+impl Log for ConsoleLog {
+  fn log(message: String) -> Void {
+    println("[log] ${message}")
+  }
+}
+
+fn main() {
+  handling (Log with ConsoleLog {}) {
+    log("service started")
+  }
+}

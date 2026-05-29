@@ -1,0 +1,28 @@
+// TEST: effect_module_layer2_handler_resolves
+// EXPECT: no_errors
+// §10.3 Layer 2 (Module): an effect operation can be satisfied by a module-level
+// `handle <Effect> with <handler>` declaration alone, with NO enclosing Layer-1
+// `handling` block. Here the module installs `Log` via `handle Log with
+// ConsoleLog {}`, and `main` invokes the `log` operation directly; resolution
+// falls through Local (absent) to Module and finds the installed handler, so the
+// program is well-formed. This isolates Layer-2 resolution from Layer-1.
+module effects_module_handler_resolves
+
+effect Log {
+  fn log(message: String) -> Void
+}
+
+record ConsoleLog {}
+
+impl Log for ConsoleLog {
+  fn log(message: String) -> Void {
+    println("[log] ${message}")
+  }
+}
+
+// Layer 2 — module-level handler; no local `handling` block is needed.
+handle Log with ConsoleLog {}
+
+fn main() {
+  log("module-level handler resolves this")
+}
