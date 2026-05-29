@@ -563,3 +563,31 @@ Machinery validation (Block 1's purpose): the full coordination cycle exercised
     into the spec-alignment pass — for approval before landing; or (b) keep this as the
     map. ROADMAP/scope changes are the operator's call; not moving them unilaterally.
   State: main 747fe04; 0 open PRs; no in-flight sessions.
+
+═══ BLOCK COMPLETE — Tracking consolidation (2026-05-29) ═══
+Goal (operator): consolidate the fragmented, drift-prone tracking surfaces into a
+single in-repo hub; formalize the core-spec design process. Done via brainstorm →
+spec → plan → 3 PRs.
+Landed: #94 design spec (tracking/designs/2026-05-29-...), #95 implementation plan
+(tracking/plans/...), #96 seed hub (queue/divergences/design-questions/milestones/
+snapshot) + stdlib decided v1-blocking + Design-authority formalized, #97 generator
+(tools/scripts/gen-tracking-views.sh) + generated ROADMAP.md/STATUS.md + relocated
+drift guard (.github/workflows/tracking-views.yml — moved out of ci.yml's
+paths-ignore shadow so md-only hub edits are checked), #98 retire tracking.md +
+docs/INVENTORY.md + docs/SPEC-ALIGNMENT.md + boundaries table in tracking/CLAUDE.md.
+Result: tracking/ is the single forward-looking SoT (granular, one-question-per-file,
+boundaries documented); ROADMAP/STATUS generated + CI-`--check`ed; no duplicate/
+off-repo trackers. main 4538fde.
+Reconciliation outcome (impl-chat inventory, repo wins): 22/25 D1/D2 spec-decisions
+resolved; A #28 / E #26 / D3 #90 / D6 #82 / §20.1 #92 confirmed landed; the residue
+seeded into the hub.
+Escalations RAISED (filed, non-blocking — see escalations.md): DQ2-DQ5 core-spec
+design questions → Design Chat (@performance §11.4; channels §13.3; sync §13.4;
+core-module scope §18.3). Stdlib (Q-stdlib) DECIDED v1-blocking; its §18 scope = DQ5.
+Process formalized: Design Chat persists as the authoritative core-spec voice
+(Impl folded into the orchestrator; Design did not); core-spec → escalate-and-file,
+never decide here; orchestrator discretion on "core spec"; don't block. Documented in
+orchestrator.md, routing.md, the operating model, and tracking/CLAUDE.md.
+Carry-forward (in queue.md): Q-stdlib (v1, pending DQ5 scope), the D-series → ItemB
+chain, the ready chores (changelog hygiene Q-cl-dates/Q-cl-0515, §20.1 cross-refs,
+vscode test-infra, conformance execution Q-fconf), @performance example (pending DQ2).
