@@ -27,6 +27,8 @@
 # Reference
 
 - [CLI](./reference/cli.md)
+- [Build & Tooling](./reference/tooling.md)
+- [Project Schema](./reference/project-schema.md)
 - [Standard Library](./reference/stdlib.md)
 - [Specification](./reference/spec.md)
 
