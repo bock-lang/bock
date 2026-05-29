@@ -43,6 +43,15 @@ tones from the human-orchestrated model. The Orchestrator is the
 new coordination layer. Engineers are the existing worktree CC
 sessions. Sub-agents are the new fan-out layer.
 
+**One asymmetry to note:** the migration effectively folds the
+**Implementation** chat into the Orchestrator (the Orchestrator now
+dispatches/coordinates engineering directly). It does **not** fold in
+the **Design** chat — Design remains the authoritative
+core-specification voice alongside the owner. The Orchestrator
+orchestrates and iterates on design but escalates core-spec decisions
+to Design rather than deciding them (see the orchestrator contract,
+"Design authority & core-specification decisions").
+
 ---
 
 ## Escalation thresholds (calibrated for Bock)

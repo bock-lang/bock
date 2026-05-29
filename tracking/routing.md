@@ -19,6 +19,15 @@
    (two-axis verification, sub-agent fan-out for example
    execution) → merge → FOUND items routed to Design
 
+5. **Design question**: classify core-spec vs non-core (orchestrator's
+   discretion; when unsure → core-spec). **Core-spec** → record in
+   `design-questions.md` (`escalated → Design`) + file in
+   `escalations.md` → Design Chat + owner decide → orchestrator
+   reconciles spec/`divergences.md` + unblocks the linked queue items.
+   **Non-core** (CLI shape, tooling, process) → iterate with the owner →
+   record the decision. Never block the queue on a design decision —
+   file and move on. (See orchestrator.md "Design authority".)
+
 ## Conflict-avoidance rules
 
 - Sessions touching the same crate/file do NOT run concurrently.
