@@ -93,6 +93,67 @@ STATUS.md as work lands).
 
 ---
 
+## Main integration & tracking PRs
+
+`main` is ruleset-protected (`protect-main`): every change lands via
+a pull request — no direct pushes, no force-pushes. The ruleset
+requires zero approvals and enforces no status checks, so the
+**verification gate is the only real guard** and the
+merge-only-when-clean rule below is load-bearing, not ceremonial.
+
+### Local `main` is a read-only mirror
+
+Treat local `main` as a mirror of `origin/main`. Never commit
+directly to it — not engineering source, not `tracking/`. Everything
+reaches `main` through a branch → PR → merge. After every merge,
+re-align:
+
+```bash
+git switch main && git fetch origin && git merge --ff-only origin/main
+```
+
+Local `main` must always be ancestor-or-equal to `origin/main`. If a
+fast-forward ever fails because local `main` is *ahead* (has commits
+`origin` lacks), the convention was violated — something committed to
+local `main` directly. Recover by moving the stray commit to a branch
+and resetting, then PR the branch:
+
+```bash
+git branch chore/tracking-<UTC> main && git reset --hard origin/main
+```
+
+A diverged local `main` is an error signal, not a state to push from.
+
+### Merge authority
+
+You merge any PR — engineer sessions' PRs and your own tracking PRs —
+**after confirming its verification gate is clean** (`cargo fmt --all
+-- --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`, `mdbook build docs`). A PR failing any
+applicable gate does not merge (retry per threshold, then escalate).
+When a PR touches no compiler crate and no `docs/` mdbook source
+(a tracking-only or governance-markdown PR), the gate has no
+applicable surface — note that in the PR rather than running a full
+workspace build for a markdown change. Engineer sessions never merge
+their own PRs; landing is yours.
+
+### Tracking updates ride a dedicated PR
+
+Your `tracking/` writes (audit entries, queue moves, digests) land on
+a short-lived branch `chore/tracking-<UTC>` (e.g.,
+`chore/tracking-20260529-0549`). Because `tracking/` is a path no
+engineer session touches, these PRs are **conflict-free with feature
+PRs regardless of merge order** — that disjointness is what makes the
+convention robust.
+
+Batch; do not open a PR per entry. Commit tracking writes to the
+branch through a block, then open and merge one PR at a natural
+boundary — **block completion, the daily digest, or session end**. An
+escalation the human must see immediately may land an interim tracking
+PR. After merge, re-align local `main` (above) and delete the branch.
+
+---
+
 ## Sub-agent governance
 
 You may spawn sub-agents for your own parallelizable work

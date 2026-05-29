@@ -272,7 +272,10 @@ tracking/
 
 `tracking/` is committed to the repo (it's project state, not
 scratch). The Orchestrator reads these at the start of every
-work block and writes to them as it coordinates.
+work block and writes to them as it coordinates. Those writes land
+via tracking PRs (`chore/tracking-<UTC>` branch → PR → merge), never
+direct commits to the ruleset-protected `main`; see the orchestrator
+contract (Main integration & tracking PRs).
 
 ### routing.md (Bock-specific rules)
 

@@ -205,6 +205,30 @@ git branch -D <branch>                        # if abandoning
 rm -rf ~/.cargo/cache/bock-target/<slug>      # reclaim disk
 ```
 
+### Main integration (protected branch)
+
+`main` is protected by the `protect-main` ruleset: it advances
+**only via pull request** — no direct pushes, no force-pushes. The
+ruleset requires zero approvals and enforces no required status
+checks, so the **Pre-PR verification gate above is the only real
+guard against a bad merge** — it must be clean before any merge.
+
+Treat local `main` as a read-only mirror of `origin/main`. Never
+commit directly to local `main` (the push is rejected and local
+`main` ends up diverged). All changes — engineering source and
+`tracking/` alike — land via a branch → PR → merge, then re-sync:
+
+```bash
+git switch main && git fetch origin && git merge --ff-only origin/main
+```
+
+A local `main` that is *ahead* of `origin/main` is an error signal:
+move the stray commit to a branch and reset to `origin/main`.
+
+Merging is the Orchestrator's role (see GitHub Operations below and
+`.claude/agents/orchestrator.md` — Main integration & tracking PRs);
+engineer sessions open PRs and let the Orchestrator land them.
+
 ## GitHub Operations (gh CLI)
 
 Claude Code has authenticated access to the `gh` CLI. The
@@ -232,7 +256,10 @@ These are reversible but materially affect the canonical state.
 Surface as `PROPOSED:` in the session output and let the human
 run them:
 
-- `gh pr merge` — affects main; merge ceremony belongs to the human
+- `gh pr merge` — engineer sessions: restricted (never merge your
+  own PR; the Orchestrator lands it). The Orchestrator: permitted for
+  PRs whose verification gate it has confirmed clean, per its contract
+  (`.claude/agents/orchestrator.md` — Main integration & tracking PRs)
 - `gh pr close`, `gh pr reopen`
 - `gh issue close`, `gh issue reopen`
 - `gh release create`, `gh release upload`, `gh release edit`
@@ -256,7 +283,10 @@ These are destructive, irreversible, or escalate access:
 - Force pushes (`git push --force`, `--force-with-lease`)
 - Deletions of remote refs other than the session's own
   newly-created feature branch when explicitly resetting
-- Approving or merging PRs the same session created
+- Engineer sessions approving or merging their own PRs (self-review
+  of feature work). The Orchestrator's merge authority is separate
+  and governed by its contract: it may merge gate-clean PRs, including
+  its own `tracking/`-only PRs
 - `gh auth refresh --scopes` to expand token scope
 
 ### When in doubt
