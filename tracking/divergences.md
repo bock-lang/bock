@@ -22,28 +22,31 @@ status(open | resolved→link)`
   string, math, iter, …) ship in v1 · **impl-does:** `stdlib/` empty
   (0 modules; prelude ≈ 9 builtins + a few type-checker intrinsics)
 - **Classification:** spec-ahead-of-impl
-- **Disposition:** schedule the implementation (→ queue `Q-stdlib`,
-  needs `milestones.md` MS-stdlib); reconcile §18's v1-status once
-  scheduled. Acknowledged everywhere but scheduled nowhere — this is
-  the gap the 2026-05-29 stdlib audit surfaced.
-- **Status:** open
-
-### DV2 — §13.3/§13.4 concurrency: changelog asserts Reserved, spec doesn't
-- **§:** §13.3 (channels), §13.4 (sync primitives) · **spec-says:**
-  live spec lists `Channel`, `Mutex/RwLock/Atomic/WaitGroup/OnceCell`
-  as plain v1 surface, NO Reserved marker · **changelog-asserts:**
-  `20260514-0449` claims they were "Reserved for v1.x per the D1+D2
-  batch" — but no such batch changelog exists and the assertion was
-  never applied to the spec.
-- **Classification:** gap (unapplied decision / changelog-vs-spec)
-- **Disposition:** decide via `design-questions.md` DQ3/DQ4, then
-  either mark the spec Reserved or correct the 0449 cross-reference.
-- **Status:** open
+- **Disposition:** implement the 11 v1 core modules (→ queue `Q-stdlib`,
+  now SCOPED via `design-questions.md` DQ5 / `milestones.md` MS-stdlib).
+  §18.3 v1-status reconciled in #100 (v1/v1.x tiering). Remains open until
+  the modules land; Q-stdlib carries the R1/R2/R3 implementation plan.
+- **Status:** open (scope decided 2026-05-29; implementation pending)
 
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)
 
+- **DV2 §13.3/§13.4 concurrency Reserved status** — gap (the
+  `20260514-0449` changelog asserted channels + sync primitives were
+  "Reserved per the D1+D2 batch", but no such batch existed and the spec
+  carried no Reserved marker) → channels (§13.3) and sync primitives
+  (§13.4) marked Reserved-for-v1.x per Design DQ3/DQ4 (they bundle with
+  `core.concurrency`, Reserved per DQ5); the 0449 cross-ref corrected.
+  resolved → #100.
+- **DV3 §11.4 `@performance` literal form** — impl-bug: the annotation
+  interpreter required the parenthesized method-call form `100.ms()` and
+  rejected the canonical no-parens literal `100.ms`, contradicting the
+  §11.4 Q3 decision ("a literal, not a method call"); it also lacked the
+  `.min`/`.h`/`.tb` units in Design's normative set. fix-impl → taught the
+  interpreter to accept the no-parens `FieldAccess` literal form (keeping
+  the parens form as a lenient alias) and added the missing units; bare
+  ints still → E8003. resolved → #100. (Surfaced while reconciling DQ2.)
 - **§20.1 CLI + §20.7/Appendix A target tables** — spec-ahead-of-impl →
   reconciled (Reserved-for-v1.x). resolved → #92.
 - **§1.5 paradigm modes / `[paradigm]`** — spec-ahead-of-impl →
