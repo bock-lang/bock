@@ -4,8 +4,36 @@ Orchestrator working memory. Read at the start of every work
 block; update as work moves. Committed to the repo as project
 state.
 
-Last updated: 2026-05-29 (startup reconciliation vs repo HEAD 56b67f4 —
-Block 1 intact, nothing landed; see audit.md startup entry)
+Last updated: 2026-05-29 (Block 1 COMPLETE — all 4 merged, main acb9094.
+Chore sweep in progress: dep updates + Changelog-workflow rearchitect. See
+audit.md DAILY DIGEST 2026-05-29.)
+
+**Block 1 status: COMPLETE ✓** (main acb9094)
+- H3 #73 merged — spec §1.5 paradigm reconciliation
+- H2 #74 merged — 7 effect-handler conformance fixtures
+- H1 #75 merged — bock check exit-code centralized
+- C1 #76 merged — bock check --only/--brief (§20.1.1)
+Zero escalations. OPEN/FOUND items recorded below.
+
+**OPEN → Design (from Block 1):**
+- O1 [H1] `bock check` warnings-only exit code — fail on warnings? (behavior preserved)
+- O2 [C1] §20.1.1/§11 `--only=context`: adopt the dead-code validate_context pass?
+
+**FOUND → triage (from Block 1):**
+- F-conf [H2] per-target conformance execution NOT wired — suite is parse/discovery
+  only. Candidate: "wire conformance execution." (operator-flagged in digest)
+- F-exit [H1] build/run/test/fmt share the process::exit anti-pattern — follow-up.
+- F-lint [C1] lint warnings now always surfaced (matches §20.1.1) — informational.
+
+**Chore sweep (in progress, 2026-05-29, operator-directed):**
+- Dependency updates incl. majors — 21 dependabot PRs across cargo/website/vscode/
+  GitHub-Actions. Per-ecosystem sessions; close superseded PRs after each lands.
+- CI: rearchitect the Changelog workflow to PR-based (was failing on every PR —
+  missing CHANGELOG_BOT_TOKEN + pushes to protected main). Combined with the
+  GitHub-Actions version bumps (same .github/workflows/ tree).
+
+**Doc reconciliation (orchestrator/D-series):** docs/INVENTORY.md + SPEC-ALIGNMENT.md
+still mark F04/§20.1.1/F15 as drift — now resolved by C1/H3; update those meta-docs.
 
 ---
 
