@@ -372,3 +372,55 @@ Machinery validation (Block 1's purpose): the full coordination cycle exercised
     2. Block 1 OPENs O1 (warnings exit code) + O2 (context aspect) still pending Design.
     3. Optional: website npm-audit security pass; vscode test-infra.
     4. D3 (Tooling docs) remains ready (unblocked by C1).
+
+[2026-05-29 15:32 UTC] PR #21 resolve+merge; CI restore (#84); Cloudflare deploy fix (#85)
+  Input: Operator: "resolve the state of #21 (conflicts; should otherwise be merged),
+    then fix mdbook migration and keep moving" + provided the Cloudflare Workers build
+    failure logs. The two CI/deploy anomalies I had surfaced earlier are now
+    root-caused and fixed.
+
+  #21 — "Add Cloudflare Workers configuration" (Cloudflare bot PR, May 7), CONFLICTING:
+    Finding — main had ADVANCED PAST #21 (main already has astro 6 / @astrojs/cloudflare
+    13 / wrangler 4.94 via #78 + a modern adapter wrangler.jsonc; #21 carried May
+    versions astro 4 / adapter 11). Naive merge would REGRESS main. Resolved all 5
+    website/ conflicts in favor of main's current config; #21's net contribution =
+    public/.assetsignore + .gitignore hardening + a `deploy` script. astro build green;
+    merged (squash) -> main 8027347. No regression.
+
+  CI ROOT CAUSE (the startup_failures): NOT the action bumps. Repo Actions policy =
+    allowed_actions:selected, github_owned_allowed:true, verified_allowed:true,
+    patterns_allowed:[] — actions/* allowed, but the FOUR third-party actions
+    (Swatinem/rust-cache, dtolnay/rust-toolchain, peaceiris/actions-mdbook,
+    softprops/action-gh-release) BLOCKED => GitHub startup_failures every referencing
+    workflow repo-wide. Timeline (green before ~14:42, fail after) => allowlist
+    tightened around the operator's supply-chain note. Repo SETTING the orchestrator
+    cannot change (prohibited). Operator chose: replace the actions (no settings change).
+  FIX (#84 -> main e71c878): replaced ALL 4 third-party actions with GitHub-owned/inline
+    — peaceiris->inline mdBook (pinned v0.5.2); dtolnay/rust-toolchain->inline rustup;
+    Swatinem/rust-cache->actions/cache (SHA-pinned v5.0.5); softprops->gh CLI. No `uses:`
+    outside actions/* remain. PR #84 CI fully GREEN (12 jobs); post-merge main CI now
+    STARTS (in_progress, not startup_failure). Gate restored, no settings change. Side
+    benefit: also resolves the time-sensitive peaceiris Node-20->24 (2026-06-02)
+    deprecation — peaceiris removed entirely.
+
+  CLOUDFLARE deploy failure (operator logs): build OK; `wrangler deploy` failed
+    provisioning KV namespace bock-homepage-session ("already exists", 10014). Root
+    cause: @astrojs/cloudflare v13 (from #78's 11->13 bump) auto-enables astro Sessions
+    (SESSION KV binding) + an IMAGES binding when session.driver is unset; wrangler
+    auto-provisioning tries to CREATE the namespace #78's first deploy already created.
+    Site is output:static => those runtime bindings are unused. FIX (#85 -> main
+    321d6b7): astro.config — session.driver=sessionDrivers.memory() (no KV binding) +
+    cloudflare({imageService:'compile'}) (no IMAGES binding; keeps build-time image
+    optimization). Verified: build no longer logs "Enabling sessions with Cloudflare
+    KV"; generated wrangler.json kv_namespaces:[]. DEPLOY VERIFIED EXTERNALLY: next
+    Cloudflare Workers build = deploy:success / Workers Builds:success. Resolved.
+
+  Merge-order note: #85 merged before #84, so #85's post-merge Docs run still
+    startup_failed (third-party actions still present then); clean after #84. Expected.
+
+  Open PRs after this: NONE. main e71c878. CI gate restored; Cloudflare deploy green.
+
+  Carry-forward: Block 1 OPENs O1/O2 -> Design; website npm-audit (1 high devalue /
+    5 moderate yaml) security pass; vscode test-infra gap; F-conf (per-target
+    conformance execution not wired); root CLAUDE.md references a nonexistent
+    tools/scripts/run-conformance.sh (minor doc drift). Next substantive item: D3.

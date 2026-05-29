@@ -4,27 +4,29 @@ Orchestrator working memory. Read at the start of every work
 block; update as work moves. Committed to the repo as project
 state.
 
-Last updated: 2026-05-29 (Block 1 COMPLETE + chore sweep COMPLETE. main 49211c9.
-See audit.md DAILY DIGEST + CHORE SWEEP entries 2026-05-29.)
+Last updated: 2026-05-29 (Block 1 + chore sweep + #21/#84/#85 all COMPLETE.
+main e71c878. NO open PRs. CI gate restored; Cloudflare deploy green.
+See audit.md entries 2026-05-29, latest = the 15:32 #21/#84/#85 entry.)
 
 **Block 1 status: COMPLETE ✓** (H3 #73, H2 #74, H1 #75, C1 #76). Zero escalations.
 
-**Chore sweep status: COMPLETE ✓** (operator-directed, 2026-05-29; main 49211c9):
-- Deps: ALL 21 dependabot PRs resolved (#78 website, #79 cargo incl. dashmap 5→6,
-  #80 vscode incl. 4 majors, #81 GitHub-Actions); superseded PRs closed. Only the
-  non-dependabot #21 (Cloudflare) remains open.
-- CI: the post-merge Changelog workflow (the only red) REPLACED with a
-  generate-don't-push design (#82) — removed the CI write-back; added
-  tools/scripts/gen-changelog.sh + read-only release verify + backfill. No CI
-  write surface. Largely completes D6.
+**Chore sweep + follow-ons: COMPLETE ✓** (operator-directed, 2026-05-29; main e71c878):
+- Deps: ALL 21 dependabot PRs resolved (#78/#79/#80/#81); superseded PRs closed.
+- Changelog: CI write-back removed, replaced by generate-don't-push (#82). ~D6 done.
+- #21 Cloudflare config: conflicts resolved (favored main; no regression), merged (8027347).
+- CI restored (#84): the startup_failures were the Actions allowlist (selected + empty
+  patterns) blocking 4 third-party actions repo-wide. Fixed by replacing ALL 4 with
+  actions/*/inline — NO settings change. CI green. Also kills the peaceiris Node-20 risk.
+- Cloudflare deploy fixed (#85): disabled the auto-provisioned SESSION KV + IMAGES
+  bindings on the static site. Verified externally — deploy:success.
+- **NO open PRs remain.**
 
 **OPEN → Design (pending):**
 - O1 [H1] `bock check` warnings-only exit code — fail on warnings? (behavior preserved)
 - O2 [C1] §20.1.1/§11 `--only=context`: adopt the dead-code validate_context pass?
 
 **FOUND / follow-ups (queued):**
-- **peaceiris/actions-mdbook@v2.0.0 Node-20 → forced Node-24 on 2026-06-02 (~4 days).**
-  mdbook job (docs.yml) may break. **Handle before 2026-06-02.** HIGHEST near-term.
+- ~~peaceiris Node-20 deprecation~~ RESOLVED in #84 (peaceiris removed entirely).
 - F-conf [H2] per-target conformance execution NOT wired — suite is parse/discovery
   only. Candidate: "wire conformance execution."
 - SEC [website] npm audit: 1 high (devalue) + 5 moderate (yaml/@astrojs/check). Pre-existing.
