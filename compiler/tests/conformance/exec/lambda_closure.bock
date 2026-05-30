@@ -1,0 +1,39 @@
+// TEST: exec_lambda_closure
+// EXPECT: output "12;20"
+// EXPECT: targets js, ts, python, rust
+//
+// Lambda + first-class-function codegen. Exercises:
+//   - a function parameter of function type (`Fn(Int) -> Int`), applied inside
+//     the callee (`f(f(x))`),
+//   - a lambda bound to a `let` and then passed by name (`applyTwice(inc, 10)`),
+//   - a lambda passed inline as a call argument (`applyTwice((n) => n * 2, ...)`).
+//
+// This is the regression fixture for the Python lambda defect (DV-codegen):
+// `(n: Int) => n + 1` lowered to `lambda n: int: …`, a `SyntaxError`, because
+// the param type hint was emitted into the `lambda` param list (Python forbids
+// annotations there). The fix emits BARE param names for lambdas. The same
+// program also exercises the `Callable[[int], int]` annotation on `applyTwice`'s
+// `f` parameter, which previously emitted no `from typing import Callable` and
+// raised `NameError` once the lambda parsed.
+//
+// `// EXPECT: targets` deliberately OMITS `go`: Go's lambda codegen infers the
+// closure's return type as `interface{}` (`func(n int64) interface{}`), which
+// does not satisfy the `func(int64) int64` parameter type — a separate,
+// pre-existing Go-backend defect (the cross-target lambda/generics work is a
+// later session; see DV12 for the generics half). This fixture seeds that work:
+// flip `go` on once the Go lambda return-type inference is fixed.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn applyTwice(f: Fn(Int) -> Int, x: Int) -> Int {
+  return f(f(x))
+}
+
+fn main() -> Void {
+  let inc = (n: Int) => n + 1
+  let a = applyTwice(inc, 10)
+  let b = applyTwice((n: Int) => n * 2, 5)
+  println("${a};${b}")
+}

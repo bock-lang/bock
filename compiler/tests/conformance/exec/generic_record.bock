@@ -1,0 +1,41 @@
+// TEST: exec_generic_record
+// EXPECT: output "42;hi"
+// EXPECT: targets js, ts, python, rust
+//
+// Generic record (`record Box[T] { value: T }`) codegen: a type-parameterized
+// value type, constructed at two distinct instantiations (`Box[Int]` and
+// `Box[String]`) and read back via field access.
+//
+// This is the regression fixture for the Python generics defect (DV12, Python
+// slice): `record Box[T]` emitted `class Box:` with a field annotation
+// `value: T` and no `T = TypeVar("T")` / `Generic[T]`, so the module raised
+// `NameError: name 'T' is not defined` at class-evaluation time, before `main`
+// ran. The fix emits `T = TypeVar("T")` once per type parameter (deduped across
+// the bundle), adds `Generic[T, …]` to the class bases, and imports
+// `TypeVar`/`Generic` from `typing`.
+//
+// `// EXPECT: targets` deliberately OMITS `go`: Go emits the struct literal
+// without its type argument (`Box{Value: 42}` rather than `Box[int64]{…}`), so
+// `go build` rejects "generic type Box[T any] without instantiation" — a
+// separate, pre-existing Go-backend defect tracked under DV12. The cross-target
+// generics work (Go construction-site type-argument inference; TS/Rust generic
+// *methods* — a `Box[T]` method body further breaks TS interface-merge and
+// Rust `impl<T>`) is a later session; this fixture seeds it. Flip `go` on (and
+// add a generic method) once that lands.
+//
+// The fixture stays to construct-and-read (no method) precisely so it remains
+// green on js/ts/rust today, isolating the Python TypeVar/Generic fix.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Box[T] {
+  value: T
+}
+
+fn main() -> Void {
+  let n = Box { value: 42 }
+  let s = Box { value: "hi" }
+  println("${n.value};${s.value}")
+}

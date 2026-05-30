@@ -6,9 +6,10 @@
 //! - Pattern matching → native `match`/`case` (Python 3.10+)
 //! - Effects → keyword arguments
 //! - Ownership → erased (Python is GC)
-//! - Generics → erased (Python uses runtime typing)
+//! - Generics → `TypeVar` + `Generic[T]` (so `T` resolves at class-eval time)
 //! - Type hints on all declarations
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -257,6 +258,23 @@ struct PyEmitCtx {
     /// Set when an enum decl emits a `Name = Union[...]` alias, so the preamble
     /// imports `Union` from `typing`.
     needs_union_import: bool,
+    /// Typing-import needs accumulated while lowering type annotations. These
+    /// are `Cell`s because `type_to_py`/`ast_type_to_py` (where the relevant
+    /// `Callable`/`Any`/`Self`/`Never`/`TypeVar` names are emitted) take
+    /// `&self` — many of their call sites borrow `self` immutably inside
+    /// closures, so promoting them to `&mut self` would fight the borrow
+    /// checker. The `finish` preamble reads them to emit a single merged
+    /// `from typing import …` line.
+    needs_typing_callable: Cell<bool>,
+    needs_typing_any: Cell<bool>,
+    needs_typing_self: Cell<bool>,
+    needs_typing_never: Cell<bool>,
+    /// Set when a generic decl emits `T = TypeVar("T")`, so the preamble
+    /// imports `TypeVar` (and `Generic`, used in the class base list).
+    needs_typing_typevar: Cell<bool>,
+    /// Names already emitted as `T = TypeVar("T")`, deduped across the bundle so
+    /// a type parameter shared by several decls is declared exactly once.
+    emitted_typevars: std::collections::HashSet<String>,
     /// User-enum-variant registry (DV14). Routes a construction/pattern to the
     /// `{enum}_{variant}` dataclass and recognises a unit variant (needs `()`
     /// instantiation). Built-in Optional/Result pre-seeds filtered out where
@@ -284,6 +302,12 @@ impl PyEmitCtx {
             optional_runtime_emitted: false,
             concurrency_runtime_emitted: false,
             needs_union_import: false,
+            needs_typing_callable: Cell::new(false),
+            needs_typing_any: Cell::new(false),
+            needs_typing_self: Cell::new(false),
+            needs_typing_never: Cell::new(false),
+            needs_typing_typevar: Cell::new(false),
+            emitted_typevars: std::collections::HashSet::new(),
             enum_variants: crate::generator::EnumVariantRegistry::new(),
         }
     }
@@ -296,8 +320,36 @@ impl PyEmitCtx {
         if self.needs_time_import {
             preamble.push_str("import time\n");
         }
+        // Merge every `typing` need into one `from typing import …` line so a
+        // module that uses, e.g., both a `Callable` annotation and a generic
+        // type does not emit two separate (potentially conflicting) imports.
+        let mut typing_names: Vec<&str> = Vec::new();
         if self.needs_union_import {
-            preamble.push_str("from typing import Union\n");
+            typing_names.push("Union");
+        }
+        if self.needs_typing_callable.get() {
+            typing_names.push("Callable");
+        }
+        if self.needs_typing_any.get() {
+            typing_names.push("Any");
+        }
+        if self.needs_typing_self.get() {
+            typing_names.push("Self");
+        }
+        if self.needs_typing_never.get() {
+            typing_names.push("Never");
+        }
+        if self.needs_typing_typevar.get() {
+            // `Generic` is always paired with `TypeVar`: a generic class lists
+            // `Generic[T, …]` in its bases and `T` is a `TypeVar`.
+            typing_names.push("TypeVar");
+            typing_names.push("Generic");
+        }
+        if !typing_names.is_empty() {
+            // Stable, de-duplicated ordering for deterministic output.
+            typing_names.sort_unstable();
+            typing_names.dedup();
+            preamble.push_str(&format!("from typing import {}\n", typing_names.join(", ")));
         }
         if self.needs_abc_import {
             preamble.push_str("from abc import ABC, abstractmethod\n");
@@ -721,6 +773,7 @@ impl PyEmitCtx {
                 visibility,
                 is_async,
                 name,
+                generic_params,
                 params,
                 return_type,
                 effect_clause,
@@ -730,18 +783,29 @@ impl PyEmitCtx {
                 *visibility,
                 *is_async,
                 &name.name,
+                generic_params,
                 params,
                 return_type.as_deref(),
                 effect_clause,
                 body,
             ),
-            NodeKind::RecordDecl { name, fields, .. } => {
+            NodeKind::RecordDecl {
+                name,
+                fields,
+                generic_params,
+                ..
+            } => {
+                // A `record R[T] { … }` needs `T` to resolve at class-eval time:
+                // emit `T = TypeVar("T")` and add `Generic[T, …]` to the bases,
+                // else the field annotation `value: T` raises `NameError`
+                // (DV12, Python slice).
+                self.emit_typevars(generic_params);
                 // Pull any previously-collected `impl Trait for Name` blocks
                 // so their methods become part of this class body and the
                 // class inherits from every implemented trait — giving real
                 // method dispatch (a bare instance has no orphan methods).
                 let impls = self.impls_by_target.remove(&name.name).unwrap_or_default();
-                let bases: Vec<String> = impls
+                let mut bases: Vec<String> = impls
                     .iter()
                     .filter_map(|im| {
                         if let NodeKind::ImplBlock {
@@ -755,6 +819,7 @@ impl PyEmitCtx {
                         }
                     })
                     .collect();
+                bases.extend(self.generic_base(generic_params));
                 let base_list = if bases.is_empty() {
                     String::new()
                 } else {
@@ -793,8 +858,19 @@ impl PyEmitCtx {
                 self.indent -= 1;
                 Ok(())
             }
-            NodeKind::EnumDecl { name, variants, .. } => {
+            NodeKind::EnumDecl {
+                name,
+                variants,
+                generic_params,
+                ..
+            } => {
                 self.needs_dataclass_import = true;
+                // A generic `enum E[T]` whose variants carry `T`-typed payloads
+                // needs `T = TypeVar("T")` so those field annotations resolve.
+                // (Full generic-enum codegen — `Generic[T]` variant bases — is
+                // tracked separately under DV12/P1; the TypeVar declaration is
+                // the minimum that keeps the module from raising `NameError`.)
+                self.emit_typevars(generic_params);
                 for (i, variant) in variants.iter().enumerate() {
                     if i > 0 {
                         self.buf.push('\n');
@@ -829,9 +905,19 @@ impl PyEmitCtx {
                 name,
                 fields,
                 methods,
+                generic_params,
                 ..
             } => {
-                self.writeln(&format!("class {}:", name.name));
+                // A generic `class C[T]` needs `T = TypeVar("T")` + a
+                // `Generic[T, …]` base so `T`-typed members resolve (DV12).
+                self.emit_typevars(generic_params);
+                let bases = self.generic_base(generic_params);
+                let base_list = if bases.is_empty() {
+                    String::new()
+                } else {
+                    format!("({})", bases.join(", "))
+                };
+                self.writeln(&format!("class {}{base_list}:", name.name));
                 self.indent += 1;
                 // __init__
                 if !fields.is_empty() {
@@ -1081,6 +1167,52 @@ impl PyEmitCtx {
         }
     }
 
+    // ── Generic type parameters ─────────────────────────────────────────────
+
+    /// Emit `T = TypeVar("T")` for each generic parameter not already declared,
+    /// deduped across the whole bundle via [`Self::emitted_typevars`]. A param
+    /// with a single bound (`T: Comparable`) becomes
+    /// `T = TypeVar("T", bound=Comparable)` so static checkers see the
+    /// constraint; multiple bounds collapse to the first (Python `TypeVar`
+    /// takes one `bound=`). Sets [`Self::needs_typing_typevar`] when anything is
+    /// emitted so the preamble imports `TypeVar`/`Generic`.
+    fn emit_typevars(&mut self, generic_params: &[bock_ast::GenericParam]) {
+        for gp in generic_params {
+            let name = gp.name.name.clone();
+            if !self.emitted_typevars.insert(name.clone()) {
+                continue;
+            }
+            self.needs_typing_typevar.set(true);
+            // A bound becomes `bound=<Name>`. Python's `TypeVar` accepts a
+            // single `bound`; if Bock ever allows several, the first wins and
+            // the rest are dropped (a static-checker approximation only —
+            // Python erases generics at runtime regardless).
+            let bound = gp
+                .bounds
+                .first()
+                .and_then(|tp| tp.segments.last())
+                .map(|seg| format!(", bound={}", self.map_type_name(&seg.name)))
+                .unwrap_or_default();
+            self.writeln(&format!("{name} = TypeVar(\"{name}\"{bound})"));
+        }
+    }
+
+    /// Build the `Generic[T, …]` base-class fragment for a generic decl. Returns
+    /// an empty `Vec` when there are no type parameters. Also sets
+    /// [`Self::needs_typing_typevar`] (the typevars are emitted separately by
+    /// [`Self::emit_typevars`]).
+    fn generic_base(&self, generic_params: &[bock_ast::GenericParam]) -> Vec<String> {
+        if generic_params.is_empty() {
+            return Vec::new();
+        }
+        self.needs_typing_typevar.set(true);
+        let names: Vec<String> = generic_params
+            .iter()
+            .map(|gp| gp.name.name.clone())
+            .collect();
+        vec![format!("Generic[{}]", names.join(", "))]
+    }
+
     // ── Function declarations ───────────────────────────────────────────────
 
     #[allow(clippy::too_many_arguments)]
@@ -1089,6 +1221,7 @@ impl PyEmitCtx {
         _visibility: Visibility,
         is_async: bool,
         name: &str,
+        generic_params: &[bock_ast::GenericParam],
         params: &[AIRNode],
         return_type: Option<&AIRNode>,
         effect_clause: &[bock_ast::TypePath],
@@ -1097,6 +1230,10 @@ impl PyEmitCtx {
         if is_async {
             self.needs_asyncio_import = true;
         }
+        // A generic `fn f[T](…) -> T` references `T` in its param/return
+        // annotations, which Python evaluates at def time — declare
+        // `T = TypeVar("T")` first so those names resolve (DV12).
+        self.emit_typevars(generic_params);
         let async_kw = if is_async { "async " } else { "" };
         let param_strs = self.collect_param_strs(params);
         let effects = self.effects_params(effect_clause);
@@ -1179,7 +1316,28 @@ impl PyEmitCtx {
         Ok(())
     }
 
+    /// Collect parameter strings for a `def`/method signature.
+    ///
+    /// Each emitted param carries its `: type` annotation and any default.
+    /// Use [`Self::collect_param_strs_bare`] for `lambda` params, where Python
+    /// forbids type annotations (`lambda x: int: body` is a `SyntaxError`).
     fn collect_param_strs(&self, params: &[AIRNode]) -> Vec<String> {
+        self.collect_param_strs_inner(params, true)
+    }
+
+    /// Collect bare parameter names (no `: type` annotations) for a `lambda`.
+    ///
+    /// A Python `lambda` parameter list cannot carry annotations: emitting one
+    /// produces `lambda x: int: body`, where the first `:` ends the parameter
+    /// list, so the type hint becomes a second, syntactically invalid `:`.
+    fn collect_param_strs_bare(&self, params: &[AIRNode]) -> Vec<String> {
+        self.collect_param_strs_inner(params, false)
+    }
+
+    /// Shared implementation of [`Self::collect_param_strs`] and
+    /// [`Self::collect_param_strs_bare`]. When `hints` is `false`, the `: type`
+    /// annotation is omitted (required for `lambda` params).
+    fn collect_param_strs_inner(&self, params: &[AIRNode], hints: bool) -> Vec<String> {
         params
             .iter()
             .filter_map(|p| {
@@ -1190,10 +1348,13 @@ impl PyEmitCtx {
                 } = &p.kind
                 {
                     let name = to_snake_case(&self.pattern_to_binding_name(pattern));
-                    let type_hint = ty
-                        .as_ref()
-                        .map(|t| format!(": {}", self.type_to_py(t)))
-                        .unwrap_or_default();
+                    let type_hint = if hints {
+                        ty.as_ref()
+                            .map(|t| format!(": {}", self.type_to_py(t)))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     if let Some(def) = default {
                         let mut ctx = PyEmitCtx::new();
                         ctx.indent = self.indent;
@@ -1734,7 +1895,9 @@ impl PyEmitCtx {
                 Ok(())
             }
             NodeKind::Lambda { params, body } => {
-                let param_strs = self.collect_param_strs(params);
+                // Python `lambda` params take no type annotations — see
+                // `collect_param_strs_bare`.
+                let param_strs = self.collect_param_strs_bare(params);
                 let _ = write!(self.buf, "lambda {}: ", param_strs.join(", "));
                 self.emit_expr(body)?;
                 Ok(())
@@ -2392,6 +2555,7 @@ impl PyEmitCtx {
                 format!("tuple[{}]", elem_strs.join(", "))
             }
             NodeKind::TypeFunction { params, ret, .. } => {
+                self.needs_typing_callable.set(true);
                 let param_strs: Vec<String> = params.iter().map(|p| self.type_to_py(p)).collect();
                 format!(
                     "Callable[[{}], {}]",
@@ -2409,8 +2573,14 @@ impl PyEmitCtx {
                 let _ = inner;
                 "_BockSome | _BockNone".to_string()
             }
-            NodeKind::TypeSelf => "Self".into(),
-            _ => "Any".into(),
+            NodeKind::TypeSelf => {
+                self.needs_typing_self.set(true);
+                "Self".into()
+            }
+            _ => {
+                self.needs_typing_any.set(true);
+                "Any".into()
+            }
         }
     }
 
@@ -2424,8 +2594,14 @@ impl PyEmitCtx {
             "List" => "list".into(),
             "Map" => "dict".into(),
             "Set" => "set".into(),
-            "Any" => "Any".into(),
-            "Never" => "Never".into(),
+            "Any" => {
+                self.needs_typing_any.set(true);
+                "Any".into()
+            }
+            "Never" => {
+                self.needs_typing_never.set(true);
+                "Never".into()
+            }
             other => other.into(),
         }
     }
@@ -2453,6 +2629,7 @@ impl PyEmitCtx {
                 format!("tuple[{}]", elem_strs.join(", "))
             }
             TypeExpr::Function { params, ret, .. } => {
+                self.needs_typing_callable.set(true);
                 let param_strs: Vec<String> =
                     params.iter().map(|p| self.ast_type_to_py(p)).collect();
                 format!(
@@ -2467,7 +2644,10 @@ impl PyEmitCtx {
                 let _ = inner;
                 "_BockSome | _BockNone".to_string()
             }
-            TypeExpr::SelfType { .. } => "Self".into(),
+            TypeExpr::SelfType { .. } => {
+                self.needs_typing_self.set(true);
+                "Self".into()
+            }
         }
     }
 
@@ -5226,6 +5406,239 @@ mod tests {
         assert!(
             out.contains("(lambda x:") && out.contains(")(__v._0)"),
             "expected the Some payload bound from __v._0, got: {out}"
+        );
+    }
+
+    // ── Lambdas, typing imports, and generics (DV12 + lambda fix) ─────────────
+
+    /// A `GenericParam` named `name` with optional single trait `bound`.
+    fn generic_param(name: &str, bound: Option<&str>) -> bock_ast::GenericParam {
+        bock_ast::GenericParam {
+            id: 0,
+            span: span(),
+            name: ident(name),
+            bounds: bound.map(|b| vec![type_path(&[b])]).unwrap_or_default(),
+        }
+    }
+
+    /// A record field whose declared type is the bare named type `ty_name`
+    /// (e.g. a type parameter `T`).
+    fn named_field(field: &str, ty_name: &str) -> bock_ast::RecordDeclField {
+        bock_ast::RecordDeclField {
+            id: 0,
+            span: span(),
+            name: ident(field),
+            ty: bock_ast::TypeExpr::Named {
+                id: 0,
+                span: span(),
+                path: type_path(&[ty_name]),
+                args: vec![],
+            },
+            default: None,
+        }
+    }
+
+    #[test]
+    fn lambda_params_have_no_type_hints() {
+        // `(x: Int) => x + 1` must emit `lambda x: …`, never `lambda x: int: …`
+        // (the latter is a Python `SyntaxError` — the bug this fix closes).
+        let lambda = node(
+            1,
+            NodeKind::Lambda {
+                params: vec![typed_param_node(2, "x", "Int")],
+                body: Box::new(node(
+                    3,
+                    NodeKind::BinaryOp {
+                        op: BinOp::Add,
+                        left: Box::new(id_node(4, "x")),
+                        right: Box::new(int_lit(5, "1")),
+                    },
+                )),
+            },
+        );
+        let body = block(
+            6,
+            vec![node(
+                7,
+                NodeKind::LetBinding {
+                    is_mut: false,
+                    pattern: Box::new(bind_pat(8, "inc")),
+                    ty: None,
+                    value: Box::new(lambda),
+                },
+            )],
+            None,
+        );
+        let f = node(
+            9,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("run"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("lambda x: "),
+            "lambda must emit a bare param list, got: {out}"
+        );
+        assert!(
+            !out.contains("lambda x: int"),
+            "lambda param must NOT carry a type hint (SyntaxError), got: {out}"
+        );
+    }
+
+    #[test]
+    fn fn_type_param_emits_callable_import() {
+        // A parameter of function type lowers to `Callable[[int], int]`, which
+        // must be imported from `typing` or it raises `NameError`.
+        let f_param = node(
+            2,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(3, "f")),
+                ty: Some(Box::new(node(
+                    4,
+                    NodeKind::TypeFunction {
+                        params: vec![node(
+                            5,
+                            NodeKind::TypeNamed {
+                                path: type_path(&["Int"]),
+                                args: vec![],
+                            },
+                        )],
+                        ret: Box::new(node(
+                            6,
+                            NodeKind::TypeNamed {
+                                path: type_path(&["Int"]),
+                                args: vec![],
+                            },
+                        )),
+                        effects: vec![],
+                    },
+                ))),
+                default: None,
+            },
+        );
+        let body = block(7, vec![], Some(int_lit(8, "0")));
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("apply"),
+                generic_params: vec![],
+                params: vec![f_param],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("from typing import Callable"),
+            "Callable annotation needs its typing import, got: {out}"
+        );
+        assert!(
+            out.contains("f: Callable[[int], int]"),
+            "expected the Callable annotation, got: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_record_emits_typevar_and_generic() {
+        // `record Box[T] { value: T }` must declare `T = TypeVar("T")`, list
+        // `Generic[T]` in the class bases, and import both from `typing`, or
+        // the field annotation `value: T` raises `NameError` at class-eval time.
+        let rec = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Box"),
+                generic_params: vec![generic_param("T", None)],
+                fields: vec![named_field("value", "T")],
+            },
+        );
+        let out = gen(&module(vec![], vec![rec]));
+        assert!(
+            out.contains("from typing import Generic, TypeVar"),
+            "expected merged typing import, got: {out}"
+        );
+        assert!(
+            out.contains("T = TypeVar(\"T\")"),
+            "expected a TypeVar declaration, got: {out}"
+        );
+        assert!(
+            out.contains("class Box(Generic[T]):"),
+            "expected Generic[T] in the class bases, got: {out}"
+        );
+        assert!(out.contains("value: T"), "got: {out}");
+    }
+
+    #[test]
+    fn bounded_type_param_emits_typevar_bound() {
+        // `fn describe[T: Named](x: T) -> ...` → `T = TypeVar("T", bound=Named)`.
+        let body = block(3, vec![], Some(int_lit(4, "0")));
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("describe"),
+                generic_params: vec![generic_param("T", Some("Named"))],
+                params: vec![typed_param_node(2, "x", "T")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("T = TypeVar(\"T\", bound=Named)"),
+            "expected a bounded TypeVar, got: {out}"
+        );
+    }
+
+    #[test]
+    fn shared_type_param_typevar_is_deduped() {
+        // Two generic records sharing the parameter name `T` must declare
+        // `T = TypeVar("T")` exactly once across the bundle.
+        let box_a = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Boxed"),
+                generic_params: vec![generic_param("T", None)],
+                fields: vec![named_field("value", "T")],
+            },
+        );
+        let box_b = node(
+            2,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Wrapped"),
+                generic_params: vec![generic_param("T", None)],
+                fields: vec![named_field("inner", "T")],
+            },
+        );
+        let out = gen(&module(vec![], vec![box_a, box_b]));
+        let typevar_count = out.matches("T = TypeVar(\"T\")").count();
+        assert_eq!(
+            typevar_count, 1,
+            "shared type param T must be declared exactly once, got {typevar_count} in: {out}"
         );
     }
 }
