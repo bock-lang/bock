@@ -18,15 +18,39 @@ status(open | resolved→link)`
 ## Open
 
 ### DV1 — core stdlib modules unimplemented
-- **§:** §18.3 · **spec-says:** ~15 `core.*` modules (collections,
-  string, math, iter, …) ship in v1 · **impl-does:** `stdlib/` empty
-  (0 modules; prelude ≈ 9 builtins + a few type-checker intrinsics)
+- **§:** §18.3 · **spec-says:** 11 v1 `core.*` modules ship in v1 ·
+  **impl-does:** **2/11 landed** — `core.error` (#103) + `core.compare`
+  (#104); 9 remain. Loading mechanism (embedded source-compiled) works.
 - **Classification:** spec-ahead-of-impl
-- **Disposition:** implement the 11 v1 core modules (→ queue `Q-stdlib`,
-  now SCOPED via `design-questions.md` DQ5 / `milestones.md` MS-stdlib).
-  §18.3 v1-status reconciled in #100 (v1/v1.x tiering). Remains open until
-  the modules land; Q-stdlib carries the R1/R2/R3 implementation plan.
-- **Status:** open (scope decided 2026-05-29; implementation pending)
+- **Disposition:** implement the remaining 9 (→ queue `Q-stdlib`, SCOPED via
+  DQ5). §18.3 v1-status reconciled in #100. Fan-out paused on `Q-bridge`/DQ6
+  (DV4). Remains open until all 11 land.
+- **Status:** open (2/11 landed; fan-out paused on Q-bridge/DQ6)
+
+### DV4 — stdlib trait impls can't cover primitive types
+- **§:** §18.3 (+§18.2) · **spec-says:** `core.compare`'s `Comparable`/
+  `Equatable` (and analogous traits across modules) apply to the language's
+  values, primitives included · **impl-does:** primitive receivers resolve
+  methods via the hardcoded intrinsic table in
+  `bock-types/src/checker.rs::resolve_method_return_type` and never consult
+  the user/stdlib trait-impl table, so `impl Comparable for Int` + a call site
+  → E4001 (#104). Stdlib traits cover only stdlib-defined types today.
+- **Classification:** gap (missing checker↔bock-core bridge)
+- **Disposition:** fix-impl → `queue.md` Q-bridge, gated on Design's DQ6
+  (carries a stdlib-impl-vs-intrinsic precedence/coherence question). A
+  near-universal prerequisite for a *useful* core stdlib.
+- **Status:** open
+
+### DV5 — §18.2 prelude vs §18.3 import for fundamental traits
+- **§:** §18.2 / §18.3 · **spec-says:** §18.2 lists `Comparable`/`Equatable`
+  as PRELUDE ("always available without import"); §18.3 lists them as
+  `core.compare` members · **impl-does:** matches the named-import model —
+  bare `Ordering`/`Less` without `use core.compare` → E1001; no prelude
+  injection. Internally inconsistent spec.
+- **Classification:** gap (spec internal inconsistency / undecided import model)
+- **Disposition:** decide via `design-questions.md` DQ9 (prelude vs import for
+  the fundamental traits), then reconcile §18.2/§18.3. Surfaced #104.
+- **Status:** open
 
 ---
 
