@@ -572,6 +572,129 @@ impl EmitCtx {
         Ok(true)
     }
 
+    /// Emit a built-in `Optional`/`Result` method call to its JS form.
+    ///
+    /// Recognised via the checker's `recv_kind` annotation
+    /// ([`crate::generator::desugared_optional_method`] /
+    /// [`crate::generator::desugared_result_method`]) so the overloaded names
+    /// (`unwrap`/`unwrap_or`/`map`) dispatch to the right tag test. Both types use
+    /// the inline tagged-object representation (`{ _tag: "Some"/"Ok", _0: v }` /
+    /// `{ _tag: "None"/"Err", _0: e }`), so the lowering is a ternary on `._tag`.
+    /// The receiver is wrapped in an IIFE (`((__o) => …)(recv)`) so it is
+    /// evaluated exactly once even when read several times (`map`, the default
+    /// branch). Returns `true` if the call was handled.
+    fn try_emit_container_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        if let Some((recv, method, rest)) =
+            crate::generator::desugared_optional_method(node, callee, args)
+        {
+            self.emit_tagged_container_method(recv, method, rest, "Some")?;
+            return Ok(true);
+        }
+        if let Some((recv, method, rest)) =
+            crate::generator::desugared_result_method(node, callee, args)
+        {
+            self.emit_tagged_container_method(recv, method, rest, "Ok")?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Lower a tagged-container method on `recv` to JS. `present_tag` is the
+    /// "payload-carrying" tag (`"Some"` for `Optional`, `"Ok"` for `Result`); the
+    /// predicate methods (`is_some`/`is_ok` vs `is_none`/`is_err`) and the
+    /// payload extraction (`unwrap`/`unwrap_or`/`map`) are expressed against it.
+    fn emit_tagged_container_method(
+        &mut self,
+        recv: &AIRNode,
+        method: &str,
+        rest: &[bock_air::AirArg],
+        present_tag: &str,
+    ) -> Result<(), CodegenError> {
+        // `is_some`/`is_ok` and `is_none`/`is_err` are pure tag tests; emit
+        // inline without an IIFE (the receiver is read once).
+        match method {
+            "is_some" | "is_ok" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, "._tag === \"{present_tag}\")");
+                return Ok(());
+            }
+            "is_none" | "is_err" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, "._tag !== \"{present_tag}\")");
+                return Ok(());
+            }
+            _ => {}
+        }
+        // The remaining methods read the receiver more than once, so bind it in
+        // an IIFE.
+        self.buf.push_str("((__c) => ");
+        match method {
+            "unwrap" => {
+                let _ = write!(
+                    self.buf,
+                    "__c._tag === \"{present_tag}\" ? __c._0 : undefined"
+                );
+            }
+            "unwrap_or" => {
+                let _ = write!(self.buf, "__c._tag === \"{present_tag}\" ? __c._0 : ");
+                if let Some(d) = rest.first() {
+                    self.emit_expr(&d.value)?;
+                } else {
+                    self.buf.push_str("undefined");
+                }
+            }
+            "map" => {
+                let _ = write!(
+                    self.buf,
+                    "__c._tag === \"{present_tag}\" ? {{ _tag: \"{present_tag}\", _0: ("
+                );
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf.push_str("(x) => x");
+                }
+                self.buf.push_str(")(__c._0) } : __c");
+            }
+            "flat_map" => {
+                let _ = write!(self.buf, "__c._tag === \"{present_tag}\" ? (");
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf.push_str("(x) => x");
+                }
+                self.buf.push_str(")(__c._0) : __c");
+            }
+            "map_err" => {
+                // Transform only the `Err` payload; an `Ok` passes through.
+                let _ = write!(
+                    self.buf,
+                    "__c._tag === \"{present_tag}\" ? __c : {{ _tag: \"Err\", _0: ("
+                );
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf.push_str("(x) => x");
+                }
+                self.buf.push_str(")(__c._0) }");
+            }
+            _ => {
+                // Unreachable: the recogniser only admits the methods above.
+                self.buf.push_str("undefined");
+            }
+        }
+        self.buf.push_str(")(");
+        self.emit_expr(recv)?;
+        self.buf.push(')');
+        Ok(())
+    }
+
     /// Emit a read-only `List` built-in method call to its JS form.
     ///
     /// Recognised via [`crate::generator::desugared_list_method`] in the `Call`
@@ -1576,6 +1699,9 @@ impl EmitCtx {
                 if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
+                if self.try_emit_container_method(node, callee, args)? {
+                    return Ok(());
+                }
                 // Rewrite bare effect operation calls: log(...) → handler.log(...)
                 if let NodeKind::Identifier { name } = &callee.kind {
                     if let Some(effect_name) = self.effect_ops.get(&name.name).cloned() {
@@ -1859,26 +1985,21 @@ impl EmitCtx {
                 Ok(())
             }
             NodeKind::ResultConstruct { variant, value } => {
-                match variant {
-                    ResultVariant::Ok => {
-                        self.buf.push_str("{ _tag: \"Ok\", value: ");
-                        if let Some(v) = value {
-                            self.emit_expr(v)?;
-                        } else {
-                            self.buf.push_str("undefined");
-                        }
-                        self.buf.push_str(" }");
-                    }
-                    ResultVariant::Err => {
-                        self.buf.push_str("{ _tag: \"Err\", error: ");
-                        if let Some(v) = value {
-                            self.emit_expr(v)?;
-                        } else {
-                            self.buf.push_str("undefined");
-                        }
-                        self.buf.push_str(" }");
-                    }
+                // Use the `_0` payload key — the same shape the surface
+                // `Ok(..)`/`Err(..)` construction (`try_emit_prelude_ctor`) emits
+                // and the `Result` match reads — so construction and match agree
+                // (the old `value`/`error` keys were never read by the match).
+                let tag = match variant {
+                    ResultVariant::Ok => "Ok",
+                    ResultVariant::Err => "Err",
+                };
+                let _ = write!(self.buf, "{{ _tag: \"{tag}\", _0: ");
+                if let Some(v) = value {
+                    self.emit_expr(v)?;
+                } else {
+                    self.buf.push_str("undefined");
                 }
+                self.buf.push_str(" }");
                 Ok(())
             }
             NodeKind::Assign { op, target, value } => {
@@ -3345,8 +3466,12 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("{ _tag: \"Ok\", value: 42 }"));
-        assert!(out.contains("{ _tag: \"Err\", error: \"failed\" }"));
+        // Reconciled on the `_0` payload key the `Result` match reads.
+        assert!(out.contains("{ _tag: \"Ok\", _0: 42 }"), "got: {out}");
+        assert!(
+            out.contains("{ _tag: \"Err\", _0: \"failed\" }"),
+            "got: {out}"
+        );
     }
 
     #[test]

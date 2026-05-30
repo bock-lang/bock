@@ -79,9 +79,11 @@ fn go_loop_needs_label(body: &AIRNode) -> bool {
             | NodeKind::FnDecl { .. }
             | NodeKind::Lambda { .. } => false,
             NodeKind::Match { arms, .. } => {
-                // Optional matches lower to if/else where bare break/continue
-                // already target the loop — no label needed for *this* match.
+                // Optional/Result matches lower to if/else where bare
+                // break/continue already target the loop — no label needed for
+                // *this* match.
                 let this_needs_label = !go_match_is_optional(arms)
+                    && !go_match_is_result(arms)
                     && crate::generator::match_has_statement_arm(arms)
                     && arms.iter().any(|a| {
                         matches!(&a.kind, NodeKind::MatchArm { body, .. } if arm_has_jump(body))
@@ -189,7 +191,18 @@ type __bockOption struct {
 func __bockSome(v interface{}) __bockOption { return __bockOption{tag: \"Some\", v: v} }
 
 var __bockNone = __bockOption{tag: \"None\"}
+";
 
+/// Shared numeric-widening helpers used by both the `Optional` and `Result`
+/// runtimes to recover an `int64`/`float64` payload from the `interface{}` box.
+///
+/// A payload constructed from an *untyped Go constant* — e.g. `Some(10)` /
+/// `Ok(10)` → `__bockSome(10)` / `__bockOk(10)` — boxes a Go `int` (the default
+/// type of an untyped integer constant), not an `int64`. A hard `.(int64)`
+/// assertion on that box panics (`interface {} is int, not int64`). These helpers
+/// widen the common numeric boxings instead. Emitted once if *either* container
+/// runtime is used (its own emit flag), so the two runtimes never redeclare them.
+const NUMERIC_RUNTIME_GO: &str = "// ── Bock numeric payload helpers ──
 func __bockAsInt64(v interface{}) int64 {
 	switch n := v.(type) {
 	case int64:
@@ -221,6 +234,23 @@ func __bockAsFloat64(v interface{}) float64 {
 }
 ";
 
+/// Runtime for Bock `Result[T, E]` in Go. Mirrors `OPTIONAL_RUNTIME_GO`: a
+/// tagged struct (`tag` is `"Ok"`/`"Err"`, `v` carries the payload), with
+/// `__bockOk`/`__bockErr` constructors. A `match r { Ok(v) => …; Err(e) => … }`
+/// dispatches on `.tag` and reads `.v` for the bound value — the same tag-switch
+/// the Optional match uses, not the user-enum type-switch (`case Ok:` against an
+/// undefined Go type) the broken codegen produced.
+const RESULT_RUNTIME_GO: &str = "// ── Bock Result runtime ──
+type __bockResult struct {
+	tag string
+	v   interface{}
+}
+
+func __bockOk(v interface{}) __bockResult { return __bockResult{tag: \"Ok\", v: v} }
+
+func __bockErr(v interface{}) __bockResult { return __bockResult{tag: \"Err\", v: v} }
+";
+
 /// True if the module references `Optional`, `Some`, or `None` anywhere (so the
 /// Optional runtime prelude must be emitted). A cheap structural scan over the
 /// debug rendering, mirroring `go_module_uses_concurrency`.
@@ -231,6 +261,18 @@ fn go_module_uses_optional(items: &[AIRNode]) -> bool {
             || s.contains("TypeOptional")
             || s.contains("\"Some\"")
             || s.contains("\"None\"")
+    })
+}
+
+/// True if the module references `Result`, `Ok`, or `Err` anywhere (so the
+/// `Result` runtime prelude must be emitted). Mirrors [`go_module_uses_optional`].
+fn go_module_uses_result(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"Result\"")
+            || s.contains("ResultConstruct")
+            || s.contains("\"Ok\"")
+            || s.contains("\"Err\"")
     })
 }
 
@@ -308,6 +350,25 @@ fn go_match_is_optional(arms: &[AIRNode]) -> bool {
                     .segments
                     .last()
                     .is_some_and(|seg| matches!(seg.name.as_str(), "Some" | "None"));
+            }
+        }
+        false
+    })
+}
+
+/// True if a `match`'s arms dispatch on the `Result` constructors `Ok`/`Err`
+/// (so the Go backend emits a tag-based switch over `__bockResult`, mirroring
+/// [`go_match_is_optional`]). Without this, an `Ok`/`Err` constructor pattern
+/// would route to the user-enum type-switch (`case Ok:` against an undefined Go
+/// type) — the defect this fixes.
+fn go_match_is_result(arms: &[AIRNode]) -> bool {
+    arms.iter().any(|arm| {
+        if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
+            if let NodeKind::ConstructorPat { path, .. } = &pattern.kind {
+                return path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| matches!(seg.name.as_str(), "Ok" | "Err"));
             }
         }
         false
@@ -562,6 +623,18 @@ struct GoEmitCtx {
     /// type, the same way [`Self::var_optional_elem`] handles direct
     /// `Optional[T]` bindings. Scoped per function body and restored on exit.
     var_list_elem: HashMap<String, String>,
+    /// Maps an in-scope variable name → `(ok_go_type, err_go_type)` of its
+    /// `Result[T, E]` (e.g. an `r: Result[Int, String]` param maps to
+    /// `("int64", "string")`). The Result analogue of [`Self::var_optional_elem`]:
+    /// a `match r { Ok(v) => ...; Err(e) => ... }` type-asserts the `interface{}`
+    /// payload to the concrete Ok/Err type rather than leaving it `interface{}`.
+    /// Scoped per function body and restored on exit.
+    var_result_elem: HashMap<String, (String, String)>,
+    /// Maps a free-function name → `(ok_go_type, err_go_type)` of its
+    /// `Result[T, E]` return, so a `match parse(s) { Ok(n) => ... }` on a call
+    /// scrutinee type-asserts the bound payload. The Result analogue of
+    /// [`Self::fn_optional_ret_elem`]; functions not returning a Result are absent.
+    fn_result_ret_elem: HashMap<String, (String, String)>,
     /// Set once the concurrency runtime prelude has been emitted into `buf`, so
     /// a single-file **bundle** of several modules (cross-module `use`, DV13)
     /// emits it at most once (a duplicate `type __bockChannel` would not
@@ -570,6 +643,13 @@ struct GoEmitCtx {
     /// Set once the Optional runtime prelude has been emitted into `buf`;
     /// deduped across a bundle exactly as [`Self::concurrency_runtime_emitted`].
     optional_runtime_emitted: bool,
+    /// Set once the `Result` runtime prelude has been emitted; deduped across a
+    /// bundle exactly as [`Self::optional_runtime_emitted`].
+    result_runtime_emitted: bool,
+    /// Set once the shared numeric-payload helpers ([`NUMERIC_RUNTIME_GO`]) have
+    /// been emitted. Emitted once if *either* the Optional or `Result` runtime is
+    /// used, so the two never redeclare `__bockAsInt64`/`__bockAsFloat64`.
+    numeric_runtime_emitted: bool,
     /// Set once the [`ORDERING_RUNTIME_GO`] prelude has been emitted; deduped
     /// across a bundle exactly as [`Self::optional_runtime_emitted`].
     ordering_runtime_emitted: bool,
@@ -629,8 +709,12 @@ impl GoEmitCtx {
             var_optional_elem: HashMap::new(),
             method_optional_ret_elem: HashMap::new(),
             var_list_elem: HashMap::new(),
+            var_result_elem: HashMap::new(),
+            fn_result_ret_elem: HashMap::new(),
             concurrency_runtime_emitted: false,
             optional_runtime_emitted: false,
+            result_runtime_emitted: false,
+            numeric_runtime_emitted: false,
             ordering_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
@@ -799,6 +883,12 @@ impl GoEmitCtx {
                     if let Some(elem) = self.optional_elem_go_type(rt) {
                         self.fn_optional_ret_elem.insert(name.name.clone(), elem);
                     }
+                    // Same pre-scan for `Result[T, E]` returns, so a `match
+                    // parse(s) { Ok(n) => ... }` on a call scrutinee asserts the
+                    // bound payload's Ok/Err type (mirrors the Optional path).
+                    if let Some(elems) = self.result_elem_go_types(rt) {
+                        self.fn_result_ret_elem.insert(name.name.clone(), elems);
+                    }
                 }
             }
         }
@@ -879,6 +969,26 @@ impl GoEmitCtx {
             }
             _ => None,
         }
+    }
+
+    /// If `node` is a `Result[T, E]` type expression, return the Go types of its
+    /// `Ok` and `Err` payloads `(T, E)`; otherwise `None`. The Result analogue of
+    /// [`Self::optional_elem_go_type`]: used to type-assert the `interface{}`
+    /// payload of the Go Result runtime back to its concrete Ok/Err type at a
+    /// `match` arm. A missing arg defaults to `interface{}`.
+    fn result_elem_go_types(&self, node: &AIRNode) -> Option<(String, String)> {
+        if let NodeKind::TypeNamed { path, args } = &node.kind {
+            if path.segments.last().is_some_and(|s| s.name == "Result") {
+                let ok = args
+                    .first()
+                    .map_or_else(|| "interface{}".to_string(), |a| self.type_to_go(a));
+                let err = args
+                    .get(1)
+                    .map_or_else(|| "interface{}".to_string(), |a| self.type_to_go(a));
+                return Some((ok, err));
+            }
+        }
+        None
     }
 
     /// If `node` is a `List[T]` type expression, return the Go type of its
@@ -1016,14 +1126,21 @@ impl GoEmitCtx {
     /// function/lambda's parameters into the variable scopes, so a `match param
     /// { Some(x) => ... }` (direct Optional) or `match param.get(i) { Some(x) =>
     /// ... }` (List built-in) inside the body can type-assert the payload.
-    /// Returns the previous `(var_optional_elem, var_list_elem)` scopes so the
-    /// caller can restore them on exit (Go has no block-scoped reset here).
+    /// Returns the previous `(var_optional_elem, var_list_elem, var_result_elem)`
+    /// scopes so the caller can restore them on exit (Go has no block-scoped reset
+    /// here).
+    #[allow(clippy::type_complexity)]
     fn enter_param_optional_scope(
         &mut self,
         params: &[AIRNode],
-    ) -> (HashMap<String, String>, HashMap<String, String>) {
+    ) -> (
+        HashMap<String, String>,
+        HashMap<String, String>,
+        HashMap<String, (String, String)>,
+    ) {
         let saved_opt = self.var_optional_elem.clone();
         let saved_list = self.var_list_elem.clone();
+        let saved_result = self.var_result_elem.clone();
         for p in params {
             if let NodeKind::Param {
                 pattern,
@@ -1036,11 +1153,14 @@ impl GoEmitCtx {
                     self.var_optional_elem.insert(name.clone(), elem);
                 }
                 if let Some(elem) = self.list_elem_go_type(t) {
-                    self.var_list_elem.insert(name, elem);
+                    self.var_list_elem.insert(name.clone(), elem);
+                }
+                if let Some(elems) = self.result_elem_go_types(t) {
+                    self.var_result_elem.insert(name, elems);
                 }
             }
         }
-        (saved_opt, saved_list)
+        (saved_opt, saved_list, saved_result)
     }
 
     /// Record each typed param's Go type into [`Self::var_go_type`] so the
@@ -1118,6 +1238,32 @@ impl GoEmitCtx {
                     _ => None,
                 }
             }
+            _ => None,
+        }
+    }
+
+    /// Resolve the `(ok_go_type, err_go_type)` to assert for the payload of an
+    /// `Ok`/`Err` bound in a `match` on `scrutinee`. The Result analogue of
+    /// [`Self::scrutinee_optional_elem`]: an identifier (parameter or typed
+    /// `let`) or a call to a function with a known `Result[T, E]` return.
+    /// Returns `None` when the types cannot be determined structurally, in which
+    /// case the payload falls back to the runtime `interface{}` (never wrong,
+    /// only un-asserted).
+    fn scrutinee_result_elems(&self, scrutinee: &AIRNode) -> Option<(String, String)> {
+        match &scrutinee.kind {
+            NodeKind::Identifier { name } => self
+                .var_result_elem
+                .get(&to_camel_case(&name.name))
+                .cloned(),
+            NodeKind::Call { callee, args, .. } => match &callee.kind {
+                NodeKind::Identifier { name } => self.fn_result_ret_elem.get(&name.name).cloned(),
+                NodeKind::FieldAccess { .. }
+                    if crate::generator::desugared_self_call(callee, args).is_some() =>
+                {
+                    None
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1250,9 +1396,221 @@ impl GoEmitCtx {
                 format!("__bockSome({a})")
             }
             "None" => "__bockNone".to_string(),
+            // Result constructors → tagged runtime struct (see
+            // `RESULT_RUNTIME_GO`), mirroring `Some`/`None`.
+            "Ok" => {
+                let a = arg_strs
+                    .first()
+                    .map_or_else(|| "nil".to_string(), |s| s.clone());
+                format!("__bockOk({a})")
+            }
+            "Err" => {
+                let a = arg_strs
+                    .first()
+                    .map_or_else(|| "nil".to_string(), |s| s.clone());
+                format!("__bockErr({a})")
+            }
             _ => return Ok(None),
         };
         Ok(Some(code))
+    }
+
+    /// Emit a built-in `Optional`/`Result` method call to its Go form.
+    ///
+    /// Recognised via the checker's `recv_kind` annotation
+    /// ([`crate::generator::desugared_optional_method`] /
+    /// [`crate::generator::desugared_result_method`]). The tagged runtime structs
+    /// (`__bockOption`/`__bockResult`) carry the payload as `interface{}` in `.v`
+    /// and the tag in `.tag`, so a method lowers to a Go closure IIFE that tests
+    /// `.tag` and recovers the payload. The payload Go type (for `unwrap`/
+    /// `unwrap_or`) is resolved from the receiver's declared `Optional[T]` /
+    /// `Result[T, E]` type; when unknown it stays `interface{}` (works for `%v`
+    /// interpolation, the conservative fallback the Optional match also uses).
+    /// Returns `true` if handled.
+    fn try_emit_container_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        if let Some((recv, method, rest)) =
+            crate::generator::desugared_optional_method(node, callee, args)
+        {
+            let elem = self.scrutinee_optional_elem(recv);
+            self.emit_tagged_container_method(
+                recv,
+                method,
+                rest,
+                "Some",
+                "__bockSome",
+                "__bockNone",
+                elem.as_deref(),
+            )?;
+            return Ok(true);
+        }
+        if let Some((recv, method, rest)) =
+            crate::generator::desugared_result_method(node, callee, args)
+        {
+            let elems = self.scrutinee_result_elems(recv);
+            let ok = elems.as_ref().map(|(o, _)| o.as_str());
+            self.emit_tagged_container_method(
+                recv,
+                method,
+                rest,
+                "Ok",
+                "__bockOk",
+                "__bockErr",
+                ok,
+            )?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Lower a tagged-container method on `recv` to a Go closure IIFE.
+    /// `present_tag` is the payload-carrying tag (`"Some"`/`"Ok"`);
+    /// `present_ctor`/`other_ctor` are the runtime constructors; `payload_ty` is
+    /// the Go type the payload is asserted to (`None` → bare `interface{}`).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_tagged_container_method(
+        &mut self,
+        recv: &AIRNode,
+        method: &str,
+        rest: &[bock_air::AirArg],
+        present_tag: &str,
+        present_ctor: &str,
+        other_ctor: &str,
+        payload_ty: Option<&str>,
+    ) -> Result<(), CodegenError> {
+        // The closure binds the receiver once as `__c` (a tagged struct).
+        // Tag tests: `is_some`/`is_ok` and `is_none`/`is_err`.
+        match method {
+            "is_some" | "is_ok" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, ".tag == \"{present_tag}\")");
+                return Ok(());
+            }
+            "is_none" | "is_err" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, ".tag != \"{present_tag}\")");
+                return Ok(());
+            }
+            _ => {}
+        }
+        // Recover the payload as its concrete type (numeric boxings widened via
+        // the shared helpers; otherwise a type assertion; else bare `.v`).
+        let payload_expr = |ty: Option<&str>| -> String {
+            match ty {
+                Some("int64") => "__bockAsInt64(__c.v)".to_string(),
+                Some("float64") => "__bockAsFloat64(__c.v)".to_string(),
+                Some(t) => format!("__c.v.({t})"),
+                None => "__c.v".to_string(),
+            }
+        };
+        match method {
+            "unwrap" | "unwrap_or" => {
+                let ret_ty = payload_ty.unwrap_or("interface{}");
+                let payload = payload_expr(payload_ty);
+                let _ = write!(
+                    self.buf,
+                    "func(__c {recv_ty}) {ret_ty} {{ if __c.tag == \"{present_tag}\" {{ return {payload} }}; return ",
+                    recv_ty = self.container_runtime_ty(present_ctor),
+                );
+                if method == "unwrap_or" {
+                    if let Some(d) = rest.first() {
+                        self.emit_expr(&d.value)?;
+                    } else {
+                        // No default supplied — fall back to the zero value.
+                        self.zero_value_for(ret_ty);
+                    }
+                } else {
+                    // `unwrap` on the empty case panics (no default supplied).
+                    self.zero_value_for(ret_ty);
+                }
+                self.buf.push_str(" }(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "map" => {
+                // Apply the callback to the payload and rewrap as the present
+                // variant; the empty/other variant passes through unchanged.
+                let recv_ty = self.container_runtime_ty(present_ctor);
+                let payload = payload_expr(payload_ty);
+                let _ = write!(
+                    self.buf,
+                    "func(__c {recv_ty}) {recv_ty} {{ if __c.tag == \"{present_tag}\" {{ return {present_ctor}("
+                );
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf
+                        .push_str("func(x interface{}) interface{} { return x }");
+                }
+                let _ = write!(self.buf, "({payload})) }}; return __c }}(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "flat_map" => {
+                let recv_ty = self.container_runtime_ty(present_ctor);
+                let payload = payload_expr(payload_ty);
+                let _ = write!(
+                    self.buf,
+                    "func(__c {recv_ty}) {recv_ty} {{ if __c.tag == \"{present_tag}\" {{ return "
+                );
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf
+                        .push_str("func(x interface{}) interface{} { return x }");
+                }
+                let _ = write!(self.buf, "({payload}).({recv_ty}) }}; return __c }}(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "map_err" => {
+                let recv_ty = self.container_runtime_ty(present_ctor);
+                let _ = write!(
+                    self.buf,
+                    "func(__c {recv_ty}) {recv_ty} {{ if __c.tag != \"{present_tag}\" {{ return {other_ctor}("
+                );
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf
+                        .push_str("func(x interface{}) interface{} { return x }");
+                }
+                self.buf.push_str("(__c.v)) }; return __c }(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            _ => {
+                self.buf.push_str("nil");
+            }
+        }
+        Ok(())
+    }
+
+    /// The Go runtime struct type for a container, keyed by its present-variant
+    /// constructor (`__bockSome` → `__bockOption`, `__bockOk` → `__bockResult`).
+    fn container_runtime_ty(&self, present_ctor: &str) -> &'static str {
+        if present_ctor == "__bockOk" {
+            "__bockResult"
+        } else {
+            "__bockOption"
+        }
+    }
+
+    /// Emit a Go zero value for `ty` (used as the `unwrap`-on-empty fallback).
+    fn zero_value_for(&mut self, ty: &str) {
+        let zero = match ty {
+            "int64" | "float64" | "int" | "float32" | "int32" => "0",
+            "string" => "\"\"",
+            "bool" => "false",
+            _ => "nil",
+        };
+        self.buf.push_str(zero);
     }
 
     /// Emit a read-only `List` built-in method call to its Go form.
@@ -1568,10 +1926,25 @@ impl GoEmitCtx {
                     self.buf.push('\n');
                     self.concurrency_runtime_emitted = true;
                 }
-                if !self.optional_runtime_emitted && go_module_uses_optional(items) {
+                let uses_optional = go_module_uses_optional(items);
+                let uses_result = go_module_uses_result(items);
+                if !self.optional_runtime_emitted && uses_optional {
                     self.buf.push_str(OPTIONAL_RUNTIME_GO);
                     self.buf.push('\n');
                     self.optional_runtime_emitted = true;
+                }
+                if !self.result_runtime_emitted && uses_result {
+                    self.buf.push_str(RESULT_RUNTIME_GO);
+                    self.buf.push('\n');
+                    self.result_runtime_emitted = true;
+                }
+                // Shared numeric-payload helpers: emit once if either container
+                // runtime is present (both use them; emitting from each would
+                // redeclare them).
+                if !self.numeric_runtime_emitted && (uses_optional || uses_result) {
+                    self.buf.push_str(NUMERIC_RUNTIME_GO);
+                    self.buf.push('\n');
+                    self.numeric_runtime_emitted = true;
                 }
                 if !self.ordering_runtime_emitted && go_module_uses_ordering(items) {
                     self.buf.push_str(ORDERING_RUNTIME_GO);
@@ -2029,7 +2402,8 @@ impl GoEmitCtx {
             self.current_handler_vars
                 .insert(ename.clone(), to_camel_case(ename));
         }
-        let (saved_opt_scope, saved_list_scope) = self.enter_param_optional_scope(params);
+        let (saved_opt_scope, saved_list_scope, saved_result_scope) =
+            self.enter_param_optional_scope(params);
         if name == "main" || is_void {
             self.emit_block_body(body)?;
         } else {
@@ -2037,6 +2411,7 @@ impl GoEmitCtx {
         }
         self.var_optional_elem = saved_opt_scope;
         self.var_list_elem = saved_list_scope;
+        self.var_result_elem = saved_result_scope;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         self.writeln("}");
@@ -2194,7 +2569,8 @@ impl GoEmitCtx {
                 self.current_handler_vars
                     .insert(ename.clone(), to_camel_case(ename));
             }
-            let (saved_opt_scope, saved_list_scope) = self.enter_param_optional_scope(rest);
+            let (saved_opt_scope, saved_list_scope, saved_result_scope) =
+                self.enter_param_optional_scope(rest);
             if return_type.is_some() && !is_void {
                 self.emit_block_body_return(body)?;
             } else {
@@ -2202,6 +2578,7 @@ impl GoEmitCtx {
             }
             self.var_optional_elem = saved_opt_scope;
             self.var_list_elem = saved_list_scope;
+            self.var_result_elem = saved_result_scope;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
             self.writeln("}");
@@ -2352,6 +2729,13 @@ impl GoEmitCtx {
                     if let Some(elem) = self.list_elem_go_type(t) {
                         self.var_list_elem
                             .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
+                    }
+                    // Record a `Result[T, E]` binding's Ok/Err types so a later
+                    // `match binding { Ok(v) => ...; Err(e) => ... }` can
+                    // type-assert the bound payload.
+                    if let Some(elems) = self.result_elem_go_types(t) {
+                        self.var_result_elem
+                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elems);
                     }
                     let type_str = self.type_to_go(t);
                     let ind = self.indent_str();
@@ -2774,6 +3158,9 @@ impl GoEmitCtx {
                 if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
+                if self.try_emit_container_method(node, callee, args)? {
+                    return Ok(());
+                }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
                 // [recv, ...rest])`: emit `recv.M(rest)` using Go method casing
                 // so the receiver flows through the native `self` receiver
@@ -3058,25 +3445,23 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::ResultConstruct { variant, value } => {
-                match variant {
-                    ResultVariant::Ok => {
-                        if let Some(v) = value {
-                            self.emit_expr(v)?;
-                            self.buf.push_str(", nil");
-                        } else {
-                            self.buf.push_str("nil, nil");
-                        }
-                    }
-                    ResultVariant::Err => {
-                        self.needs_fmt_import = true;
-                        if let Some(v) = value {
-                            self.buf.push_str("nil, ");
-                            self.emit_expr(v)?;
-                        } else {
-                            self.buf.push_str("nil, fmt.Errorf(\"error\")");
-                        }
-                    }
+                // Construct the tagged Result-runtime struct (`__bockOk`/
+                // `__bockErr`) — the same shape the surface `Ok(..)`/`Err(..)`
+                // construction emits and the `Result` match reads on `.tag`. The
+                // old Go-idiomatic `v, nil` / `nil, err` multi-return shape
+                // disagreed with the tag-dispatched match, so reconcile on the
+                // tagged struct.
+                let ctor = match variant {
+                    ResultVariant::Ok => "__bockOk",
+                    ResultVariant::Err => "__bockErr",
+                };
+                let _ = write!(self.buf, "{ctor}(");
+                if let Some(v) = value {
+                    self.emit_expr(v)?;
+                } else {
+                    self.buf.push_str("nil");
                 }
+                self.buf.push(')');
                 Ok(())
             }
             NodeKind::Assign { op, target, value } => {
@@ -3131,9 +3516,12 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => {
-                // `Optional` matches dispatch on the runtime tag.
+                // `Optional` / `Result` matches dispatch on the runtime tag.
                 if go_match_is_optional(arms) {
                     return self.emit_optional_match_expr(scrutinee, arms);
+                }
+                if go_match_is_result(arms) {
+                    return self.emit_result_match_expr(scrutinee, arms);
                 }
                 // Match in expression position: emit as IIFE with switch.
                 self.buf.push_str("func() interface{} { switch ");
@@ -3382,11 +3770,145 @@ impl GoEmitCtx {
         Ok(())
     }
 
+    /// Emit a `Result` `match` in expression position as an IIFE that dispatches
+    /// on the runtime tag (`__bockResult.tag`). Mirrors
+    /// [`Self::emit_optional_match_expr`].
+    fn emit_result_match_expr(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<(), CodegenError> {
+        let elems = self.scrutinee_result_elems(scrutinee);
+        self.buf.push_str("func() interface{} { __res := ");
+        self.emit_expr(scrutinee)?;
+        self.buf.push_str("; ");
+        self.emit_result_match_arms(arms, /*as_expr=*/ true, elems.as_ref())?;
+        self.buf.push_str(" }()");
+        Ok(())
+    }
+
+    /// Emit a `Result` `match` in statement position as an if/else chain on the
+    /// runtime tag. Mirrors [`Self::emit_optional_match_stmt`].
+    fn emit_result_match_stmt(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<(), CodegenError> {
+        let elems = self.scrutinee_result_elems(scrutinee);
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}__res := ");
+        self.emit_expr(scrutinee)?;
+        self.buf.push('\n');
+        self.write_indent();
+        self.emit_result_match_arms(arms, /*as_expr=*/ false, elems.as_ref())?;
+        self.buf.push('\n');
+        Ok(())
+    }
+
+    /// Shared body for the `Result` match emitters: an if/else chain on the
+    /// result tag. `Ok(v)` binds `v` from `__res.v` asserted to the Ok type;
+    /// `Err(e)` binds `e` asserted to the Err type. Mirrors
+    /// [`Self::emit_optional_match_arms`].
+    fn emit_result_match_arms(
+        &mut self,
+        arms: &[AIRNode],
+        as_expr: bool,
+        elems: Option<&(String, String)>,
+    ) -> Result<(), CodegenError> {
+        let mut first = true;
+        let arm_count = arms.len();
+        for (idx, arm) in arms.iter().enumerate() {
+            let NodeKind::MatchArm { pattern, body, .. } = &arm.kind else {
+                continue;
+            };
+            let is_last = idx + 1 == arm_count;
+            // `(cond, bind, variant)`: the final arm is a plain `else` (Bock
+            // matches are exhaustive), but its payload bind is still extracted.
+            let (cond, bind, variant): (String, Option<String>, Option<&str>) = match &pattern.kind
+            {
+                NodeKind::ConstructorPat { path, fields } => {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    let bind = fields.first().map(|f| self.pattern_to_binding_name(f));
+                    if is_last {
+                        (String::new(), bind, Some(variant))
+                    } else {
+                        (format!("__res.tag == \"{variant}\""), bind, Some(variant))
+                    }
+                }
+                _ => (String::new(), None, None),
+            };
+            if first {
+                first = false;
+                if cond.is_empty() {
+                    self.buf.push('{');
+                } else {
+                    let _ = write!(self.buf, "if {cond} {{");
+                }
+            } else if cond.is_empty() {
+                self.buf.push_str(" else {");
+            } else {
+                let _ = write!(self.buf, " else if {cond} {{");
+            }
+            self.buf.push(' ');
+            if let Some(name) = &bind {
+                if name != "_" {
+                    // Assert the `interface{}` payload to the concrete Ok/Err
+                    // type. Numeric payloads from untyped Go constants are widened
+                    // via the shared helpers (a hard `.(int64)` would panic, see
+                    // `NUMERIC_RUNTIME_GO`). When the type is unknown, bind the
+                    // bare `interface{}` payload (never wrong, only un-asserted).
+                    let payload_ty = match (variant, elems) {
+                        (Some("Ok"), Some((ok, _))) => Some(ok.as_str()),
+                        (Some("Err"), Some((_, err))) => Some(err.as_str()),
+                        _ => None,
+                    };
+                    match payload_ty {
+                        Some("int64") => {
+                            let _ =
+                                write!(self.buf, "{name} := __bockAsInt64(__res.v); _ = {name}; ");
+                        }
+                        Some("float64") => {
+                            let _ = write!(
+                                self.buf,
+                                "{name} := __bockAsFloat64(__res.v); _ = {name}; "
+                            );
+                        }
+                        Some(ty) => {
+                            let _ = write!(self.buf, "{name} := __res.v.({ty}); _ = {name}; ");
+                        }
+                        None => {
+                            let _ = write!(self.buf, "{name} := __res.v; _ = {name}; ");
+                        }
+                    }
+                }
+            }
+            if as_expr {
+                self.buf.push_str("return ");
+                self.emit_block_as_expr(body)?;
+                self.buf.push(' ');
+            } else {
+                self.buf.push('\n');
+                self.indent += 1;
+                self.emit_block_body(body)?;
+                self.indent -= 1;
+                self.write_indent();
+            }
+            self.buf.push('}');
+        }
+        if as_expr {
+            self.buf.push_str("; return nil");
+        }
+        Ok(())
+    }
+
     fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
-        // `Optional` matches dispatch on the runtime tag, not a Go type/value
-        // switch.
+        // `Optional` / `Result` matches dispatch on the runtime tag, not a Go
+        // type/value switch.
         if go_match_is_optional(arms) {
             return self.emit_optional_match_stmt(scrutinee, arms);
+        }
+        if go_match_is_result(arms) {
+            return self.emit_result_match_stmt(scrutinee, arms);
         }
         // A user enum lowers to a type-switch over the sealed-interface concrete
         // variant structs, binding each arm's payload fields from `__v`.
@@ -3695,6 +4217,10 @@ impl GoEmitCtx {
             "Never" => "interface{}".into(),
             "Channel" => "*__bockChannel".into(),
             "Optional" => "__bockOption".into(),
+            // `Result[T, E]` lowers to the tagged Result-runtime struct (the
+            // `[T, E]` args are dropped — `is_mapped_runtime` in the callers
+            // suppresses the generic suffix), mirroring `Optional`.
+            "Result" => "__bockResult".into(),
             other => other.into(),
         }
     }
@@ -4756,6 +5282,9 @@ mod tests {
 
     #[test]
     fn result_construct_ok() {
+        // `ResultConstruct` now lowers to the tagged Result-runtime constructor
+        // `__bockOk(..)` — the same shape the surface `Ok(..)` construction emits
+        // and the `Result` match reads — reconciling construction with match.
         let rc = node(
             1,
             NodeKind::ResultConstruct {
@@ -4764,7 +5293,7 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![rc]));
-        assert!(out.contains("42, nil"), "got: {out}");
+        assert!(out.contains("__bockOk(42)"), "got: {out}");
     }
 
     #[test]
@@ -4777,7 +5306,7 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![rc]));
-        assert!(out.contains("nil, \"failed\""), "got: {out}");
+        assert!(out.contains("__bockErr(\"failed\")"), "got: {out}");
     }
 
     #[test]
@@ -5049,6 +5578,48 @@ mod tests {
         );
         let out2 = gen(&module(vec![], vec![f2]));
         assert!(!out2.contains("__bockOption"), "got: {out2}");
+    }
+
+    #[test]
+    fn result_runtime_gated_and_constructed() {
+        // A module that constructs `Ok`/`Err` pulls in the Result runtime + the
+        // shared numeric helpers, and lowers the constructors to `__bockOk`/
+        // `__bockErr` (not the old `v, nil` multi-return).
+        let ok_call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "Ok")),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(12, "7"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(2, vec![ok_call], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("type __bockResult struct"), "got: {out}");
+        assert!(out.contains("__bockOk("), "got: {out}");
+        // The shared numeric helpers are emitted exactly once.
+        assert_eq!(
+            out.matches("func __bockAsInt64").count(),
+            1,
+            "numeric helpers must be emitted once; got: {out}"
+        );
     }
 
     /// The Go Optional runtime stores the `Some` payload as `interface{}`. A

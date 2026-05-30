@@ -1,0 +1,43 @@
+// TEST: exec_optional_methods
+// EXPECT: output "some:10:20;none:0:-1"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Built-in `Optional[T]` method dispatch (codegen-completeness P1-c):
+// `unwrap_or`, `is_some`, and `map` on a tagged Optional value. These method
+// names overlap with `Result` and `List`, so each backend reads the checker's
+// `recv_kind = "Optional"` annotation to pick the right lowering (the
+// disambiguation crux #137 resolved).
+//
+// Before this work the methods failed on 4/5 targets: JS double-passed the
+// receiver (`o.unwrap_or(o, 0)`), TS had no such method on the union, Python
+// crashed, Go hit the `map` keyword. Each is now lowered to the idiomatic form
+// on the tagged representation (a `_tag` ternary in JS/TS, an `isinstance`
+// lambda in Python, a `.tag` closure in Go, native `Option` methods in Rust).
+//
+// `map` is exercised through a named function (`dbl`) and its result is itself
+// `unwrap_or`-ed (chained container methods), and `unwrap_or` runs before the
+// `is_some` test — the ordering that exposed Rust's borrow-of-moved-value
+// (fixed by cloning the receiver for the by-value methods).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn dbl(n: Int) -> Int {
+  return n * 2
+}
+
+fn run(o: Int?) -> String {
+  let s: Int = o.unwrap_or(0)
+  let present: Bool = o.is_some()
+  let m: Int? = o.map(dbl)
+  let mv: Int = m.unwrap_or(-1)
+  if (present) {
+    return "some:${s}:${mv}"
+  }
+  return "none:${s}:${mv}"
+}
+
+fn main() -> Void {
+  println("${run(Some(10))};${run(None)}")
+}
