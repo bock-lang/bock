@@ -25,8 +25,51 @@ pub struct ToolchainSpec {
     pub compile_command: String,
     /// Arguments for the compile command (source path appended).
     pub compile_args: Vec<String>,
+    /// The plan for executing a built program and capturing its stdout.
+    ///
+    /// Distinct from [`ToolchainSpec::compile_command`]/[`ToolchainSpec::compile_args`],
+    /// which only *validate* generated source (e.g. `node --check`, `tsc --noEmit`).
+    /// Execution may require multiple ordered steps (e.g. Rust compiles then runs
+    /// the produced binary); see [`RunPlan`].
+    pub run_plan: RunPlan,
     /// Human-readable install instructions shown when toolchain is missing.
     pub install_hint: String,
+}
+
+/// A single command in a target's execution plan.
+///
+/// Steps run in order from the program's working directory. The entrypoint
+/// file is always named `main.<ext>` (matching `bock build`'s emitted entry
+/// module), so steps reference it by literal name rather than an interpolated
+/// path. The *last* step's captured stdout is the program's output.
+#[derive(Debug, Clone)]
+pub struct RunStep {
+    /// The program to invoke (looked up on PATH, e.g. `node`, `python3`).
+    pub command: String,
+    /// Literal arguments passed to `command`, in order.
+    pub args: Vec<String>,
+}
+
+impl RunStep {
+    /// Construct a step from a command name and string arguments.
+    pub fn new(command: impl Into<String>, args: &[&str]) -> Self {
+        Self {
+            command: command.into(),
+            args: args.iter().map(|a| (*a).to_string()).collect(),
+        }
+    }
+}
+
+/// The ordered sequence of commands that compiles (if needed) and runs a
+/// generated program, capturing the final step's stdout.
+///
+/// Single-step targets (interpreted languages) have one entry; compiled targets
+/// such as Rust have a compile step followed by a run step. Every step must
+/// exit zero or [`ToolchainRegistry::run`] reports the failing step.
+#[derive(Debug, Clone)]
+pub struct RunPlan {
+    /// The steps to execute, in order. Must be non-empty.
+    pub steps: Vec<RunStep>,
 }
 
 /// Result of successfully detecting a toolchain.
@@ -53,6 +96,26 @@ pub struct CompilationResult {
     pub stderr: String,
     /// Whether the compilation succeeded.
     pub success: bool,
+}
+
+/// Result of executing a generated program and capturing its output.
+///
+/// Returned by [`ToolchainRegistry::run`]. Unlike [`CompilationResult`], a
+/// non-zero `exit` is *not* an error at this layer — callers (e.g. the
+/// conformance execution harness) decide whether a given exit code or stdout
+/// constitutes a test failure.
+#[derive(Debug, Clone)]
+pub struct RunOutput {
+    /// Target profile ID the program was run under (e.g. "js", "rust").
+    pub target_id: String,
+    /// The full command pipeline that was executed, joined with `&&` for display.
+    pub command: String,
+    /// Captured standard output of the final step.
+    pub stdout: String,
+    /// Captured standard error of the final step.
+    pub stderr: String,
+    /// Process exit code of the final step, if the process exited normally.
+    pub exit: Option<i32>,
 }
 
 /// Errors that can occur during toolchain operations.
@@ -248,6 +311,37 @@ impl ToolchainRegistry {
         // Invoke the compile command
         invoke_compile(spec, source_path)
     }
+
+    /// Compile (if the target requires it) and execute a generated program,
+    /// capturing the final step's stdout/stderr/exit.
+    ///
+    /// `workdir` must contain the emitted entrypoint named `main.<ext>` (as
+    /// produced by `bock build` into `build/<target>/`). Each step in the
+    /// target's [`RunPlan`] runs with `workdir` as its current directory.
+    ///
+    /// # Errors
+    ///
+    /// * [`ToolchainError::NotFound`] if the toolchain binary is absent.
+    /// * [`ToolchainError::InvocationFailed`] if a non-final (compile) step
+    ///   exits non-zero — the generated program never produced output. A
+    ///   non-zero exit of the *final* step is **not** an error here; it is
+    ///   surfaced via [`RunOutput::exit`] for the caller to judge.
+    /// * [`ToolchainError::Io`] for other spawn failures.
+    pub fn run(&self, target_id: &str, workdir: &Path) -> Result<RunOutput, ToolchainError> {
+        let spec = self
+            .specs
+            .get(target_id)
+            .ok_or_else(|| ToolchainError::NotFound {
+                target_id: target_id.to_string(),
+                binary_name: target_id.to_string(),
+                install_hint: format!("No toolchain registered for target '{target_id}'"),
+            })?;
+
+        // Ensure the primary toolchain is installed before attempting to run.
+        detect_toolchain(spec)?;
+
+        run_program(spec, workdir)
+    }
 }
 
 impl Default for ToolchainRegistry {
@@ -285,6 +379,10 @@ fn builtin_javascript_spec() -> ToolchainSpec {
         version_args: vec!["--version".to_string()],
         compile_command: "node".to_string(),
         compile_args: vec!["--check".to_string()],
+        // Run the emitted ESM/CJS entry directly with Node.
+        run_plan: RunPlan {
+            steps: vec![RunStep::new("node", &["main.js"])],
+        },
         install_hint: "Install Node.js from https://nodejs.org/ or via your package manager \
                         (e.g., `brew install node`, `apt install nodejs`)"
             .to_string(),
@@ -299,6 +397,13 @@ fn builtin_typescript_spec() -> ToolchainSpec {
         version_args: vec!["--version".to_string()],
         compile_command: "tsc".to_string(),
         compile_args: vec!["--noEmit".to_string()],
+        // Emit `main.js` next to `main.ts`, then run it with Node.
+        run_plan: RunPlan {
+            steps: vec![
+                RunStep::new("tsc", &["main.ts"]),
+                RunStep::new("node", &["main.js"]),
+            ],
+        },
         install_hint: "Install TypeScript via npm: `npm install -g typescript`".to_string(),
     }
 }
@@ -311,6 +416,10 @@ fn builtin_python_spec() -> ToolchainSpec {
         version_args: vec!["--version".to_string()],
         compile_command: "python3".to_string(),
         compile_args: vec!["-m".to_string(), "py_compile".to_string()],
+        // Run the emitted module directly with the Python 3 interpreter.
+        run_plan: RunPlan {
+            steps: vec![RunStep::new("python3", &["main.py"])],
+        },
         install_hint: "Install Python 3 from https://python.org/ or via your package manager \
                         (e.g., `brew install python3`, `apt install python3`)"
             .to_string(),
@@ -325,6 +434,14 @@ fn builtin_rust_spec() -> ToolchainSpec {
         version_args: vec!["--version".to_string()],
         compile_command: "rustc".to_string(),
         compile_args: vec!["--edition".to_string(), "2021".to_string()],
+        // Compile `main.rs` to a `main_bin` binary, then execute it. The
+        // produced binary lives in `workdir`, so it is invoked as `./main_bin`.
+        run_plan: RunPlan {
+            steps: vec![
+                RunStep::new("rustc", &["--edition", "2021", "main.rs", "-o", "main_bin"]),
+                RunStep::new("./main_bin", &[]),
+            ],
+        },
         install_hint: "Install Rust via rustup: https://rustup.rs/".to_string(),
     }
 }
@@ -337,6 +454,10 @@ fn builtin_go_spec() -> ToolchainSpec {
         version_args: vec!["version".to_string()],
         compile_command: "go".to_string(),
         compile_args: vec!["vet".to_string()],
+        // `go run` compiles and executes the entry file in one step.
+        run_plan: RunPlan {
+            steps: vec![RunStep::new("go", &["run", "main.go"])],
+        },
         install_hint: "Install Go from https://go.dev/dl/ or via your package manager \
                         (e.g., `brew install go`, `apt install golang`)"
             .to_string(),
@@ -443,6 +564,79 @@ fn invoke_compile(
     })
 }
 
+/// Execute a target's [`RunPlan`] from `workdir`, returning the final step's output.
+///
+/// Compile/setup steps (every step except the last) must exit zero, or this
+/// returns [`ToolchainError::InvocationFailed`] for the failing step. The final
+/// step's output is captured and returned regardless of its exit code.
+fn run_program(spec: &ToolchainSpec, workdir: &Path) -> Result<RunOutput, ToolchainError> {
+    let steps = &spec.run_plan.steps;
+    debug_assert!(!steps.is_empty(), "run plan must have at least one step");
+
+    let display = steps
+        .iter()
+        .map(|step| {
+            format!("{} {}", step.command, step.args.join(" "))
+                .trim()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+
+    let last_idx = steps.len().saturating_sub(1);
+    let mut final_stdout = String::new();
+    let mut final_stderr = String::new();
+    let mut final_exit: Option<i32> = None;
+
+    for (idx, step) in steps.iter().enumerate() {
+        let mut cmd = Command::new(&step.command);
+        cmd.args(&step.args);
+        cmd.current_dir(workdir);
+
+        let output = cmd.output().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.kind() == std::io::ErrorKind::PermissionDenied
+            {
+                ToolchainError::NotFound {
+                    target_id: spec.target_id.clone(),
+                    binary_name: step.command.clone(),
+                    install_hint: spec.install_hint.clone(),
+                }
+            } else {
+                ToolchainError::Io(e)
+            }
+        })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if idx != last_idx && !output.status.success() {
+            // A compile/setup step failed: the program never ran.
+            return Err(ToolchainError::InvocationFailed {
+                target_id: spec.target_id.clone(),
+                command: format!("{} {}", step.command, step.args.join(" "))
+                    .trim()
+                    .to_string(),
+                stdout,
+                stderr,
+                exit_code: output.status.code(),
+            });
+        }
+
+        final_stdout = stdout;
+        final_stderr = stderr;
+        final_exit = output.status.code();
+    }
+
+    Ok(RunOutput {
+        target_id: spec.target_id.clone(),
+        command: display,
+        stdout: final_stdout,
+        stderr: final_stderr,
+        exit: final_exit,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,6 +670,9 @@ mod tests {
             version_args: vec!["--version".to_string()],
             compile_command: "customc".to_string(),
             compile_args: vec!["--check".to_string()],
+            run_plan: RunPlan {
+                steps: vec![RunStep::new("customc", &["main.custom"])],
+            },
             install_hint: "Install custom-lang from example.com".to_string(),
         });
 
@@ -505,6 +702,9 @@ mod tests {
             version_args: vec!["--version".to_string()],
             compile_command: "definitely_not_a_real_binary_xyz_123".to_string(),
             compile_args: vec![],
+            run_plan: RunPlan {
+                steps: vec![RunStep::new("definitely_not_a_real_binary_xyz_123", &[])],
+            },
             install_hint: "This is a test".to_string(),
         };
 
@@ -661,6 +861,9 @@ mod tests {
             version_args: vec!["--version".to_string()],
             compile_command: "not_a_real_binary_abc_999".to_string(),
             compile_args: vec![],
+            run_plan: RunPlan {
+                steps: vec![RunStep::new("not_a_real_binary_abc_999", &[])],
+            },
             install_hint: "Cannot install fake toolchain".to_string(),
         });
 
@@ -680,6 +883,9 @@ mod tests {
             version_args: vec!["--version".to_string()],
             compile_command: "not_a_real_binary_zzz".to_string(),
             compile_args: vec!["--check".to_string()],
+            run_plan: RunPlan {
+                steps: vec![RunStep::new("not_a_real_binary_zzz", &[])],
+            },
             install_hint: "Install from example.com".to_string(),
         });
 
@@ -689,5 +895,154 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("not installed"));
         assert!(msg.contains("Install from example.com"));
+    }
+
+    #[test]
+    fn builtin_specs_have_run_plans() {
+        let registry = ToolchainRegistry::with_builtins();
+        for target in &["js", "ts", "python", "rust", "go"] {
+            let spec = registry.get(target).expect("builtin spec present");
+            assert!(
+                !spec.run_plan.steps.is_empty(),
+                "{target} run plan must be non-empty"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_run_plan_is_two_step_compile_then_run() {
+        let spec = builtin_rust_spec();
+        assert_eq!(
+            spec.run_plan.steps.len(),
+            2,
+            "rust runs compile then binary"
+        );
+        assert_eq!(spec.run_plan.steps[0].command, "rustc");
+        assert!(spec.run_plan.steps[0].args.contains(&"main.rs".to_string()));
+        assert!(spec.run_plan.steps[0]
+            .args
+            .contains(&"main_bin".to_string()));
+        assert_eq!(spec.run_plan.steps[1].command, "./main_bin");
+    }
+
+    #[test]
+    fn ts_run_plan_is_tsc_then_node() {
+        let spec = builtin_typescript_spec();
+        assert_eq!(spec.run_plan.steps.len(), 2, "ts emits then runs");
+        assert_eq!(spec.run_plan.steps[0].command, "tsc");
+        assert_eq!(spec.run_plan.steps[0].args, vec!["main.ts".to_string()]);
+        assert_eq!(spec.run_plan.steps[1].command, "node");
+        assert_eq!(spec.run_plan.steps[1].args, vec!["main.js".to_string()]);
+    }
+
+    #[test]
+    fn single_step_targets_run_one_command() {
+        for spec in [
+            builtin_javascript_spec(),
+            builtin_python_spec(),
+            builtin_go_spec(),
+        ] {
+            assert_eq!(
+                spec.run_plan.steps.len(),
+                1,
+                "{} should be a single run step",
+                spec.target_id
+            );
+        }
+    }
+
+    #[test]
+    fn run_unknown_target_returns_not_found() {
+        let registry = ToolchainRegistry::with_builtins();
+        let result = registry.run("unknown_xyz", Path::new("."));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolchainError::NotFound { target_id, .. } => {
+                assert_eq!(target_id, "unknown_xyz");
+            }
+            other => panic!("Expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn run_with_missing_toolchain_gives_not_found() {
+        let mut registry = ToolchainRegistry::new();
+        registry.register(ToolchainSpec {
+            target_id: "fake".to_string(),
+            display_name: "Fake Lang".to_string(),
+            binary_name: "not_a_real_binary_run_xyz".to_string(),
+            version_args: vec!["--version".to_string()],
+            compile_command: "not_a_real_binary_run_xyz".to_string(),
+            compile_args: vec![],
+            run_plan: RunPlan {
+                steps: vec![RunStep::new("not_a_real_binary_run_xyz", &[])],
+            },
+            install_hint: "Install from example.com".to_string(),
+        });
+
+        let result = registry.run("fake", Path::new("."));
+        assert!(matches!(result, Err(ToolchainError::NotFound { .. })));
+    }
+
+    #[test]
+    fn run_captures_stdout_of_final_step() {
+        // Use a portable program (`true`-like) to exercise the plumbing without
+        // depending on a language toolchain. We register a custom spec whose
+        // single step is a command guaranteed present on the test host.
+        if Command::new("printf").arg("").output().is_err() {
+            // `printf` not available on this host; skip rather than fail.
+            return;
+        }
+        let mut registry = ToolchainRegistry::new();
+        registry.register(ToolchainSpec {
+            target_id: "printer".to_string(),
+            display_name: "Printer".to_string(),
+            binary_name: "printf".to_string(),
+            version_args: vec!["%s".to_string(), "probe".to_string()],
+            compile_command: "printf".to_string(),
+            compile_args: vec![],
+            run_plan: RunPlan {
+                steps: vec![RunStep::new("printf", &["%s", "captured-output"])],
+            },
+            install_hint: "coreutils".to_string(),
+        });
+
+        let out = registry.run("printer", Path::new(".")).expect("run ok");
+        assert_eq!(out.target_id, "printer");
+        assert_eq!(out.stdout.trim(), "captured-output");
+        assert_eq!(out.exit, Some(0));
+    }
+
+    #[test]
+    fn run_reports_failing_compile_step() {
+        // A two-step plan whose first (compile) step exits non-zero must surface
+        // InvocationFailed, not reach the second step.
+        if Command::new("false").output().is_err() {
+            return;
+        }
+        let mut registry = ToolchainRegistry::new();
+        registry.register(ToolchainSpec {
+            target_id: "twostep".to_string(),
+            display_name: "Two Step".to_string(),
+            binary_name: "false".to_string(),
+            version_args: vec![],
+            compile_command: "false".to_string(),
+            compile_args: vec![],
+            run_plan: RunPlan {
+                steps: vec![
+                    RunStep::new("false", &[]),
+                    RunStep::new("echo", &["unreached"]),
+                ],
+            },
+            install_hint: "coreutils".to_string(),
+        });
+
+        let result = registry.run("twostep", Path::new("."));
+        match result {
+            Err(ToolchainError::InvocationFailed { target_id, .. }) => {
+                assert_eq!(target_id, "twostep");
+            }
+            other => panic!("expected InvocationFailed, got {other:?}"),
+        }
     }
 }

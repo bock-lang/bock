@@ -23,6 +23,6 @@ pub use repair::{
     RuleLookupOutcome,
 };
 pub use toolchain::{
-    CompilationResult, DetectedToolchain, ToolchainError, ToolchainRegistry, ToolchainReport,
-    ToolchainSpec,
+    CompilationResult, DetectedToolchain, RunOutput, RunPlan, RunStep, ToolchainError,
+    ToolchainRegistry, ToolchainReport, ToolchainSpec,
 };

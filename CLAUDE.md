@@ -41,7 +41,7 @@ cd extensions/vscode && npm install && npm run compile
 ```bash
 cargo test                                # all unit + integration tests
 cargo test -p bock-lexer                  # one crate
-./tools/scripts/run-conformance.sh        # language conformance suite
+./tools/scripts/run-conformance.sh        # conformance: directive + cross-target execution tests
 cd extensions/vscode && npm test          # extension tests
 ```
 

@@ -397,7 +397,9 @@ dependencies = [
 name = "bock-test-harness"
 version = "0.1.0"
 dependencies = [
+ "bock-build",
  "pretty_assertions",
+ "tempfile",
 ]
 
 [[package]]
