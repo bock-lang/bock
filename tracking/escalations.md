@@ -144,3 +144,19 @@ types as an unimplemented follow-up.
 follows Rust/Swift precedent (no `Float: Hashable`; conservative on `Bool` ordering).
 **Awaiting:** Design ratification of the normative matrix; non-blocking.
 **Status:** pending
+
+## [2026-05-30 03:37 UTC] core.convert design questions (DQ11)
+
+**Type:** design (core-spec)
+**Severity:** low (non-blocking — `core.convert` shipped the floor in #110)
+**Trigger:** standing up `core.convert` + parameterized-trait resolution raised
+four design questions; the impl shipped a minimum-useful default for each and
+escalates for ratification.
+**Context (in `design-questions.md` DQ11):** (1) the normative primitive-
+conversion matrix (parallels DQ10); (2) whether canonical conversions are sealed
+(shipped unsealed); (3) the `TryFrom` error type (shipped fixed `ConvertError`);
+(4) whether `TryInto` exists in v1 (omitted). All additive/refineable.
+**Recommendation:** none on the merits (Design's call). Defaults follow the §18.3
+surface + Rust/Swift precedent; refining any is non-breaking.
+**Awaiting:** Design ratification; non-blocking (R1 proceeds).
+**Status:** pending

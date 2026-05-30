@@ -829,3 +829,34 @@ vscode test-infra, conformance execution Q-fconf), @performance example (pending
   Next: resume the R1 fan-out one module at a time (convert first — validates parameterized-
     trait resolution; then iter [collection conformances], effect [effect-system bridge]) +
     land Q-prelude-inject/Q-import-reject. main f8f9155.
+
+[2026-05-30 03:37 UTC] core.convert + parameterized-trait resolution LANDED (#110); 3/11
+  Input: operator directed "proceed with parameterized-trait resolution + core.convert."
+    Plan agent (→ plans/2026-05-30-parameterized-traits-convert-plan.md) mapped it; the
+    central gap was that the trait type-arg (`From[Int]`→`[Int]`) is dropped at parse time
+    (TypePath has no args), so the fix spans parser→AST→AIR→checker. Front-loaded behind a
+    STOP gate.
+  Result (#110 → main 04dd167; 12/12 CI green): T1 ripple stayed in scope (5 files / 9
+    construction sites; under threshold) — engineer correctly added trait_args to ImplBlock
+    only (TraitDecl parameterizes via generic_params). Parameterized index keyed
+    (trait,arg,target) alongside #108's untouched index; 3-tuple coherence; blanket
+    From⇒Into synthesized (second pass, explicit-wins). Return-type-driven .into()
+    resolution — engineer CAUGHT + replaced a prior UNSOUND fresh-var fallthrough with a
+    real diagnostic (E4012). Canonical primitive conversions (Int→Float, signed widening,
+    Float32→Float, Char→String, TryFrom[String]); narrowing excluded. Full gate incl
+    cargo doc green (the new gate step caught one intra-doc link → fixed with Self::).
+  Notable: `where (T: Into[U])` is arg-IMPRECISE (the bound's [U] is dropped at parse —
+    same root as DV7); documented fallback (satisfied when T has Into for some target).
+  Escalated (DQ11, non-blocking — shipped the floor): normative conversion matrix (parallels
+    DQ10), seal scope (unsealed), TryFrom error type (fixed ConvertError), TryInto (omitted).
+  OPEN findings triaged: DV8 + Q-xmod-impl (cross-module .into() impl resolution — pairs
+    with DV7's cross-module theme); Q-prim-assoc (`Float.from(3)` doesn't resolve; .into()
+    is the primitive path); broadened Q-interp-enum (interpreter lags type-check/codegen on
+    user associated fns / bodyless blanket .into() / shadowed to_string). `Type.from` dotted
+    form (`::` doesn't parse) is informational, no item.
+  Tracking (this PR, chore/tracking-20260530-0337): Q-stdlib 3/11 (R1 remaining iter/effect);
+    DQ11 filed; DV8 + Q-xmod-impl/Q-prim-assoc filed; Q-interp-enum broadened; plan doc; graph
+    + snapshot. main 04dd167.
+  Next (per the directed-step cadence): R1's `iter` (collection conformances) or `effect`
+    (effect-system bridge) — each an infra-then-module step; await operator direction on
+    sequencing, or pick up the decided-ready items (Q-prelude-inject/Q-import-reject) / bugs.

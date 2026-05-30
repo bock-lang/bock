@@ -51,12 +51,13 @@ reconciliation; repo wins). See audit.md._
   doc comments and rewrites `public`→`pub` (not valid Bock), mangling stdlib
   `.bock` sources (error.bock/compare.bock are hand-authored to avoid it). A
   formatter producing invalid output is a real CLI bug. Found #104.
-- **[Q-interp-enum] interpreter: cross-module enum variant in stdlib impl body**
-  — bug · ready · interpreter crate (`bock run` path) · — · note: `bock run` of
-  a `main` calling a stdlib impl method whose body constructs an imported enum
-  variant (e.g. `Ordering.Less`) → "undefined variable: Less"; the interpreter
-  lacks the imported enum's variants in scope inside a cross-module stdlib impl
-  body. Type-check + codegen handle it; execution doesn't. Found #104; relates to
+- **[Q-interp-enum] interpreter execution gaps for stdlib dispatch** — bug ·
+  ready · interpreter crate (`bock run` path) · — · note: the interpreter lags
+  type-check + codegen on several stdlib dispatch cases — (a) cross-module enum
+  variant in a stdlib impl body (`Ordering.Less` → "undefined variable: Less",
+  #104); (b) user associated fns, the bodyless blanket `.into()`, and
+  builtin-shadowed `to_string` (#110). Type-check + codegen handle all; `bock run`
+  doesn't. Broaden interpreter dispatch to match. Relates to
   the execution story (Q-fconf).
 - **[Q-self-subst] checker: `Self` not substituted in impl method sigs** — bug ·
   ready · `compiler/crates/bock-types/` · — · note: an impl writing
@@ -82,11 +83,22 @@ reconciliation; repo wins). See audit.md._
   `seed_imported_generic_fn` sets `where_clause: vec![]`. Locally-defined bounded
   fns enforce correctly (wired in #108); thread bounds through the export ABI to
   close the cross-module case. Pre-existing; surfaced by Q-bridge (#108).
+- **[Q-xmod-impl] Cross-module trait-impl resolution for `.into()`** — bug ·
+  ready · `compiler/crates/bock-types/` · — · links #110, DV8 · note: `.into()`
+  resolves a trait impl via the impl-table, which isn't seeded across module
+  boundaries — so an `impl From[A] for B` in module X isn't visible to `.into()`
+  in module Y (`.from()`/trait-methods DO cross modules via method seeding). Seed
+  the impl-table cross-module. Surfaced by core.convert (#110); pairs with DV7
+  (cross-module bounds) as the cross-module-impl-surface theme.
+- **[Q-prim-assoc] Primitive associated calls (`Float.from(3)`)** — bug · ready ·
+  `compiler/crates/bock-types/` · — · links #110 · note: the resolver doesn't
+  treat a primitive type name as an expression value, so `Float.from(3)` doesn't
+  resolve (`.into()` is the working primitive path). Minor usability gap. #110.
 
 ## v1-blocking
 
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (2/11 landed; fan-out UNBLOCKED — Q-bridge in #108) · `stdlib/`,
+  **v1-BLOCKING** (3/11 landed; R1 remaining: iter, effect) · `stdlib/`,
   `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: **DECIDED a v1 deliverable** (operator, 2026-05-29) and
   **SCOPE decided by Design 2026-05-29** (DQ5; §18.3 tiering reconciled in
@@ -100,15 +112,14 @@ reconciliation; repo wins). See audit.md._
   conformance-harness execution gap (Q-fconf) before fanning out.
   `core.types/math/memory/concurrency` are Reserved for v1.x. **Progress:**
   the loading mechanism + `core.error` landed (#103); `core.compare` landed
-  (#104, validating generics — work with a `Self`-substitution caveat, see
-  Q-self-subst). **Fan-out UNBLOCKED:** Q-bridge landed (#108) — primitives now
-  conform to the core traits and generic bounds are enforced. Resume R1's
-  remaining modules (convert/iter/effect), each on the proven error/compare
-  pattern, but note each carries a NEW unknown to validate (de-risk one at a
-  time): `convert`'s Into/From half needs parameterized-trait resolution (a
-  separate gap; its `Displayable` half is covered by the bridge); `iter` needs
-  trait conformances for collection types (an analogous bridge for List/Map/Set);
-  `effect` bridges the built-in effect system. Plans:
+  (#104, validating generics — `Self`-substitution caveat, Q-self-subst).
+  Q-bridge landed (#108 — primitives conform, bounds enforced). `core.convert`
+  landed (#110) **with parameterized-trait resolution** (From/Into/TryFrom +
+  blanket From⇒Into + canonical primitive conversions). **R1 remaining (each a
+  new infra unknown, de-risk one at a time):** `iter` needs trait conformances
+  for collection types (an analogous bridge for List/Map/Set); `effect` bridges
+  the built-in effect system. Then R2 (option/result/string/time), R3
+  (collections/test). Plans:
   `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`,
   `plans/2026-05-30-primitive-conformance-bridge-plan.md`.
 
@@ -143,12 +154,12 @@ reconciliation; repo wins). See audit.md._
 ## Dependency graph
 
 ```
-[#103 foundation+error, #104 compare, #106 spec batch, #108 Q-bridge: LANDED]
-Q-stdlib fan-out (convert/iter/effect → R2 → R3) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
-  ⮑ each remaining R1 module carries a new unknown to validate (convert: parameterized traits; iter: collection conformances; effect: effect-system bridge)
+[#103 found+error, #104 compare, #106 spec batch, #108 Q-bridge, #110 param-traits+convert: LANDED]
+Q-stdlib R1 remaining (iter, effect) → R2 (option/result/string/time) → R3 (collections/test) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
+  ⮑ each remaining R1 module is an infra-then-module step (iter: collection conformances; effect: effect-system bridge)
 (decided-ready: Q-prelude-inject [DQ9], Q-import-reject [DQ8])
 (independent / ready: Q-cl-dates, Q-cl-0515, Q-20.1-xref, Q-vscode-test, Q-fconf)
-(bugs, ready: Q-fmt-bock, Q-interp-enum, Q-self-subst, Q-xmod-bounds)
+(bugs, ready: Q-fmt-bock, Q-interp-enum, Q-self-subst, Q-xmod-bounds, Q-xmod-impl, Q-prim-assoc)
 ```
 
 **Critical path to v1.0:** foundation + `core.error` + `core.compare` (#103/#104),

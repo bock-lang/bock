@@ -48,6 +48,24 @@ decided→link)`
   for *user* types is unimplemented (separate follow-up).
 - **Status:** escalated → Design (escalations.md)
 
+### DQ11 — `core.convert` design questions (4 sub-points)
+- **Questions** (surfaced by `core.convert` #110; shipped the floor, escalated for
+  ratification):
+  1. **Normative primitive-conversion matrix** (parallels DQ10): which `From`/
+     `TryFrom` conversions are normative for v1? Shipped: `Int→Float`, signed
+     widening, `Float32→Float`, `Char→String`, `TryFrom[String] for Int/Float`
+     (narrowing excluded).
+  2. **Seal scope:** are canonical conversions sealed against user override?
+     §18.5's seal is scoped to `(core trait, primitive)`; `From[Int] for Float`
+     is `(core trait, primitive→primitive)`. Shipped **unsealed** (conservative).
+  3. **`TryFrom` error type:** fixed `ConvertError` or generic `TryFrom[T, E]`?
+     §18.3 says only "→ `Result`". Shipped **fixed `ConvertError`**.
+  4. **`TryInto` in v1?** Prelude/§18.3 list `Into`/`From`/`TryFrom` but not
+     `TryInto`. **Omitted** (no `TryFrom⇒TryInto` blanket).
+- **§:** §18.3 / §18.5 · **context:** all four are additive/refineable; the impl
+  proceeds on the floor. Reconcile §18.3 if Design ratifies/changes any.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and
