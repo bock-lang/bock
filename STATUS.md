@@ -6,8 +6,8 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 10
-- v1-blocking: 2
+- Ready: 11
+- v1-blocking: 1
 - Blocked: 5
 - Deferred: 1
 
@@ -15,7 +15,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (~2275 tests, 0 failed — per #104) |
+| `cargo test --workspace` | passing (~2296 tests, 0 failed — per #108) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `mdbook build docs` | clean |
@@ -48,12 +48,12 @@ The embedded source-compiled loading mechanism is **live** (#103): `core.*`
 modules ship as Bock source bundled in the `bock` binary and resolve through
 the module registry (hermetic; works from any cwd). **2 of 11 v1 modules
 landed** — `core.error` (#103), `core.compare` (#104). The 2026-05-30 Design
-stdlib batch (DQ6–DQ9) is reconciled into the spec (#106). Current limitation:
-stdlib trait impls don't yet cover primitive types (Int/String) — the
-checker↔bock-core bridge is **in-flight** (`feat/stdlib-primitive-bridge`; DQ6
-decided), which also fixes a latent bug where `where`-bound enforcement was never
-wired into the production pipeline (`divergences.md` DV6). Module fan-out resumes
-when the bridge lands. The prelude (≈9 builtins + type-checker intrinsics) is
+stdlib batch (DQ6–DQ9) is reconciled into the spec (#106), and **Q-bridge landed
+(#108)**: the compiler registers canonical primitive conformances + the trait-impl
+table is now wired into the pipeline, so primitives satisfy core-trait bounds and
+generic `where`-bounds are enforced (fixing the latent DV6 bug). The module fan-out
+(R1's remaining convert/iter/effect) is now **unblocked**. The prelude (≈9 builtins
++ type-checker intrinsics) is
 unchanged pending prelude injection (Q-prelude-inject). See DV1, DV4, MS-stdlib.
 
 ## Phase history
