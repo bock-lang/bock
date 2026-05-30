@@ -77,6 +77,8 @@ impl CodeGenerator for JsGenerator {
         let mut ctx = EmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
+        ctx.trait_decls =
+            crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let (content, mappings) = ctx.finish();
         let source_map = SourceMap {
@@ -125,6 +127,7 @@ impl CodeGenerator for JsGenerator {
 
         let mut ctx = EmitCtx::new();
         ctx.enum_variants = crate::generator::collect_enum_variants(modules);
+        ctx.trait_decls = crate::generator::collect_trait_decls(modules);
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
                 ctx.buf.push('\n');
@@ -215,6 +218,12 @@ struct EmitCtx {
     /// variants. Pre-scanned across the bundle. The built-in Optional/Result
     /// pre-seeds are filtered out where bespoke lowering already applies.
     enum_variants: crate::generator::EnumVariantRegistry,
+    /// Trait-declaration registry. Used at each `impl Trait for Type` site to
+    /// recover the trait's *default* methods (those carrying a body) so they can
+    /// be attached to the target's prototype alongside the impl's own methods —
+    /// a type relying on an inherited default would otherwise have no such
+    /// method. Pre-scanned across the bundle (mirrors [`Self::enum_variants`]).
+    trait_decls: crate::generator::TraitDeclRegistry,
 }
 
 impl EmitCtx {
@@ -238,6 +247,7 @@ impl EmitCtx {
             match_temp_counter: 0,
             concurrency_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
+            trait_decls: crate::generator::TraitDeclRegistry::new(),
         }
     }
 
@@ -992,7 +1002,19 @@ impl EmitCtx {
                 } else {
                     self.writeln(&format!("// impl {target_name}"));
                 }
-                for method in methods {
+                // Trait default methods (codegen-completeness P2): synthesize
+                // every default method the impl does not override onto the
+                // target's prototype, alongside the impl's own methods. JS is
+                // untyped, so a default method emits identically to an impl
+                // method; a default body that calls another trait method via
+                // `self.other(self, ...)` resolves through the same prototype.
+                let default_methods: Vec<AIRNode> = trait_path
+                    .as_ref()
+                    .map(|tp| {
+                        crate::generator::inherited_default_methods(&self.trait_decls, tp, methods)
+                    })
+                    .unwrap_or_default();
+                for method in methods.iter().chain(default_methods.iter()) {
                     if let NodeKind::FnDecl {
                         is_async,
                         name,

@@ -1,0 +1,44 @@
+// TEST: exec_use_core_compare
+// EXPECT: output "max=9;ord=greater"
+// EXPECT: targets js, ts, python, rust, go
+//
+// THE PAYOFF FIXTURE for the codegen-completeness P2 milestone: a user program
+// that `use`s the embedded `core.compare` stdlib module — a real trait-using
+// module (an enum, two traits, a sample `Comparable`/`Equatable` impl on `Key`,
+// and the trait-bounded generic helpers `max`/`min`) — and compiles + runs it
+// on every target.
+//
+// This exercises, end to end and cross-module, the three things the P2 trait
+// codegen work delivers:
+//   * item 2 (trait-decl `self` typing): `core.compare`'s `Comparable.compare`
+//     and `Equatable.eq` take `other: Self`, so the emitted TS trait interface
+//     must type `self`/`other` to satisfy `tsc --strict`.
+//   * item 4 (generic-bounded dispatch): `max[T: Comparable](a, b)` calls
+//     `a.compare(b)` on a bounded type variable, dispatching through the
+//     `Comparable` trait (the `recv_kind = "TraitBound:Comparable"` stamp).
+//   * cross-module bundling: `Key`, `key`, `max`, and `Ordering` are all
+//     resolved from the embedded `core.compare` module concatenated into the
+//     entry file.
+//
+// `max(key(4), key(9))` picks the greater key (9). `winner.compare(key(4))`
+// returns an `Ordering`, matched to a target-independent string.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Ordering, Key, key, max}
+
+fn ord_str(o: Ordering) -> String {
+  match o {
+    Less => "less"
+    Equal => "equal"
+    Greater => "greater"
+  }
+}
+
+fn main() -> Void {
+  let winner: Key = max(key(4), key(9))
+  let ord: Ordering = winner.compare(key(4))
+  println("max=${winner.value};ord=${ord_str(ord)}")
+}

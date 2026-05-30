@@ -424,7 +424,23 @@ impl PyEmitCtx {
     }
 
     fn finish(mut self) -> String {
+        // An empty module emits nothing at all — not even a preamble (an empty
+        // `.py` is the expected output, and a bare `from __future__` import on
+        // its own would be surprising noise).
+        if self.buf.is_empty() {
+            return self.buf;
+        }
         let mut preamble = String::new();
+        // PEP 563: defer evaluation of every annotation to a string. A method
+        // declared inside a class body that annotates a parameter with the class
+        // itself — `class Tag: def equals(self, other: Tag)`, emitted for an
+        // `impl Eq for Tag` whose `other: Self` resolves to `Tag` — references a
+        // name that is not yet bound while the class body executes, raising
+        // `NameError` at import time. `from __future__ import annotations` makes
+        // all annotations lazy strings, so such (and any other) forward
+        // references never evaluate eagerly. It must be the first statement in
+        // the module, so it is prepended ahead of every other import.
+        preamble.push_str("from __future__ import annotations\n");
         if self.needs_asyncio_import {
             preamble.push_str("import asyncio\n");
         }

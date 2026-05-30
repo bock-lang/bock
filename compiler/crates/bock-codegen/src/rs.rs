@@ -97,6 +97,10 @@ impl CodeGenerator for RsGenerator {
         ctx.generic_decls =
             crate::generator::collect_generic_decls(&[(module, std::path::Path::new(""))]);
         ctx.collect_clone_targets(module);
+        ctx.collect_self_operand_methods(&crate::generator::collect_trait_decls(&[(
+            module,
+            std::path::Path::new(""),
+        )]));
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -143,6 +147,7 @@ impl CodeGenerator for RsGenerator {
         // the `<T>` declared on `record Box[T]` even across module boundaries,
         // and the clone-target set so `RecordDecl` emission can derive `Clone`.
         ctx.generic_decls = crate::generator::collect_generic_decls(modules);
+        ctx.collect_self_operand_methods(&crate::generator::collect_trait_decls(modules));
         for (module, _) in modules {
             ctx.collect_clone_targets(module);
         }
@@ -227,6 +232,16 @@ struct RsEmitCtx {
     /// applies only inside such methods (never to general field reads, which
     /// would be noisy and could over-require `Clone`).
     in_clone_self_method: bool,
+    /// Names of trait methods whose non-receiver operand is `Self`-typed
+    /// (`compare`/`eq`/`beats`/…). Such an operand is emitted and *called* by
+    /// shared reference in Rust: the trait/impl signature is `other: &Self` /
+    /// `other: &Target`, and a desugared call borrows the argument
+    /// (`a.compare(&b)`). Bock's value semantics permit reusing the argument
+    /// after the call (e.g. stdlib `max` does `match a.compare(b) { _ => b }`),
+    /// which by-value would move a non-`Copy` value out (Rust E0382). Derived
+    /// from the trait registry; keyed by the bare method name (globally unique
+    /// within a v1 program).
+    self_operand_methods: std::collections::HashSet<String>,
 }
 
 impl RsEmitCtx {
@@ -246,6 +261,30 @@ impl RsEmitCtx {
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             clone_target_records: std::collections::HashSet::new(),
             in_clone_self_method: false,
+            self_operand_methods: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Populate [`Self::self_operand_methods`] from a trait registry: every
+    /// method (in any trait) whose own non-receiver params include a
+    /// `Self`-typed operand. These methods take that operand by shared
+    /// reference in Rust (see the field doc).
+    fn collect_self_operand_methods(&mut self, registry: &crate::generator::TraitDeclRegistry) {
+        for info in registry.values() {
+            for m in &info.methods {
+                let NodeKind::FnDecl { params, name, .. } = &m.kind else {
+                    continue;
+                };
+                let has_self_operand = params.iter().skip(1).any(|p| {
+                    matches!(
+                        &p.kind,
+                        NodeKind::Param { ty: Some(t), .. } if matches!(t.kind, NodeKind::TypeSelf)
+                    )
+                });
+                if has_self_operand {
+                    self.self_operand_methods.insert(name.name.clone());
+                }
+            }
         }
     }
 
@@ -353,6 +392,19 @@ impl RsEmitCtx {
             return None;
         }
         Some(info.enum_name.clone())
+    }
+
+    /// True when the real `core.compare.Ordering` enum is bundled into this
+    /// program (its `Less` variant is a registered user enum variant). Under
+    /// DV13 cross-module bundling, `use core.compare` concatenates the actual
+    /// `enum Ordering` decl into the entry file; the `Less`/`Equal`/`Greater`
+    /// references and match patterns must then use that user enum
+    /// (`Ordering::Less`), not the `std::cmp::Ordering` bridge the prelude form
+    /// uses when the enum is *not* bundled (e.g. a bare primitive `compare`).
+    fn ordering_enum_bundled(&self) -> bool {
+        self.enum_variants
+            .get("Less")
+            .is_some_and(|info| info.enum_name == "Ordering")
     }
 
     fn finish(mut self) -> String {
@@ -1419,7 +1471,11 @@ impl RsEmitCtx {
                 }
                 _ => ("&self".to_string(), &params[..]),
             };
-            let param_strs = self.collect_param_strs(rest);
+            // A `Self`-operand trait method's impl borrows its operand to match
+            // the trait signature (`fn compare(&self, other: &Key)`); the call
+            // site borrows the argument to match. See `self_operand_methods`.
+            let borrow_operands = self.self_operand_methods.contains(&name.name);
+            let param_strs = self.collect_param_strs_inner(rest, borrow_operands);
             let effects = self.effects_params(effect_clause);
             let mut all_params = vec![receiver];
             all_params.extend(param_strs);
@@ -1477,7 +1533,11 @@ impl RsEmitCtx {
                 }
                 _ => ("&self".to_string(), &params[..]),
             };
-            let param_strs = self.collect_param_strs(rest);
+            // A `Self`-operand trait method (`compare`/`eq`/…) takes its operand
+            // by shared reference, so the bound value can be reused after the
+            // call (Bock value semantics) — see `self_operand_methods`.
+            let borrow_operands = self.self_operand_methods.contains(&name.name);
+            let param_strs = self.collect_param_strs_inner(rest, borrow_operands);
             let effects = self.effects_params(effect_clause);
             let mut all_params = vec![receiver];
             all_params.extend(param_strs);
@@ -1486,15 +1546,21 @@ impl RsEmitCtx {
                 .as_deref()
                 .map(|t| format!(" -> {}", self.type_to_rs(t)))
                 .unwrap_or_default();
-            let where_cl = self.where_clause_to_rs(where_clause);
+            let mut where_cl = self.where_clause_to_rs(where_clause);
             let fn_name = to_snake_case(&name.name);
 
-            // Check if body is an empty block (trait method signature without default impl).
-            let has_body = if let NodeKind::Block { stmts, tail } = &body.kind {
-                !stmts.is_empty() || tail.is_some()
-            } else {
-                true
-            };
+            // A default method (one carrying a body) that still takes a `Self`
+            // operand *by value* needs `where Self: Sized` (inside the trait
+            // `Self` is `?Sized`). A borrowed operand (`other: &Self`) is always
+            // sized, so the bound is unnecessary there.
+            let has_body = crate::generator::is_default_method(method);
+            if has_body && !borrow_operands && rest.iter().any(Self::param_type_is_self) {
+                if where_cl.is_empty() {
+                    where_cl = " where Self: Sized".to_string();
+                } else {
+                    where_cl = format!("{where_cl},\n    Self: Sized");
+                }
+            }
 
             if has_body {
                 self.writeln(&format!(
@@ -1515,7 +1581,25 @@ impl RsEmitCtx {
         Ok(())
     }
 
+    /// True if `param` is a `Param` node whose declared type is exactly `Self`.
+    /// Used to decide whether a default trait method needs `where Self: Sized`
+    /// (a by-value `Self` operand is `?Sized` inside the trait).
+    fn param_type_is_self(param: &AIRNode) -> bool {
+        matches!(
+            &param.kind,
+            NodeKind::Param { ty: Some(t), .. } if matches!(t.kind, NodeKind::TypeSelf)
+        )
+    }
+
     fn collect_param_strs(&mut self, params: &[AIRNode]) -> Vec<String> {
+        self.collect_param_strs_inner(params, false)
+    }
+
+    /// As [`Self::collect_param_strs`], but when `borrow` is set each param's
+    /// declared type is emitted as a shared reference (`other: &Target`). Used
+    /// for the operands of a `Self`-operand trait method (`compare`/`eq`/…),
+    /// which Rust must take by reference to match Bock's value semantics.
+    fn collect_param_strs_inner(&mut self, params: &[AIRNode], borrow: bool) -> Vec<String> {
         let mut result = Vec::new();
         for p in params {
             if let NodeKind::Param {
@@ -1525,9 +1609,10 @@ impl RsEmitCtx {
             } = &p.kind
             {
                 let name = to_snake_case(&self.pattern_to_binding_name(pattern));
+                let amp = if borrow { "&" } else { "" };
                 let type_ann = ty
                     .as_ref()
-                    .map(|t| format!(": {}", self.type_to_rs(t)))
+                    .map(|t| format!(": {amp}{}", self.type_to_rs(t)))
                     .unwrap_or_else(|| ": _".into());
                 if let Some(def) = default {
                     // Rust doesn't have default params; emit a comment.
@@ -1911,11 +1996,15 @@ impl RsEmitCtx {
             }
             NodeKind::Identifier { name } => {
                 // The prelude `Ordering` variants map to Rust's native
-                // `std::cmp::Ordering`, so they are self-contained in the entry
-                // file (the `core.compare` enum decl is not bundled under the
-                // single-file run model). This mirrors how `Some`/`None` map to
+                // `std::cmp::Ordering` — UNLESS the real `core.compare.Ordering`
+                // enum is bundled (DV13), in which case the references must use
+                // that user enum (handled by the `variant_enum_qualifier_for_name`
+                // path below). This mirrors how `Some`/`None` map to
                 // `std::option`.
-                if let Some(variant) = crate::generator::ordering_variant(&name.name) {
+                if crate::generator::ordering_variant(&name.name).is_some()
+                    && !self.ordering_enum_bundled()
+                {
+                    let variant = &name.name;
                     let _ = write!(self.buf, "std::cmp::Ordering::{variant}");
                     return Ok(());
                 }
@@ -2040,9 +2129,16 @@ impl RsEmitCtx {
                     self.emit_expr(recv)?;
                     let _ = write!(self.buf, ".{}", to_snake_case(&method.name));
                     self.buf.push('(');
+                    // A `Self`-operand trait method takes its operand by shared
+                    // reference (`a.compare(&b)`) so the caller can keep using
+                    // the value afterwards. See `self_operand_methods`.
+                    let borrow_operands = self.self_operand_methods.contains(&method.name);
                     for (i, arg) in rest.iter().enumerate() {
                         if i > 0 {
                             self.buf.push_str(", ");
+                        }
+                        if borrow_operands {
+                            self.buf.push('&');
                         }
                         self.emit_expr(&arg.value)?;
                     }
@@ -2057,9 +2153,23 @@ impl RsEmitCtx {
                 };
                 self.emit_expr(callee)?;
                 self.buf.push('(');
+                // A `recv.m(b)` whose callee is a `Self`-operand trait method but
+                // which is NOT the desugared self-call shape (the receiver isn't
+                // duplicated into the arg list, so it falls here) still borrows
+                // its operand: `recv.m(&b)`. The leading receiver, if present,
+                // is a method receiver (consumed by `recv.m`), so all positional
+                // args here are operands.
+                let borrow_operands = matches!(
+                    &callee.kind,
+                    NodeKind::FieldAccess { field, .. }
+                        if self.self_operand_methods.contains(&field.name)
+                );
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         self.buf.push_str(", ");
+                    }
+                    if borrow_operands {
+                        self.buf.push('&');
                     }
                     self.emit_expr(&arg.value)?;
                 }
@@ -2084,9 +2194,13 @@ impl RsEmitCtx {
                 self.emit_expr(receiver)?;
                 let _ = write!(self.buf, ".{}", to_snake_case(&method.name));
                 self.buf.push('(');
+                let borrow_operands = self.self_operand_methods.contains(&method.name);
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         self.buf.push_str(", ");
+                    }
+                    if borrow_operands {
+                        self.buf.push('&');
                     }
                     self.emit_expr(&arg.value)?;
                 }
@@ -2279,8 +2393,11 @@ impl RsEmitCtx {
                             sub.indent = self.indent;
                             // The sub-context must see the same enum-variant
                             // registry so an interpolated variant construction
-                            // (`${label(Red)}`) is qualified `Color::Red` too.
+                            // (`${label(Red)}`) is qualified `Color::Red` too,
+                            // and the `self_operand_methods` set so an
+                            // interpolated `${a.compare(b)}` borrows its operand.
                             sub.enum_variants = self.enum_variants.clone();
+                            sub.self_operand_methods = self.self_operand_methods.clone();
                             sub.emit_expr(expr)?;
                             format_args.push(sub.buf);
                         }
@@ -2564,13 +2681,16 @@ impl RsEmitCtx {
             },
             NodeKind::ConstructorPat { path, fields } => {
                 // Prelude `Ordering` variant patterns match Rust's native
-                // `std::cmp::Ordering` (the construction side maps the same way).
+                // `std::cmp::Ordering` (the construction side maps the same way)
+                // — UNLESS the real `core.compare.Ordering` enum is bundled
+                // (DV13), in which case the user enum (`Ordering::Less`) is
+                // matched via the qualifier path below.
                 if let Some(variant) = path
                     .segments
                     .last()
                     .and_then(|s| crate::generator::ordering_variant(&s.name))
                 {
-                    if fields.is_empty() {
+                    if fields.is_empty() && !self.ordering_enum_bundled() {
                         let _ = write!(self.buf, "std::cmp::Ordering::{variant}");
                         return Ok(());
                     }
