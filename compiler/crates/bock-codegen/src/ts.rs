@@ -120,6 +120,8 @@ impl CodeGenerator for TsGenerator {
         let mut ctx = TsEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
+        ctx.generic_decls =
+            crate::generator::collect_generic_decls(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let (content, mappings) = ctx.finish();
         let source_map = SourceMap {
@@ -165,6 +167,7 @@ impl CodeGenerator for TsGenerator {
 
         let mut ctx = TsEmitCtx::new();
         ctx.enum_variants = crate::generator::collect_enum_variants(modules);
+        ctx.generic_decls = crate::generator::collect_generic_decls(modules);
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
                 ctx.buf.push('\n');
@@ -256,6 +259,13 @@ struct TsEmitCtx {
     /// Built-in Optional/Result pre-seeds are filtered out where bespoke
     /// lowering applies. Pre-scanned across the bundle.
     enum_variants: crate::generator::EnumVariantRegistry,
+    /// Generic-type declaration registry: a record/enum/class name → its
+    /// declared generic params. An `impl Box { ... }` block carries no generic
+    /// params of its own (the `T` is declared on `record Box[T]`); this lets the
+    /// declaration-merged `interface Box<T>` and the `self: Box<T>` param type
+    /// recover them so the merge lands on the generic class. Pre-scanned across
+    /// the bundle (mirrors [`Self::enum_variants`]).
+    generic_decls: crate::generator::GenericDeclRegistry,
 }
 
 impl TsEmitCtx {
@@ -281,6 +291,7 @@ impl TsEmitCtx {
             optional_runtime_emitted: false,
             concurrency_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
+            generic_decls: crate::generator::GenericDeclRegistry::new(),
         }
     }
 
@@ -801,6 +812,49 @@ impl TsEmitCtx {
     }
 
     /// Emit generic parameter list: `<T, U extends Foo>`.
+    /// Resolve the generic params that apply to an `impl` target: the impl's own
+    /// params when present (`impl[T] Box[T] { ... }`), else the params declared
+    /// on the target record/enum (`impl Box { ... }` where `T` lives on
+    /// `record Box[T]`). Empty for a non-generic target.
+    fn impl_target_generics(
+        &self,
+        impl_params: &[bock_ast::GenericParam],
+        target_name: &str,
+    ) -> Vec<bock_ast::GenericParam> {
+        if !impl_params.is_empty() {
+            return impl_params.to_vec();
+        }
+        self.generic_decls
+            .get(target_name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Render a *use-site* generic argument list (`<T>`, `<T, U>`) — the bare
+    /// param names, no `extends` bounds — for a type reference like `Box<T>`.
+    /// Empty string for no params.
+    fn generic_param_args(&self, params: &[bock_ast::GenericParam]) -> String {
+        if params.is_empty() {
+            return String::new();
+        }
+        let names: Vec<&str> = params.iter().map(|p| p.name.name.as_str()).collect();
+        format!("<{}>", names.join(", "))
+    }
+
+    /// Render the combined generic-parameter declaration for an impl method's
+    /// prototype function: the target type's params (with bounds) followed by
+    /// the method's own params. Used because the prototype assignment lives
+    /// outside the class, so its function must re-declare the class's `<T>`.
+    fn merge_generic_params_to_ts(
+        &self,
+        target_params: &[bock_ast::GenericParam],
+        method_params: &[bock_ast::GenericParam],
+    ) -> String {
+        let mut merged = target_params.to_vec();
+        merged.extend(method_params.iter().cloned());
+        self.generic_params_to_ts(&merged)
+    }
+
     fn generic_params_to_ts(&self, params: &[bock_ast::GenericParam]) -> String {
         if params.is_empty() {
             return String::new();
@@ -1060,12 +1114,23 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::ImplBlock {
+                generic_params,
                 trait_path,
                 target,
                 methods,
                 ..
             } => {
-                let target_name = self.type_expr_to_string(target);
+                let target_base = self.type_expr_to_string(target);
+                // The target's generic params — from the impl's own list when
+                // present, else from the record/enum decl (`impl Box { ... }`
+                // where `T` is declared on `record Box[T]`). `target_name` is
+                // `Box<T>`, used for the merged interface head and the
+                // `self: Box<T>` receiver param. Each prototype function
+                // re-declares `<T>` (it is a free function outside the class
+                // scope) via `merge_generic_params_to_ts`.
+                let target_params = self.impl_target_generics(generic_params, &target_base);
+                let target_name =
+                    format!("{target_base}{}", self.generic_param_args(&target_params));
                 // Methods are attached via `Target.prototype.m = function(...)`.
                 // For `tsc` to accept `p.m(...)` at call sites, the class type
                 // must declare those members. We emit a declaration-merging
@@ -1145,7 +1210,15 @@ impl TsEmitCtx {
                     } = &method.kind
                     {
                         let async_kw = if *is_async { "async " } else { "" };
-                        let generics = self.generic_params_to_ts(generic_params);
+                        // The prototype assignment lives outside the class scope,
+                        // so the function itself must re-declare the target's
+                        // generic params (`function<T>(self: Box<T>): T`) — they
+                        // are NOT in scope from the class. Merge them with the
+                        // method's own generics. The `.prototype` reference uses
+                        // the *bare* type name (`Box.prototype`, never
+                        // `Box<T>.prototype`, which is not valid TS).
+                        let generics =
+                            self.merge_generic_params_to_ts(&target_params, generic_params);
                         let param_list = self.collect_impl_typed_params(params, &target_name);
                         let effects_param = self.effects_param(effect_clause);
                         let mut all_params = param_list;
@@ -1157,7 +1230,7 @@ impl TsEmitCtx {
                             return_type.as_deref().map(|r| self.type_to_ts(r)),
                         );
                         self.writeln(&format!(
-                            "{target_name}.prototype.{} = {async_kw}function{generics}({}){ret_str} {{",
+                            "{target_base}.prototype.{} = {async_kw}function{generics}({}){ret_str} {{",
                             name.name,
                             all_params.join(", "),
                         ));
@@ -4527,6 +4600,130 @@ mod tests {
         assert!(
             !out.contains("f()._tag") && !out.contains("f()._0"),
             "call scrutinee must not be re-emitted inline, got: {out}"
+        );
+    }
+
+    // ── Generic impl interface-merge (DV12 / P1-b2) ───────────────────────────
+
+    fn generic_param(id: u32, name: &str) -> GenericParam {
+        GenericParam {
+            id,
+            span: span(),
+            name: ident(name),
+            bounds: vec![],
+        }
+    }
+
+    fn named_type(id: u32, name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::TypeNamed {
+                path: type_path(&[name]),
+                args: vec![],
+            },
+        )
+    }
+
+    /// `record Box[T] { value: T }`.
+    fn generic_box_record() -> AIRNode {
+        node(
+            10,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                name: ident("Box"),
+                generic_params: vec![generic_param(11, "T")],
+                fields: vec![bock_ast::RecordDeclField {
+                    id: 12,
+                    span: span(),
+                    name: ident("value"),
+                    ty: TypeExpr::Named {
+                        id: 13,
+                        span: span(),
+                        path: type_path(&["T"]),
+                        args: vec![],
+                    },
+                    default: None,
+                }],
+            },
+        )
+    }
+
+    /// `impl Box { fn get(self) -> T { return self.value } }`.
+    fn generic_box_impl() -> AIRNode {
+        let self_param = node(
+            20,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(21, "self")),
+                ty: None,
+                default: None,
+            },
+        );
+        let body = block(
+            22,
+            vec![],
+            Some(node(
+                23,
+                NodeKind::Return {
+                    value: Some(Box::new(node(
+                        24,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(25, "self")),
+                            field: ident("value"),
+                        },
+                    ))),
+                },
+            )),
+        );
+        let method = node(
+            26,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("get"),
+                generic_params: vec![],
+                params: vec![self_param],
+                return_type: Some(Box::new(named_type(27, "T"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        node(
+            30,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(named_type(31, "Box")),
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        )
+    }
+
+    #[test]
+    fn generic_impl_merges_onto_generic_class() {
+        // `impl Box { ... }` for `record Box[T]` must declaration-merge onto the
+        // generic class: `interface Box<T>`, `self: Box<T>`, and a prototype
+        // function that re-declares `<T>` (it lives outside the class scope).
+        let out = gen(&module(
+            vec![],
+            vec![generic_box_record(), generic_box_impl()],
+        ));
+        assert!(
+            out.contains("interface Box<T> {"),
+            "merged interface should carry `<T>`, got: {out}"
+        );
+        assert!(
+            out.contains("get(self: Box<T>): T;"),
+            "interface signature should type `self` as `Box<T>`, got: {out}"
+        );
+        assert!(
+            out.contains("Box.prototype.get = function<T>(self: Box<T>): T {"),
+            "prototype function should re-declare `<T>` and reference `Box.prototype`, got: {out}"
         );
     }
 }

@@ -1,6 +1,6 @@
 // TEST: exec_lambda_closure
 // EXPECT: output "12;20"
-// EXPECT: targets js, ts, python, rust
+// EXPECT: targets js, ts, python, rust, go
 //
 // Lambda + first-class-function codegen. Exercises:
 //   - a function parameter of function type (`Fn(Int) -> Int`), applied inside
@@ -8,7 +8,7 @@
 //   - a lambda bound to a `let` and then passed by name (`applyTwice(inc, 10)`),
 //   - a lambda passed inline as a call argument (`applyTwice((n) => n * 2, ...)`).
 //
-// This is the regression fixture for the Python lambda defect (DV-codegen):
+// Originally the regression fixture for the Python lambda defect (DV-codegen):
 // `(n: Int) => n + 1` lowered to `lambda n: int: …`, a `SyntaxError`, because
 // the param type hint was emitted into the `lambda` param list (Python forbids
 // annotations there). The fix emits BARE param names for lambdas. The same
@@ -16,12 +16,13 @@
 // `f` parameter, which previously emitted no `from typing import Callable` and
 // raised `NameError` once the lambda parsed.
 //
-// `// EXPECT: targets` deliberately OMITS `go`: Go's lambda codegen infers the
-// closure's return type as `interface{}` (`func(n int64) interface{}`), which
-// does not satisfy the `func(int64) int64` parameter type — a separate,
-// pre-existing Go-backend defect (the cross-target lambda/generics work is a
-// later session; see DV12 for the generics half). This fixture seeds that work:
-// flip `go` on once the Go lambda return-type inference is fixed.
+// `go` is now included (codegen-completeness P1-b2): Go's lambda codegen
+// previously inferred every closure's return type as `interface{}`
+// (`func(n int64) interface{}`), which does not satisfy a typed
+// `func(int64) int64` parameter, so the typed assignment failed to compile.
+// The fix infers the lambda's return type structurally from its body (here
+// `n + 1` / `n * 2` over an `int64` param → `int64`), emitting
+// `func(n int64) int64 { return (n + 1) }`.
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).

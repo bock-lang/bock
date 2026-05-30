@@ -948,6 +948,64 @@ pub fn registered_variant<'a>(
     registry.get(&last.name)
 }
 
+/// Maps a generic type's declared name to its generic parameters. Built by a
+/// pre-scan of every `RecordDecl`/`EnumDecl`/`ClassDecl` in the bundle.
+///
+/// Backends with native generic-receiver / `impl` syntax (Rust `impl<T> T<T>`,
+/// Go `func (self *T[T])`, TS declaration-merged `interface T<T>`) need a
+/// generic type's parameters at its method-emission site even though the AIR
+/// `impl Box { ... }` block carries no generic params of its own — the `T` is
+/// declared on the *record*, not the impl. This registry recovers those params
+/// at the impl site. A *pre-scan* (rather than recording params as decls are
+/// emitted) is required because an `impl` may precede its type's declaration in
+/// source order, and because bundling concatenates modules so a `use`d type's
+/// decl can live in a different module than its `impl`. Mirrors
+/// [`collect_enum_variants`].
+pub type GenericDeclRegistry = HashMap<String, Vec<bock_ast::GenericParam>>;
+
+/// Pre-scan every module in the bundle and build the [`GenericDeclRegistry`].
+/// Records the generic parameters declared on each top-level `RecordDecl`,
+/// `EnumDecl`, and `ClassDecl`. Non-generic decls are recorded with an empty
+/// parameter list (their presence still lets a backend distinguish a known
+/// concrete type from an unknown one).
+#[must_use]
+pub fn collect_generic_decls(modules: &[(&AIRModule, &Path)]) -> GenericDeclRegistry {
+    let mut registry = GenericDeclRegistry::new();
+    for (module, _) in modules {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            collect_generic_decls_from_item(item, &mut registry);
+        }
+    }
+    registry
+}
+
+/// Record one decl's name → generic params into `registry`. Ignores items that
+/// are not record/enum/class declarations.
+fn collect_generic_decls_from_item(item: &AIRNode, registry: &mut GenericDeclRegistry) {
+    let (name, generic_params) = match &item.kind {
+        NodeKind::RecordDecl {
+            name,
+            generic_params,
+            ..
+        }
+        | NodeKind::EnumDecl {
+            name,
+            generic_params,
+            ..
+        }
+        | NodeKind::ClassDecl {
+            name,
+            generic_params,
+            ..
+        } => (name, generic_params),
+        _ => return,
+    };
+    registry.insert(name.name.clone(), generic_params.clone());
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1824,5 +1882,56 @@ mod tests {
         );
         // An unknown name does not.
         assert!(registered_variant(&reg, &variant_path("Nope")).is_none());
+    }
+
+    // ── Generic-decl registry ───────────────────────────────────────────────
+
+    /// `record Box[T] { value: T }`.
+    fn generic_record_decl(name: &str, params: &[&str]) -> AIRNode {
+        n(
+            0,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: bock_ast::Visibility::Public,
+                name: ident(name),
+                generic_params: params
+                    .iter()
+                    .map(|p| bock_ast::GenericParam {
+                        id: 0,
+                        span: dummy_span(),
+                        name: ident(p),
+                        bounds: vec![],
+                    })
+                    .collect(),
+                fields: vec![record_field("value")],
+            },
+        )
+    }
+
+    #[test]
+    fn collect_generic_decls_records_params_and_spans_modules() {
+        let boxed = generic_record_decl("Box", &["T"]);
+        let pair = generic_record_decl("Pair", &["A", "B"]);
+        let plain = generic_record_decl("Plain", &[]);
+        let lib = module_named("lib", &[], vec![pair]);
+        let main_m = module_named("main", &["lib"], vec![boxed, plain]);
+        let p = std::path::Path::new("x.bock");
+        let reg = collect_generic_decls(&[(&lib, p), (&main_m, p)]);
+
+        // Single-param generic.
+        let box_params = reg.get("Box").expect("Box registered");
+        assert_eq!(box_params.len(), 1);
+        assert_eq!(box_params[0].name.name, "T");
+
+        // Two-param generic, declaration order preserved, across module boundary.
+        let pair_params = reg.get("Pair").expect("Pair registered");
+        assert_eq!(pair_params.len(), 2);
+        assert_eq!(pair_params[0].name.name, "A");
+        assert_eq!(pair_params[1].name.name, "B");
+
+        // Non-generic decl is present with an empty param list.
+        assert_eq!(reg.get("Plain").map(Vec::len), Some(0));
+        // Unknown type is absent.
+        assert!(!reg.contains_key("Nope"));
     }
 }

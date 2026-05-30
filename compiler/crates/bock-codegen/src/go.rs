@@ -283,6 +283,9 @@ impl CodeGenerator for GoGenerator {
         let mut ctx = GoEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
+        ctx.generic_decls =
+            crate::generator::collect_generic_decls(&[(module, std::path::Path::new(""))]);
+        ctx.collect_record_param_fields(module);
         ctx.collect_async_fns(module);
         ctx.collect_methods(module);
         ctx.collect_optional_returns(module);
@@ -351,6 +354,9 @@ impl CodeGenerator for GoGenerator {
         // Pre-scan enum variants across the whole bundle so a `use`d enum's
         // variants resolve at a construction/pattern site in another module.
         ctx.enum_variants = crate::generator::collect_enum_variants(modules);
+        // Pre-scan generic-type declarations so an `impl Box { ... }` recovers
+        // the `[T]` declared on `record Box[T]` even across module boundaries.
+        ctx.generic_decls = crate::generator::collect_generic_decls(modules);
         // Pre-scan method / Optional-return metadata across every module so a
         // match whose scrutinee calls a function/method defined in another
         // bundled module still type-asserts its payload correctly.
@@ -358,6 +364,7 @@ impl CodeGenerator for GoGenerator {
             ctx.collect_methods(module);
             ctx.collect_optional_returns(module);
             ctx.collect_method_optional_returns(module);
+            ctx.collect_record_param_fields(module);
         }
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
@@ -510,6 +517,27 @@ struct GoEmitCtx {
     /// Optional/Result pre-seeds are filtered out (Optional has its own
     /// `__bockOption` runtime). Pre-scanned across the bundle.
     enum_variants: crate::generator::EnumVariantRegistry,
+    /// Generic-type declaration registry: a record/enum/class name → its
+    /// declared generic params. Lets an `impl Box { ... }` block recover the
+    /// `[T any]` declared on `record Box[T]` so a Go method receiver emits
+    /// `func (self *Box[T]) ...` (Go requires the type-param list on the
+    /// receiver) and a construction emits `Box[int64]{...}`. Pre-scanned across
+    /// the bundle (mirrors [`Self::enum_variants`]).
+    generic_decls: crate::generator::GenericDeclRegistry,
+    /// Maps an in-scope variable name → its Go type, used to infer a lambda's
+    /// return type. Go infers a bare `func(...) interface{}` for every lambda;
+    /// when such a closure is passed to a typed `func(int64) int64` parameter
+    /// the assignment fails to compile. Tracking param/binding Go types lets the
+    /// lambda emitter recover a concrete return type structurally from the body.
+    /// Scoped per function/lambda body and restored on exit.
+    var_go_type: HashMap<String, String>,
+    /// Maps a generic record's name → for each generic param (in declaration
+    /// order) the field name whose declared type is exactly that param. Lets a
+    /// construction `Box { value: 42 }` emit the explicit instantiation
+    /// `Box[int64]{...}` Go requires (Go does *not* infer struct type args from
+    /// composite-literal field values). `None` for a param not directly named by
+    /// any field's type (then the arg falls back to `any`). Pre-scanned.
+    record_param_fields: HashMap<String, Vec<Option<String>>>,
 }
 
 impl GoEmitCtx {
@@ -539,7 +567,59 @@ impl GoEmitCtx {
             concurrency_runtime_emitted: false,
             optional_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
+            generic_decls: crate::generator::GenericDeclRegistry::new(),
+            var_go_type: HashMap::new(),
+            record_param_fields: HashMap::new(),
         }
+    }
+
+    /// Pre-scan a module's top-level `RecordDecl`s and, for each generic
+    /// record, record which field's declared type is each generic param (in
+    /// param order). A construction site then looks up the field value's Go
+    /// type per param to emit the explicit `[arg, ...]` instantiation Go
+    /// requires. Additive across a bundle (mirrors the other `collect_*`).
+    fn collect_record_param_fields(&mut self, module: &AIRModule) {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            return;
+        };
+        for item in items {
+            let NodeKind::RecordDecl {
+                name,
+                generic_params,
+                fields,
+                ..
+            } = &item.kind
+            else {
+                continue;
+            };
+            if generic_params.is_empty() {
+                continue;
+            }
+            let per_param: Vec<Option<String>> = generic_params
+                .iter()
+                .map(|gp| {
+                    fields
+                        .iter()
+                        .find(|f| Self::ast_type_is_param(&f.ty, &gp.name.name))
+                        .map(|f| f.name.name.clone())
+                })
+                .collect();
+            self.record_param_fields
+                .insert(name.name.clone(), per_param);
+        }
+    }
+
+    /// True when `ty` is a bare named type whose single segment is `param`
+    /// (i.e. the field is declared with exactly the generic param `T`, not
+    /// `List[T]` or some other composite).
+    fn ast_type_is_param(ty: &TypeExpr, param: &str) -> bool {
+        matches!(
+            ty,
+            TypeExpr::Named { path, args, .. }
+                if args.is_empty()
+                    && path.segments.len() == 1
+                    && path.segments[0].name == param
+        )
     }
 
     /// Variant info for `path` when its last segment is a registered *user*
@@ -751,6 +831,121 @@ impl GoEmitCtx {
         None
     }
 
+    /// True when `node` is (or contains, in operand position) an identifier
+    /// whose Go type is not in `scope` — i.e. an `interface{}`-typed value an
+    /// arithmetic operation cannot soundly operate on. Used to keep arithmetic
+    /// type-inference conservative (untyped lambda params stay `interface{}`).
+    fn has_unresolved_operand(node: &AIRNode, scope: &HashMap<String, String>) -> bool {
+        match &node.kind {
+            NodeKind::Identifier { name } => !scope.contains_key(&to_camel_case(&name.name)),
+            NodeKind::UnaryOp { operand, .. } => Self::has_unresolved_operand(operand, scope),
+            NodeKind::BinaryOp { left, right, .. } => {
+                Self::has_unresolved_operand(left, scope)
+                    || Self::has_unresolved_operand(right, scope)
+            }
+            _ => false,
+        }
+    }
+
+    /// Best-effort structural inference of an expression's Go type. Reaches the
+    /// cases needed to (a) instantiate a generic struct construction
+    /// (`Box[int64]{...}`) and (b) give a lambda a concrete return type rather
+    /// than `interface{}`. Handles literals, in-scope identifiers (via
+    /// [`Self::var_go_type`]), arithmetic/comparison binary ops, and unary ops.
+    /// Returns `None` when the type can't be determined structurally — callers
+    /// fall back to `any`/`interface{}`, never a wrong type.
+    fn infer_go_expr_type(&self, node: &AIRNode) -> Option<String> {
+        match &node.kind {
+            NodeKind::Literal { lit } => match lit {
+                Literal::Int(_) => Some("int64".to_string()),
+                Literal::Float(_) => Some("float64".to_string()),
+                Literal::Bool(_) => Some("bool".to_string()),
+                Literal::String(_) => Some("string".to_string()),
+                Literal::Char(_) => Some("rune".to_string()),
+                Literal::Unit => None,
+            },
+            NodeKind::Identifier { name } => {
+                self.var_go_type.get(&to_camel_case(&name.name)).cloned()
+            }
+            NodeKind::Interpolation { .. } => Some("string".to_string()),
+            NodeKind::UnaryOp { op, operand } => match op {
+                UnaryOp::Not => Some("bool".to_string()),
+                UnaryOp::Neg | UnaryOp::BitNot => self.infer_go_expr_type(operand),
+            },
+            NodeKind::BinaryOp { op, left, right } => match op {
+                BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or
+                | BinOp::Is => Some("bool".to_string()),
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Rem
+                | BinOp::Pow
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor => {
+                    // An arithmetic op is only soundly typed when neither operand
+                    // is an *unresolved* identifier: a `func(x interface{}) ...`
+                    // body of `x * 2` would not type-check in Go regardless of
+                    // the literal, so leave the return type as `interface{}`
+                    // rather than inferring a type the operation can't satisfy.
+                    if Self::has_unresolved_operand(left, &self.var_go_type)
+                        || Self::has_unresolved_operand(right, &self.var_go_type)
+                    {
+                        return None;
+                    }
+                    self.infer_go_expr_type(left)
+                        .or_else(|| self.infer_go_expr_type(right))
+                }
+                BinOp::Compose => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Build the explicit type-argument suffix (`[int64]`, `[int64, string]`)
+    /// for a generic struct construction. For each of the target record's
+    /// generic params (in declaration order) it finds the field whose declared
+    /// type is exactly that param, then infers that field value's Go type. A
+    /// param with no directly-typed field, or a value whose type can't be
+    /// inferred, falls back to `any` (still a valid, if loose, instantiation).
+    /// Returns `""` for a non-generic / unregistered type.
+    fn infer_construct_type_args(
+        &self,
+        type_name: &str,
+        fields: &[bock_air::AirRecordField],
+    ) -> String {
+        let Some(per_param) = self.record_param_fields.get(type_name) else {
+            return String::new();
+        };
+        if per_param.is_empty() {
+            return String::new();
+        }
+        let args: Vec<String> = per_param
+            .iter()
+            .map(|field_name| {
+                field_name
+                    .as_ref()
+                    .and_then(|fname| {
+                        fields
+                            .iter()
+                            .find(|f| &f.name.name == fname)
+                            .and_then(|f| f.value.as_deref())
+                            .and_then(|v| self.infer_go_expr_type(v))
+                    })
+                    .unwrap_or_else(|| "any".to_string())
+            })
+            .collect();
+        format!("[{}]", args.join(", "))
+    }
+
     /// Record the `Optional[T]` and `List[T]` element Go types of a
     /// function/lambda's parameters into the variable scopes, so a `match param
     /// { Some(x) => ... }` (direct Optional) or `match param.get(i) { Some(x) =>
@@ -780,6 +975,27 @@ impl GoEmitCtx {
             }
         }
         (saved_opt, saved_list)
+    }
+
+    /// Record each typed param's Go type into [`Self::var_go_type`] so the
+    /// body's expression types can be inferred (chiefly to give a lambda a
+    /// concrete return type). Returns the previous map so the caller can restore
+    /// it on exit. Untyped params are skipped (left absent → inference yields
+    /// the `interface{}` fallback, never a wrong type).
+    fn enter_param_go_types(&mut self, params: &[AIRNode]) -> HashMap<String, String> {
+        let saved = self.var_go_type.clone();
+        for p in params {
+            if let NodeKind::Param {
+                pattern,
+                ty: Some(t),
+                ..
+            } = &p.kind
+            {
+                let name = to_camel_case(&self.pattern_to_binding_name(pattern));
+                self.var_go_type.insert(name, self.type_to_go(t));
+            }
+        }
+        saved
     }
 
     /// Resolve the Go element type to assert for the payload of a `Some` bound in
@@ -1378,7 +1594,7 @@ impl GoEmitCtx {
                 // Methods.
                 for method in methods {
                     self.buf.push('\n');
-                    self.emit_method(&name.name, method, false)?;
+                    self.emit_method(&name.name, generic_params, method, false)?;
                 }
                 Ok(())
             }
@@ -1416,12 +1632,19 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::ImplBlock {
+                generic_params,
                 target,
                 methods,
                 trait_path,
                 ..
             } => {
                 let target_name = self.type_expr_to_string(target);
+                // The receiver's type-param list. Go requires the parameters on a
+                // generic type's method receiver: `func (self *Box[T]) ...`. The
+                // params come from the impl's own list when present, else from the
+                // record/enum decl (the common `impl Box { ... }` where `T` is
+                // declared on `record Box[T]`, not the impl).
+                let target_generics = self.impl_target_generics(generic_params, &target_name);
                 // Value receivers for trait/effect impls so `Handler{}` satisfies
                 // the interface; pointer receivers for inherent `impl T { ... }`.
                 let use_value_receiver = trait_path.is_some();
@@ -1429,7 +1652,7 @@ impl GoEmitCtx {
                     if i > 0 {
                         self.buf.push('\n');
                     }
-                    self.emit_method(&target_name, method, use_value_receiver)?;
+                    self.emit_method(&target_name, &target_generics, method, use_value_receiver)?;
                 }
                 Ok(())
             }
@@ -1569,6 +1792,36 @@ impl GoEmitCtx {
     }
 
     // ── Generics ────────────────────────────────────────────────────────────
+
+    /// Resolve the generic params that apply to an `impl` target. Prefers the
+    /// impl's own params (`impl[T] Box[T] { ... }`); falls back to the generic
+    /// params declared on the target record/enum (`impl Box { ... }` where `T`
+    /// is declared on `record Box[T]`). Returns an empty slice for a
+    /// non-generic target.
+    fn impl_target_generics(
+        &self,
+        impl_params: &[bock_ast::GenericParam],
+        target_name: &str,
+    ) -> Vec<bock_ast::GenericParam> {
+        if !impl_params.is_empty() {
+            return impl_params.to_vec();
+        }
+        self.generic_decls
+            .get(target_name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Render a *use-site* generic argument list (`[T]`) from generic params —
+    /// the bare names only, never the `any`/bound clause. Used on a method
+    /// receiver type (`*Box[T]`) where the params are already in scope.
+    fn format_generic_param_args(&self, params: &[bock_ast::GenericParam]) -> String {
+        if params.is_empty() {
+            return String::new();
+        }
+        let names: Vec<&str> = params.iter().map(|p| p.name.name.as_str()).collect();
+        format!("[{}]", names.join(", "))
+    }
 
     fn format_generic_params(&self, params: &[bock_ast::GenericParam]) -> String {
         if params.is_empty() {
@@ -1759,6 +2012,7 @@ impl GoEmitCtx {
     fn emit_method(
         &mut self,
         receiver_type: &str,
+        target_generics: &[bock_ast::GenericParam],
         method: &AIRNode,
         use_value_receiver: bool,
     ) -> Result<(), CodegenError> {
@@ -1809,8 +2063,13 @@ impl GoEmitCtx {
                     .unwrap_or_default()
             };
             let receiver_prefix = if use_value_receiver { "" } else { "*" };
+            // Go binds a generic type's params on the receiver itself:
+            // `func (self *Box[T]) ...`. The bare-name arg list (`[T]`) brings
+            // `T` into scope for the receiver type, params, and body.
+            let receiver_generics = self.format_generic_param_args(target_generics);
             self.writeln(&format!(
-                "func ({receiver_var} {receiver_prefix}{receiver_type}) {method_name}({}){ret} {{",
+                "func ({receiver_var} {receiver_prefix}{receiver_type}{receiver_generics}) \
+                 {method_name}({}){ret} {{",
                 all_params.join(", "),
             ));
             self.indent += 1;
@@ -2489,14 +2748,22 @@ impl GoEmitCtx {
             }
             NodeKind::Lambda { params, body } => {
                 let param_strs = self.collect_param_strs(params);
-                // Determine return type from body context (best effort).
+                // Record the lambda's typed params so the body's return type can
+                // be inferred structurally. Without a concrete return type Go
+                // infers `interface{}`, which fails to satisfy a typed
+                // `func(int64) int64` parameter at the use site.
+                let saved_go_types = self.enter_param_go_types(params);
+                let ret_ty = self
+                    .infer_go_expr_type(body)
+                    .unwrap_or_else(|| "interface{}".to_string());
                 let _ = write!(
                     self.buf,
-                    "func({}) interface{{}} {{ return ",
+                    "func({}) {ret_ty} {{ return ",
                     param_strs.join(", ")
                 );
                 self.emit_expr(body)?;
                 self.buf.push_str(" }");
+                self.var_go_type = saved_go_types;
                 Ok(())
             }
             NodeKind::Pipe { left, right } => self.emit_pipe(left, right),
@@ -2547,9 +2814,14 @@ impl GoEmitCtx {
                         .collect::<Vec<_>>()
                         .join(".")
                 };
+                // Go requires an explicit type-argument list on a generic
+                // struct literal (`Box[int64]{...}`); it does NOT infer the args
+                // from the field values. Recover each param's concrete Go type
+                // by inferring the type of the field value that names it.
+                let type_args = self.infer_construct_type_args(&type_name, fields);
                 if let Some(_sp) = spread {
                     // Go doesn't have spread syntax; emit TODO comment.
-                    self.buf.push_str(&format!("{type_name}{{"));
+                    self.buf.push_str(&format!("{type_name}{type_args}{{"));
                     self.buf.push_str("/* spread */ ");
                     for (i, f) in fields.iter().enumerate() {
                         if i > 0 {
@@ -2564,7 +2836,7 @@ impl GoEmitCtx {
                     }
                     self.buf.push('}');
                 } else {
-                    self.buf.push_str(&format!("{type_name}{{"));
+                    self.buf.push_str(&format!("{type_name}{type_args}{{"));
                     for (i, f) in fields.iter().enumerate() {
                         if i > 0 {
                             self.buf.push_str(", ");
@@ -6136,6 +6408,191 @@ mod tests {
         assert!(
             !out.contains("return logger.Log("),
             "Void effect op in Void fn should NOT be preceded by `return`, got: {out}"
+        );
+    }
+
+    // ── Generics codegen (DV12 / P1-b2) ───────────────────────────────────────
+
+    fn generic_param(id: u32, name: &str) -> bock_ast::GenericParam {
+        bock_ast::GenericParam {
+            id,
+            span: span(),
+            name: ident(name),
+            bounds: vec![],
+        }
+    }
+
+    fn named_type(id: u32, name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::TypeNamed {
+                path: type_path(&[name]),
+                args: vec![],
+            },
+        )
+    }
+
+    /// `record Box[T] { value: T }`.
+    fn generic_box_record() -> AIRNode {
+        node(
+            10,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                name: ident("Box"),
+                generic_params: vec![generic_param(11, "T")],
+                fields: vec![bock_ast::RecordDeclField {
+                    id: 12,
+                    span: span(),
+                    name: ident("value"),
+                    ty: TypeExpr::Named {
+                        id: 13,
+                        span: span(),
+                        path: type_path(&["T"]),
+                        args: vec![],
+                    },
+                    default: None,
+                }],
+            },
+        )
+    }
+
+    /// `impl Box { fn get(self) -> T { return self.value } }`.
+    fn generic_box_impl() -> AIRNode {
+        let self_param = node(
+            20,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(21, "self")),
+                ty: None,
+                default: None,
+            },
+        );
+        let body = block(
+            22,
+            vec![],
+            Some(node(
+                23,
+                NodeKind::Return {
+                    value: Some(Box::new(node(
+                        24,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(25, "self")),
+                            field: ident("value"),
+                        },
+                    ))),
+                },
+            )),
+        );
+        let method = node(
+            26,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("get"),
+                generic_params: vec![],
+                params: vec![self_param],
+                return_type: Some(Box::new(named_type(27, "T"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        node(
+            30,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(named_type(31, "Box")),
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        )
+    }
+
+    #[test]
+    fn generic_method_receiver_carries_type_params() {
+        // `impl Box { ... }` for `record Box[T]` must emit
+        // `func (self *Box[T]) get() T` — Go requires the type-param list on the
+        // receiver, recovered from the record decl since the impl has none.
+        let out = gen(&module(
+            vec![],
+            vec![generic_box_record(), generic_box_impl()],
+        ));
+        assert!(
+            out.contains("func (self *Box[T]) get() T {"),
+            "generic method receiver should carry `[T]`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_construct_emits_explicit_type_args() {
+        // `Box { value: 42 }` → `Box[int64]{Value: 42}` (Go does not infer
+        // struct type args from composite-literal fields).
+        let construct = node(
+            40,
+            NodeKind::RecordConstruct {
+                path: type_path(&["Box"]),
+                fields: vec![bock_air::AirRecordField {
+                    name: ident("value"),
+                    value: Some(Box::new(int_lit(41, "42"))),
+                }],
+                spread: None,
+            },
+        );
+        let let_stmt = node(
+            42,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(43, "b")),
+                ty: None,
+                value: Box::new(construct),
+            },
+        );
+        let out = gen(&module(vec![], vec![generic_box_record(), let_stmt]));
+        assert!(
+            out.contains("Box[int64]{Value: 42}"),
+            "generic construction should carry explicit `[int64]`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn lambda_return_type_inferred_from_body() {
+        // `(n: Int) => n + 1` → `func(n int64) int64 { return (n + 1) }`, not
+        // `interface{}` (which fails to satisfy a typed `func(int64) int64`).
+        let lambda = node(
+            50,
+            NodeKind::Lambda {
+                params: vec![typed_param_node(51, "n", "Int")],
+                body: Box::new(node(
+                    52,
+                    NodeKind::BinaryOp {
+                        op: BinOp::Add,
+                        left: Box::new(id_node(53, "n")),
+                        right: Box::new(int_lit(54, "1")),
+                    },
+                )),
+            },
+        );
+        let let_stmt = node(
+            55,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(56, "inc")),
+                ty: None,
+                value: Box::new(lambda),
+            },
+        );
+        let out = gen(&module(vec![], vec![let_stmt]));
+        assert!(
+            out.contains("func(n int64) int64 {"),
+            "lambda should infer `int64` return type, got: {out}"
+        );
+        assert!(
+            !out.contains("func(n int64) interface{}"),
+            "lambda should NOT fall back to interface{{}} return, got: {out}"
         );
     }
 }
