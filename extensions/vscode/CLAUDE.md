@@ -20,7 +20,7 @@ cd extensions/vscode
 npm install                     # first time
 npm run compile                 # tsc build
 npm run watch                   # tsc --watch for the inner loop
-npm test                        # vscode-test runner
+npm test                        # mocha + ts-node unit tests (headless)
 npm run lint                    # eslint
 ```
 
@@ -47,3 +47,34 @@ npx @vscode/vsce package        # produces .vsix
 ```
 
 Publishing happens through `release.yml` on tag push, not manually.
+
+## Testing
+
+Unit tests live in `test/` and run headlessly with **Mocha + ts-node**
+— no Extension Host, no Electron download, so they run in plain CI.
+
+```bash
+npm test                        # type-checks test/ then runs the suite
+```
+
+What this means in practice:
+
+- Tests target **pure logic** — parsers and helpers that don't need the
+  live `vscode` API (e.g. `extractEffects` / `parseProjectEffects` in
+  `features/effect-analyzer.ts`, `escapeHtml` in `shared/webview.ts`).
+- Source modules still carry a top-level `import * as vscode from 'vscode'`
+  for type annotations. `test/register-vscode.ts` (a Mocha `--require`
+  hook) intercepts `require('vscode')` and returns `test/vscode-stub.ts`,
+  a minimal stand-in exposing only the runtime constructors the tested
+  code touches (`Position`, `Range`, `Uri`). Extend the stub if a newly
+  tested function references more of the API.
+- `npm test` first runs `tsc --noEmit -p test/tsconfig.json` so the test
+  sources are genuinely type-checked (ts-node executes transpile-only at
+  runtime), then runs Mocha. Both must be green.
+- Logic that genuinely needs the live `vscode` API (commands, webview
+  panels, tree views) is **not** covered here — that needs
+  `@vscode/test-electron`. Prefer extracting pure helpers and testing
+  those over reaching for the Electron harness.
+
+`test/` and `.mocharc.json` are excluded from the packaged `.vsix` via
+`.vscodeignore`.
