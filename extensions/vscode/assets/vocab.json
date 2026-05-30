@@ -658,6 +658,11 @@
         "name": "Channel",
         "kind": "type",
         "signature": "Channel"
+      },
+      {
+        "name": "Ordering",
+        "kind": "type",
+        "signature": "Ordering"
       }
     ],
     "prelude_functions": [
@@ -729,14 +734,19 @@
         "signature": "Displayable"
       },
       {
-        "name": "Iterator",
+        "name": "Serializable",
         "kind": "trait",
-        "signature": "Iterator"
+        "signature": "Serializable"
       },
       {
-        "name": "Iterable",
+        "name": "Cloneable",
         "kind": "trait",
-        "signature": "Iterable"
+        "signature": "Cloneable"
+      },
+      {
+        "name": "Default",
+        "kind": "trait",
+        "signature": "Default"
       },
       {
         "name": "Into",
@@ -747,6 +757,26 @@
         "name": "From",
         "kind": "trait",
         "signature": "From"
+      },
+      {
+        "name": "TryFrom",
+        "kind": "trait",
+        "signature": "TryFrom"
+      },
+      {
+        "name": "Iterator",
+        "kind": "trait",
+        "signature": "Iterator"
+      },
+      {
+        "name": "Iterable",
+        "kind": "trait",
+        "signature": "Iterable"
+      },
+      {
+        "name": "Error",
+        "kind": "trait",
+        "signature": "Error"
       }
     ],
     "prelude_constructors": [
@@ -769,6 +799,21 @@
         "name": "Err",
         "kind": "constructor",
         "signature": "Err"
+      },
+      {
+        "name": "Less",
+        "kind": "constructor",
+        "signature": "Less"
+      },
+      {
+        "name": "Equal",
+        "kind": "constructor",
+        "signature": "Equal"
+      },
+      {
+        "name": "Greater",
+        "kind": "constructor",
+        "signature": "Greater"
       }
     ]
   },
@@ -1543,6 +1588,16 @@
         "related_codes": []
       },
       {
+        "code": "E4011",
+        "severity": "error",
+        "summary": "Cannot implement a core trait for a primitive type.",
+        "description": "Core traits (`Equatable`, `Comparable`, `Displayable`, `Hashable`) have sealed, compiler-provided conformances for primitive types. User code may not add its own `impl` of a core trait for a primitive (an orphan-rule violation). Wrap the primitive in a newtype and implement the trait for that instead.",
+        "spec_refs": [
+          "§18.5"
+        ],
+        "related_codes": []
+      },
+      {
         "code": "E5001",
         "severity": "error",
         "summary": "Use after move.",
@@ -1689,11 +1744,11 @@
       },
       {
         "name": "build",
-        "summary": "Transpile and compile an Bock project."
+        "summary": "Transpile and compile a Bock project."
       },
       {
         "name": "run",
-        "summary": "Execute an Bock program via the interpreter."
+        "summary": "Execute a Bock program via the interpreter."
       },
       {
         "name": "check",

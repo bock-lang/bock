@@ -57,6 +57,69 @@ pub fn seed_imports(checker: &mut TypeChecker, imports: &[ImportDecl], registry:
     }
 }
 
+// ─── Prelude injection (§18.2) ────────────────────────────────────────────────
+
+/// The §18.2 prelude symbols that are **defined in the embedded `core.*`
+/// modules** and re-exported into the prelude (Design DQ9: "defined in
+/// `core.*`, re-exported into the prelude").
+///
+/// Each entry is `(module_id, symbol_name)`. Seeding a symbol pulls its full
+/// definition (enum variants, trait method signatures, etc.) from the registry
+/// via the same path an explicit `use core.<module>.{<symbol>}` would take —
+/// so bare `Ordering`, `Comparable`, `Into`, … resolve and type-check without
+/// an import.
+///
+/// The set is intentionally the §18.2 subset whose **definitions live in an
+/// embedded core module**. The remaining §18.2 names are handled elsewhere:
+/// primitives (`Int`, `Float`, …) are intrinsic; `Optional`/`Some`/`None`,
+/// `Result`/`Ok`/`Err`, `List`/`Map`/`Set`, `Fn`, `Duration`/`Instant`, and the
+/// utility functions (`print`, `println`, `debug`, `assert`, `todo`,
+/// `unreachable`, `sleep`) are seeded as builtins by the CLI's
+/// `register_type_builtins`. Traits with no embedded definition yet
+/// (`Hashable`, `Serializable`, `Cloneable`, `Default`, `Iterator`, `Iterable`)
+/// are name-level prelude builtins in the resolver only.
+///
+/// Seeding `Ordering` also seeds its variants `Less`/`Equal`/`Greater`
+/// (via the enum-detail path), so they need no separate entries.
+pub const PRELUDE_FROM_CORE: &[(&str, &str)] = &[
+    // core.compare
+    ("core.compare", "Ordering"),
+    ("core.compare", "Comparable"),
+    ("core.compare", "Equatable"),
+    // core.convert
+    ("core.convert", "Into"),
+    ("core.convert", "From"),
+    ("core.convert", "TryFrom"),
+    ("core.convert", "Displayable"),
+    // core.error
+    ("core.error", "Error"),
+];
+
+/// Seeds the §18.2 prelude subset that is **defined in the embedded `core.*`
+/// modules** into the type checker, as if every user module began with the
+/// corresponding `use core.<module>.{<symbol>}`.
+///
+/// This makes bare `Ordering`/`Less`/`Comparable`/`Into`/`Error`/… resolve and
+/// type-check without an explicit import (Design DQ9). It reuses the exact
+/// per-symbol seeding path as [`seed_imports`], so trait method signatures and
+/// enum variants are registered identically.
+///
+/// Symbols are only seeded when their source module is present in `registry`
+/// (the embedded core sources are always prepended before user files, so they
+/// are present for `check`/`build`/`run`). A user's explicit
+/// `use core.<module>.{...}` still works: imports are seeded after this call
+/// and simply re-define the same symbol with the same type.
+///
+/// Call this **after** the CLI's builtin seeding and **before**
+/// [`seed_imports`], for every user module.
+pub fn seed_prelude(checker: &mut TypeChecker, registry: &ModuleRegistry) {
+    for (module_id, name) in PRELUDE_FROM_CORE {
+        if let Ok(sym) = registry.resolve_symbol(module_id, name) {
+            seed_symbol(checker, name, sym);
+        }
+    }
+}
+
 // ─── Symbol seeding ─────────────────────────────────────────────────────────
 
 /// Seeds a single exported symbol into the type checker.

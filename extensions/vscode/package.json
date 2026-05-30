@@ -1,7 +1,7 @@
 {
   "name": "bock-lang",
   "displayName": "Bock Language",
-  "description": "Official VS Code extension for the Bock programming language — syntax, LSP, spec panel, and decision manifest UI.",
+  "description": "Official VS Code extension for the Bock programming language \u2014 syntax, LSP, spec panel, and decision manifest UI.",
   "version": "0.1.1",
   "publisher": "bock-lang",
   "license": "MIT",
@@ -151,7 +151,7 @@
       },
       {
         "command": "bock.openSpecAt",
-        "title": "Open Spec at Section…",
+        "title": "Open Spec at Section\u2026",
         "category": "Bock"
       },
       {
@@ -374,6 +374,8 @@
     "package": "node esbuild.js --production",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
+    "typecheck:test": "tsc --noEmit -p test/tsconfig.json",
+    "test": "npm run typecheck:test && TS_NODE_PROJECT=test/tsconfig.json mocha",
     "publish": "vsce publish"
   },
   "dependencies": {
@@ -383,11 +385,14 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/mocha": "^10.0.10",
     "@types/node": "^25.9.1",
     "@types/vscode": "^1.120.0",
     "@vscode/vsce": "^3.9.1",
     "esbuild": "^0.20.0",
     "eslint": "^10.4.0",
+    "mocha": "^11.7.6",
+    "ts-node": "^10.9.2",
     "typescript": "^5.3.3",
     "typescript-eslint": "^8.59.4"
   }

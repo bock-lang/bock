@@ -1,0 +1,20 @@
+// TEST: stdlib_prelude_error
+// EXPECT: no_errors
+//
+// The prelude `Error` trait (from `core.error`) is implementable without an
+// import.
+module userapp
+
+public record NotFound {
+  what: String
+}
+
+impl Error for NotFound {
+  public fn message(self) -> String {
+    self.what
+  }
+}
+
+public fn describe(e: NotFound) -> String {
+  e.message()
+}

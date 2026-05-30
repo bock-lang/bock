@@ -12,7 +12,9 @@ use bock_errors::{Diagnostic, DiagnosticBag};
 use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
-use bock_types::{seed_imports, FnType, PrimitiveType, Strictness, Type, TypeChecker};
+use bock_types::{
+    seed_imports, seed_prelude, FnType, PrimitiveType, Strictness, Type, TypeChecker,
+};
 
 /// Result of running the check pipeline on a single document.
 pub struct CheckResult {
@@ -89,6 +91,7 @@ pub fn check_document(path: PathBuf, content: String) -> CheckResult {
     // 5. Type check
     let mut checker = TypeChecker::new();
     register_builtins(&mut checker);
+    seed_prelude(&mut checker, &registry);
     seed_imports(&mut checker, &module.imports, &registry);
     checker.check_module(&mut air_module);
     push_all(&mut diagnostics, &checker.diags);

@@ -23,7 +23,8 @@ use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
 use bock_types::{
-    collect_exports, seed_imports, FnType, PrimitiveType, Strictness, Type, TypeChecker,
+    collect_exports, seed_imports, seed_prelude, FnType, PrimitiveType, Strictness, Type,
+    TypeChecker,
 };
 
 /// Run the `bock run` command.
@@ -242,9 +243,22 @@ async fn run_project(
     let mut dep_graph = DepGraph::new();
     let mut id_to_index: HashMap<String, usize> = HashMap::new();
 
+    // Embedded core (`is_stdlib`) module ids — every user module implicitly
+    // depends on them so the §18.2 prelude can seed core-defined symbols even
+    // without an explicit `use` (see `check::run`).
+    let core_module_ids: Vec<String> = parsed_files
+        .iter()
+        .enumerate()
+        .filter(|(_, pf)| pf.is_stdlib)
+        .map(|(i, pf)| dep_graph::module_id_from_module(&pf.module, i))
+        .collect();
+
     for (i, pf) in parsed_files.iter().enumerate() {
         let module_id = dep_graph::module_id_from_module(&pf.module, i);
-        let deps = dep_graph::extract_dependencies(&pf.module.imports);
+        let mut deps = dep_graph::extract_dependencies(&pf.module.imports);
+        if !pf.is_stdlib {
+            dep_graph::add_prelude_deps(&mut deps, &module_id, &core_module_ids);
+        }
         dep_graph.add_module_with_deps(module_id.clone(), deps);
         id_to_index.insert(module_id, i);
     }
@@ -291,6 +305,7 @@ async fn run_project(
         // 4c. Type check (T-AIR)
         let mut checker = TypeChecker::new();
         register_type_builtins(&mut checker);
+        seed_prelude(&mut checker, &registry);
         seed_imports(&mut checker, &pf.module.imports, &registry);
         checker.check_module(&mut air_module);
         collect_diagnostics(&mut all_diagnostics, &checker.diags);

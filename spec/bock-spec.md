@@ -1058,7 +1058,7 @@ Custom strategies that perform blocking work or hold resources across checkpoint
 
 **Runtime decisions in the manifest.** Adaptive handler selections are runtime decisions, stored separately from build-time codegen decisions. Build decisions live in `.bock/decisions/build/` and are committed to version control — they are artifacts of the compilation process, stable across runs, and reviewable as part of code review. Runtime decisions live in `.bock/decisions/runtime/` and are environment-local — they accumulate with every production event and are not committed. `bock inspect` shows build decisions by default; `bock inspect --runtime` surfaces runtime decisions with filtering by operation, error type, or time window. `bock override` operates on build decisions by default and requires explicit `--runtime` to pin runtime selections.
 
-**Promotion path.** A runtime selection that has stabilized (same strategy chosen for the same error signature across many occurrences) can be promoted to a build-time pin. `bock override --promote <selection-id>` copies the pin from `runtime/` to `build/` and commits it to the codebase, freezing that recovery decision into the deployed configuration. This is the path by which adaptive handlers transition from "AI decides at runtime" to "code decides at build time" — the adaptive tuning phase yields deterministic production behavior.
+**Promotion path.** A runtime selection that has stabilized (same strategy chosen for the same error signature across many occurrences) can be promoted to a build-time pin. `bock override <decision-id> --promote` copies the pin from `runtime/` to `build/` and commits it to the codebase, freezing that recovery decision into the deployed configuration (the v1 `override` surface per §20.1: a bare `--promote` flag operating on the positional decision id). This is the path by which adaptive handlers transition from "AI decides at runtime" to "code decides at build time" — the adaptive tuning phase yields deterministic production behavior.
 
 ---
 
@@ -1445,7 +1445,7 @@ These annotations are consumed by `bock test`, not by the C-AIR context interpre
 | `@test` | Marks a function as a test; included in `bock test` runs |
 | `@test(skip: "reason")` | Marks a test as skipped without removing it |
 
-The test runner reads these annotations directly from source; they do not flow through C-AIR codegen paths. Test functions are excluded from production builds (`bock build --no-tests` per §20.1).
+The test runner reads these annotations directly from source; they do not flow through C-AIR codegen paths. Test functions are excluded from production builds via the `--no-tests` opt-out, which is **Reserved for v1.x** per §20.1 (test inclusion is the v1 default).
 
 ### 15.3 — Application sites
 
@@ -1567,7 +1567,7 @@ Source → Parse → Type Check → Context Resolve → Target Analyze
 
 **Tier 2 — Rule-Based Generation (fallback):** Traditional deterministic transpilation via syntax rules and templates. Handles the common case by default and serves as the fallback when Tier 1 fails or is unavailable. Activated exclusively via `bock build --deterministic` or `@deterministic`.
 
-**Tier 3 — AI Optimization (optional):** A second AI pass reviewing generated code for performance and idiomaticness. Activated via `bock build --optimize`.
+**Tier 3 — AI Optimization (optional):** A second AI pass reviewing generated code for performance and idiomaticness. Activated via `bock build --optimize`, which is **Reserved for v1.x** per §20.1 (it ships with the project-mode build work).
 
 ### 17.3 — Verification (Always Deterministic)
 
@@ -1599,7 +1599,7 @@ Confidence is a float in the range `0.0`–`1.0`. The compiler accepts AI output
 
 *Runtime decisions* are made during program execution — adaptive effect handler selections (§10.8) are the primary source. They are stored in `.bock/decisions/runtime/`, environment-local, not committed. They accumulate with every production event and are subject to log rotation or size caps.
 
-`bock inspect` shows build decisions by default. `bock inspect --runtime` surfaces runtime decisions with filtering by operation, error type, or time window. `bock inspect --all` presents both with clear separation. `bock override` operates on build decisions by default; `--runtime` scopes it to runtime pins. `bock override --promote <selection-id>` moves a stabilized runtime pin into the build manifest, committing it to the codebase.
+`bock inspect` shows build decisions by default. `bock inspect --runtime` surfaces runtime decisions with filtering by operation, error type, or time window. `bock inspect --all` presents both with clear separation. `bock override` operates on build decisions by default; `--runtime` scopes it to runtime pins. `bock override <decision-id> --promote` moves a stabilized runtime pin into the build manifest, committing it to the codebase (the v1 `override` surface per §20.1: a bare `--promote` flag operating on the positional decision id).
 
 In `production` strictness, all decisions must be pinned. Pinned decisions bypass the confidence check — the stored choice is replayed identically regardless of any new AI response. `bock inspect` browses decisions; `bock override` changes them.
 

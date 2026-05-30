@@ -165,8 +165,12 @@ impl<'a> Formatter<'a> {
             if c.start >= byte_offset {
                 break;
             }
-            // Skip doc comments — they're handled by the AST
-            if c.kind == CommentKind::Doc || c.kind == CommentKind::ModuleDoc {
+            // Module doc comments (`//!`) are reconstructed from the AST
+            // (`Module.doc`) in `format_module`, so skip them here to avoid
+            // double-emission. Item doc comments (`///`) are NOT stored in the
+            // AST, so they must be emitted from the extracted comment stream —
+            // otherwise the formatter silently drops them (see Q-fmt-bock).
+            if c.kind == CommentKind::ModuleDoc {
                 self.next_comment += 1;
                 continue;
             }
@@ -200,7 +204,9 @@ impl<'a> Formatter<'a> {
     fn emit_remaining_comments(&mut self) {
         while self.next_comment < self.comments.len() {
             let c = &self.comments[self.next_comment];
-            if c.kind == CommentKind::Doc || c.kind == CommentKind::ModuleDoc {
+            // Module docs come from the AST; everything else (including trailing
+            // `///` doc comments) is emitted from the comment stream.
+            if c.kind == CommentKind::ModuleDoc {
                 self.next_comment += 1;
                 continue;
             }
@@ -217,8 +223,13 @@ impl<'a> Formatter<'a> {
     pub fn format_module(&mut self, module: &Module) {
         // Module doc comments
         for doc in &module.doc {
-            self.push("//! ");
-            self.push(doc);
+            if doc.is_empty() {
+                // Avoid emitting a trailing space on blank `//!` lines.
+                self.push("//!");
+            } else {
+                self.push("//! ");
+                self.push(doc);
+            }
             self.newline();
         }
         if !module.doc.is_empty() {
@@ -275,6 +286,9 @@ impl<'a> Formatter<'a> {
     // ─── Imports ──────────────────────────────────────────────────────────
 
     fn format_import(&mut self, import: &ImportDecl) {
+        // Preserve a re-export's visibility (`public use ...`); dropping it
+        // would silently change the module's public surface (see Q-fmt-bock).
+        self.format_visibility(import.visibility);
         self.push("use ");
         self.format_module_path(&import.path);
         match &import.items {
@@ -365,15 +379,22 @@ impl<'a> Formatter<'a> {
         match vis {
             Visibility::Private => {}
             Visibility::Internal => self.push("internal "),
-            Visibility::Public => self.push("pub "),
+            // Bock's visibility keyword is `public`, not Rust's `pub`. Emitting
+            // `pub` produced source that no longer parses (see Q-fmt-bock).
+            Visibility::Public => self.push("public "),
         }
     }
 
     // ─── Functions ────────────────────────────────────────────────────────
 
     fn format_fn_decl(&mut self, decl: &FnDecl) {
-        // Doc comments from AST (already in annotations? no — in the AST as Module.doc)
-        // Doc comments for items are tracked via span-based comment emission
+        // Flush any leading comments (notably `///` doc comments) attached to
+        // this function before its annotations/signature. For top-level
+        // functions these were already flushed at the module level, so this is
+        // a no-op; for trait/impl/class/effect members this is the only flush
+        // point, so without it their doc comments would be dropped or
+        // mis-placed (see Q-fmt-bock).
+        self.emit_comments_before(decl.span.start);
         self.format_annotations(&decl.annotations);
         self.push_indent();
         self.format_visibility(decl.visibility);
@@ -547,6 +568,12 @@ impl<'a> Formatter<'a> {
         self.newline();
         self.inc_indent();
         for variant in &decl.variants {
+            let vstart = match variant {
+                EnumVariant::Unit { span, .. }
+                | EnumVariant::Struct { span, .. }
+                | EnumVariant::Tuple { span, .. } => span.start,
+            };
+            self.emit_comments_before(vstart);
             self.format_enum_variant(variant);
         }
         self.dec_indent();
@@ -577,6 +604,7 @@ impl<'a> Formatter<'a> {
                 self.newline();
                 self.inc_indent();
                 for field in fields {
+                    self.emit_comments_before(field.span.start);
                     self.format_record_field_decl(field);
                 }
                 self.dec_indent();
@@ -613,6 +641,7 @@ impl<'a> Formatter<'a> {
         self.newline();
         self.inc_indent();
         for field in &decl.fields {
+            self.emit_comments_before(field.span.start);
             self.format_record_field_decl(field);
         }
         if !decl.fields.is_empty() && !decl.methods.is_empty() {
@@ -683,6 +712,19 @@ impl<'a> Formatter<'a> {
         }
         if let Some(trait_path) = &decl.trait_path {
             self.format_type_path(trait_path);
+            // Preserve type arguments applied to a parameterized trait, e.g.
+            // `[Celsius]` in `impl From[Celsius] for Fahrenheit`. Dropping them
+            // changes which trait instance is being implemented.
+            if !decl.trait_args.is_empty() {
+                self.push_char('[');
+                for (i, arg) in decl.trait_args.iter().enumerate() {
+                    if i > 0 {
+                        self.push(", ");
+                    }
+                    self.format_type_expr(arg);
+                }
+                self.push_char(']');
+            }
             self.push(" for ");
         }
         self.format_type_expr(&decl.target);
@@ -897,14 +939,19 @@ impl<'a> Formatter<'a> {
             Pattern::Literal { lit, .. } => self.format_literal(lit),
             Pattern::Constructor { path, fields, .. } => {
                 self.format_type_path(path);
-                self.push_char('(');
-                for (i, f) in fields.iter().enumerate() {
-                    if i > 0 {
-                        self.push(", ");
+                // A unit-variant pattern (no fields) is written bare, e.g.
+                // `Greater`. Emitting `Greater()` is wrong: it turns a unit
+                // pattern into a zero-arg tuple-constructor pattern.
+                if !fields.is_empty() {
+                    self.push_char('(');
+                    for (i, f) in fields.iter().enumerate() {
+                        if i > 0 {
+                            self.push(", ");
+                        }
+                        self.format_pattern(f);
                     }
-                    self.format_pattern(f);
+                    self.push_char(')');
                 }
-                self.push_char(')');
             }
             Pattern::Record {
                 path, fields, rest, ..
@@ -1099,14 +1146,17 @@ impl<'a> Formatter<'a> {
                 else_block,
                 ..
             } => {
-                self.push("if ");
+                // Bock requires parentheses around the condition:
+                // `if (cond)` / `if (let pat = expr)` (§21 grammar). Emitting
+                // them bare produces source that no longer parses.
+                self.push("if (");
                 if let Some(pat) = let_pattern {
                     self.push("let ");
                     self.format_pattern(pat);
                     self.push(" = ");
                 }
                 self.format_expr(condition);
-                self.push(" ");
+                self.push(") ");
                 self.format_block(then_block);
                 if let Some(else_expr) = else_block {
                     self.push(" else ");
@@ -1370,8 +1420,11 @@ impl<'a> Formatter<'a> {
         self.push_indent();
         self.format_pattern(&arm.pattern);
         if let Some(guard) = &arm.guard {
-            self.push(" if ");
+            // Match-arm guards require parentheses: `pat if (expr) => ...`
+            // (§8 / §21 grammar). Emitting them bare breaks the parse.
+            self.push(" if (");
             self.format_expr(guard);
+            self.push_char(')');
         }
         self.push(" => ");
         match &arm.body {
@@ -1464,9 +1517,10 @@ impl<'a> Formatter<'a> {
     fn format_while_loop(&mut self, stmt: &WhileLoop) {
         self.emit_comments_before(stmt.span.start);
         self.push_indent();
-        self.push("while ");
+        // `while (condition)` — parentheses are required (§21 grammar).
+        self.push("while (");
         self.format_expr(&stmt.condition);
-        self.push(" ");
+        self.push(") ");
         self.format_block(&stmt.body);
         self.newline();
     }
@@ -1489,9 +1543,11 @@ impl<'a> Formatter<'a> {
             self.format_expr(&stmt.condition);
             self.push(") else ");
         } else {
-            self.push("guard ");
+            // `guard (condition) else` — parentheses are required
+            // (§21 grammar: guard_statement = 'guard' '(' condition ')' ...).
+            self.push("guard (");
             self.format_expr(&stmt.condition);
-            self.push(" else ");
+            self.push(") else ");
         }
         self.format_block(&stmt.else_block);
         self.newline();

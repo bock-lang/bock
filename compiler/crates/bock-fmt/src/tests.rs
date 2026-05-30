@@ -37,10 +37,12 @@ fn format_simple_fn() {
 }
 
 #[test]
-fn format_fn_pub_async() {
+fn format_fn_public_async() {
+    // Bock's visibility keyword is `public` (not Rust's `pub`); the formatter
+    // must preserve it verbatim so the output re-parses.
     check(
-        "pub async fn fetch(url: String) -> String {\n  url\n}\n",
-        "pub async fn fetch(url: String) -> String {\n  url\n}\n",
+        "public async fn fetch(url: String) -> String {\n  url\n}\n",
+        "public async fn fetch(url: String) -> String {\n  url\n}\n",
     );
 }
 
@@ -107,9 +109,10 @@ fn format_enum_tuple_variant() {
 
 #[test]
 fn format_if_else() {
+    // Bock requires parens around the condition (`if (cond)`, §21 grammar).
     check(
-        "fn test() {\n  if true {\n    1\n  } else {\n    2\n  }\n}\n",
-        "fn test() {\n  if true {\n    1\n  } else {\n    2\n  }\n}\n",
+        "fn test() {\n  if (true) {\n    1\n  } else {\n    2\n  }\n}\n",
+        "fn test() {\n  if (true) {\n    1\n  } else {\n    2\n  }\n}\n",
     );
 }
 
@@ -135,9 +138,10 @@ fn format_for_loop() {
 
 #[test]
 fn format_while_loop() {
+    // `while (cond)` — parens required (§21 grammar).
     check(
-        "fn test() {\n  while true {\n    break\n  }\n}\n",
-        "fn test() {\n  while true {\n    break\n  }\n}\n",
+        "fn test() {\n  while (true) {\n    break\n  }\n}\n",
+        "fn test() {\n  while (true) {\n    break\n  }\n}\n",
     );
 }
 
@@ -181,10 +185,10 @@ fn format_annotation() {
 // ─── Visibility ───────────────────────────────────────────────────────────
 
 #[test]
-fn format_pub_record() {
+fn format_public_record() {
     check(
-        "pub record Point {\n  x: Int,\n}\n",
-        "pub record Point {\n  x: Int,\n}\n",
+        "public record Point {\n  x: Int,\n}\n",
+        "public record Point {\n  x: Int,\n}\n",
     );
 }
 
@@ -446,5 +450,308 @@ fn hard_limit_continuation_indent() {
         found_continuation,
         "Should have continuation lines with 6 spaces indent (2 base + 4 continuation)\nOutput:\n{}",
         result.output
+    );
+}
+
+// ─── Visibility keyword (`public`, never `pub`) ────────────────────────────
+
+#[test]
+fn format_public_fn_preserves_keyword() {
+    // Regression for Q-fmt-bock: the formatter used to rewrite `public` to the
+    // Rust keyword `pub`, producing source that no longer parses.
+    let out = format_source("public fn f() {\n  1\n}\n", "t.bock").output;
+    assert!(
+        out.contains("public fn f"),
+        "expected `public fn`, got:\n{out}"
+    );
+    assert!(
+        !out.contains("pub fn"),
+        "must not emit Rust's `pub`:\n{out}"
+    );
+}
+
+#[test]
+fn format_public_keyword_on_all_item_kinds() {
+    let src = "\
+public fn f() {\n  1\n}\n\
+\n\
+public record R {\n  x: Int,\n}\n\
+\n\
+public enum E {\n  A,\n}\n\
+\n\
+public trait T {\n  fn m(self) -> Int\n}\n\
+\n\
+public const C: Int = 1\n";
+    let out = format_source(src, "t.bock").output;
+    assert_eq!(
+        out.matches("public ").count(),
+        5,
+        "every item should keep `public`:\n{out}"
+    );
+    assert!(!out.contains("pub "), "no Rust `pub` anywhere:\n{out}");
+    assert_parses(&out);
+}
+
+// ─── Doc comment preservation (`///`) ──────────────────────────────────────
+
+#[test]
+fn format_preserves_item_doc_comment() {
+    // Regression for Q-fmt-bock: `///` doc comments on items used to be dropped.
+    let src = "/// Adds one.\nfn inc(x: Int) -> Int {\n  x + 1\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(out.contains("/// Adds one."), "doc comment dropped:\n{out}");
+    assert!(
+        out.starts_with("/// Adds one.\nfn inc"),
+        "doc comment must stay attached above its item:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_preserves_multiline_doc_comment() {
+    let src = "/// Line one.\n/// Line two.\npublic fn f() {\n  1\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        out.contains("/// Line one."),
+        "first doc line dropped:\n{out}"
+    );
+    assert!(
+        out.contains("/// Line two."),
+        "second doc line dropped:\n{out}"
+    );
+    assert!(out.contains("public fn f"), "public lost:\n{out}");
+    assert_parses(&out);
+}
+
+#[test]
+fn format_preserves_doc_on_trait_method() {
+    // Doc comments on nested members (trait methods) were mis-placed: they got
+    // swept into the *next* top-level item's leading comments.
+    let src = "\
+public trait T {\n  /// Does the thing.\n  fn m(self) -> Int\n}\n\
+\n\
+public record R {\n  x: Int,\n}\n";
+    let out = format_source(src, "t.bock").output;
+    // The doc must appear inside the trait, immediately above `fn m`.
+    let idx_doc = out.find("/// Does the thing.").expect("doc dropped");
+    let idx_m = out.find("fn m(self)").expect("method missing");
+    let idx_record = out.find("record R").expect("record missing");
+    assert!(idx_doc < idx_m, "doc must precede its method:\n{out}");
+    assert!(
+        idx_doc < idx_record,
+        "doc must stay inside the trait, not before the record:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_preserves_doc_on_impl_method() {
+    // Doc comments on impl methods used to land *inside* the method body.
+    let src = "\
+impl Error for SimpleError {\n  /// Returns the message.\n  public fn message(self) -> String {\n    self.msg\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    let idx_doc = out.find("/// Returns the message.").expect("doc dropped");
+    let idx_fn = out.find("public fn message").expect("method missing");
+    assert!(
+        idx_doc < idx_fn,
+        "doc must precede the method, not sit in its body:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_preserves_doc_on_record_field() {
+    let src = "public record R {\n  /// The width.\n  width: Int,\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(out.contains("/// The width."), "field doc dropped:\n{out}");
+    assert_parses(&out);
+}
+
+#[test]
+fn format_preserves_doc_on_enum_variant() {
+    let src = "public enum E {\n  /// The first.\n  A,\n  /// The second.\n  B,\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        out.contains("/// The first."),
+        "variant doc dropped:\n{out}"
+    );
+    assert!(
+        out.contains("/// The second."),
+        "variant doc dropped:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_doc_comment_round_trip_is_idempotent() {
+    let src = "/// Doc.\npublic fn f() {\n  1\n}\n";
+    let first = format_source(src, "t.bock").output;
+    let second = format_source(&first, "t.bock");
+    assert_eq!(second.output, first, "fmt(fmt(x)) != fmt(x)");
+    assert!(!second.changed, "second format should report no change");
+}
+
+// ─── Full stdlib fixture round-trip (Q-fmt-bock) ───────────────────────────
+
+#[test]
+fn format_error_bock_round_trips_to_valid_bock() {
+    // The hand-authored `core.error` module exercises `//!`, `///`, and
+    // `public` on a trait, record, impl method, and free function. Formatting
+    // it must produce valid, parseable Bock that keeps every doc comment and
+    // every `public`.
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../stdlib/core/error/error.bock"
+    ))
+    .expect("read error.bock");
+
+    let out = format_source(&src, "error.bock").output;
+
+    // Re-parses cleanly.
+    assert_parses(&out);
+
+    // No `pub` leaked in.
+    assert!(
+        !out.contains("pub "),
+        "Rust `pub` leaked into output:\n{out}"
+    );
+
+    // Same number of `public` and `///` lines as the input — nothing dropped.
+    let count = |hay: &str, needle: &str| hay.matches(needle).count();
+    assert_eq!(
+        count(&out, "public "),
+        count(&src, "public "),
+        "`public` count changed:\n{out}"
+    );
+    assert_eq!(
+        count(&out, "///"),
+        count(&src, "///"),
+        "`///` doc-comment count changed:\n{out}"
+    );
+
+    // Idempotent.
+    let out2 = format_source(&out, "error.bock").output;
+    assert_eq!(out2, out, "error.bock formatting is not idempotent");
+}
+
+#[test]
+fn format_public_use_preserves_visibility() {
+    // Regression for Q-fmt-bock: `public use` re-exports must keep `public`.
+    let out = format_source("public use core.error.{ Error }\n", "t.bock").output;
+    assert!(
+        out.starts_with("public use core.error"),
+        "`public use` re-export lost its visibility:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_if_keeps_required_parens() {
+    // §21 grammar: `if_expr = 'if' '(' condition ')' block`. The formatter must
+    // not strip the parentheses, or the output stops parsing.
+    let src = "fn f(x: Int) -> Int {\n  if (x < 0) {\n    0\n  } else {\n    x\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(out.contains("if (x < 0)"), "if parens stripped:\n{out}");
+    assert!(out.contains("} else {"), "else mangled:\n{out}");
+    assert_parses(&out);
+}
+
+#[test]
+fn format_if_let_keeps_required_parens() {
+    let src = "fn f(o: Int) -> Int {\n  if (let Some(v) = o) {\n    v\n  } else {\n    0\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        out.contains("if (let Some(v) = o)"),
+        "if-let parens stripped:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_while_keeps_required_parens() {
+    let src = "fn f() {\n  while (true) {\n    break\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        out.contains("while (true)"),
+        "while parens stripped:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_guard_keeps_required_parens() {
+    let src = "fn f(x: Int) -> Int {\n  guard (x > 0) else {\n    return 0\n  }\n  x\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        out.contains("guard (x > 0) else"),
+        "guard parens stripped:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_match_guard_keeps_required_parens() {
+    let src = "fn f(n: Int) -> Int {\n  match n {\n    x if (x > 100) => 1,\n    _ => 0,\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        out.contains("if (x > 100)"),
+        "match-guard parens stripped:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_unit_variant_pattern_has_no_parens() {
+    // A bare unit-variant pattern must stay bare (`Greater`), not gain empty
+    // parens (`Greater()`).
+    let src = "public enum E {\n  A,\n  B,\n}\n\nfn f(e: E) -> Int {\n  match e {\n    A => 1,\n    B => 2,\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        !out.contains("A()"),
+        "unit pattern gained empty parens:\n{out}"
+    );
+    assert!(
+        !out.contains("B()"),
+        "unit pattern gained empty parens:\n{out}"
+    );
+    assert!(out.contains("A => 1"), "unit pattern arm mangled:\n{out}");
+    assert_parses(&out);
+}
+
+#[test]
+fn format_impl_preserves_trait_type_args() {
+    // `impl From[Celsius] for Fahrenheit` — the trait's type arguments must be
+    // preserved; dropping them changes which trait is implemented.
+    let src = "impl From[Celsius] for Fahrenheit {\n  fn from(value: Celsius) -> Fahrenheit {\n    value\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        out.contains("impl From[Celsius] for Fahrenheit"),
+        "trait type args dropped:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+/// Helper: assert that `src` parses with no lexer or parser errors.
+fn assert_parses(src: &str) {
+    use bock_lexer::Lexer;
+    use bock_parser::Parser;
+    use bock_source::SourceFile;
+
+    let file = SourceFile::new(
+        bock_errors::FileId(0),
+        std::path::PathBuf::from("fmt-out.bock"),
+        src.to_string(),
+    );
+    let mut lexer = Lexer::new(&file);
+    let tokens = lexer.tokenize();
+    assert!(
+        !lexer.diagnostics().has_errors(),
+        "formatted output failed to lex:\n{src}"
+    );
+    let mut parser = Parser::new(tokens, &file);
+    let _ = parser.parse_module();
+    assert!(
+        !parser.diagnostics().has_errors(),
+        "formatted output failed to parse:\n{src}"
     );
 }

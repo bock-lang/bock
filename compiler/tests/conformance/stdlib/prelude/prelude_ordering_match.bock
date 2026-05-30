@@ -1,0 +1,33 @@
+// TEST: stdlib_prelude_ordering_match
+// EXPECT: no_errors
+//
+// The §18.2 prelude makes `Ordering` and its variants (`Less`/`Equal`/
+// `Greater`) and the `Comparable` trait available WITHOUT an explicit `use`.
+// A user type implements `Comparable` (naming `Ordering` and returning its
+// variants) and a caller matches on the result of `.compare(...)` — all
+// prelude-only, no import.
+module userapp
+
+public record Money {
+  cents: Int
+}
+
+impl Comparable for Money {
+  public fn compare(self, other: Money) -> Ordering {
+    if (self.cents < other.cents) {
+      Less
+    } else if (self.cents == other.cents) {
+      Equal
+    } else {
+      Greater
+    }
+  }
+}
+
+public fn rank(a: Money, b: Money) -> String {
+  match a.compare(b) {
+    Less => "less"
+    Equal => "equal"
+    Greater => "greater"
+  }
+}
