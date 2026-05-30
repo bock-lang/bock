@@ -76,3 +76,29 @@ DV3 added (a parens-vs-literal impl divergence found and fixed in the same
 PR); `queue.md` Q-stdlib scoped + unblocked and Q-perf-example closed;
 `milestones.md` MS-stdlib scope recorded. The stdlib implementation (R1/R2/
 R3) follows, starting with a one-module pilot.
+
+## [2026-05-29 23:57 UTC] Stdlib pilot → 3 core-spec questions (DQ6–DQ8)
+
+**Type:** design (core-spec)
+**Severity:** low (non-blocking — filed; the pilot proceeds on safe defaults)
+**Trigger:** the stdlib loading + `core.error` pilot plan
+(`plans/2026-05-29-stdlib-loading-error-pilot-plan.md`) surfaced three
+questions touching core specification. Per the core-spec rule the orchestrator
+files them and continues; the pilot is dispatched on safe defaults.
+**Context (each in `design-questions.md`):**
+- **DQ6 §18** — should §18 normatively state the core-module implementation
+  model (Bock source + per-target runtime shims, embedded in the compiler)? The
+  model is currently only a tracking-level Design note; the spec doesn't state
+  it and `stdlib/CLAUDE.md`'s shim path is wrong.
+- **DQ7 §18.3** — the canonical v1 `core.error` surface (does `Error` carry
+  `cause()`; §18.5 / `Displayable` participation?). Pilot ships the minimal
+  surface.
+- **DQ8 §12/§18** — does v1 require module-qualified `use core.error` access?
+  `seed_imports` skips `ImportItems::Module` (a type-checker change affecting all
+  11 modules). Pilot relies on named imports (supported).
+**Options:** Design decides each; the orchestrator then reconciles §18 (+ a
+changelog) and, for DQ8, schedules the type-checker change if required.
+**Recommendation:** none on the merits (core-spec is Design's call). DQ6 is the
+highest-leverage — it makes the implementation model normative for all 11 modules.
+**Awaiting:** Design Chat (with the operator) decisions, routed back here.
+**Status:** pending

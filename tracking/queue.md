@@ -50,7 +50,7 @@ reconciliation; repo wins). See audit.md._
 ## v1-blocking
 
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (ready — pilot next) · `stdlib/`,
+  **v1-BLOCKING** (pilot in-flight) · `stdlib/`,
   `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: **DECIDED a v1 deliverable** (operator, 2026-05-29) and
   **SCOPE decided by Design 2026-05-29** (DQ5; §18.3 tiering reconciled in
@@ -62,7 +62,10 @@ reconciliation; repo wins). See audit.md._
   option/result/string/time · **R3** collections/test. Start with a
   **one-module pilot** to validate the per-module pattern AND the
   conformance-harness execution gap (Q-fconf) before fanning out.
-  `core.types/math/memory/concurrency` are Reserved for v1.x.
+  `core.types/math/memory/concurrency` are Reserved for v1.x. **Pilot
+  in-flight:** `core.error` + the stdlib loading mechanism, branch
+  `feat/stdlib-error-pilot`, per `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`;
+  surfaced DQ6–DQ8 (core-spec, escalated — pilot on safe defaults).
 
 ## Blocked
 

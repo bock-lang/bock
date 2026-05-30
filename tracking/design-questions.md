@@ -32,6 +32,39 @@ decided→link)`
   Non-core; parked as a smaller follow-up.
 - **Status:** open
 
+## Escalated to Design (core spec — pending)
+
+Surfaced by the stdlib loading + `core.error` pilot plan (2026-05-29,
+`plans/2026-05-29-stdlib-loading-error-pilot-plan.md`). Filed per the
+core-spec rule; the pilot proceeds on safe defaults meanwhile (not blocked).
+
+### DQ6 — §18: normative implementation model for core modules
+- **Question:** should §18 normatively state that `core.*` modules are **Bock
+  source compiled with the program + per-target runtime shims** for host
+  primitives, distributed **embedded in the compiler**? Today the model lives
+  only in tracking-level Design notes (DQ5 / Q-stdlib); §18 doesn't state it,
+  and `stdlib/CLAUDE.md`'s shim path is already wrong.
+- **§:** §18.1/§18.3 · **context:** all 11 modules build against this contract;
+  worth a normative statement + changelog so the model is the source of truth.
+- **Status:** escalated → Design (escalations.md)
+
+### DQ7 — canonical v1 `core.error` surface
+- **Question:** does `Error` carry `cause(self) -> Optional[Error]`, and does it
+  participate in §18.5 trait-language integration / `Displayable`? §18.3 says
+  only "base trait."
+- **§:** §18.3 · **context:** the pilot ships the minimal surface (`message`
+  accessor, `SimpleError`, `error()`); Design ratifies/extends the canonical one.
+- **Status:** escalated → Design (escalations.md)
+
+### DQ8 — module-qualified stdlib imports for v1
+- **Question:** does v1 require module-qualified `use core.error` (then
+  `core.error.Error`) access, or are named imports (`use core.error.{Error}`)
+  sufficient? `seed_imports` currently skips `ImportItems::Module`; supporting
+  qualified access is a type-checker change affecting all 11 modules.
+- **§:** §12 (imports) / §18 · **context:** the pilot relies on named imports
+  (supported). Whether qualified access is a v1 requirement is a Design call.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-29; reconciled in #100)
 
 These touched core specification (§11/§13/§18 language + stdlib surface),
