@@ -1147,3 +1147,39 @@ Merged this half: #123 (vscode CI), #124 (TS codegen), #125 (changelog hygiene),
     Result methods (4/5); generics (DV12: Python TypeVar, Go instantiation+int64, TS interface-merge, Rust
     bounds); primitive-bridge dispatch codegen; Python lambdas. Sequential (bock-codegen). Checkpoint with the
     operator at the P0/P1 boundary (this report). main 144f879.
+
+[2026-05-30 22:18 UTC] PHASE 1 of the codegen-completeness milestone COMPLETE (#135/#136/#137/#138)
+  Input: continued autonomous execution of the operator-approved milestone (Phase-1 plan
+    tracking/plans/2026-05-30-codegen-completeness-phase1-plan.md). Sequenced; the c/d crux forced a re-order.
+  MERGED (main 8ef01f2 → 7c201fc; each gate-clean, full-matrix CI, worktree-removed-first, re-synced):
+    - #135 P1-a/b1 — Python lambdas (no more `lambda x:int:`), typing imports, generics (TypeVar/Generic). 118 exec.
+    - #136 P1-b2 — Go/TS/Rust generics: shared collect_generic_decls registry; Go `func (self *Box[T])` + explicit
+      instantiation + lambda-return inference; TS `interface Box<T>` merge; Rust `impl<T> Box<T>` + conservative
+      `T: Clone`. **Generics now work on all 5.** 125 exec.
+    - #137 P1-d (re-sequenced FIRST) — the checker→codegen **receiver-type annotation** (`recv_kind` metadata tag:
+      Optional/Result/List/Primitive:<Ty>/… stamped at method-call resolution; no AIR struct change, no ripple) +
+      primitive-bridge dispatch (`(1).compare(2)`→Ordering; `.to_string`/`.eq`; Ordering given a self-contained
+      per-target rep). 135 exec.
+    - #138 P1-c — Result runtime (TS BockResult / Py _BockOk/_BockErr / Go __bockResult) + Optional/Result method
+      dispatch (consuming `recv_kind`); construction↔match reconciled. 150 exec, 0 failed.
+  THE CRUX + RE-SEQUENCE: P1-c first STOPPED at its T1 — codegen could not determine method receiver type
+    (AIRNode.type_info.resolved_type stamped None unconditionally; the checker's type side-table never reaches
+    codegen). Same root cause as P1-d (primitive-bridge). I RE-SEQUENCED per the plan's contingency: built the
+    shared receiver-type annotation first (#137, P1-d) → then P1-c (#138) consumed it. Clean.
+  RESOLVED: DV12 (generics, #135/#136). DV10/DV11 (List) already resolved (#129/Phase-0). The recv_kind
+    annotation is the reusable mechanism (#137).
+  OPENs / follow-ups (queued / → Design): DQ20 `expr?` error-propagation (no-op on js/ts/py/go; needs the fn
+    return-type at the Propagate site — a new checker annotation; → P4/Design); Rust generic-bounds policy
+    (only `T: Clone` for field getters today); generic-enum scope (records/methods done; `enum Tree[T]` not
+    exercised — Optional/Result are generic-enum-shaped, handled); Go/TS expr-position edge cases (Go single-line
+    value-switch IIFE; TS literal-`<`-literal TS2367 — same expr-position family as Q-match-exprpos → P4).
+  PAYOFF + caveat: generics/Result/Optional-methods/primitive-bridge now work on all 5. BUT `use core.*` is not
+    yet fully runnable cross-module on the TYPED targets — the stdlib's trait-using modules (core.compare's
+    Comparable/Equatable + generic-bounded `max[T: Comparable]`, core.convert's From/Into) need **P2 trait
+    codegen** (default methods, Self-subst, TS trait-self, generic-bounded dispatch) which is broken on ts/py/go
+    per the audit. So P2 is the next gate before the stdlib resumes.
+  NEXT: Phase 2 (traits + match completeness): trait default methods (js/ts/go), TS trait-decl self typing,
+    Self-subst (Q-self-subst), generic-bounded dispatch (ts/py/go), match guards/or/nested on js/ts/go, Go
+    value-match binding. Then P3 (Go collection typing + Map/Set + range()), P4 (polish: `?`, tuple `.N` parser,
+    Go/TS expr-position, Int/Int + Bool-interp harmonize, mutating-List/DQ18). Then Q-stdlib R1 resumes.
+  Checkpoint with the operator at the P1/P2 boundary (this report). main 7c201fc.

@@ -72,9 +72,12 @@ check-only, never executed cross-module), and Result/generics/closures/Optional-
 on 3-4/5. Operator decided (2026-05-30) a **codegen-completeness MILESTONE** (`Q-codegen-completeness`,
 v1-blocking, phased P0-P4, ~10-15 PRs): fix comprehensively, THEN resume the stdlib. **Q-stdlib R1 is
 PAUSED** behind it. The for→Iterable desugar is proven (T1 ×5) and resumes after the milestone's P0/P1.
-**Phase 0 DONE** (#131 tail-`if` · #132 cross-module single-file bundling · #133 user-enum variant registry) —
-cross-module programs + user enums now codegen on all 5. **Phase 1 (stdlib types) next**: Result runtime,
-Optional/Result methods, generics (DV12), primitive-bridge dispatch, Python lambdas. (§20.6.1 bundling → DQ19/Design.)
+**Phase 0 + Phase 1 DONE** (#131-#138): cross-module single-file bundling, user-enum registry, generics on all 5
+(DV12), the `recv_kind` receiver-type annotation (#137), primitive-bridge dispatch, Result runtime +
+Optional/Result methods. Generics/Result/Optional/primitive-bridge now work on all 5. **Phase 2 (traits + match
+completeness) NEXT** — gates the stdlib's trait-using modules (core.compare/convert) running cross-module on the
+typed targets — then P3 (Go collection typing / Map/Set / range()), P4 (polish: `expr?`/DQ20, tuple `.N`,
+expr-position, Int/Int+Bool-interp, mutating-List/DQ18). (§20.6.1 bundling → DQ19; `expr?` → DQ20.)
 **§18.2 prelude auto-import is live** (#120): the core-defined prelude symbols
 (`Ordering`/`Less`/`Equal`/`Greater`, `Comparable`/`Equatable`, `Into`/`From`/
 `TryFrom`/`Displayable`, `Error`) resolve without an explicit `use` (the membership

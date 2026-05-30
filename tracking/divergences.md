@@ -84,8 +84,10 @@ status(open | resolved→link)`
   (go.rs:~1726) + int-literal `int` vs `int64`. TS: impl interface-merge drops `<T>` (ts.rs:~1041/1050). Rust:
   bare `impl Box` not expanded to `impl<T> Box<T>` + trait-path drops args + missing `T: Clone`/`Display`.
 - **Classification:** gap (generic codegen, 4/5) · **Disposition:** fix-impl → Q-codegen-completeness P1. Gates
-  core.iter (generic ListIterator), core.collections, option/result. A MONOMORPHIC iterator is green on all 5,
-  so this is the bounded final gap for iter. · **Status:** open (audit 2026-05-30; agent a0564d1b)
+  core.iter (generic ListIterator), core.collections, option/result. · **Status:** RESOLVED → #135 (Python
+  TypeVar/Generic) + #136 (Go receiver `[T]`/instantiation, TS interface-merge `<T>`, Rust `impl<T>` + bounds;
+  shared collect_generic_decls registry). Generics work on all 5. Residue (refinements, non-blocking): Rust
+  generic-bounds policy + generic-enum scope + Go inference edge cases → P-follow-ups.
 
 ### DV13 — Cross-module `use` not wired into codegen (broken on ALL 5)
 - **§:** §12/§18 · **impl-does:** stdlib/user modules emit as separate files but `main` never wires them (js
