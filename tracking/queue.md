@@ -12,24 +12,13 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-05-30 vs main 2b562e3 (post the codegen-correctness
-workstream + the 5-way fan-out #114-#121; repo wins). See audit.md._
+_Last reconciled: 2026-05-30 vs main 70f1b80 (post the core.iter codegen-residue
+block: #123-#127 merged; core.iter BLOCKED on Q-list-codegen + DQ16; repo wins). See audit.md._
 
 ---
 
 ## Ready
 
-- **[Q-cl-dates] Changelog date hygiene** — chore · ready ·
-  `spec/changelogs/` · — · note: 8 filename-date vs content-`Date:`
-  mismatches (20260420-1400, 20260423-1830, 20260506-0900,
-  20260506-1630, 20260510-2100, 20260510-2300, 20260512-1700,
-  20260512-1700-k04-handoff) + 1 missing-date file (20260304-1629).
-  Decide filename-wins vs content-wins and align; preserve history.
-- **[Q-cl-0515] Fix 0515 changelog factual error** — chore · ready ·
-  `spec/changelogs/20260513-0515-specs-changes.md` · — · note: replace
-  the non-parsing `with Logger as { log: (msg) => print(msg) }`
-  "works today" example (lines 13, 44-48, 81) with a working Form A
-  snippet. Changelog-body only; spec §10.4 is correct.
 - **[Q-import-reject] Reject bare module-qualified import** — bug · ready ·
   `compiler/crates/bock-parser|bock-types/` · — · links DQ8 · note: a `use` of a
   module path with neither a brace-list nor a wildcard (bare `use core.error`) is
@@ -61,35 +50,42 @@ workstream + the 5-way fan-out #114-#121; repo wins). See audit.md._
   `compiler/crates/bock-types/` · — · links #110 · note: the resolver doesn't
   treat a primitive type name as an expression value, so `Float.from(3)` doesn't
   resolve (`.into()` is the working primitive path). Minor usability gap.
-- **[Q-ts-codegen] TypeScript codegen defects (self-methods, Optional typing)** —
-  bug · ready · `compiler/crates/bock-codegen/` (ts.rs) · — · links #121 · note:
-  TS self-methods emit `Point.prototype.m = function(self)` and TS `Optional`
-  typing (`number | null` *type* vs the tagged-object *value*) both fail `tsc`.
-  Pre-existing, surfaced by #121 (excluded from its fixtures, out of scope there).
-  JS is fine (no type-checking); these are TS-specific.
-- **[Q-py-optional] Python `Optional`/`Some`/`None` runtime** — bug · ready ·
-  `compiler/crates/bock-codegen/` (py.rs) · — · links #121 · note: Python (like Go
-  pre-#121) emits bare `Some`/`None`/`Optional[int]` with no runtime definition.
-  #121 added the Go `__bockOption` runtime; do the analogous Python one (deferred
-  fast-follow from #121).
 - **[Q-match-exprpos] Expression-position statement-arm match lowering** — impl ·
-  ready · `compiler/crates/bock-codegen/` · — · links #121 · note: #121 fixed
-  statement-POSITION matches with statement arms (all 5 backends). The
-  expression-position case (`let x = match … { _ => return }` yielding a value on
-  non-diverging arms) needs a temp-hoist desugar on Go/Py/JS/TS. Deferred from #121.
-- **[Q-ci-vscode-test] Wire `npm test` into the CI vscode job** — chore · ready ·
-  `.github/workflows/ci.yml` · — · links #118 · note: #118 added the extension
-  test infra + `npm test` (Mocha), but the CI `vscode extension` job runs only
-  `npm ci`/`lint`/`compile`. Add a `npm test` step so the new tests gate PRs.
+  ready · `compiler/crates/bock-codegen/` · — · links #121, #127 · note: #121 fixed
+  statement-POSITION matches with statement arms (all 5). The expression-position case
+  (`let x = match … { _ => return }` yielding a value) needs a temp-hoist desugar on
+  Go/Py/JS/TS. #127 found the Go variant: an expr-position Optional/`if` lowers to a
+  `func() interface{}{…}()` IIFE whose `interface{}` result can't be assigned to a
+  concrete type (incl. block-tail `Some` in an `if` branch). Off the for-desugar path.
 - **[Q-stdlib-fmtcheck] Enable `fmt --check` on stdlib `.bock`** — chore · ready ·
   `.github/workflows/`, `stdlib/` · — · links #119 · note: now that `bock fmt`
   emits valid Bock (#119), the stdlib `.bock` files (hand-authored to avoid the old
   mangling) can be `bock fmt`'d + `--check`'d in CI. Format them once + add a check.
+- **[Q-go-list-literal] Go native `for x in [literal]` element typing** — bug · ready ·
+  `compiler/crates/bock-codegen/` (go.rs) · — · links #127, DV11 · note: `for x in [1,2,3]`
+  emits `for _, x := range []interface{}{...}`, so `x` is `interface{}` and typed use fails.
+  Emit a typed slice + typed range var. Same `interface{}` family as #127's Optional fixes;
+  js/python/rust fine. Found by core.iter v3.
+- **[Q-ts-generic-impl] TS generic impl-target `self` typing drops generic args** — bug · ready ·
+  `compiler/crates/bock-codegen/` (ts.rs) · — · links #124 · note: `impl Box[T]` types `self` as
+  `Box` not `Box<T>` (`type_expr_to_string` drops generic args) — imprecise, not implicit-any; no
+  fixture exercises it. Minor follow-up from #124.
 
 ## v1-blocking
 
+- **[Q-list-codegen] List built-in method codegen across all 5 backends** — impl ·
+  **v1-BLOCKING** · `compiler/crates/bock-codegen/` (js/ts/py/rs/go + generator) ·
+  ESCALATED (scope/roadmap — operator; escalations.md 2026-05-30 15:24) · links DV10, DQ16,
+  #127 · note: List built-in methods (`.len()`/`.get(i)`/`.push(x)`/`is_empty`/…) DO NOT
+  codegen on ANY target — emitted verbatim (`recv.len()`), no backend lowers them to native
+  ops (verified all 5 + by source: no List-method dispatch in bock-codegen). Gates core.iter's
+  List-backed `ListIterator`+combinators AND core.collections (R3) AND any List-using module.
+  Substantial workstream — plan-first. Surfaced by core.iter v3 (2026-05-30); latent because
+  the 3 landed modules (error/compare/convert) were List-free.
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (3/11 landed; R1 RESUMES with iter — codegen gate cleared) ·
+  **v1-BLOCKING** (3/11 landed; R1 `iter` BLOCKED on Q-list-codegen + DQ16 — the for→Iterable
+  desugar is PROVEN [T1 green on all 5 targets], but the DQ12 List-backed module surface needs
+  List-method codegen first) ·
   `stdlib/`, `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: v1 = **11 core modules** at minimum-useful surface (option, result,
   collections, string, iter, compare, convert, error, effect, time, test). Each =
@@ -136,21 +132,25 @@ workstream + the 5-way fan-out #114-#121; repo wins). See audit.md._
 ## Dependency graph
 
 ```
-[LANDED: #103 found+error · #104 compare · #108 bridge · #110 param-traits+convert ·
- #114/#115 Q-fconf exec conformance · #116 rust-cache · #117 §20.1 · #118 vscode-test ·
- #119 fmt · #120 prelude · #121 Q-codegen-fixes (DV9 closed)]
-Q-stdlib R1 (iter → effect) → R2 (option/result/string/time) → R3 (collections/test) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
-  ⮑ iter (for→Iterable desugar in CHECKER + collection conformances; DQ12); effect (effect-system bridge)
+[LANDED: … #121 Q-codegen-fixes (DV9) · #123 vscode-CI-test (Q-ci-vscode-test) ·
+ #124 Q-ts-codegen · #125 changelog-hygiene (Q-cl-dates/Q-cl-0515) ·
+ #126 Q-py-optional + Go-typed-payload · #127 Go match-in-loop codegen]
+Q-list-codegen (List built-in method codegen ×5 — NEW v1-BLOCKING, ESCALATED) ──┐ gates ↓
+Q-stdlib R1 (iter ⟂ effect) → R2 (option/result/string/time) → R3 (collections/test) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
+  ⮑ iter: for→Iterable desugar PROVEN (T1 green ×5); BLOCKED on Q-list-codegen + DQ16 (floor: List-backed vs List-free)
+  ⮑ collections (R3) + any List-using module also depend on Q-list-codegen
 (decided-ready: Q-import-reject [DQ8])
-(bugs/follow-ups: Q-self-subst, Q-xmod-bounds, Q-xmod-impl, Q-prim-assoc, Q-interp-enum, Q-ts-codegen, Q-py-optional, Q-match-exprpos)
-(ci/chore: Q-cl-dates, Q-cl-0515, Q-ci-vscode-test, Q-stdlib-fmtcheck)
+(bugs/follow-ups: Q-self-subst, Q-xmod-bounds, Q-xmod-impl, Q-prim-assoc, Q-interp-enum, Q-match-exprpos [+Go expr-pos #127], Q-go-list-literal, Q-ts-generic-impl)
 ```
 
-**Critical path to v1.0 (2026-05-30):** the **codegen-correctness gate is CLOSED** —
-Q-fconf execution conformance (#114/#115) + Q-codegen-fixes (#121, resolving DV9)
-restored and *tested* the v1 "5-target parity" property (it was false + untested
-before). 3/11 core modules landed; `core.iter` is unblocked. Remaining critical
-path: **Q-stdlib R1 (iter, effect) → R2 → R3 → D4 → D5 → ItemB**. The ready
-follow-ups + bugs (left column) can land alongside; the cross-module-impl gaps
-(Q-xmod-*) and the TS/Python codegen gaps (Q-ts-codegen/Q-py-optional) are quality
-items that should close before v1.0's parity claim is fully airtight.
+**Critical path to v1.0 (2026-05-30, updated):** the Optional-payload codegen family is now
+CLOSED across all 5 targets (#124 TS · #126 Python+Go-typed-payload · #127 Go match-in-loop)
+and the for→Iterable desugar is PROVEN (T1 green ×5) — but `core.iter` revealed a deeper gate:
+**List built-in methods don't codegen on any backend (Q-list-codegen, v1-BLOCKING, ESCALATED)**,
+which also gates `core.collections` and every List-using module. core.iter additionally awaits
+Design on **DQ16** (List-backed vs List-free R1 floor). Updated path: **resolve Q-list-codegen
+(+ DQ16) → Q-stdlib R1 (iter, effect) → R2 → R3 → D4 → D5 → ItemB**. The "5-target parity"
+#114-#121 restored was real for the constructs tested but rested on fixtures that never
+exercised realistic desugar shapes (method-call scrutinees, statement-position match-in-loop,
+mut-self iterators, List methods); conformance is now materially deeper (55+ exec pairs). Quality
+follow-ups (Q-xmod-*, Q-go-list-literal, Q-ts-generic-impl, Q-match-exprpos) land alongside.

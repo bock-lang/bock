@@ -11,17 +11,17 @@ changes.
 
 ---
 
-## Build status (as of main, 2026-05-30)
+## Build status (as of main 70f1b80, 2026-05-30)
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (~2338 tests, 0 failed — per #121) |
+| `cargo test --workspace` | passing (~2370 tests, 0 failed — per #127) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |
 | `mdbook build docs` | clean |
 | CI on `main` | green; cache via Swatinem/rust-cache@v2.9.1 (#116, faster) |
-| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `tools/scripts/run-conformance.sh`; 5-target parity tested (#121) |
+| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **55+ exec pairs** across 5 targets (deepened by #124/#126/#127 Optional-payload fixtures) |
 | `bock check` on examples | 20/20 exit 0 |
 
 ## What works today
@@ -35,9 +35,11 @@ changes.
   CLOSED: Q-fconf execution conformance (#114/#115 — compile + run + diff stdout
   per target) + Q-codegen-fixes (#121 — statement-bodied match arms, self-methods
   on Rust/Go/Python, Go `Optional` runtime, interp method-env all fixed); 32/32
-  exec fixture×target pairs green under `REQUIRE=all`. Residue tracked: Q-ts-codegen
-  (TS self/Optional typing), Q-py-optional (Python Optional runtime), Q-match-exprpos
-  (expr-position statement-arm match).
+  exec fixture×target pairs green under `REQUIRE=all`. The Optional-payload residue has since
+  been CLOSED across all 5 (#124 TS self/Optional · #126 Python runtime + Go typed-payload ·
+  #127 Go match-in-loop; 55+ exec pairs). Remaining: Q-match-exprpos (expr-position), and the
+  newly-found **List built-in method codegen gap (DV10 / Q-list-codegen)** — no backend lowers
+  `List.len()`/`.get()`/`.push()` — which blocks core.iter (+ Q-go-list-literal, Q-ts-generic-impl).
 - **Type system** — bidirectional inference, generics, trait-style
   constraints, effect inference.
 - **Conformance** — fixtures across `effects/interp/parse/time/types`
@@ -60,9 +62,13 @@ The 2026-05-30 Design stdlib batch (DQ6–DQ9) is reconciled into the spec (#106
 **Q-bridge (#108)** wired the trait-impl table + canonical primitive conformances
 (primitives satisfy bounds; `where`-bounds enforced; DV6 fixed); **#110** added
 parameterized-trait resolution (From/Into/TryFrom + blanket + primitive
-conversions). The **codegen-correctness gate is cleared** (DV9 closed via
-#114/#115 + #121), so **R1 resumes**: `iter` (for→Iterable desugar in the checker
-+ collection conformances; DQ12), then `effect` (effect-system bridge), then R2/R3.
+conversions). The Optional-payload codegen family is now **complete across all 5 targets**
+(#124 TS · #126 Python + Go-typed-payload · #127 Go match-in-loop) and the **for→Iterable
+desugar is proven** (core.iter T1 green ×5). But `core.iter` is **BLOCKED**: its DQ12
+List-backed floor needs **List built-in method codegen, which exists on no backend** (DV10 /
+Q-list-codegen, v1-blocking, ESCALATED) — also gating `core.collections` — plus a Design call
+on the R1 floor (DQ16: List-backed vs List-free). `effect` (R1) + R2/R3 follow; any List-using
+module inherits the List-codegen dependency.
 **§18.2 prelude auto-import is live** (#120): the core-defined prelude symbols
 (`Ordering`/`Less`/`Equal`/`Greater`, `Comparable`/`Equatable`, `Into`/`From`/
 `TryFrom`/`Displayable`, `Error`) resolve without an explicit `use` (the membership

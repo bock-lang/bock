@@ -189,3 +189,35 @@ aren't in §18.2's literal trait list (the orchestrator's dispatch prompt named 
 is one-line either way.
 **Awaiting:** Design ratification; non-blocking.
 **Status:** pending
+
+## [2026-05-30 15:24 UTC] core.iter blocked on the List-codegen substrate — scope/roadmap (operator) + R1 floor (Design, DQ16)
+
+**Type:** scope (operator) + design core-spec (Design)
+**Severity:** high / blocking — `core.iter` (a v1 critical-path module) cannot proceed; reframes the stdlib path.
+**Trigger:** `core.iter` (R1) passed its T1 codegen gate on all 5 targets (the for→Iterable desugar
+shape is PROVEN) but stopped one layer deeper: the DQ12 R1 floor (a `ListIterator[T]` over `List[T]` +
+6 List-returning combinators) requires **List built-in method codegen** (`.len()`/`.get(i)`/`.push(x)`/…),
+which **does not exist on ANY backend** — the codegen emits the calls verbatim and no target lowers them
+(verified empirically on all 5 + by source). See `divergences.md` DV10, `queue.md` Q-list-codegen. Latent
+until now because the 3 landed modules (error/compare/convert) were List-free.
+**Context — TWO coupled decisions:**
+- **(operator — scope/roadmap):** "Implement List built-in method codegen across 5 backends" is a
+  substantial, foundational workstream (not a routine fix) gating `core.iter`, `core.collections` (R3),
+  and every List-using module — it reframes the v1 stdlib critical path. Priority/sequencing? Authorize a
+  plan-first codegen workstream now, or defer and re-sequence R1?
+- **(Design — core-spec, DQ16):** keep the R1 `core.iter` floor List-backed (block on the List-codegen
+  workstream), or redefine it to a **List-free iterator surface** (Counter/Range-style, Int/Float +
+  arithmetic — codegen-PROVEN today via `optional_match_in_loop.bock`), shipping iter sooner but omitting
+  the combinators until List codegen lands?
+**Options the orchestrator sees:** (a) operator authorizes the List-codegen workstream + Design keeps the
+List-backed floor → plan + build List codegen, then resume full core.iter; (b) Design redefines the floor
+List-free → ship a reduced core.iter now, List-codegen + combinators follow; (c) defer core.iter,
+re-sequence R1 (`effect` first) while List-codegen is scoped/built.
+**Recommendation (informal; the calls are the operator's + Design's):** List built-in method codegen is
+needed for v1 regardless (`core.collections` is a v1 module), so authorizing the workstream (a) is likely
+unavoidable; whether to ALSO ship a List-free iter floor first (b) is a sequencing/UX call. The
+for→Iterable desugar work is complete and proven on all 5 either way — no rework lost.
+**Also filed this block (non-blocking → Design):** DQ14 (`Iterable.iter()` return-type limit), DQ15
+(concrete vs generic-bound combinators), DQ17 (canonical Optional codegen representation — normative?).
+**Awaiting:** operator decision on Q-list-codegen scope/priority + Design decision on DQ16 (core.iter floor).
+**Status:** pending

@@ -19,13 +19,14 @@ status(open | resolved→link)`
 
 ### DV1 — core stdlib modules unimplemented
 - **§:** §18.3 · **spec-says:** 11 v1 `core.*` modules ship in v1 ·
-  **impl-does:** **2/11 landed** — `core.error` (#103) + `core.compare`
-  (#104); 9 remain. Loading mechanism (embedded source-compiled) works.
+  **impl-does:** **3/11 landed** — `core.error` (#103), `core.compare` (#104),
+  `core.convert` (#110); 8 remain. Loading mechanism (embedded source-compiled) works.
 - **Classification:** spec-ahead-of-impl
-- **Disposition:** implement the remaining 9 (→ queue `Q-stdlib`, SCOPED via
-  DQ5). §18.3 v1-status reconciled in #100. Fan-out **UNBLOCKED** — Q-bridge
-  landed (#108, resolving DV4 + DV6). Remains open until all 11 land.
-- **Status:** open (2/11 landed; fan-out unblocked — R1 resuming)
+- **Disposition:** implement the remaining 8 (→ queue `Q-stdlib`, SCOPED via
+  DQ5). §18.3 v1-status reconciled in #100. R1 `iter` is now BLOCKED on **DV10**
+  (List-method codegen, all backends) + DQ16 (floor); the for→Iterable desugar itself
+  is proven (T1 green ×5).
+- **Status:** open (3/11 landed; iter blocked on Q-list-codegen + DQ16)
 
 ### DV7 — cross-module where-bound enforcement gap
 - **§:** — (impl correctness; §18.5 trait conformance across modules) ·
@@ -53,6 +54,29 @@ status(open | resolved→link)`
   with use).
 - **Status:** open
 
+### DV10 — List built-in methods do not codegen on any target
+- **§:** §18.3 (collections) / general · **spec-says:** `List[T]` values have built-in
+  methods (`len`/`get`/`push`/`is_empty`/…) usable in Bock, lowered to native ops on every
+  target · **impl-does:** codegen emits the calls VERBATIM (`recv.len()`); NO backend lowers
+  List built-ins → failure on all 5 (js `len is not a function`; py `no attribute 'len'`;
+  rust type errors; go `no field or method len`). Verified empirically + by source (no
+  List-method dispatch anywhere in bock-codegen).
+- **Classification:** gap (List built-in method codegen unimplemented, all backends)
+- **Disposition:** fix-impl → `queue.md` Q-list-codegen (v1-BLOCKING; substantial workstream).
+  Gates core.iter (List-backed floor), core.collections, any List-using module. ESCALATED
+  (scope/roadmap) + DQ16 (floor). Surfaced by core.iter v3 (2026-05-30); latent because the
+  3 landed modules were List-free.
+- **Status:** open
+
+### DV11 — Go native `for x in [list]` element typing
+- **§:** — (impl correctness) · **spec-says:** the loop var of `for x in [1,2,3]` has the
+  list's element type · **impl-does:** Go codegen emits `for _, x := range []interface{}{…}`,
+  so `x` is `interface{}` and typed use fails (`sum + x` mismatched types). js/python/rust ok.
+- **Classification:** impl-bug (Go list-literal element typing; `interface{}` family, cf. #127)
+- **Disposition:** fix-impl → `queue.md` Q-go-list-literal (emit a typed slice + typed range
+  var). Surfaced by core.iter v3's native-fast-path fixture.
+- **Status:** open
+
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)
@@ -65,9 +89,12 @@ status(open | resolved→link)`
   a two-PR workstream: **Q-fconf** execution conformance (#114/#115 — compile + run
   fixtures per target, diff stdout) + **Q-codegen-fixes** (#121 — all 6 defects
   fixed, 32/32 fixture×target pairs green under REQUIRE=all). Parity is now real +
-  tested. Residue (deferred, tracked): expr-position statement-arm match
-  (Q-match-exprpos), Python `Optional` (Q-py-optional), TS self/Optional
-  (Q-ts-codegen). resolved → #114/#115/#121.
+  tested. Residue: Python `Optional` (Q-py-optional) RESOLVED #126; TS self/Optional
+  (Q-ts-codegen) RESOLVED #124; expr-position statement-arm match (Q-match-exprpos) still
+  open (+ a Go expr-position IIFE variant, #127). NB: "parity" rested on fixtures that never
+  exercised method-call scrutinees / statement-position match-in-loop / mut-self iterators /
+  List methods — deeper Optional-payload layers surfaced + closed by core.iter (#124/#126/#127);
+  the List-method codegen gate (DV10) remains. resolved → #114/#115/#121.
 
 - **DV4 stdlib trait impls can't cover primitive types** — gap (missing
   checker↔bock-core bridge) → Design DQ6 ruled the model; the compiler now

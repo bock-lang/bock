@@ -949,3 +949,119 @@ vscode test-infra, conformance execution Q-fconf), @performance example (pending
     milestones gate-cleared. main 2b562e3.
   Next: resume core.iter (R1); land the ready follow-ups/bugs as capacity allows; route DQ10-DQ13
     to Design.
+
+[2026-05-30 15:24 UTC] BLOCK — core.iter pursuit + 5-PR codegen/chore fan-out; core.iter BLOCKED on List codegen (escalated)
+  Input: operator: "Lets keep going", then "I'll be away for a bit so feel free to keep things going
+    as you can." Autonomous continuation of the critical path (resume core.iter, R1) per the #122 Next.
+  Model/effort floor held: Opus 4.8 @ xhigh across every dispatched session + sub-agent.
+
+  Repo reconciliation at start: main 178a092 (#122), clean, 0 open PRs, 3/11 core modules. No drift.
+
+  DISPATCHED (engineer sessions, isolation worktrees, background):
+    - core.iter (R1) — feat/stdlib-iter — the critical path; planned via a read-only architect first
+      (the desugar lives in the CHECKER, which mutates AIR in place → all 5 targets + interp get it free).
+    - Q-ts-codegen, Q-ci-vscode-test, Q-cl-dates+Q-cl-0515 — disjoint ready items, fanned out under the
+      away-authorization (crate-granularity respected: each on a distinct tree).
+    - Then reactively: Go+Python Optional codegen, then a Go match-in-loop fix — see the saga below.
+
+  MERGED (main 178a092 → 70f1b80; each: explicit per-job CI breakdown verified [fail=0,pending=0,
+    mergeState∉{DIRTY,BLOCKED}], squash, agent-worktree removed first, main re-synced):
+    - #123 Q-ci-vscode-test — `npm test` wired into the CI vscode job (the #118 tests now gate PRs).
+    - #124 Q-ts-codegen — TS self-methods (declaration-merging interface + typed self) + Optional typing
+      (`BockOption<T>` discriminated union). Re-included ts in self_method/go_optional_runtime fixtures.
+    - #125 Q-cl-dates + Q-cl-0515 — changelog date hygiene (all filename-wins, git-add-date-verified;
+      no renames) + the 0515 non-parsing handler example → valid Form A (bock check clean).
+    - #126 Q-py-optional + Go-typed-payload — Python `_BockSome`/`_BockNone` runtime; Go Some-payload
+      type assertion (structural Optional[T] resolve); + incidental TS/JS scrutinee double-eval hoist
+      (call-result scrutinees). New fixture optional_typed_payload.bock (all 5).
+    - #127 Go match-in-loop — method-call scrutinee type assertion; unused-loop-label fix; Some(<literal>)
+      panic (__bockAsInt64/Float64 widening); Python expr-position match (emit_match_expr rewrite). New
+      fixtures optional_match_in_loop.bock (the EXACT core.iter desugar shape, all 5), method_scrutinee,
+      expr_position. Conformance now 55+ exec pairs.
+
+  THE CODEGEN-RESIDUE SAGA (core.iter as a sensitive probe — the block's headline):
+    core.iter STOPPED at its T1 gate THREE times, each surfacing a deeper, real codegen-correctness layer
+    that the "5-target parity" claim (#114-#121) had not actually covered — because the conformance
+    fixtures never exercised realistic desugar shapes:
+      R1 (pre-block #121/DV9): statement match arms, self-methods, Go Optional runtime.
+      R2 (this block, fixed #124/#126): TS self/Optional typing; Go typed Some-payload; Python Optional
+         runtime; TS/JS call-result-scrutinee double-eval.
+      R3 (fixed #127): Go method-call scrutinee assertion; unused loop label; Some(literal) panic; Python
+         expr-position match.
+    Each fix is genuine, general codegen correctness, landed within the operator's standing "fix codegen
+    first" direction. The desugar shape itself is now PROVEN: optional_match_in_loop.bock (a record
+    iterator, `fn next(mut self) -> Int?`, statement-style returns, `loop { match it.next() { Some(x) =>
+    {...} None => break } }`) executes correctly on ALL 5 targets. The checker desugar I was to write is
+    sound (validated). Design findings captured: iterator `next` needs `mut self` (→ &mut self / pointer
+    receiver; plain self infinite-loops Rust/Go); statement-style returns only (block-tail Some-in-if is
+    an off-path Go/Py expr-position defect); the desugar binds `let mut __iter`.
+
+  THE BLOCKER (core.iter v3 got PAST T1, stopped one layer deeper — ESCALATING):
+    DQ12's R1 floor (a `ListIterator[T]` over `List[T]` + 6 List-returning combinators) requires List
+    built-in method codegen — `.len()`/`.get(i)`/`.push(x)` — which DOES NOT EXIST on ANY backend
+    (verified empirically on all 5 + by source: no List-method dispatch in bock-codegen). Plus a narrower
+    Go defect: native `for x in [literal]` emits `[]interface{}` → untyped element (interface{} family).
+    → DV10 (List methods uncodegen'd, gap), DV11 (Go for-list element typing, impl-bug), queue Q-list-codegen
+    (v1-BLOCKING) + Q-go-list-literal. This is NOT a routine fix: "List built-in method codegen × 5 backends"
+    is a substantial workstream gating core.iter AND core.collections AND every List-using stdlib module —
+    a SCOPE/ROADMAP matter (operator's call), and it raises a CORE-SPEC question (DQ16: keep the DQ12
+    List-backed floor and block on Q-list-codegen, or redefine the R1 core.iter floor to a List-free
+    iterator surface that is codegen-proven today?) — Design's call. Both exceed routine autonomous
+    authority, so I STOPPED dispatching and escalated rather than unilaterally launching the workstream or
+    redefining the floor.
+
+  DECISION: stop the core.iter pursuit at the List-codegen substrate; ESCALATE (escalations.md 15:24) the
+    List-codegen scope/roadmap matter to the operator + the core.iter-floor core-spec question (DQ16) to
+    Design; complete the wind-down (this tracking PR + root CHANGELOG regen) so the record is clean and the
+    decision is well-framed for the operator's return.
+  Reasoning: the previous three rounds were narrow, surgical, clearly-authorized codegen bug-fixes. List
+    built-in method codegen is feature-scale, foundational, and reframes the v1 stdlib critical path (the
+    3 landed modules were all pure / List-free, so this gap was latent until iter). The operator should set
+    its priority/sequencing; Design owns whether the iter floor changes. Filing-and-framing (not blocking
+    other work) is the contract behavior; there is no other unblocked critical-path work to dispatch (every
+    remaining ready item conflicts with bock-types/stdlib/bock-codegen ownership), so the honest state is
+    "awaiting decision."
+
+  New design questions → Design (design-questions.md / escalations.md): DQ14 (Iterable.iter() must return
+    concrete ListIterator — no impl-Trait/assoc-types), DQ15 (concrete vs generic-bound combinators), DQ16
+    (core.iter R1 floor: List-backed vs List-free), DQ17 (canonical Optional codegen representation across
+    targets — is it normative? #126 Python repr proceeded on the JS/TS/Go-mirroring default). All non-blocking
+    to OTHER work; DQ16 gates core.iter.
+  New FOUND/follow-ups (queue): Q-list-codegen (v1-blocking), Q-go-list-literal, Q-ts-generic-impl (minor,
+    #124: generic impl targets drop generic args in self typing), Q-match-exprpos broadened (Go expr-position
+    Optional IIFE yields interface{} / block-tail Some-in-if, #127 off-path).
+  Process notes (lessons, for the operator + future sessions): (a) merge ONLY on the explicit per-job
+    breakdown, never a watch exit code (held throughout). (b) Remove the completed agent's worktree BEFORE
+    `gh pr merge --delete-branch`; operate merges from the main checkout (a cwd-invalidation from removing a
+    worktree my shell sat in hit once on #126, recovered, no state lost). (c) isolation:worktree dispatches
+    can nest under a stale stopped-agent worktree dir if cwd drifts — ensure cwd=main checkout before
+    dispatch. (d) STALE shared CARGO_TARGET_DIR gave a false Go T1 failure in core.iter v3 until forced
+    recompile — codegen-dependent sessions should `cargo build -p bock` first or wipe the per-branch target
+    cache (CLAUDE.md "Cargo target sharing").
+
+  Follow-up:
+    1. AWAIT operator decision on Q-list-codegen scope/priority + Design on DQ16 (core.iter floor). Then
+       either dispatch the List-codegen workstream (plan-first) → resume core.iter, or implement a
+       redefined List-free iter floor.
+    2. Root CHANGELOG.md regen (separate chore PR; gen-changelog.sh; folds #114-#127; was pre-existing stale).
+    3. Land DQ10-DQ13 + DQ14-DQ17 routing to Design at leisure (non-blocking except DQ16).
+    4. Other ready bugs (Q-self-subst, Q-xmod-*, Q-prim-assoc, Q-interp-enum) remain available; most touch
+       bock-types and should sequence around any core.iter resume.
+
+═══ DAILY DIGEST — 2026-05-30 ═══
+Dispatched: 8 engineer sessions (Opus 4.8 @ xhigh, isolation worktrees) — core.iter ×3 (T1-stopped each,
+  progressively deeper), Q-ts-codegen, Q-ci-vscode-test, changelog-hygiene, Go+Python Optional codegen,
+  Go match-in-loop. All non-core.iter sessions succeeded.
+Merged: #123 (vscode CI), #124 (TS codegen), #125 (changelog hygiene), #126 (Py Optional + Go typed-payload),
+  #127 (Go match-in-loop). main 178a092 → 70f1b80. All gate-clean, full-matrix CI green incl. Windows.
+Queued: Q-list-codegen (v1-blocking, NEW), Q-go-list-literal, Q-ts-generic-impl; DV10/DV11; DQ14-DQ17.
+Blocked: core.iter — on Q-list-codegen (List built-in method codegen, absent on all backends) + DQ16
+  (core.iter floor, → Design). The R1 fan-out (effect + R2/R3) inherits the List-codegen dependency for any
+  List-using module (collections, parts of iter).
+Escalations raised: 1 immediate (escalations.md 2026-05-30 15:24) — List-codegen scope/roadmap (operator) +
+  core.iter floor DQ16 (Design). HIGH-severity / blocking the critical path.
+Notes: core.iter is a sensitive probe — it peeled back 3 codegen layers (Optional-payload family, all fixed
+  #124/#126/#127) and then the List-codegen substrate. The "5-target parity" restored by #114-#121 was real
+  for the constructs tested but leaned on fixtures that never exercised realistic desugar shapes; conformance
+  coverage is now materially deeper (55+ exec pairs). The verify-and-STOP discipline (a session stopping at a
+  real substrate gap rather than shipping a module that can't build) again prevented significant waste.

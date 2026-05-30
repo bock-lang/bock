@@ -94,6 +94,42 @@ decided→link)`
   Iterator/Iterable) are name-level prelude only until their `core.*` ship — expected.
 - **Status:** escalated → Design (escalations.md)
 
+### DQ14 — `core.iter`: `Iterable.iter()` return type without `impl Trait`/associated types
+- **Question:** the compiler has neither associated types (parsed but inert end-to-end) nor
+  `-> impl Iterator`/existential returns, so the DQ12 floor pins `Iterable[T].iter(self) ->
+  ListIterator[T]` (the single concrete stdlib iterator). A *user* iterable can then only return
+  the stdlib `ListIterator`, not its own iterator type — a real expressiveness limit. Accept this
+  v1 floor, have `iter()` return `Self`, or pull forward existential/assoc-type returns?
+- **§:** §18.3 · **context:** surfaced by the `core.iter` plan; non-blocking to the floor.
+- **Status:** escalated → Design (escalations.md)
+
+### DQ15 — `core.iter`: combinator dispatch — concrete vs generic-bound
+- **Question:** are v1 combinators `fn map[I: Iterator[T], U](it: I, …)` (generic-bound dispatch
+  via the less-exercised `type_var_bounds` path) or `fn map[T,U](it: ListIterator[T], …)`
+  (concrete)? The floor ships concrete (proven path). Ratify the normative surface.
+- **§:** §18.3 · **context:** surfaced by the `core.iter` plan; non-blocking.
+- **Status:** escalated → Design (escalations.md)
+
+### DQ16 — `core.iter` R1 floor: List-backed vs List-free (**BLOCKS core.iter**)
+- **Question:** the DQ12 R1 floor (a `ListIterator[T]` over `List[T]` + 6 List-returning
+  combinators) is **not shippable** — List built-in methods don't codegen on any backend
+  (`divergences.md` DV10, `queue.md` Q-list-codegen, a substantial workstream). Two paths:
+  **(a)** keep the List-backed floor and BLOCK `core.iter` on Q-list-codegen; **(b)** redefine
+  the R1 floor to a List-free iterator surface (Counter/Range-style, Int/Float + arithmetic —
+  codegen-PROVEN today via `optional_match_in_loop.bock`), omitting the combinators until List
+  codegen lands. The for→Iterable desugar itself is proven on all 5 targets.
+- **§:** §18.3 · **context:** surfaced by core.iter v3 (2026-05-30); the decision that unblocks
+  core.iter. Pairs with the Q-list-codegen scope/roadmap escalation (operator).
+- **Status:** escalated → Design (escalations.md) — **blocks core.iter**
+
+### DQ17 — canonical Optional codegen representation (normative?)
+- **Question:** is the cross-target `Optional`/`Some`/`None` codegen representation normative, or
+  a free per-backend choice? #124/#126 shipped a tagged representation (`BockOption<T>` TS,
+  `__bockOption` Go, `_BockSome`/`_BockNone` Python, tagged object JS) on the defensible "mirror
+  JS value representation" default; the spec doesn't pin it. Low priority / reversible.
+- **§:** §18 / codegen · **context:** surfaced by #126 (Python repr OPEN→Design). Non-blocking.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and
