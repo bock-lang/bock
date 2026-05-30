@@ -143,6 +143,16 @@ decided→link)`
   Non-blocking — core.iter builds result lists via `concat`, not `push`. → Q-codegen-completeness P4.
 - **Status:** escalated → Design (escalations.md)
 
+### DQ19 — single-file bundling vs §20.6.1 one-file-per-module output
+- **Question:** Phase 0 (#132) emits a cross-module program as a single bundled `main.<ext>` (concatenating the
+  `use`-reachable modules), diverging from spec §20.6.1's one-file-per-module build output. Is single-file
+  bundling the v1 execution model (per-module tree → a future "library build" mode), or should §20.6.1 be
+  preserved (requiring the run model + harness to load a multi-file tree per target)?
+- **§:** §20.6.1 · **context:** surfaced by #132 (a non-normative §20.6.1 note + changelog were added). The
+  single-file run model (the conformance harness + toolchain run plans run one `main.<ext>`) made bundling the
+  pragmatic path. Non-blocking — bundling works on all 5.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and

@@ -247,3 +247,17 @@ behind it, dispatched the Phase-0 design (cross-module wiring + user-enum codege
 the phased fixes (sequential per crate-granularity), checkpointing between phases. Reduce-target-set (§1.3) and
 reduce-stdlib-scope remain available if the magnitude warrants a later pivot.
 **Status:** responded (decisions #2 + #3 made; milestone underway)
+
+## [2026-05-30 19:41 UTC] §20.6.1 build-output: single-file bundling divergence (DQ19 → Design)
+
+**Type:** design (core-spec)
+**Severity:** low (non-blocking — bundling works on all 5; Phase 0 landed)
+**Trigger:** Phase 0 Item A (#132) emits cross-module programs as a single bundled `main.<ext>`, diverging from
+spec §20.6.1's one-file-per-module output. The single-file run model (conformance harness + toolchain run plans
+run one `main.<ext>`) made bundling the pragmatic path; per CLAUDE.md the spec was NOT silently changed (a
+non-normative §20.6.1 note + changelog were added pending Design).
+**Context (design-questions.md DQ19):** is single-file bundling the v1 execution model (per-module tree → a
+future "library build" mode), or should §20.6.1 be preserved (requiring multi-file run/harness support)?
+**Recommendation:** none on merits (Design's). Bundling is the lower-friction v1 path given the run model.
+**Awaiting:** Design ratification; non-blocking.
+**Status:** pending
