@@ -230,13 +230,20 @@ fn conformance_fixtures_execute_on_every_present_target() {
     }
 
     // Only fixtures that declare an output expectation are executable here.
-    let output_cases: Vec<(&TestCase, &str)> = cases
+    // A fixture may also declare `// EXPECT: targets <ids>` to restrict which
+    // backends it runs on (absent ⇒ all targets).
+    let output_cases: Vec<(&TestCase, &str, Option<BTreeSet<String>>)> = cases
         .iter()
         .filter_map(|tc| {
-            tc.expectations.iter().find_map(|e| match e {
-                Expectation::Output(text) => Some((tc, text.as_str())),
+            let text = tc.expectations.iter().find_map(|e| match e {
+                Expectation::Output(text) => Some(text.as_str()),
                 _ => None,
-            })
+            })?;
+            let targets = tc.expectations.iter().find_map(|e| match e {
+                Expectation::Targets(set) => Some(set.clone()),
+                _ => None,
+            });
+            Some((tc, text, targets))
         })
         .collect();
     assert!(
@@ -249,8 +256,14 @@ fn conformance_fixtures_execute_on_every_present_target() {
     let mut skipped: Vec<String> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
-    for (case, expected) in &output_cases {
+    for (case, expected, targets) in &output_cases {
         for target in TARGET_ORDER {
+            // Honor a per-fixture `targets` restriction.
+            if let Some(allowed) = targets {
+                if !allowed.contains(*target) {
+                    continue;
+                }
+            }
             match run_one(&registry, case, target, expected, &required) {
                 Outcome::Passed => passed.push(format!("{}::{target}", case.name)),
                 Outcome::Skipped => skipped.push(format!("{}::{target}", case.name)),

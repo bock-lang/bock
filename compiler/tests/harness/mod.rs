@@ -11,10 +11,17 @@
 //! // EXPECT: no_errors
 //! // EXPECT: error E0205 at 3:10
 //! // EXPECT: output "hello world"
+//! // EXPECT: targets go, rust, js
 //! ```
 //!
 //! All directives must appear at the **top** of the file (before any
 //! non-directive, non-blank lines).
+//!
+//! `// EXPECT: targets <ids>` restricts an execution fixture to the listed
+//! transpilation targets (`js`, `ts`, `python`, `rust`, `go`); when absent the
+//! fixture runs on every target. It lets a fixture exercise a backend-specific
+//! defect without failing on targets where the relevant feature is not yet
+//! supported.
 
 pub mod expectation;
 

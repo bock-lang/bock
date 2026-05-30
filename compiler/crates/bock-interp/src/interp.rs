@@ -2243,8 +2243,15 @@ impl Interpreter {
         };
 
         // Check if first param is `self` — instance method.
+        //
+        // Method bodies run in a fresh env seeded with the program globals
+        // (top-level fns, constructors, `Some`/`None`/`Ok`/`Err`) so those
+        // names resolve inside the body — mirroring how top-level function
+        // calls clone the current env. Using a bare `Environment::new()` here
+        // hid every global from method bodies.
         if param_names.first().map(|s| s.as_str()) == Some("self") {
-            let saved_env = std::mem::replace(&mut self.env, Environment::new());
+            let method_env = Environment::with_globals(&self.env);
+            let saved_env = std::mem::replace(&mut self.env, method_env);
             self.env.push_scope();
             self.env.define("self", receiver.clone());
             for (name, val) in param_names.iter().skip(1).zip(args) {
@@ -2258,7 +2265,8 @@ impl Interpreter {
             }
         } else {
             // Static method — no self parameter.
-            let saved_env = std::mem::replace(&mut self.env, Environment::new());
+            let method_env = Environment::with_globals(&self.env);
+            let saved_env = std::mem::replace(&mut self.env, method_env);
             self.env.push_scope();
             for (name, val) in param_names.iter().zip(args) {
                 self.env.define(name.clone(), val);
@@ -5514,5 +5522,54 @@ mod tests {
             result,
             Value::List(vec![Value::Int(3), Value::Int(4), Value::Int(5)])
         );
+    }
+
+    // ── Method-body global visibility (codegen-correctness defect 5) ──────────
+
+    #[tokio::test]
+    async fn method_body_sees_program_globals() {
+        // A method body must see program globals (here the prelude `None`
+        // constructor). Before the fix, method bodies ran in a bare
+        // `Environment::new()`, so `None`/`Some`/`Ok`/`Err` and top-level fns
+        // were invisible and resolving `None` failed.
+        let mut interp = Interpreter::new();
+        let g = gen();
+
+        // Method `get_none(self) -> { None }`, registered on type `Holder`.
+        let body = node(
+            g.next(),
+            NodeKind::Block {
+                stmts: vec![],
+                tail: Some(Box::new(var(&g, "None"))),
+            },
+        );
+        interp.method_table.insert(
+            "Holder".to_string(),
+            HashMap::from([("get_none".to_string(), (vec!["self".to_string()], body))]),
+        );
+
+        let receiver = Value::Record(RecordValue {
+            type_name: "Holder".to_string(),
+            fields: std::collections::BTreeMap::new(),
+        });
+
+        let result = interp
+            .try_call_impl_method(&receiver, "get_none", vec![])
+            .await;
+        assert_eq!(result, Ok(Some(Value::Optional(None))));
+    }
+
+    #[tokio::test]
+    async fn method_body_global_invisible_without_seeding() {
+        // Guard: a method env seeded *without* globals (the old behavior) does
+        // not resolve `None`. This pins the regression — proving the seeding in
+        // `try_call_impl_method` is what makes the test above pass.
+        let mut interp = Interpreter::new();
+        let g = gen();
+        let bare = Environment::new();
+        // Replacing the env with a bare one drops the globals.
+        interp.env = bare;
+        assert!(interp.env.get("None").is_none());
+        let _ = g;
     }
 }

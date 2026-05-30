@@ -25,6 +25,19 @@ impl Environment {
         }
     }
 
+    /// Create an environment seeded with another environment\'s global (root)
+    /// frame — the bindings registered at program start (`Some`/`None`/`Ok`/
+    /// `Err`, top-level functions, constructors). Used for method-body
+    /// evaluation so those globals stay visible inside a method, mirroring the
+    /// way top-level function bodies clone the caller\'s env. Inner scopes of
+    /// `source` are intentionally dropped: a method does not capture the
+    /// caller\'s locals, only the globals.
+    #[must_use]
+    pub fn with_globals(source: &Environment) -> Self {
+        let root = source.scopes.first().cloned().unwrap_or_default();
+        Self { scopes: vec![root] }
+    }
+
     /// Push a new inner scope.
     pub fn push_scope(&mut self) {
         self.scopes.push(Frame::new());

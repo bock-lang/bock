@@ -1,0 +1,24 @@
+// TEST: exec_match_stmt_arm_return
+// EXPECT: output "n=zero;p=other"
+//
+// Regression fixture for the codegen-correctness workstream (defects 1 & 2):
+// `match` arms with `return` bodies in statement position (not inside a loop,
+// so no loop label is involved). `return` is the cleanest statement arm -- it
+// lowers identically across Rust (match arm), Go (switch), Python (match/case)
+// and JS/TS (switch). Before the fix these arms emitted `/* unsupported */`
+// (Rust) or value-returning IIFEs/lambdas that discarded the `return`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn classify(n: Int) -> String {
+  match n {
+    0 => return "zero"
+    _ => return "other"
+  }
+}
+
+fn main() -> Void {
+  println("n=${classify(0)};p=${classify(7)}")
+}

@@ -1,5 +1,6 @@
 //! Parsing of `// EXPECT:` directives from `.bock` test files.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// A location referenced in an error expectation (`line:col`).
@@ -24,6 +25,12 @@ pub enum Expectation {
     ErrorAt { code: String, location: Location },
     /// `// EXPECT: output "<text>"` — the interpreter should print this text.
     Output(String),
+    /// `// EXPECT: targets <a>, <b>, ...` — restrict execution to the listed
+    /// transpilation targets (by id: `js`, `ts`, `python`, `rust`, `go`).
+    /// Absent ⇒ the fixture runs on every target. Lets a fixture exercise a
+    /// backend-specific defect without failing on targets where the relevant
+    /// feature is not yet supported.
+    Targets(BTreeSet<String>),
 }
 
 impl fmt::Display for Expectation {
@@ -34,6 +41,13 @@ impl fmt::Display for Expectation {
                 write!(f, "error {} at {}", code, location)
             }
             Expectation::Output(text) => write!(f, "output {:?}", text),
+            Expectation::Targets(targets) => {
+                write!(
+                    f,
+                    "targets {}",
+                    targets.iter().cloned().collect::<Vec<_>>().join(", ")
+                )
+            }
         }
     }
 }
@@ -103,6 +117,26 @@ pub fn parse_expectation(
         });
     }
 
+    if let Some(rest) = value.strip_prefix("targets ") {
+        // `targets <id>, <id>, ...`
+        let mut set = BTreeSet::new();
+        for tok in rest.split(',') {
+            let tok = tok.trim();
+            if !tok.is_empty() {
+                set.insert(tok.to_string());
+            }
+        }
+        if set.is_empty() {
+            return Err(ParseError {
+                line_number,
+                message: format!(
+                    "malformed targets expectation {value:?}; expected `targets <id>, ...`"
+                ),
+            });
+        }
+        return Ok(Some(Expectation::Targets(set)));
+    }
+
     // Unknown expectation type — forward-compatible: ignore silently.
     Ok(None)
 }
@@ -163,5 +197,32 @@ mod tests {
     fn test_malformed_output() {
         let result = parse_expectation("output not_quoted", 7);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_targets() {
+        let exp = parse_expectation("targets go, rust , js", 1)
+            .unwrap()
+            .unwrap();
+        let mut want = BTreeSet::new();
+        want.insert("go".to_string());
+        want.insert("rust".to_string());
+        want.insert("js".to_string());
+        assert_eq!(exp, Expectation::Targets(want));
+    }
+
+    #[test]
+    fn test_targets_empty_is_error() {
+        // The prefix is present but yields no target tokens (only separators).
+        let result = parse_expectation("targets ,,", 3);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_targets_bare_word_is_unknown() {
+        // `targets` with no trailing space/args is an unknown directive, not an
+        // error (forward-compatible: ignored).
+        let result = parse_expectation("targets", 3).unwrap();
+        assert!(result.is_none());
     }
 }

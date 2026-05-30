@@ -1,0 +1,33 @@
+// TEST: exec_match_stmt_arm_break
+// EXPECT: output "total=10"
+//
+// Regression fixture for the codegen-correctness workstream (defects 1 & 2):
+// a `match` whose arms have *statement* bodies -- here `break` and an
+// assignment block. Before the fix every backend routed the match through an
+// expression form (Rust emitted `=> /* unsupported */`; Go/JS/TS an IIFE/lambda
+// `switch`; Python a `lambda`), so the statement arm produced invalid or
+// non-compiling output.
+//
+// The match is in statement position inside a loop. `break` must exit the
+// LOOP, not the lowered `switch` -- on Go/JS/TS that requires a labelled break,
+// which the fix emits. Uses an integer scrutinee so no enum machinery is
+// involved (keeps the fixture focused on the statement-arm defect).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let mut total: Int = 0
+  let mut i: Int = 0
+  loop {
+    match i {
+      5 => break
+      _ => {
+        total = total + i
+        i = i + 1
+      }
+    }
+  }
+  println("total=${total}")
+}
