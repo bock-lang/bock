@@ -1,0 +1,71 @@
+// TEST: exec_optional_match_in_loop
+// EXPECT: output "sum=6"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Mirrors the EXACT shape `core.iter`'s checker desugar emits for
+// `for x in <user-Iterable> { ... }`:
+//
+//   let mut __iter = <iterable>.iter()
+//   loop {
+//     match __iter.next() {            // scrutinee is a METHOD CALL returning Int?
+//       Some(x) => { sum = sum + x }   // payload used in a *typed* op
+//       None => break                  // 2-arm Some/None lowers to if/else + break
+//     }
+//   }
+//
+// The iterator's `next` uses statement-style `return Some(v)` / `return None`
+// and takes `mut self`. This fixture is the acceptance criterion that
+// guarantees `core.iter`'s codegen gate (T1) passes on every target.
+//
+// Two Go defects this exercised (both fixed in the same PR):
+//
+//   1. Method-call-scrutinee payload not type-asserted. `scrutinee_optional_elem`
+//      only resolved `Optional[T]` for identifier and free-call scrutinees, so a
+//      `match it.next() { Some(x) => sum = sum + x ... }` bound `x` as bare
+//      `interface{}`, and `sum + x` failed `go build` ("mismatched types int64
+//      and interface{}"). Fixed by resolving the called method's `Optional[T]`
+//      return element type (the method-call / desugared-self-call path).
+//
+//   2. Unused loop label. A 2-arm `Some/None` match lowers to
+//      `if __opt.tag == "Some" { ... } else { break }` (NOT a Go `switch`); the
+//      bare `break` already exits the enclosing `for`, but Go still allocated a
+//      `__bockLoopN:` label it never used -> "label __bockLoopN defined and not
+//      used". Fixed by only labelling loops whose contained match lowers to a
+//      real `switch` (a non-Optional statement-arm match).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+// A range-style iterator [1, lo .. hi] inclusive of lo, exclusive of hi.
+record Counter {
+  cur: Int
+  hi: Int
+}
+
+impl Counter {
+  // Statement-style Optional return: `return Some(v)` / `return None`, taking
+  // `mut self` -- exactly the shape `core.iter`'s `next` uses.
+  fn next(mut self) -> Int? {
+    if (self.cur >= self.hi) {
+      return None
+    }
+    let v: Int = self.cur
+    self.cur = self.cur + 1
+    return Some(v)
+  }
+}
+
+fn main() -> Void {
+  let mut it: Counter = Counter { cur: 1, hi: 4 }
+  let mut sum: Int = 0
+  loop {
+    match it.next() {
+      Some(x) => {
+        sum = sum + x
+      }
+      None => break
+    }
+  }
+  println("sum=${sum}")
+}

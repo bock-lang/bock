@@ -1964,27 +1964,118 @@ impl PyEmitCtx {
         Ok(())
     }
 
-    /// Emit a match expression as nested ternary (best effort for expression context).
+    /// Emit a `match` *expression* (each arm yields a value, no statement arm)
+    /// as a nested Python conditional over the scrutinee, which the caller has
+    /// bound to `__v` via the enclosing `(lambda __v: …)(<scrutinee>)`.
+    ///
+    /// Each non-final arm becomes `<body> if <test on __v> else (<rest>)`. The
+    /// arm body may reference a pattern binding (the `x` in `Some(x)`, or a
+    /// whole-scrutinee bind pattern); since a Python conditional can't introduce
+    /// a binding, the body is wrapped in an immediately-applied
+    /// `(lambda <bind>: <body>)(<value>)` so the name resolves. Patterns:
+    ///
+    /// - `Some(x)` → test `isinstance(__v, _BockSome)`, bind `x = __v._0`
+    /// - `None`    → test `isinstance(__v, _BockNone)`
+    /// - literal   → test `__v == <lit>`
+    /// - wildcard / bind / final arm → the `else` (catch-all); a bind pattern
+    ///   binds the whole scrutinee
+    ///
+    /// This replaces an earlier stub that emitted a hardcoded `… if False else …`
+    /// chain (which always selected the *last* arm and never bound the payload),
+    /// mis-compiling every expression-position `match` whose arms were not all
+    /// `return`s — e.g. `let r = match o { Some(x) => x + 1; None => 0 }`.
     fn emit_match_expr(
         &mut self,
         _scrutinee: &AIRNode,
         arms: &[AIRNode],
     ) -> Result<(), CodegenError> {
-        // Simple fallback: just emit first arm body or None
-        for (i, arm) in arms.iter().enumerate() {
-            if let NodeKind::MatchArm { body, pattern, .. } = &arm.kind {
-                if i > 0 {
-                    self.buf.push_str(" if False else ");
-                }
-                if matches!(pattern.kind, NodeKind::WildcardPat) || i == arms.len() - 1 {
-                    self.emit_block_as_expr(body)?;
-                    return Ok(());
-                }
-                self.emit_block_as_expr(body)?;
-            }
+        self.emit_match_expr_from(arms, 0)
+    }
+
+    /// Tail of [`Self::emit_match_expr`]: emit the conditional for `arms[idx..]`.
+    fn emit_match_expr_from(&mut self, arms: &[AIRNode], idx: usize) -> Result<(), CodegenError> {
+        let Some(NodeKind::MatchArm { pattern, body, .. }) = arms.get(idx).map(|a| &a.kind) else {
+            // No arm at this index: Bock matches are exhaustive, so this is
+            // unreachable, but emit a defined value to keep the expression valid.
+            self.buf.push_str("None");
+            return Ok(());
+        };
+        let is_last = idx + 1 >= arms.len();
+        let is_catch_all = matches!(
+            pattern.kind,
+            NodeKind::WildcardPat | NodeKind::BindPat { .. }
+        );
+        // The final arm, or any catch-all, is the unconditional `else` value.
+        if is_last || is_catch_all {
+            return self.emit_arm_value(pattern, body, /*whole_scrutinee_bind=*/ true);
         }
-        self.buf.push_str("None");
+        // Otherwise: `<value> if <test> else (<rest>)`.
+        self.emit_arm_value(pattern, body, /*whole_scrutinee_bind=*/ false)?;
+        self.buf.push_str(" if ");
+        self.emit_match_expr_test(pattern)?;
+        self.buf.push_str(" else (");
+        self.emit_match_expr_from(arms, idx + 1)?;
+        self.buf.push(')');
         Ok(())
+    }
+
+    /// Emit the boolean test (over the bound `__v`) that selects `pattern`.
+    fn emit_match_expr_test(&mut self, pattern: &AIRNode) -> Result<(), CodegenError> {
+        match &pattern.kind {
+            NodeKind::ConstructorPat { path, .. } => {
+                let leaf = path.segments.last().map_or("", |s| s.name.as_str());
+                let cls = match leaf {
+                    "Some" => "_BockSome",
+                    "None" => "_BockNone",
+                    other => other,
+                };
+                let _ = write!(self.buf, "isinstance(__v, {cls})");
+            }
+            NodeKind::LiteralPat { .. } => {
+                self.buf.push_str("__v == ");
+                self.emit_pattern(pattern)?;
+            }
+            // Catch-alls never produce a test (handled as the `else`).
+            _ => self.buf.push_str("True"),
+        }
+        Ok(())
+    }
+
+    /// Emit one arm's value, binding any pattern variable via an applied lambda
+    /// so it resolves inside the conditional. `whole_scrutinee_bind` allows a
+    /// bind pattern in `else` position to capture the whole scrutinee (`__v`).
+    fn emit_arm_value(
+        &mut self,
+        pattern: &AIRNode,
+        body: &AIRNode,
+        whole_scrutinee_bind: bool,
+    ) -> Result<(), CodegenError> {
+        match &pattern.kind {
+            // `Some(x)` binds the payload `__v._0`.
+            NodeKind::ConstructorPat { path, fields }
+                if path.segments.last().is_some_and(|s| s.name == "Some") =>
+            {
+                if let Some(f) = fields.first() {
+                    let name = self.pattern_to_binding_name(f);
+                    if name != "_" {
+                        let _ = write!(self.buf, "(lambda {name}: ");
+                        self.emit_block_as_expr(body)?;
+                        self.buf.push_str(")(__v._0)");
+                        return Ok(());
+                    }
+                }
+                self.emit_block_as_expr(body)
+            }
+            // A bind pattern (`x => …`) captures the whole scrutinee.
+            NodeKind::BindPat { name, .. } if whole_scrutinee_bind => {
+                let bind = to_snake_case(&name.name);
+                let _ = write!(self.buf, "(lambda {bind}: ");
+                self.emit_block_as_expr(body)?;
+                self.buf.push_str(")(__v)");
+                Ok(())
+            }
+            _ => self.emit_block_as_expr(body),
+        }
     }
 
     // ── Pipe operator ───────────────────────────────────────────────────────
@@ -4740,5 +4831,142 @@ mod tests {
         assert!(out.contains("case _BockSome(x):"), "got: {out}");
         assert!(out.contains("case _BockNone():"), "got: {out}");
         assert!(!out.contains("case None()"), "got: {out}");
+    }
+
+    /// An Optional `match` in *expression* position (value of a `let`) with
+    /// *non-`return`* arms must lower to a real conditional over the bound
+    /// scrutinee that tests the tag and binds the payload — NOT the old stub
+    /// `(lambda __v: <some> if False else <none>)` (which always selected the
+    /// last arm and never bound the payload). Regression-locking the Python
+    /// expression-position Optional-match defect.
+    #[test]
+    fn optional_match_in_expression_position_binds_payload() {
+        // fn pick(o: Int?) -> Int { let r = match o { Some(x) => x + 1; None => 0 }; return r }
+        let opt_int_ty = node(
+            200,
+            NodeKind::TypeOptional {
+                inner: Box::new(node(
+                    201,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                )),
+            },
+        );
+        let o_param = node(
+            30,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(31, "o")),
+                ty: Some(Box::new(opt_int_ty)),
+                default: None,
+            },
+        );
+        // Some(x) => x + 1  (a value, not a `return`).
+        let some_arm = node(
+            40,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    41,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Some"]),
+                        fields: vec![bind_pat(42, "x")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    43,
+                    vec![],
+                    Some(node(
+                        44,
+                        NodeKind::BinaryOp {
+                            op: BinOp::Add,
+                            left: Box::new(id_node(45, "x")),
+                            right: Box::new(int_lit(46, "1")),
+                        },
+                    )),
+                )),
+            },
+        );
+        // None => 0
+        let none_arm = node(
+            50,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    51,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["None"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(52, vec![], Some(int_lit(53, "0")))),
+            },
+        );
+        let match_expr = node(
+            60,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(61, "o")),
+                arms: vec![some_arm, none_arm],
+            },
+        );
+        // let r = <match_expr>  (match appears in expression position).
+        let let_r = node(
+            70,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(71, "r")),
+                ty: None,
+                value: Box::new(match_expr),
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("pick"),
+                generic_params: vec![],
+                params: vec![o_param],
+                return_type: Some(Box::new(node(
+                    2,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    3,
+                    vec![
+                        let_r,
+                        node(
+                            80,
+                            NodeKind::Return {
+                                value: Some(Box::new(id_node(81, "r"))),
+                            },
+                        ),
+                    ],
+                    None,
+                )),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        // No hardcoded `if False` stub.
+        assert!(
+            !out.contains("if False"),
+            "expression-position match must not emit the `if False` stub, got: {out}"
+        );
+        // Tests the tag and binds the payload via an applied lambda.
+        assert!(
+            out.contains("isinstance(__v, _BockSome)"),
+            "expected a tag test, got: {out}"
+        );
+        assert!(
+            out.contains("(lambda x:") && out.contains(")(__v._0)"),
+            "expected the Some payload bound from __v._0, got: {out}"
+        );
     }
 }

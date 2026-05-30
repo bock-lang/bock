@@ -1,0 +1,51 @@
+// TEST: exec_optional_match_method_scrutinee
+// EXPECT: output "11;-1"
+// EXPECT: targets js, ts, python, rust, go
+//
+// A `match <method-call> { Some(x) => <typed use of x> None => ... }` whose
+// scrutinee is an instance method returning `Optional[T]`, used in *statement*
+// position (each arm `return`s). This is the minimal repro of the Go
+// method-call-scrutinee defect (separate from the loop case in
+// optional_match_in_loop.bock):
+//
+//   match b.get() { Some(x) => println("${x + 6}") None => ... }
+//
+// Before the fix Go bound the `Some` payload as bare `interface{}` (because
+// `scrutinee_optional_elem` only resolved identifier and free-call scrutinees,
+// not method calls), so the typed use `x + 5` failed `go build` with
+// "mismatched types int64 and interface{}". The other four targets passed.
+// Fixed by resolving the called method's `Optional[T]` return element type.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Box {
+  present: Bool
+  value: Int
+}
+
+impl Box {
+  // Non-mut `self` method returning Optional — exercises the method-call
+  // scrutinee resolution without the `mut self` mutation of the iterator case.
+  fn get(self) -> Int? {
+    if (self.present) {
+      return Some(self.value)
+    }
+    return None
+  }
+}
+
+// Scrutinee is a method call; payload used in typed arithmetic.
+fn getPlus5(b: Box) -> Int {
+  match b.get() {
+    Some(x) => return x + 5
+    None => return -1
+  }
+}
+
+fn main() -> Void {
+  let full: Box = Box { present: true, value: 6 }
+  let empty: Box = Box { present: false, value: 0 }
+  println("${getPlus5(full)};${getPlus5(empty)}")
+}
