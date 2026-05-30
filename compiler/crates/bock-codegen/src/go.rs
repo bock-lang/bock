@@ -130,6 +130,18 @@ fn go_match_is_type_switch(arms: &[AIRNode]) -> bool {
     })
 }
 
+/// True if any arm is a catch-all (`_` or a bind pattern), which lowers to a Go
+/// `default:` case.
+fn go_match_has_default_arm(arms: &[AIRNode]) -> bool {
+    arms.iter().any(|arm| {
+        matches!(
+            &arm.kind,
+            NodeKind::MatchArm { pattern, .. }
+                if matches!(pattern.kind, NodeKind::WildcardPat | NodeKind::BindPat { .. })
+        )
+    })
+}
+
 /// Runtime helpers for Bock concurrency in Go. A Channel is a wrapper
 /// over `chan interface{}` so the generic shape is simple; `spawn`
 /// launches a goroutine whose result is piped through a 1-element
@@ -269,6 +281,8 @@ impl CodeGenerator for GoGenerator {
 
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
         let mut ctx = GoEmitCtx::new();
+        ctx.enum_variants =
+            crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
         ctx.collect_async_fns(module);
         ctx.collect_methods(module);
         ctx.collect_optional_returns(module);
@@ -334,6 +348,9 @@ impl CodeGenerator for GoGenerator {
 
         let mut ctx = GoEmitCtx::new();
         ctx.async_fns = global_async_fns;
+        // Pre-scan enum variants across the whole bundle so a `use`d enum's
+        // variants resolve at a construction/pattern site in another module.
+        ctx.enum_variants = crate::generator::collect_enum_variants(modules);
         // Pre-scan method / Optional-return metadata across every module so a
         // match whose scrutinee calls a function/method defined in another
         // bundled module still type-asserts its payload correctly.
@@ -484,6 +501,15 @@ struct GoEmitCtx {
     /// Set once the Optional runtime prelude has been emitted into `buf`;
     /// deduped across a bundle exactly as [`Self::concurrency_runtime_emitted`].
     optional_runtime_emitted: bool,
+    /// User-enum-variant registry (DV14). Go has no sum type, so a user enum is
+    /// a sealed interface + per-variant structs named `{enum}{variant}`
+    /// (e.g. `ShapeCircle`). The registry lets a construction emit the variant
+    /// struct literal and a `match` emit a *type-switch* (`switch __v :=
+    /// s.(type) { case ShapeCircle: … }`) with field extraction, rather than the
+    /// broken value-switch on the unqualified variant name. Built-in
+    /// Optional/Result pre-seeds are filtered out (Optional has its own
+    /// `__bockOption` runtime). Pre-scanned across the bundle.
+    enum_variants: crate::generator::EnumVariantRegistry,
 }
 
 impl GoEmitCtx {
@@ -512,7 +538,58 @@ impl GoEmitCtx {
             var_list_elem: HashMap::new(),
             concurrency_runtime_emitted: false,
             optional_runtime_emitted: false,
+            enum_variants: crate::generator::EnumVariantRegistry::new(),
         }
+    }
+
+    /// Variant info for `path` when its last segment is a registered *user*
+    /// enum variant (built-in Optional/Result pre-seeds excluded — Optional has
+    /// its own `__bockOption` runtime, handled by the bespoke `go_match_is_*`
+    /// paths).
+    fn user_variant_for_path(
+        &self,
+        path: &bock_ast::TypePath,
+    ) -> Option<&crate::generator::EnumVariantInfo> {
+        let info = crate::generator::registered_variant(&self.enum_variants, path)?;
+        if matches!(info.enum_name.as_str(), "Optional" | "Result") {
+            return None;
+        }
+        Some(info)
+    }
+
+    /// As [`Self::user_variant_for_path`] but keyed by a bare identifier name.
+    fn user_variant_for_name(&self, name: &str) -> Option<&crate::generator::EnumVariantInfo> {
+        let info = self.enum_variants.get(name)?;
+        if matches!(info.enum_name.as_str(), "Optional" | "Result") {
+            return None;
+        }
+        Some(info)
+    }
+
+    /// True if every arm of a `match` is a registered user enum variant pattern
+    /// (constructor / record / unit), so the match lowers to a Go *type-switch*
+    /// over the sealed-interface concrete types with field extraction.
+    fn go_match_is_user_enum(&self, arms: &[AIRNode]) -> bool {
+        let mut saw_variant = false;
+        for arm in arms {
+            let NodeKind::MatchArm { pattern, .. } = &arm.kind else {
+                continue;
+            };
+            match &pattern.kind {
+                NodeKind::ConstructorPat { path, .. } | NodeKind::RecordPat { path, .. }
+                    if self.user_variant_for_path(path).is_some() =>
+                {
+                    saw_variant = true;
+                }
+                // Any constructor / record pattern that is NOT a registered
+                // user variant disqualifies the type-switch lowering.
+                NodeKind::ConstructorPat { .. } | NodeKind::RecordPat { .. } => return false,
+                // A trailing `_` / bind arm is a permissible default.
+                NodeKind::WildcardPat | NodeKind::BindPat { .. } => {}
+                _ => return false,
+            }
+        }
+        saw_variant
     }
 
     /// Pre-scan the module for top-level `async fn` names. Must be populated
@@ -2194,6 +2271,15 @@ impl GoEmitCtx {
                     self.buf.push_str("__bockNone");
                     return Ok(());
                 }
+                // A unit-variant reference (`Empty`) → an empty variant-struct
+                // literal `ShapeEmpty{}`.
+                if let Some(enum_name) = self
+                    .user_variant_for_name(&name.name)
+                    .map(|i| i.enum_name.clone())
+                {
+                    let _ = write!(self.buf, "{enum_name}{}{{}}", name.name);
+                    return Ok(());
+                }
                 let emitted = if is_prelude_ctor(&name.name) {
                     name.name.clone()
                 } else if self.public_fns.contains(&name.name) {
@@ -2271,6 +2357,26 @@ impl GoEmitCtx {
                 if let Some(code) = self.map_prelude_call(callee, args)? {
                     self.buf.push_str(&code);
                     return Ok(());
+                }
+                // A call whose callee names a registered tuple variant is a
+                // construction → the variant-struct literal
+                // `ShapeRect{Field0: 3.0, Field1: 4.0}`.
+                if let NodeKind::Identifier { name } = &callee.kind {
+                    if let Some(enum_name) = self
+                        .user_variant_for_name(&name.name)
+                        .map(|i| i.enum_name.clone())
+                    {
+                        let _ = write!(self.buf, "{enum_name}{}{{", name.name);
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 {
+                                self.buf.push_str(", ");
+                            }
+                            let _ = write!(self.buf, "Field{i}: ");
+                            self.emit_expr(&arg.value)?;
+                        }
+                        self.buf.push('}');
+                        return Ok(());
+                    }
                 }
                 if self.try_emit_time_assoc_call(callee, args)? {
                     return Ok(());
@@ -2428,12 +2534,19 @@ impl GoEmitCtx {
                 fields,
                 spread,
             } => {
-                let type_name = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(".");
+                // A struct-variant construction (`Circle { radius: .. }`) → the
+                // `{enum}{variant}` struct literal `ShapeCircle{Radius: ..}`
+                // (field name `to_pascal_case`d). Plain records keep their path.
+                let type_name = if let Some(info) = self.user_variant_for_path(path) {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    format!("{}{variant}", info.enum_name)
+                } else {
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                };
                 if let Some(_sp) = spread {
                     // Go doesn't have spread syntax; emit TODO comment.
                     self.buf.push_str(&format!("{type_name}{{"));
@@ -2878,13 +2991,25 @@ impl GoEmitCtx {
         if go_match_is_optional(arms) {
             return self.emit_optional_match_stmt(scrutinee, arms);
         }
+        // A user enum lowers to a type-switch over the sealed-interface concrete
+        // variant structs, binding each arm's payload fields from `__v`.
+        let user_enum = self.go_match_is_user_enum(arms);
         // Choose value-switch (`switch v { case 5: }`) vs type-switch
         // (`switch v := s.(type) { case T: }`) by pattern kind: constructor /
         // record patterns dispatch on dynamic type; literal / bind patterns
         // dispatch on value.
-        let type_switch = go_match_is_type_switch(arms);
+        let type_switch = user_enum || go_match_is_type_switch(arms);
         let ind = self.indent_str();
-        if type_switch {
+        if user_enum {
+            // A *narrowing* type-switch: `switch __v := s.(type)` rebinds `__v`
+            // to the concrete variant struct in each case, so the arm can read
+            // its payload fields (`__v.Radius`). (The non-narrowing
+            // `switch __v := s; __v.(type)` form does not give `__v` the
+            // concrete type in the cases.)
+            let _ = write!(self.buf, "{ind}switch __v := ");
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str(".(type) {\n");
+        } else if type_switch {
             let _ = write!(self.buf, "{ind}switch __v := ");
             self.emit_expr(scrutinee)?;
             self.buf.push_str("; __v.(type) {\n");
@@ -2896,7 +3021,20 @@ impl GoEmitCtx {
         self.indent += 1;
         self.switch_label_depth += 1;
         for arm in arms {
-            self.emit_match_arm(arm)?;
+            self.emit_match_arm(arm, user_enum)?;
+        }
+        // Bock matches are exhaustive, but Go can't prove a type-switch covers
+        // every implementor of a sealed interface, so a function that returns a
+        // value after the switch would fail to compile ("missing return"). When
+        // no arm is a catch-all (`_` / bind), add a `default: panic(...)` so the
+        // switch is total from Go's control-flow view.
+        if user_enum && !go_match_has_default_arm(arms) {
+            self.needs_fmt_import = true;
+            let di = self.indent_str();
+            let _ = write!(
+                self.buf,
+                "{di}default:\n{di}\tpanic(fmt.Sprintf(\"unreachable match arm: %v\", __v))\n"
+            );
         }
         self.switch_label_depth -= 1;
         self.indent -= 1;
@@ -2904,7 +3042,7 @@ impl GoEmitCtx {
         Ok(())
     }
 
-    fn emit_match_arm(&mut self, arm: &AIRNode) -> Result<(), CodegenError> {
+    fn emit_match_arm(&mut self, arm: &AIRNode, user_enum: bool) -> Result<(), CodegenError> {
         if let NodeKind::MatchArm {
             pattern,
             guard,
@@ -2924,6 +3062,11 @@ impl GoEmitCtx {
             }
             self.buf.push('\n');
             self.indent += 1;
+            // For a user enum type-switch, bind the arm's payload fields from
+            // the concrete `__v` (`radius := __v.Radius`, `w := __v.Field0`).
+            if user_enum {
+                self.emit_user_enum_arm_bindings(pattern)?;
+            }
             if let Some(g) = guard {
                 let gi = self.indent_str();
                 let _ = write!(self.buf, "{gi}if ");
@@ -2936,6 +3079,47 @@ impl GoEmitCtx {
             } else {
                 self.emit_block_body(body)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Bind a user-enum arm's payload fields from the type-switched `__v`.
+    ///
+    /// Inside a Go type-switch case `case ShapeCircle:`, `__v` has the concrete
+    /// variant-struct type, so each bound field reads directly off it:
+    /// - struct variant (`Circle { radius }`): `radius := __v.Radius`
+    ///   (the struct field is `to_pascal_case` of the Bock field name).
+    /// - tuple variant (`Rect(w, h)`): `w := __v.Field0; h := __v.Field1`.
+    /// - unit variant: nothing to bind.
+    ///
+    /// Each binding is followed by `_ = name` so an arm that does not use every
+    /// payload field still compiles (Go errors on an unused local).
+    fn emit_user_enum_arm_bindings(&mut self, pattern: &AIRNode) -> Result<(), CodegenError> {
+        match &pattern.kind {
+            NodeKind::ConstructorPat { fields, .. } => {
+                for (i, field) in fields.iter().enumerate() {
+                    let name = self.pattern_to_binding_name(field);
+                    if name == "_" {
+                        continue;
+                    }
+                    self.writeln(&format!("{name} := __v.Field{i}; _ = {name}"));
+                }
+            }
+            NodeKind::RecordPat { fields, .. } => {
+                for f in fields {
+                    let go_field = to_pascal_case(&f.name.name);
+                    let bind = match &f.pattern {
+                        Some(p) => self.pattern_to_binding_name(p),
+                        // Shorthand `{ radius }` binds a variable named `radius`.
+                        None => to_camel_case(&f.name.name),
+                    };
+                    if bind == "_" {
+                        continue;
+                    }
+                    self.writeln(&format!("{bind} := __v.{go_field}; _ = {bind}"));
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -2966,21 +3150,31 @@ impl GoEmitCtx {
                 Literal::Unit => self.buf.push_str("nil"),
             },
             NodeKind::ConstructorPat { path, .. } => {
-                let variant_name = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("");
+                // A user enum variant is a `{enum}{variant}` struct type
+                // (`ShapeRect`); fall back to the joined path otherwise.
+                let variant_name = if let Some(info) = self.user_variant_for_path(path) {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    format!("{}{variant}", info.enum_name)
+                } else {
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("")
+                };
                 self.buf.push_str(&variant_name);
             }
             NodeKind::RecordPat { path, .. } => {
-                let type_name = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(".");
+                let type_name = if let Some(info) = self.user_variant_for_path(path) {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    format!("{}{variant}", info.enum_name)
+                } else {
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                };
                 self.buf.push_str(&type_name);
             }
             NodeKind::TuplePat { .. } => {

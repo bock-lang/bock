@@ -1,0 +1,41 @@
+// TEST: exec_enum_tuple_payload_match
+// EXPECT: output "7;12;0"
+// EXPECT: targets js, ts, python, rust, go
+//
+// User-defined enum with TUPLE (positional-payload) variants. Exercises:
+//   - construction at a call-shaped use site (`Pair(3, 4)` lowers to a `Call`
+//     whose callee is the variant name — must become the variant factory /
+//     struct literal, NOT a free-function call to a `pair`/`Pair` symbol),
+//   - a `match` whose arms are constructor patterns binding the positional
+//     fields (`Pair(a, b) => a + b`), with EVERY bound field used (so Go's
+//     unused-local check is satisfied) and one arm that uses only SOME fields
+//     (`Single(x)`), proving the per-field `_ = name` suppression works.
+//
+// `Nothing` is a unit variant in the same enum so the match has a no-payload
+// arm alongside the tuple arms.
+//
+// The reducer is named `total` (not `eval`) because `eval` is a reserved word
+// in TypeScript strict mode (TS1100) — a fixture-naming concern unrelated to
+// enum codegen.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Calc {
+  Pair(Int, Int)
+  Single(Int)
+  Nothing
+}
+
+fn total(c: Calc) -> Int {
+  match c {
+    Pair(a, b) => return a + b
+    Single(x) => return x
+    Nothing => return 0
+  }
+}
+
+fn main() -> Void {
+  println("${total(Pair(3, 4))};${total(Single(12))};${total(Nothing)}")
+}

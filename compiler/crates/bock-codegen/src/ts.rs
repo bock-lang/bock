@@ -118,6 +118,8 @@ impl CodeGenerator for TsGenerator {
 
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
         let mut ctx = TsEmitCtx::new();
+        ctx.enum_variants =
+            crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let (content, mappings) = ctx.finish();
         let source_map = SourceMap {
@@ -162,6 +164,7 @@ impl CodeGenerator for TsGenerator {
         };
 
         let mut ctx = TsEmitCtx::new();
+        ctx.enum_variants = crate::generator::collect_enum_variants(modules);
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
                 ctx.buf.push('\n');
@@ -247,6 +250,12 @@ struct TsEmitCtx {
     /// Set once the concurrency runtime prelude has been emitted; deduped across
     /// a bundle exactly as [`Self::optional_runtime_emitted`].
     concurrency_runtime_emitted: bool,
+    /// User-enum-variant registry (DV14). Same role as the JS backend's: route
+    /// a unit-variant reference to the `{enum}_{variant}` const, a struct/tuple
+    /// construction to the factory, and recognise `RecordPat` arms as ADT.
+    /// Built-in Optional/Result pre-seeds are filtered out where bespoke
+    /// lowering applies. Pre-scanned across the bundle.
+    enum_variants: crate::generator::EnumVariantRegistry,
 }
 
 impl TsEmitCtx {
@@ -271,11 +280,35 @@ impl TsEmitCtx {
             match_temp_counter: 0,
             optional_runtime_emitted: false,
             concurrency_runtime_emitted: false,
+            enum_variants: crate::generator::EnumVariantRegistry::new(),
         }
     }
 
     fn finish(self) -> (String, Vec<SourceMapping>) {
         (self.buf, self.mappings)
+    }
+
+    /// Variant info for `path` when its last segment is a registered *user*
+    /// enum variant (built-in Optional/Result pre-seeds excluded — those go
+    /// through the bespoke tagged-object lowering).
+    fn user_variant_for_path(
+        &self,
+        path: &bock_ast::TypePath,
+    ) -> Option<&crate::generator::EnumVariantInfo> {
+        let info = crate::generator::registered_variant(&self.enum_variants, path)?;
+        if matches!(info.enum_name.as_str(), "Optional" | "Result") {
+            return None;
+        }
+        Some(info)
+    }
+
+    /// As [`Self::user_variant_for_path`] but keyed by a bare identifier name.
+    fn user_variant_for_name(&self, name: &str) -> Option<&crate::generator::EnumVariantInfo> {
+        let info = self.enum_variants.get(name)?;
+        if matches!(info.enum_name.as_str(), "Optional" | "Result") {
+            return None;
+        }
+        Some(info)
     }
 
     /// Bring `cur_line` / `cur_col` up to date with everything appended to
@@ -1404,6 +1437,7 @@ impl TsEmitCtx {
                     if let Some(def) = default {
                         let mut ctx = TsEmitCtx::new();
                         ctx.indent = self.indent;
+                        ctx.enum_variants = self.enum_variants.clone();
                         if ctx.emit_expr_to_string(def).is_ok() {
                             let (def_str, _) = ctx.finish();
                             return Some(format!("{name}{ty_str} = {def_str}"));
@@ -1448,6 +1482,7 @@ impl TsEmitCtx {
                 if let Some(def) = default {
                     let mut ctx = TsEmitCtx::new();
                     ctx.indent = self.indent;
+                    ctx.enum_variants = self.enum_variants.clone();
                     if ctx.emit_expr_to_string(def).is_ok() {
                         let (def_str, _) = ctx.finish();
                         return Some(format!("{name}{ty_str} = {def_str}"));
@@ -1873,6 +1908,13 @@ impl TsEmitCtx {
             NodeKind::Identifier { name } => {
                 if name.name == "None" {
                     self.buf.push_str("{ _tag: \"None\" as const }");
+                } else if let Some(enum_name) = self
+                    .user_variant_for_name(&name.name)
+                    .map(|i| i.enum_name.clone())
+                {
+                    // A bare unit-variant reference (`Red`) → the frozen
+                    // `{enum}_{variant}` const.
+                    let _ = write!(self.buf, "{enum_name}_{}", name.name);
                 } else {
                     self.buf.push_str(&to_camel_case(&name.name));
                 }
@@ -2063,6 +2105,38 @@ impl TsEmitCtx {
                 fields,
                 spread,
             } => {
+                // A struct-variant construction (`Circle { radius: 2.0 }`) →
+                // the `{enum}_{variant}(field, ..)` factory, in field decl
+                // order. Plain records keep their object/class form.
+                let struct_variant = if spread.is_none() {
+                    self.user_variant_for_path(path).and_then(|info| {
+                        if let crate::generator::VariantPayloadKind::Struct(field_order) =
+                            &info.payload
+                        {
+                            Some((info.enum_name.clone(), field_order.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                if let Some((enum_name, field_order)) = struct_variant {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    let _ = write!(self.buf, "{enum_name}_{variant}(");
+                    for (i, fname) in field_order.iter().enumerate() {
+                        if i > 0 {
+                            self.buf.push_str(", ");
+                        }
+                        let supplied = fields.iter().find(|f| &f.name.name == fname);
+                        match supplied.and_then(|f| f.value.as_ref()) {
+                            Some(val) => self.emit_expr(val)?,
+                            None => self.buf.push_str(&to_camel_case(fname)),
+                        }
+                    }
+                    self.buf.push(')');
+                    return Ok(());
+                }
                 let type_name = path.segments.last().map(|s| s.name.as_str()).unwrap_or("");
                 let is_class = self.record_names.contains(type_name);
                 if is_class {
@@ -2319,11 +2393,18 @@ impl TsEmitCtx {
     // ── Match → switch ──────────────────────────────────────────────────────
 
     fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
+        // ADT (dispatch on `._tag`) when any arm is a constructor pattern or a
+        // record pattern naming a registered enum variant. The record-pattern
+        // case is the struct-payload variant the prior `ConstructorPat`-only
+        // check missed (DV14).
         let is_adt = arms.iter().any(|arm| {
-            if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
-                matches!(pattern.kind, NodeKind::ConstructorPat { .. })
-            } else {
-                false
+            let NodeKind::MatchArm { pattern, .. } = &arm.kind else {
+                return false;
+            };
+            match &pattern.kind {
+                NodeKind::ConstructorPat { .. } => true,
+                NodeKind::RecordPat { path, .. } => self.user_variant_for_path(path).is_some(),
+                _ => false,
             }
         });
 

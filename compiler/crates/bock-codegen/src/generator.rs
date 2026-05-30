@@ -1,8 +1,9 @@
 //! Code generator trait and output types.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use bock_air::{AIRNode, AirArg, NodeKind};
+use bock_air::{AIRNode, AirArg, EnumVariantPayload, NodeKind};
 use bock_types::AIRModule;
 
 use crate::error::CodegenError;
@@ -793,6 +794,160 @@ pub fn desugared_list_method<'a>(
     }
 }
 
+// ─── Enum-variant registry ──────────────────────────────────────────────────
+//
+// User-defined enum *declarations* already lower correctly per target (JS
+// tagged factories, Rust real `enum`, Go sealed interface + variant structs).
+// What every backend lacked was a way to recognise, at a *use* site, that a
+// bare `Red` / `Circle { .. }` / `Rect(..)` is an enum variant rather than a
+// variable, a record, or a free function — and which enum it belongs to. The
+// AIR carries no back-pointer from a variant name to its enum at a construction
+// or pattern site (`ConstructorPat`/`RecordPat`/`RecordConstruct` paths hold
+// only the variant name, never the enum). This registry closes that gap: a
+// single pre-scan over the bundle maps each variant name to its enum and
+// payload shape, which each backend consults to qualify constructions
+// (`Color_Red`, `Shape::Circle`, `ShapeCircle{..}`) and to dispatch matches.
+//
+// The built-in `Optional`/`Result` constructors (`Some`/`None`/`Ok`/`Err`) are
+// pre-seeded so one mechanism describes both user and built-in ADTs (B1). The
+// pre-seeded entries are a *fallback*: each backend keeps its existing bespoke
+// Optional/Result lowering and consults the registry only afterwards, so the
+// proven Optional/Result paths are never regressed.
+
+/// The payload shape of an enum variant, as needed to lower a construction or
+/// a match arm in any target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariantPayloadKind {
+    /// A unit variant (`Red`): no payload.
+    Unit,
+    /// A tuple variant (`Rect(Float, Float)`): positional fields, by arity.
+    Tuple(usize),
+    /// A struct variant (`Circle { radius: Float }`): named fields, in
+    /// declaration order.
+    Struct(Vec<String>),
+}
+
+/// What the registry knows about one enum variant: the enum it belongs to and
+/// its payload shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumVariantInfo {
+    /// The declared name of the owning enum (e.g. `Shape`).
+    pub enum_name: String,
+    /// The variant's payload shape.
+    pub payload: VariantPayloadKind,
+}
+
+/// Maps an enum-variant name to its [`EnumVariantInfo`]. Variant names are
+/// globally unique within a v1 Bock program (no per-enum namespacing at use
+/// sites — `Red`, not `Color.Red`), so a flat map keyed by the bare variant
+/// name resolves every construction and pattern site.
+pub type EnumVariantRegistry = HashMap<String, EnumVariantInfo>;
+
+/// Pre-scan every module in the bundle and build the [`EnumVariantRegistry`].
+///
+/// Walks each module's top-level `EnumDecl`s (the only place enum variants are
+/// declared) and records every variant. A *pre-scan* — rather than recording
+/// variants as their decls are emitted — is required because a use site may
+/// precede its enum's declaration in source order (forward reference), and
+/// because bundling concatenates modules so a `use`d enum's decl can live in a
+/// different module than its construction site. This mirrors the Go backend's
+/// existing `collect_methods` / `collect_optional_returns` pre-scans.
+///
+/// The built-in `Optional`/`Result` constructors are pre-seeded (B1) so the
+/// same registry describes built-in ADTs; backends treat these as a fallback
+/// behind their bespoke Optional/Result lowering (see the module comment).
+#[must_use]
+pub fn collect_enum_variants(modules: &[(&AIRModule, &Path)]) -> EnumVariantRegistry {
+    let mut registry = EnumVariantRegistry::new();
+    seed_builtin_variants(&mut registry);
+    for (module, _) in modules {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            collect_enum_variants_from_item(item, &mut registry);
+        }
+    }
+    registry
+}
+
+/// Pre-seed the built-in `Optional` (`Some`/`None`) and `Result` (`Ok`/`Err`)
+/// constructors. `Some`/`Ok`/`Err` carry a single positional payload; `None` is
+/// a unit variant.
+fn seed_builtin_variants(registry: &mut EnumVariantRegistry) {
+    registry.insert(
+        "Some".to_string(),
+        EnumVariantInfo {
+            enum_name: "Optional".to_string(),
+            payload: VariantPayloadKind::Tuple(1),
+        },
+    );
+    registry.insert(
+        "None".to_string(),
+        EnumVariantInfo {
+            enum_name: "Optional".to_string(),
+            payload: VariantPayloadKind::Unit,
+        },
+    );
+    registry.insert(
+        "Ok".to_string(),
+        EnumVariantInfo {
+            enum_name: "Result".to_string(),
+            payload: VariantPayloadKind::Tuple(1),
+        },
+    );
+    registry.insert(
+        "Err".to_string(),
+        EnumVariantInfo {
+            enum_name: "Result".to_string(),
+            payload: VariantPayloadKind::Tuple(1),
+        },
+    );
+}
+
+/// Record every variant of a single `EnumDecl` item into `registry`. Non-enum
+/// items are ignored.
+fn collect_enum_variants_from_item(item: &AIRNode, registry: &mut EnumVariantRegistry) {
+    let NodeKind::EnumDecl { name, variants, .. } = &item.kind else {
+        return;
+    };
+    let enum_name = name.name.clone();
+    for variant in variants {
+        let NodeKind::EnumVariant {
+            name: vname,
+            payload,
+        } = &variant.kind
+        else {
+            continue;
+        };
+        let payload = match payload {
+            EnumVariantPayload::Unit => VariantPayloadKind::Unit,
+            EnumVariantPayload::Tuple(elems) => VariantPayloadKind::Tuple(elems.len()),
+            EnumVariantPayload::Struct(fields) => {
+                VariantPayloadKind::Struct(fields.iter().map(|f| f.name.name.clone()).collect())
+            }
+        };
+        registry.insert(
+            vname.name.clone(),
+            EnumVariantInfo {
+                enum_name: enum_name.clone(),
+                payload,
+            },
+        );
+    }
+}
+
+/// Look up the last segment of a `TypePath` (the variant name) in the registry.
+/// Returns `None` when the path is empty or the name is not a known variant.
+#[must_use]
+pub fn registered_variant<'a>(
+    registry: &'a EnumVariantRegistry,
+    path: &bock_ast::TypePath,
+) -> Option<&'a EnumVariantInfo> {
+    let last = path.segments.last()?;
+    registry.get(&last.name)
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1522,5 +1677,152 @@ mod tests {
             },
         );
         assert!(!loop_needs_break_label(&body2));
+    }
+
+    // ── Enum-variant registry ───────────────────────────────────────────────
+
+    /// Build an `EnumVariant` AIR node with the given payload.
+    fn enum_variant(name: &str, payload: EnumVariantPayload) -> AIRNode {
+        n(
+            0,
+            NodeKind::EnumVariant {
+                name: ident(name),
+                payload,
+            },
+        )
+    }
+
+    /// Build a `struct`-variant field-decl with the given name (type is a
+    /// placeholder — `collect_enum_variants` only reads the field name).
+    fn record_field(name: &str) -> bock_ast::RecordDeclField {
+        bock_ast::RecordDeclField {
+            id: 0,
+            span: dummy_span(),
+            name: ident(name),
+            ty: bock_ast::TypeExpr::Named {
+                id: 0,
+                span: dummy_span(),
+                path: bock_ast::TypePath {
+                    segments: vec![ident("Int")],
+                    span: dummy_span(),
+                },
+                args: vec![],
+            },
+            default: None,
+        }
+    }
+
+    /// Build an `EnumDecl` AIR node named `name` with the given variants.
+    fn enum_decl(name: &str, variants: Vec<AIRNode>) -> AIRNode {
+        n(
+            0,
+            NodeKind::EnumDecl {
+                annotations: vec![],
+                visibility: bock_ast::Visibility::Public,
+                name: ident(name),
+                generic_params: vec![],
+                variants,
+            },
+        )
+    }
+
+    /// A `TypePath` of a single segment (a bare variant name at a use site).
+    fn variant_path(name: &str) -> bock_ast::TypePath {
+        bock_ast::TypePath {
+            segments: vec![ident(name)],
+            span: dummy_span(),
+        }
+    }
+
+    #[test]
+    fn collect_enum_variants_records_all_payload_kinds() {
+        // enum Shape { Circle { radius } | Rect(_, _) | Empty }
+        let shape = enum_decl(
+            "Shape",
+            vec![
+                enum_variant(
+                    "Circle",
+                    EnumVariantPayload::Struct(vec![record_field("radius")]),
+                ),
+                enum_variant(
+                    "Rect",
+                    EnumVariantPayload::Tuple(vec![
+                        n(1, NodeKind::Placeholder),
+                        n(2, NodeKind::Placeholder),
+                    ]),
+                ),
+                enum_variant("Empty", EnumVariantPayload::Unit),
+            ],
+        );
+        let m = module_named("main", &[], vec![shape]);
+        let p = std::path::Path::new("x.bock");
+        let reg = collect_enum_variants(&[(&m, p)]);
+
+        let circle = reg.get("Circle").expect("Circle registered");
+        assert_eq!(circle.enum_name, "Shape");
+        assert_eq!(
+            circle.payload,
+            VariantPayloadKind::Struct(vec!["radius".to_string()])
+        );
+
+        let rect = reg.get("Rect").expect("Rect registered");
+        assert_eq!(rect.enum_name, "Shape");
+        assert_eq!(rect.payload, VariantPayloadKind::Tuple(2));
+
+        let empty = reg.get("Empty").expect("Empty registered");
+        assert_eq!(empty.enum_name, "Shape");
+        assert_eq!(empty.payload, VariantPayloadKind::Unit);
+    }
+
+    #[test]
+    fn collect_enum_variants_pre_seeds_optional_and_result() {
+        // An empty bundle still carries the built-in Optional/Result entries so
+        // one mechanism describes both user and built-in ADTs (B1).
+        let reg = collect_enum_variants(&[]);
+        assert_eq!(
+            reg.get("Some").map(|i| i.enum_name.as_str()),
+            Some("Optional")
+        );
+        assert_eq!(
+            reg.get("Some").map(|i| &i.payload),
+            Some(&VariantPayloadKind::Tuple(1))
+        );
+        assert_eq!(
+            reg.get("None").map(|i| &i.payload),
+            Some(&VariantPayloadKind::Unit)
+        );
+        assert_eq!(reg.get("Ok").map(|i| i.enum_name.as_str()), Some("Result"));
+        assert_eq!(reg.get("Err").map(|i| i.enum_name.as_str()), Some("Result"));
+    }
+
+    #[test]
+    fn collect_enum_variants_spans_multiple_modules() {
+        // A `use`d enum in another bundled module is still registered (the
+        // pre-scan walks every module, so a forward / cross-module reference
+        // resolves).
+        let color = enum_decl("Color", vec![enum_variant("Red", EnumVariantPayload::Unit)]);
+        let lib = module_named("lib", &[], vec![color]);
+        let main_m = module_named("main", &["lib"], vec![fn_decl("main")]);
+        let p = std::path::Path::new("x.bock");
+        let reg = collect_enum_variants(&[(&lib, p), (&main_m, p)]);
+        assert_eq!(reg.get("Red").map(|i| i.enum_name.as_str()), Some("Color"));
+    }
+
+    #[test]
+    fn registered_variant_resolves_last_path_segment() {
+        let shape = enum_decl(
+            "Shape",
+            vec![enum_variant("Empty", EnumVariantPayload::Unit)],
+        );
+        let m = module_named("main", &[], vec![shape]);
+        let p = std::path::Path::new("x.bock");
+        let reg = collect_enum_variants(&[(&m, p)]);
+        // A bare variant path resolves.
+        assert_eq!(
+            registered_variant(&reg, &variant_path("Empty")).map(|i| i.enum_name.as_str()),
+            Some("Shape")
+        );
+        // An unknown name does not.
+        assert!(registered_variant(&reg, &variant_path("Nope")).is_none());
     }
 }

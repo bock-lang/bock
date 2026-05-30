@@ -129,6 +129,8 @@ impl CodeGenerator for PyGenerator {
 
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
         let mut ctx = PyEmitCtx::new();
+        ctx.enum_variants =
+            crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -174,6 +176,7 @@ impl CodeGenerator for PyGenerator {
         };
 
         let mut ctx = PyEmitCtx::new();
+        ctx.enum_variants = crate::generator::collect_enum_variants(modules);
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
                 ctx.buf.push('\n');
@@ -251,6 +254,15 @@ struct PyEmitCtx {
     /// Set once the concurrency runtime prelude has been emitted; deduped across
     /// a bundle exactly as [`Self::optional_runtime_emitted`].
     concurrency_runtime_emitted: bool,
+    /// Set when an enum decl emits a `Name = Union[...]` alias, so the preamble
+    /// imports `Union` from `typing`.
+    needs_union_import: bool,
+    /// User-enum-variant registry (DV14). Routes a construction/pattern to the
+    /// `{enum}_{variant}` dataclass and recognises a unit variant (needs `()`
+    /// instantiation). Built-in Optional/Result pre-seeds filtered out where
+    /// the bespoke `_BockSome`/`_BockNone` lowering applies. Pre-scanned across
+    /// the bundle.
+    enum_variants: crate::generator::EnumVariantRegistry,
 }
 
 impl PyEmitCtx {
@@ -271,6 +283,8 @@ impl PyEmitCtx {
             impls_by_target: HashMap::new(),
             optional_runtime_emitted: false,
             concurrency_runtime_emitted: false,
+            needs_union_import: false,
+            enum_variants: crate::generator::EnumVariantRegistry::new(),
         }
     }
 
@@ -281,6 +295,9 @@ impl PyEmitCtx {
         }
         if self.needs_time_import {
             preamble.push_str("import time\n");
+        }
+        if self.needs_union_import {
+            preamble.push_str("from typing import Union\n");
         }
         if self.needs_abc_import {
             preamble.push_str("from abc import ABC, abstractmethod\n");
@@ -293,6 +310,29 @@ impl PyEmitCtx {
             self.buf.insert_str(0, &preamble);
         }
         self.buf
+    }
+
+    /// Variant info for `path` when its last segment is a registered *user*
+    /// enum variant (built-in Optional/Result pre-seeds excluded — those go
+    /// through the bespoke `_BockSome`/`_BockNone` lowering).
+    fn user_variant_for_path(
+        &self,
+        path: &bock_ast::TypePath,
+    ) -> Option<&crate::generator::EnumVariantInfo> {
+        let info = crate::generator::registered_variant(&self.enum_variants, path)?;
+        if matches!(info.enum_name.as_str(), "Optional" | "Result") {
+            return None;
+        }
+        Some(info)
+    }
+
+    /// As [`Self::user_variant_for_path`] but keyed by a bare identifier name.
+    fn user_variant_for_name(&self, name: &str) -> Option<&crate::generator::EnumVariantInfo> {
+        let info = self.enum_variants.get(name)?;
+        if matches!(info.enum_name.as_str(), "Optional" | "Result") {
+            return None;
+        }
+        Some(info)
     }
 
     fn indent_str(&self) -> String {
@@ -761,6 +801,28 @@ impl PyEmitCtx {
                     }
                     self.emit_enum_variant(&name.name, variant)?;
                 }
+                // A union type alias so the enum's *name* (`Shape`) resolves as
+                // a type annotation — `def area(s: Shape)` evaluates `Shape` at
+                // def time, so without this alias the module raises `NameError`
+                // before `main` ever runs (DV14).
+                let variant_types: Vec<String> = variants
+                    .iter()
+                    .filter_map(|v| {
+                        if let NodeKind::EnumVariant { name: vname, .. } = &v.kind {
+                            Some(format!("{}_{}", name.name, vname.name))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !variant_types.is_empty() {
+                    self.needs_union_import = true;
+                    self.writeln(&format!(
+                        "{} = Union[{}]",
+                        name.name,
+                        variant_types.join(", ")
+                    ));
+                }
                 Ok(())
             }
             NodeKind::ClassDecl {
@@ -1135,6 +1197,7 @@ impl PyEmitCtx {
                     if let Some(def) = default {
                         let mut ctx = PyEmitCtx::new();
                         ctx.indent = self.indent;
+                        ctx.enum_variants = self.enum_variants.clone();
                         if ctx.emit_expr(def).is_ok() {
                             let def_str = ctx.buf;
                             return Some(format!("{name}{type_hint} = {def_str}"));
@@ -1488,6 +1551,13 @@ impl PyEmitCtx {
                 // not an identifier, so this rewrite is unambiguous.
                 if name.name == "None" {
                     self.buf.push_str("_bock_none");
+                } else if let Some(enum_name) = self
+                    .user_variant_for_name(&name.name)
+                    .map(|i| i.enum_name.clone())
+                {
+                    // A unit-variant reference (`Empty`) → an instance of its
+                    // `@dataclass(frozen=True)` class: `Shape_Empty()`.
+                    let _ = write!(self.buf, "{enum_name}_{}()", name.name);
                 } else {
                     self.buf.push_str(&identifier_to_py(&name.name));
                 }
@@ -1536,6 +1606,26 @@ impl PyEmitCtx {
                 if let Some(code) = self.map_prelude_call(callee, args)? {
                     self.buf.push_str(&code);
                     return Ok(());
+                }
+                // A call whose callee names a registered tuple variant is a
+                // construction (`Rect(3.0, 4.0)` → `Shape_Rect(3.0, 4.0)`).
+                // Handled here so the callee emits the bare class name, not the
+                // unit-variant `Shape_Rect()` the `Identifier` arm would.
+                if let NodeKind::Identifier { name } = &callee.kind {
+                    if let Some(enum_name) = self
+                        .user_variant_for_name(&name.name)
+                        .map(|i| i.enum_name.clone())
+                    {
+                        let _ = write!(self.buf, "{enum_name}_{}(", name.name);
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 {
+                                self.buf.push_str(", ");
+                            }
+                            self.emit_expr(&arg.value)?;
+                        }
+                        self.buf.push(')');
+                        return Ok(());
+                    }
                 }
                 if self.try_emit_time_assoc_call(callee, args)? {
                     return Ok(());
@@ -1686,12 +1776,20 @@ impl PyEmitCtx {
                 fields,
                 spread,
             } => {
-                let type_name = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(".");
+                // A struct-variant construction (`Circle { radius: 2.0 }`) → an
+                // instance of the `{enum}_{variant}` dataclass, built with
+                // keyword args (`Shape_Circle(radius=2.0)`). Plain records keep
+                // their dotted path name.
+                let type_name = if let Some(info) = self.user_variant_for_path(path) {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    format!("{}_{variant}", info.enum_name)
+                } else {
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                };
                 if let Some(sp) = spread {
                     // Spread: create dict, update, then construct
                     self.buf.push_str(&format!("{type_name}(**{{**vars("));
@@ -2050,12 +2148,16 @@ impl PyEmitCtx {
                     }
                     _ => {}
                 }
-                let variant_name = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("_");
+                let variant_name = if let Some(info) = self.user_variant_for_path(path) {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    format!("{}_{variant}", info.enum_name)
+                } else {
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("_")
+                };
                 if fields.is_empty() {
                     let _ = write!(self.buf, "{variant_name}()");
                 } else {
@@ -2071,12 +2173,16 @@ impl PyEmitCtx {
                 }
             }
             NodeKind::RecordPat { path, fields, .. } => {
-                let type_name = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("_");
+                let type_name = if let Some(info) = self.user_variant_for_path(path) {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    format!("{}_{variant}", info.enum_name)
+                } else {
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("_")
+                };
                 let field_pats: Vec<String> = fields
                     .iter()
                     .map(|f| {
@@ -2085,7 +2191,13 @@ impl PyEmitCtx {
                             let binding = self.pattern_to_binding_name(pat);
                             format!("{field_name}={binding}")
                         } else {
-                            field_name
+                            // Shorthand `{ radius }` ≡ `{ radius: radius }`. Emit
+                            // the keyword form `radius=radius` so the bind is by
+                            // field name, not by `__match_args__` position (a
+                            // dataclass's positional order is field-decl order
+                            // *plus* the trailing `_tag`, so a bare positional
+                            // sub-pattern would mis-bind multi-field variants).
+                            format!("{field_name}={field_name}")
                         }
                     })
                     .collect();
