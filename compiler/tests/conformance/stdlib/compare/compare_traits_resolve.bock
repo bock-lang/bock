@@ -1,0 +1,17 @@
+// TEST: stdlib_compare_traits_resolve
+// EXPECT: no_errors
+//
+// The `core.compare.Comparable` and `Equatable` traits, and the `Ordering`
+// enum, resolve through the embedded stdlib via named imports and can be used
+// as method receivers returning `Ordering` / `Bool`.
+module userapp
+
+use core.compare.{Ordering, Comparable, Equatable, Key}
+
+public fn order(a: Key, b: Key) -> Ordering {
+  a.compare(b)
+}
+
+public fn same(a: Key, b: Key) -> Bool {
+  a.eq(b)
+}
