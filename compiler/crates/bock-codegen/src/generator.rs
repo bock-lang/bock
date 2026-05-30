@@ -575,6 +575,47 @@ pub fn desugared_self_call<'a>(
     }
 }
 
+/// The read-only / non-mutating `List` built-in methods this codegen lowers
+/// natively per target (see [`desugared_list_method`]). Mutating methods
+/// (`push`/`pop`/`insert`/…) are intentionally excluded — their value-vs-`mut
+/// self` semantics is an open design question (DQ18) and `core.iter` does not
+/// need them.
+pub const READ_ONLY_LIST_METHODS: &[&str] = &[
+    "len", "length", "count", "is_empty", "get", "contains", "first", "last", "concat", "index_of",
+    "join",
+];
+
+/// Recognise a *desugared `List` built-in method call*.
+///
+/// Building on the same desugared shape [`desugared_self_call`] detects
+/// (`Call { callee: FieldAccess(recv, method), args: [recv, ...rest] }`), this
+/// helper additionally requires that `method` is one of the read-only `List`
+/// built-ins ([`READ_ONLY_LIST_METHODS`]). It is the shared recogniser each
+/// backend wires into its `Call` arm *before* the generic
+/// [`desugared_self_call`] / fall-through, so `nums.len()`, `nums.get(i)`,
+/// `nums.contains(x)`, etc. are lowered to the target's idiomatic form (e.g.
+/// `(nums).length`, a tagged-`Optional` bounds check, …) rather than emitted
+/// verbatim as `nums.len(nums)` — which would fail at the target's
+/// runtime/compile step.
+///
+/// Returns the receiver, the (validated) method name, and the remaining
+/// (non-self) arguments. The element type of the list is intentionally *not*
+/// inspected here: the checker has already type-checked the call, and each
+/// backend's lowering is element-type-agnostic for these methods.
+#[must_use]
+pub fn desugared_list_method<'a>(
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if READ_ONLY_LIST_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -954,6 +995,65 @@ mod tests {
             value: p2,
         }];
         assert!(desugared_self_call(&callee2, &args2).is_none());
+    }
+
+    /// Build a desugared method call `recv.method(extra)` in the AIR shape the
+    /// lowerer produces (receiver cloned into both the FieldAccess object and
+    /// the leading self arg, sharing a NodeId).
+    fn desugared_call(method: &str, extra: Vec<AIRNode>) -> (AIRNode, Vec<AirArg>) {
+        let recv = n(
+            5,
+            NodeKind::Identifier {
+                name: ident("nums"),
+            },
+        );
+        let callee = n(
+            6,
+            NodeKind::FieldAccess {
+                object: Box::new(recv.clone()),
+                field: ident(method),
+            },
+        );
+        let mut args = vec![AirArg {
+            label: None,
+            value: recv,
+        }];
+        args.extend(extra.into_iter().map(|value| AirArg { label: None, value }));
+        (callee, args)
+    }
+
+    #[test]
+    fn desugared_list_method_matches_read_only_builtins() {
+        // Every read-only built-in is recognised, returning the receiver, the
+        // method name, and the non-self args.
+        for &m in READ_ONLY_LIST_METHODS {
+            let extra = match m {
+                "get" | "contains" | "index_of" | "concat" | "join" => {
+                    vec![n(7, NodeKind::Identifier { name: ident("x") })]
+                }
+                _ => vec![],
+            };
+            let n_extra = extra.len();
+            let (callee, args) = desugared_call(m, extra);
+            let (recv, got_method, rest) =
+                desugared_list_method(&callee, &args).expect("should match");
+            assert_eq!(got_method, m);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+            assert_eq!(rest.len(), n_extra);
+        }
+    }
+
+    #[test]
+    fn desugared_list_method_rejects_mutating_and_unknown_methods() {
+        // Mutating built-ins (deferred to DQ18) and arbitrary method names are
+        // NOT recognised — they fall through to each backend's generic path.
+        for &m in &["push", "pop", "insert", "remove", "clear", "frobnicate"] {
+            let (callee, args) = desugared_call(m, vec![]);
+            assert!(
+                desugared_list_method(&callee, &args).is_none(),
+                "{m} should not be recognised as a read-only List method"
+            );
+        }
     }
 
     #[test]

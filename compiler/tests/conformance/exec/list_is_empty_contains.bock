@@ -1,0 +1,37 @@
+// TEST: exec_list_is_empty_contains
+// EXPECT: output "no;yes;yes;no;2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Read-only `List` built-ins that return scalars: `is_empty` (Bool),
+// `contains(x)` (Bool), `index_of(x)` (Optional[Int], here matched to its found
+// position via statement arms), and `len` (Int). Exercises the non-Optional
+// scalar lowerings (`(r).length === 0`, `(x in r)`, `r.contains(&x)`, …) plus
+// the `index_of` Optional rep on every target.
+//
+// Bools are mapped to `yes`/`no` rather than interpolated directly: raw `Bool`
+// interpolation diverges across targets (Python `True`/`False` vs JS/Go/Rust
+// `true`/`false`) — a pre-existing, List-independent concern this fixture does
+// not couple to.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn yn(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn idxStr(nums: List[Int], target: Int) -> String {
+  match nums.index_of(target) {
+    Some(i) => return "${i}"
+    None => return "none"
+  }
+}
+
+fn main() -> Void {
+  let nums: List[Int] = [10, 20, 30]
+  let empty: List[Int] = []
+  println("${yn(nums.is_empty())};${yn(empty.is_empty())};${yn(nums.contains(20))};${yn(nums.contains(50))};${idxStr(nums, 30)}")
+}

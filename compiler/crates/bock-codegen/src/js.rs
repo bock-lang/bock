@@ -476,6 +476,110 @@ impl EmitCtx {
         Ok(true)
     }
 
+    /// Emit a read-only `List` built-in method call to its JS form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_method`] in the `Call`
+    /// arm. `Optional`-returning methods (`get`/`first`/`last`/`index_of`) emit
+    /// the same tagged-object representation user enum variants use
+    /// (`{ _tag: "Some", _0: v }` / `{ _tag: "None" }`). Methods that need the
+    /// receiver more than once (`get`/`first`/`last`/`index_of`) wrap it in an
+    /// IIFE so the receiver expression is evaluated exactly once.
+    fn try_emit_list_method(
+        &mut self,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_list_method(callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "len" | "length" | "count" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").length");
+            }
+            "is_empty" => {
+                self.buf.push_str("((");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").length === 0)");
+            }
+            "get" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__r, __i) => (__i >= 0 && __i < __r.length) ? ");
+                self.buf
+                    .push_str("{ _tag: \"Some\", _0: __r[__i] } : { _tag: \"None\" })(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push(')');
+            }
+            "first" => {
+                self.buf.push_str("((__r) => __r.length > 0 ? ");
+                self.buf
+                    .push_str("{ _tag: \"Some\", _0: __r[0] } : { _tag: \"None\" })(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "last" => {
+                self.buf.push_str("((__r) => __r.length > 0 ? ");
+                self.buf
+                    .push_str("{ _tag: \"Some\", _0: __r[__r.length - 1] } : { _tag: \"None\" })(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").includes(");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "index_of" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__r, __x) => { const __i = __r.indexOf(__x); ");
+                self.buf.push_str(
+                    "return __i >= 0 ? { _tag: \"Some\", _0: __i } : { _tag: \"None\" }; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "concat" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").concat(");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "join" => {
+                let Some(sep) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").join(");
+                self.emit_expr(&sep.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     // ── Top-level dispatch ──────────────────────────────────────────────────
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
@@ -1327,6 +1431,9 @@ impl EmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_method(callee, args)? {
                     return Ok(());
                 }
                 // Rewrite bare effect operation calls: log(...) → handler.log(...)
@@ -2291,6 +2398,88 @@ mod tests {
         let out = gen(&module(vec![], vec![f]));
         assert!(out.contains("function answer()"));
         assert!(out.contains("return 42;"));
+    }
+
+    /// Build a desugared `recv.method(extra)` Call in the AIR shape the lowerer
+    /// produces (receiver cloned into the FieldAccess object and the leading
+    /// self arg, sharing a NodeId).
+    fn list_method_call(method: &str, extra: Vec<AIRNode>) -> AIRNode {
+        let recv = id_node(5, "nums");
+        let callee = node(
+            6,
+            NodeKind::FieldAccess {
+                object: Box::new(recv.clone()),
+                field: ident(method),
+            },
+        );
+        let mut args = vec![AirArg {
+            label: None,
+            value: recv,
+        }];
+        args.extend(extra.into_iter().map(|value| AirArg { label: None, value }));
+        node(
+            7,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                args,
+                type_args: vec![],
+            },
+        )
+    }
+
+    #[test]
+    fn list_len_emits_length_property() {
+        let body = block(2, vec![], Some(list_method_call("len", vec![])));
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("(nums).length"), "got: {out}");
+        // Must NOT emit the verbatim double-pass `nums.len(nums)`.
+        assert!(!out.contains("nums.len("), "got: {out}");
+    }
+
+    #[test]
+    fn list_get_emits_tagged_optional_with_bounds_check() {
+        let body = block(
+            2,
+            vec![],
+            Some(list_method_call("get", vec![int_lit(8, "1")])),
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("_tag: \"Some\""), "got: {out}");
+        assert!(out.contains("_tag: \"None\""), "got: {out}");
+        assert!(
+            out.contains("__i < __r.length"),
+            "bounds check missing, got: {out}"
+        );
     }
 
     #[test]

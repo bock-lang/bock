@@ -457,6 +457,14 @@ struct GoEmitCtx {
     /// entry is poisoned (left absent) so the payload falls back to the runtime
     /// `interface{}` — conservative, never wrong, only un-type-asserted.
     method_optional_ret_elem: HashMap<String, String>,
+    /// Maps an in-scope variable name → the Go element type of its `List[T]`
+    /// (e.g. a `let nums: List[Int] = ...` binding maps to `int64`). The
+    /// read-only `List` built-ins `get`/`first`/`last` return `Optional[T]`
+    /// whose payload is the list element; this lets a `match nums.get(i) {
+    /// Some(x) => ... }` type-assert the `interface{}` payload to the element
+    /// type, the same way [`Self::var_optional_elem`] handles direct
+    /// `Optional[T]` bindings. Scoped per function body and restored on exit.
+    var_list_elem: HashMap<String, String>,
 }
 
 impl GoEmitCtx {
@@ -482,6 +490,7 @@ impl GoEmitCtx {
             fn_optional_ret_elem: HashMap::new(),
             var_optional_elem: HashMap::new(),
             method_optional_ret_elem: HashMap::new(),
+            var_list_elem: HashMap::new(),
         }
     }
 
@@ -628,12 +637,34 @@ impl GoEmitCtx {
         }
     }
 
-    /// Record the Optional element Go types of a function/lambda's parameters
-    /// into the variable scope, so a `match param { Some(x) => ... }` inside the
-    /// body can type-assert the payload. Returns the previous scope so the
-    /// caller can restore it on exit (Go has no block-scoped reset here).
-    fn enter_param_optional_scope(&mut self, params: &[AIRNode]) -> HashMap<String, String> {
-        let saved = self.var_optional_elem.clone();
+    /// If `node` is a `List[T]` type expression, return the Go type of its
+    /// element `T`; otherwise `None`. The read-only `List` built-ins
+    /// `get`/`first`/`last` return `Optional[T]` over the list element, so a
+    /// `match` on such a call must type-assert the `interface{}` payload to this
+    /// element type. Reached structurally from the receiver's declared
+    /// `List[T]` type (its element is unrecoverable from the runtime
+    /// `[]interface{}` value alone).
+    fn list_elem_go_type(&self, node: &AIRNode) -> Option<String> {
+        if let NodeKind::TypeNamed { path, args } = &node.kind {
+            if path.segments.last().is_some_and(|s| s.name == "List") {
+                return args.first().map(|a| self.type_to_go(a));
+            }
+        }
+        None
+    }
+
+    /// Record the `Optional[T]` and `List[T]` element Go types of a
+    /// function/lambda's parameters into the variable scopes, so a `match param
+    /// { Some(x) => ... }` (direct Optional) or `match param.get(i) { Some(x) =>
+    /// ... }` (List built-in) inside the body can type-assert the payload.
+    /// Returns the previous `(var_optional_elem, var_list_elem)` scopes so the
+    /// caller can restore them on exit (Go has no block-scoped reset here).
+    fn enter_param_optional_scope(
+        &mut self,
+        params: &[AIRNode],
+    ) -> (HashMap<String, String>, HashMap<String, String>) {
+        let saved_opt = self.var_optional_elem.clone();
+        let saved_list = self.var_list_elem.clone();
         for p in params {
             if let NodeKind::Param {
                 pattern,
@@ -641,13 +672,16 @@ impl GoEmitCtx {
                 ..
             } = &p.kind
             {
+                let name = to_camel_case(&self.pattern_to_binding_name(pattern));
                 if let Some(elem) = self.optional_elem_go_type(t) {
-                    let name = to_camel_case(&self.pattern_to_binding_name(pattern));
-                    self.var_optional_elem.insert(name, elem);
+                    self.var_optional_elem.insert(name.clone(), elem);
+                }
+                if let Some(elem) = self.list_elem_go_type(t) {
+                    self.var_list_elem.insert(name, elem);
                 }
             }
         }
-        saved
+        (saved_opt, saved_list)
     }
 
     /// Resolve the Go element type to assert for the payload of a `Some` bound in
@@ -669,20 +703,41 @@ impl GoEmitCtx {
             NodeKind::MethodCall { method, .. } => {
                 self.method_optional_ret_elem.get(&method.name).cloned()
             }
-            NodeKind::Call { callee, args, .. } => match &callee.kind {
-                // Free-function call (`firstPositive(a, b)`).
-                NodeKind::Identifier { name } => self.fn_optional_ret_elem.get(&name.name).cloned(),
-                // The AIR also lowers `recv.method(rest)` into
-                // `Call(FieldAccess(recv, method), [recv, ...rest])`; resolve it
-                // the same way as a direct `MethodCall` so both desugar shapes
-                // get a type-asserted payload.
-                NodeKind::FieldAccess { field, .. }
-                    if crate::generator::desugared_self_call(callee, args).is_some() =>
+            NodeKind::Call { callee, args, .. } => {
+                // The read-only `List` built-ins `get`/`first`/`last` return
+                // `Optional[<elem>]`. When the receiver is a variable with a
+                // known `List[T]` element type, that element type is the payload
+                // type — resolve it from `var_list_elem` before the generic
+                // method-call path (whose `method_optional_ret_elem` only knows
+                // *user-defined* methods, never the List built-ins).
+                if let Some((recv, method, _)) =
+                    crate::generator::desugared_list_method(callee, args)
                 {
-                    self.method_optional_ret_elem.get(&field.name).cloned()
+                    if matches!(method, "get" | "first" | "last") {
+                        if let NodeKind::Identifier { name } = &recv.kind {
+                            if let Some(elem) = self.var_list_elem.get(&to_camel_case(&name.name)) {
+                                return Some(elem.clone());
+                            }
+                        }
+                    }
                 }
-                _ => None,
-            },
+                match &callee.kind {
+                    // Free-function call (`firstPositive(a, b)`).
+                    NodeKind::Identifier { name } => {
+                        self.fn_optional_ret_elem.get(&name.name).cloned()
+                    }
+                    // The AIR also lowers `recv.method(rest)` into
+                    // `Call(FieldAccess(recv, method), [recv, ...rest])`; resolve
+                    // it the same way as a direct `MethodCall` so both desugar
+                    // shapes get a type-asserted payload.
+                    NodeKind::FieldAccess { field, .. }
+                        if crate::generator::desugared_self_call(callee, args).is_some() =>
+                    {
+                        self.method_optional_ret_elem.get(&field.name).cloned()
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -818,6 +873,118 @@ impl GoEmitCtx {
             _ => return Ok(None),
         };
         Ok(Some(code))
+    }
+
+    /// Emit a read-only `List` built-in method call to its Go form.
+    ///
+    /// Lists are `[]interface{}`. `len`/`length`/`count` wrap in `int64(...)`;
+    /// `is_empty` compares the length. `Optional`-returning methods
+    /// (`get`/`first`/`last`/`index_of`) build the tagged Optional runtime
+    /// (`__bockSome(v)` / `__bockNone`) inside an immediately-called closure so
+    /// the receiver is evaluated once and bounds are checked. `contains` /
+    /// `index_of` / `concat` / `join` use inline closures (no top-level helper
+    /// injection needed). The `__bockSome` payload is `interface{}`; a `match`
+    /// arm binding it re-asserts the element type via the existing Optional
+    /// resolver (`scrutinee_optional_elem`), which now resolves
+    /// `get`/`first`/`last` on a typed `List[T]` receiver.
+    fn try_emit_list_method(
+        &mut self,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_list_method(callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let code = match method {
+            "len" | "length" | "count" => format!("int64(len({recv_str}))"),
+            "is_empty" => format!("(len({recv_str}) == 0)"),
+            "get" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                let i = self.expr_to_string(&idx.value)?;
+                format!(
+                    "func(__r []interface{{}}, __i int64) __bockOption {{ \
+                     if __i >= 0 && __i < int64(len(__r)) {{ return __bockSome(__r[__i]) }}; \
+                     return __bockNone }}({recv_str}, {i})"
+                )
+            }
+            "first" => format!(
+                "func(__r []interface{{}}) __bockOption {{ \
+                 if len(__r) > 0 {{ return __bockSome(__r[0]) }}; \
+                 return __bockNone }}({recv_str})"
+            ),
+            "last" => format!(
+                "func(__r []interface{{}}) __bockOption {{ \
+                 if len(__r) > 0 {{ return __bockSome(__r[len(__r)-1]) }}; \
+                 return __bockNone }}({recv_str})"
+            ),
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.needs_fmt_import = true;
+                let x = self.expr_to_string(&x.value)?;
+                // Compare on the `%v` string form, not raw `interface{}` `==`:
+                // a list literal boxes Go `int`/`float64` while a typed `Int`
+                // variable is `int64`, so `int(30) == int64(30)` is *false*
+                // under Go's type-and-value interface equality. The checker
+                // guarantees `contains(x: T)` on `List[T]` (same T), so the two
+                // operands always denote the same Bock type — `%v` normalises
+                // only the int/int64 boxing difference.
+                format!(
+                    "func(__r []interface{{}}, __x interface{{}}) bool {{ \
+                     __xs := fmt.Sprintf(\"%v\", __x); \
+                     for _, __e := range __r {{ if fmt.Sprintf(\"%v\", __e) == __xs {{ return true }} }}; \
+                     return false }}({recv_str}, {x})"
+                )
+            }
+            "index_of" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.needs_fmt_import = true;
+                let x = self.expr_to_string(&x.value)?;
+                // See `contains` for why this compares `%v` forms, not `==`.
+                format!(
+                    "func(__r []interface{{}}, __x interface{{}}) __bockOption {{ \
+                     __xs := fmt.Sprintf(\"%v\", __x); \
+                     for __i, __e := range __r {{ if fmt.Sprintf(\"%v\", __e) == __xs {{ return __bockSome(int64(__i)) }} }}; \
+                     return __bockNone }}({recv_str}, {x})"
+                )
+            }
+            "concat" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "func(__r []interface{{}}, __o []interface{{}}) []interface{{}} {{ \
+                     __v := make([]interface{{}}, 0, len(__r)+len(__o)); \
+                     __v = append(__v, __r...); __v = append(__v, __o...); \
+                     return __v }}({recv_str}, {o})"
+                )
+            }
+            "join" => {
+                let Some(sep) = rest.first() else {
+                    return Ok(false);
+                };
+                self.needs_fmt_import = true;
+                let sep = self.expr_to_string(&sep.value)?;
+                format!(
+                    "func(__r []interface{{}}, __sep string) string {{ \
+                     __s := \"\"; \
+                     for __i, __e := range __r {{ if __i > 0 {{ __s += __sep }}; \
+                     __s += fmt.Sprintf(\"%v\", __e) }}; \
+                     return __s }}({recv_str}, {sep})"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
     }
 
     /// Recognise `Duration.xxx(...)` / `Instant.xxx(...)` associated-function
@@ -1408,13 +1575,14 @@ impl GoEmitCtx {
             self.current_handler_vars
                 .insert(ename.clone(), to_camel_case(ename));
         }
-        let saved_opt_scope = self.enter_param_optional_scope(params);
+        let (saved_opt_scope, saved_list_scope) = self.enter_param_optional_scope(params);
         if name == "main" || is_void {
             self.emit_block_body(body)?;
         } else {
             self.emit_block_body_return(body)?;
         }
         self.var_optional_elem = saved_opt_scope;
+        self.var_list_elem = saved_list_scope;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         self.writeln("}");
@@ -1566,13 +1734,14 @@ impl GoEmitCtx {
                 self.current_handler_vars
                     .insert(ename.clone(), to_camel_case(ename));
             }
-            let saved_opt_scope = self.enter_param_optional_scope(rest);
+            let (saved_opt_scope, saved_list_scope) = self.enter_param_optional_scope(rest);
             if return_type.is_some() && !is_void {
                 self.emit_block_body_return(body)?;
             } else {
                 self.emit_block_body(body)?;
             }
             self.var_optional_elem = saved_opt_scope;
+            self.var_list_elem = saved_list_scope;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
             self.writeln("}");
@@ -1715,6 +1884,13 @@ impl GoEmitCtx {
                     // `match binding { Some(x) => ... }` can type-assert `x`.
                     if let Some(elem) = self.optional_elem_go_type(t) {
                         self.var_optional_elem
+                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
+                    }
+                    // Record a `List[T]` binding's element type so a later
+                    // `match binding.get(i) { Some(x) => ... }` can type-assert
+                    // the `interface{}` payload.
+                    if let Some(elem) = self.list_elem_go_type(t) {
+                        self.var_list_elem
                             .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
                     }
                     let type_str = self.type_to_go(t);
@@ -2094,6 +2270,9 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_method(callee, args)? {
                     return Ok(());
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
