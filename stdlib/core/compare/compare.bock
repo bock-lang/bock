@@ -1,0 +1,107 @@
+//! `core.compare` — ordering and equality abstractions for the Bock standard
+//! library.
+//!
+//! Like `core.error`, this module is pure Bock (an enum, two traits, a sample
+//! impl, and generic helpers), so it compiles to every target with no
+//! per-target runtime shim. It exercises two things the `core.error` pilot did
+//! not: a generic trait whose method takes a second operand of the implementing
+//! type, and generic functions bounded by a trait (`max[T: Comparable]`).
+
+module core.compare
+
+/// The result of comparing two values: whether the first is less than, equal
+/// to, or greater than the second.
+///
+/// `Ordering` is the return type of [`Comparable.compare`]; matching on its
+/// three variants is the canonical way to branch on a comparison.
+public enum Ordering {
+  /// The first value is less than the second.
+  Less,
+  /// The two values are equal.
+  Equal,
+  /// The first value is greater than the second.
+  Greater
+}
+
+/// The interface for types whose values can be compared for equality.
+///
+/// A type implements `Equatable` by defining how two of its values are
+/// considered equal. The `other` operand has the implementing type, so an impl
+/// for `T` compares a `T` against a `T`.
+public trait Equatable {
+  /// Returns `true` when `self` and `other` are considered equal.
+  fn eq(self, other: Self) -> Bool
+}
+
+/// The interface for types whose values have a total ordering.
+///
+/// A type implements `Comparable` by defining how one of its values orders
+/// relative to another, returning an [`Ordering`]. As with [`Equatable`], the
+/// `other` operand has the implementing type.
+public trait Comparable {
+  /// Compares `self` against `other`, returning their [`Ordering`].
+  fn compare(self, other: Self) -> Ordering
+}
+
+/// A minimal, ready-to-use `Comparable`/`Equatable` value wrapping a single
+/// integer key.
+///
+/// Use `Key` (or mirror its impls on your own type) when you need a concrete
+/// comparable value — for example as the sample receiver that proves trait
+/// resolution in tests, the way `core.error.SimpleError` proves `Error`
+/// resolves.
+public record Key {
+  /// The integer this key orders and compares by.
+  value: Int
+}
+
+/// `Key` compares by its integer `value`.
+impl Comparable for Key {
+  /// Returns `Less`, `Equal`, or `Greater` by comparing the two keys' values.
+  public fn compare(self, other: Key) -> Ordering {
+    if (self.value < other.value) {
+      Less
+    } else if (self.value == other.value) {
+      Equal
+    } else {
+      Greater
+    }
+  }
+}
+
+/// `Key` is equal to another `Key` when their `value` fields match.
+impl Equatable for Key {
+  /// Returns `true` when the two keys carry the same `value`.
+  public fn eq(self, other: Key) -> Bool {
+    self.value == other.value
+  }
+}
+
+/// Constructs a `Key` from an integer value.
+///
+/// This is the ergonomic way to create a comparable key: `key(3)`.
+public fn key(value: Int) -> Key {
+  Key { value: value }
+}
+
+/// Returns the greater of two `Comparable` values, preferring `b` on a tie.
+///
+/// Generic over any `T: Comparable`, dispatching through the type's
+/// `compare` impl.
+public fn max[T: Comparable](a: T, b: T) -> T {
+  match a.compare(b) {
+    Greater => a
+    _ => b
+  }
+}
+
+/// Returns the lesser of two `Comparable` values, preferring `b` on a tie.
+///
+/// Generic over any `T: Comparable`, dispatching through the type's
+/// `compare` impl.
+public fn min[T: Comparable](a: T, b: T) -> T {
+  match a.compare(b) {
+    Less => a
+    _ => b
+  }
+}

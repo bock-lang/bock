@@ -1,0 +1,22 @@
+// TEST: stdlib_compare_generic_helpers
+// EXPECT: no_errors
+//
+// The generic, trait-bounded helpers `max[T: Comparable]` and `min[T:
+// Comparable]` from `core.compare` accept any `Comparable` value — here `Key` —
+// dispatching through its `compare` impl. This exercises a generic function
+// bounded by a stdlib trait, which the `core.error` pilot did not cover.
+module userapp
+
+use core.compare.{Key, key, max, min}
+
+public fn larger(a: Key, b: Key) -> Key {
+  max(a, b)
+}
+
+public fn smaller(a: Key, b: Key) -> Key {
+  min(a, b)
+}
+
+public fn pick() -> Key {
+  max(key(3), key(9))
+}

@@ -1,0 +1,19 @@
+// TEST: stdlib_compare_construct_and_use
+// EXPECT: no_errors
+//
+// The `key(...)` constructor from `core.compare` builds a `Key`, and matching
+// on the `Ordering` returned by `.compare(...)` selects a branch — proving the
+// enum variants (`Less`/`Equal`/`Greater`) resolve through the import.
+module userapp
+
+use core.compare.{Ordering, Key, key}
+
+public fn describe(n: Int, m: Int) -> String {
+  let a: Key = key(n)
+  let b: Key = key(m)
+  match a.compare(b) {
+    Less => "less"
+    Equal => "equal"
+    Greater => "greater"
+  }
+}

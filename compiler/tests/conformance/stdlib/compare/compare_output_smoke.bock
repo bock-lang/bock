@@ -1,0 +1,30 @@
+// TEST: stdlib_compare_output_smoke
+// EXPECT: output "equal"
+//
+// A `main` that builds two equal `Key`s via `core.compare.key(...)` and prints
+// whether they are `eq`. NOTE: the harness currently *parses* `// EXPECT:
+// output` directives but does not yet execute fixtures (no conformance
+// execution runner exists; cross-target execution is staged for the Q-fconf
+// task). Until then this fixture is validated by loading (no LoadError) and by
+// the CLI-level `bock run` smoke test in bock-cli's `stdlib_compare`
+// integration suite, which asserts this exact "equal" output against the real
+// interpreter.
+//
+// The smoke uses `.eq(...)` (whose impl body returns a Bool) rather than
+// `.compare(...)`: constructing an enum variant inside a *cross-module* stdlib
+// impl body is an interpreter-scoping gap (the variant name is undefined at
+// run time), tracked separately from type-checking and codegen, both of which
+// handle it. See the session's PR notes.
+module main
+
+use core.compare.{Key, key}
+
+public fn main() {
+  let a = key(2)
+  let b = key(2)
+  if (a.eq(b)) {
+    println("equal")
+  } else {
+    println("differ")
+  }
+}
