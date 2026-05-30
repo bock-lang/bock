@@ -82,6 +82,18 @@ decided→link)`
   surface ratification.
 - **Status:** escalated → Design (escalations.md)
 
+### DQ13 — §18.2 prelude membership (`TryFrom`, `Error`)
+- **Question:** §18.2's literal trait list (Comparable/Equatable/Hashable/Displayable/
+  Serializable/Cloneable/Default/Into/From/Iterator/Iterable) does **not** include
+  `TryFrom` or `Error`. The prelude-injection impl (#120) preludes `TryFrom` + `Error`
+  too (both defined in `core.convert`/`core.error`, both fundamental). Should §18.2 be
+  amended to include them, or should the impl drop them (require explicit `use`)?
+- **§:** §18.2 · **context:** surfaced by #120 (the orchestrator's dispatch prompt
+  over-specified them). Reversible/low-harm in v1-dev. FYI not a question: the §18.2
+  traits without core definitions yet (Serializable/Cloneable/Default/Hashable/
+  Iterator/Iterable) are name-level prelude only until their `core.*` ship — expected.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and
