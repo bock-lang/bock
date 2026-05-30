@@ -141,6 +141,15 @@ struct TsEmitCtx {
     last_marked: Option<(u32, u32)>,
     /// Collected source-map entries (populated via [`Self::mark_span`]).
     mappings: Vec<SourceMapping>,
+    /// Loop-label stack — see [`crate::generator::loop_needs_break_label`].
+    /// `break` inside a `switch` exits the switch, so a statement-arm `match`
+    /// that wants to `break`/`continue` an enclosing loop uses a labelled jump.
+    loop_labels: Vec<Option<String>>,
+    /// Depth of statement-arm `switch` emission; > 0 routes `break`/`continue`
+    /// to the innermost labelled loop.
+    switch_label_depth: usize,
+    /// Monotonic counter for unique loop-label names.
+    loop_label_counter: usize,
 }
 
 impl TsEmitCtx {
@@ -159,6 +168,9 @@ impl TsEmitCtx {
             scan_pos: 0,
             last_marked: None,
             mappings: Vec::new(),
+            loop_labels: Vec::new(),
+            switch_label_depth: 0,
+            loop_label_counter: 0,
         }
     }
 
@@ -1378,6 +1390,7 @@ impl TsEmitCtx {
                 body,
             } => {
                 let binding = self.pattern_to_ts_destructure(pattern);
+                self.emit_loop_label_prefix(body);
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}for (const {binding} of ");
                 self.emit_expr(iterable)?;
@@ -1386,9 +1399,11 @@ impl TsEmitCtx {
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
+                self.loop_labels.pop();
                 Ok(())
             }
             NodeKind::While { condition, body } => {
+                self.emit_loop_label_prefix(body);
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}while (");
                 self.emit_expr(condition)?;
@@ -1397,14 +1412,17 @@ impl TsEmitCtx {
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
+                self.loop_labels.pop();
                 Ok(())
             }
             NodeKind::Loop { body } => {
+                self.emit_loop_label_prefix(body);
                 self.writeln("while (true) {");
                 self.indent += 1;
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
+                self.loop_labels.pop();
                 Ok(())
             }
             NodeKind::Return { value } => {
@@ -1423,13 +1441,24 @@ impl TsEmitCtx {
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}/* break value: ");
                     self.emit_expr(val)?;
-                    self.buf.push_str(" */ break;\n");
-                } else {
-                    self.writeln("break;");
+                    self.buf.push_str(" */\n");
                 }
+                if self.switch_label_depth > 0 {
+                    if let Some(label) = self.innermost_loop_label() {
+                        self.writeln(&format!("break {label};"));
+                        return Ok(());
+                    }
+                }
+                self.writeln("break;");
                 Ok(())
             }
             NodeKind::Continue => {
+                if self.switch_label_depth > 0 {
+                    if let Some(label) = self.innermost_loop_label() {
+                        self.writeln(&format!("continue {label};"));
+                        return Ok(());
+                    }
+                }
                 self.writeln("continue;");
                 Ok(())
             }
@@ -2017,12 +2046,32 @@ impl TsEmitCtx {
             self.buf.push_str(") {\n");
         }
         self.indent += 1;
+        self.switch_label_depth += 1;
         for arm in arms {
             self.emit_match_arm(arm, is_adt, scrutinee)?;
         }
+        self.switch_label_depth -= 1;
         self.indent -= 1;
         self.writeln("}");
         Ok(())
+    }
+
+    /// Emit a TS label before a loop iff a contained statement-arm `match`
+    /// needs to `break`/`continue` the loop. Pair with `loop_labels.pop()`.
+    fn emit_loop_label_prefix(&mut self, body: &AIRNode) {
+        if crate::generator::loop_needs_break_label(body) {
+            self.loop_label_counter += 1;
+            let label = format!("__bockLoop{}", self.loop_label_counter);
+            self.writeln(&format!("{label}:"));
+            self.loop_labels.push(Some(label));
+        } else {
+            self.loop_labels.push(None);
+        }
+    }
+
+    /// Label of the innermost loop, if one was allocated.
+    fn innermost_loop_label(&self) -> Option<&str> {
+        self.loop_labels.last().and_then(|l| l.as_deref())
     }
 
     fn emit_match_arm(
@@ -2172,9 +2221,30 @@ impl TsEmitCtx {
                 self.emit_node(s)?;
             }
             if let Some(t) = tail {
+                if crate::generator::node_is_statement(t) {
+                    self.emit_node(t)?;
+                    return Ok(());
+                }
+                if let NodeKind::Match { scrutinee, arms } = &t.kind {
+                    if crate::generator::match_has_statement_arm(arms) {
+                        self.emit_match(scrutinee, arms)?;
+                        return Ok(());
+                    }
+                }
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}return ");
                 self.emit_expr(t)?;
+                self.buf.push_str(";\n");
+            }
+        } else if crate::generator::node_is_statement(node) {
+            self.emit_node(node)?;
+        } else if let NodeKind::Match { scrutinee, arms } = &node.kind {
+            if crate::generator::match_has_statement_arm(arms) {
+                self.emit_match(scrutinee, arms)?;
+            } else {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}return ");
+                self.emit_expr(node)?;
                 self.buf.push_str(";\n");
             }
         } else {

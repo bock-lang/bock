@@ -414,25 +414,34 @@ impl PyEmitCtx {
                 if !imports.is_empty() && !items.is_empty() {
                     self.buf.push('\n');
                 }
-                // Pre-scan trait impls so we can attach their methods to the
-                // target record's class body instead of leaving them as
-                // orphan module-level functions with a `self` parameter.
+                // Pre-scan impl blocks so we can attach their methods to the
+                // target record/class body instead of leaving them as orphan
+                // module-level functions with a `self` parameter. Both trait
+                // impls (`impl Trait for T`) and bare inherent impls (`impl T`)
+                // are folded; only impls whose target is a record/class
+                // declared in this module are consumed (others stay as-is).
                 self.impls_by_target.clear();
+                let class_targets: std::collections::HashSet<String> = items
+                    .iter()
+                    .filter_map(|it| match &it.kind {
+                        NodeKind::RecordDecl { name, .. } | NodeKind::ClassDecl { name, .. } => {
+                            Some(name.name.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 let mut consumed_impls: std::collections::HashSet<bock_air::NodeId> =
                     std::collections::HashSet::new();
                 for item in items.iter() {
-                    if let NodeKind::ImplBlock {
-                        trait_path: Some(_),
-                        target,
-                        ..
-                    } = &item.kind
-                    {
+                    if let NodeKind::ImplBlock { target, .. } = &item.kind {
                         if let Some(target_name) = ast_type_name(target) {
-                            self.impls_by_target
-                                .entry(target_name)
-                                .or_default()
-                                .push(item.clone());
-                            consumed_impls.insert(item.id);
+                            if class_targets.contains(&target_name) {
+                                self.impls_by_target
+                                    .entry(target_name)
+                                    .or_default()
+                                    .push(item.clone());
+                                consumed_impls.insert(item.id);
+                            }
                         }
                     }
                 }
@@ -646,7 +655,11 @@ impl PyEmitCtx {
                             self.needs_asyncio_import = true;
                         }
                         let async_kw = if *is_async { "async " } else { "" };
-                        let param_strs = self.collect_param_strs(params);
+                        let rest = match params.first().map(crate::generator::param_binds_self) {
+                            Some(Some(_)) => &params[1..],
+                            _ => &params[..],
+                        };
+                        let param_strs = self.collect_param_strs(rest);
                         let effects = self.effects_params(effect_clause);
                         let mut all_params = vec!["self".to_string()];
                         all_params.extend(param_strs);
@@ -724,7 +737,12 @@ impl PyEmitCtx {
                         } = &op.kind
                         {
                             self.writeln("@abstractmethod");
-                            let param_strs = self.collect_param_strs(params);
+                            let rest = match params.first().map(crate::generator::param_binds_self)
+                            {
+                                Some(Some(_)) => &params[1..],
+                                _ => &params[..],
+                            };
+                            let param_strs = self.collect_param_strs(rest);
                             let mut all_params = vec!["self".to_string()];
                             all_params.extend(param_strs);
                             let ret = return_type
@@ -867,7 +885,14 @@ impl PyEmitCtx {
                 self.needs_asyncio_import = true;
             }
             let async_kw = if *is_async { "async " } else { "" };
-            let param_strs = self.collect_param_strs(params);
+            // The AIR keeps `self` as a leading `Param`; Python methods need
+            // exactly one explicit `self`. Skip the bound `self` param if
+            // present so it isn't emitted twice (`def m(self, self)`).
+            let rest = match params.first().map(crate::generator::param_binds_self) {
+                Some(Some(_)) => &params[1..],
+                _ => &params[..],
+            };
+            let param_strs = self.collect_param_strs(rest);
             let effects = self.effects_params(effect_clause);
             let mut all_params = vec!["self".to_string()];
             all_params.extend(param_strs);
@@ -1314,6 +1339,24 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                // Desugared instance method call `Call(FieldAccess(recv, m),
+                // [recv, ...rest])`: emit `recv.m(rest)` so the receiver binds
+                // Python's `self` rather than being passed twice.
+                if let Some((recv, method, rest)) =
+                    crate::generator::desugared_self_call(callee, args)
+                {
+                    self.emit_expr(recv)?;
+                    let _ = write!(self.buf, ".{}", to_snake_case(&method.name));
+                    self.buf.push('(');
+                    for (i, arg) in rest.iter().enumerate() {
+                        if i > 0 {
+                            self.buf.push_str(", ");
+                        }
+                        self.emit_expr(&arg.value)?;
+                    }
+                    self.buf.push(')');
                     return Ok(());
                 }
                 // Rewrite bare effect operation calls: log(...) → handler.log(...)
@@ -2114,9 +2157,35 @@ impl PyEmitCtx {
             }
             self.task_bound_names = prev;
             if let Some(t) = tail {
+                // A statement tail (`break`/`continue`/`return`/assignment) is
+                // emitted as a statement, never wrapped in `return`.
+                if crate::generator::node_is_statement(t) {
+                    self.emit_node(t)?;
+                    return Ok(());
+                }
+                // A `match` with statement arms yields no value: emit a Python
+                // `match`/`case` statement, not a `return (lambda ...)`.
+                if let NodeKind::Match { scrutinee, arms } = &t.kind {
+                    if crate::generator::match_has_statement_arm(arms) {
+                        self.emit_match(scrutinee, arms)?;
+                        return Ok(());
+                    }
+                }
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}return ");
                 self.emit_expr(t)?;
+                self.buf.push('\n');
+            }
+        } else if crate::generator::node_is_statement(node) {
+            // A bare statement body (`break`/`continue`/`return`/assignment).
+            self.emit_node(node)?;
+        } else if let NodeKind::Match { scrutinee, arms } = &node.kind {
+            if crate::generator::match_has_statement_arm(arms) {
+                self.emit_match(scrutinee, arms)?;
+            } else {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}return ");
+                self.emit_expr(node)?;
                 self.buf.push('\n');
             }
         } else {

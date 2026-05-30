@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use bock_air::NodeKind;
+use bock_air::{AIRNode, AirArg, NodeKind};
 use bock_types::AIRModule;
 
 use crate::error::CodegenError;
@@ -406,6 +406,175 @@ pub fn module_main_fn_is_async(module: &AIRModule) -> bool {
     })
 }
 
+// ─── Statement-aware match helpers ──────────────────────────────────────────
+//
+// Some Bock `match` arms have *statement* bodies — `break`, `continue`,
+// `return`, or an assignment. These have no value, so an arm carrying one
+// cannot be lowered to an expression form (a ternary, an IIFE, or a value
+// `match` arm). Backends that emit `match` as an expression must instead emit
+// such a match in **statement position** (a `switch` / if-chain that yields no
+// value). The predicates below let every backend agree on what counts as a
+// statement arm without duplicating the classification.
+
+/// Returns true if `node` is a statement-like AIR node — one that performs
+/// control flow or mutation and yields no usable value in expression position.
+///
+/// These are exactly the node kinds a target's expression form (ternary, IIFE,
+/// value-`match` arm) cannot host: `break`, `continue`, `return`, and
+/// assignment.
+#[must_use]
+pub fn node_is_statement(node: &AIRNode) -> bool {
+    matches!(
+        node.kind,
+        NodeKind::Break { .. }
+            | NodeKind::Continue
+            | NodeKind::Return { .. }
+            | NodeKind::Assign { .. }
+    )
+}
+
+/// Returns true if a `match`-arm body is a statement body — either the body is
+/// itself a statement node, or it is a `{ ... }` block whose tail is a
+/// statement node (or which has no tail at all, e.g. a block ending in a
+/// statement with no value).
+#[must_use]
+pub fn arm_body_is_statement(body: &AIRNode) -> bool {
+    if node_is_statement(body) {
+        return true;
+    }
+    if let NodeKind::Block { tail, .. } = &body.kind {
+        return match tail {
+            Some(t) => node_is_statement(t),
+            // A block with no tail expression yields no value.
+            None => true,
+        };
+    }
+    false
+}
+
+/// Returns true if any arm of a `match` carries a statement body (see
+/// [`arm_body_is_statement`]). When true, backends without a statement-admitting
+/// expression form (Go, Python, JS, TS) must emit the `match` in statement
+/// position rather than as an expression.
+#[must_use]
+pub fn match_has_statement_arm(arms: &[AIRNode]) -> bool {
+    arms.iter().any(
+        |arm| matches!(&arm.kind, NodeKind::MatchArm { body, .. } if arm_body_is_statement(body)),
+    )
+}
+
+/// Decide whether a loop must be given a target label so that a `break`/
+/// `continue` inside a statement-arm `match` reaches the loop rather than the
+/// `switch` the `match` lowers to.
+///
+/// In Go and JS/TS, `break` inside a `switch` exits the switch. When a
+/// statement-arm `match` (lowered to a `switch`) contains a `break` (or, in
+/// Go-style lowering, a `continue`) intended for an enclosing loop, the loop
+/// needs a label and the jump must be labelled. This returns true when the
+/// loop body contains — without crossing into a nested loop or function — a
+/// `match` with a statement arm that performs a `break`/`continue`.
+#[must_use]
+pub fn loop_needs_break_label(body: &AIRNode) -> bool {
+    fn arm_has_jump(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::Break { .. } | NodeKind::Continue => true,
+            NodeKind::For { .. }
+            | NodeKind::While { .. }
+            | NodeKind::Loop { .. }
+            | NodeKind::FnDecl { .. }
+            | NodeKind::Lambda { .. } => false,
+            NodeKind::Block { stmts, tail } => {
+                stmts.iter().any(arm_has_jump) || tail.as_deref().is_some_and(arm_has_jump)
+            }
+            NodeKind::If {
+                then_block,
+                else_block,
+                ..
+            } => arm_has_jump(then_block) || else_block.as_deref().is_some_and(arm_has_jump),
+            NodeKind::Match { arms, .. } => arms
+                .iter()
+                .any(|a| matches!(&a.kind, NodeKind::MatchArm { body, .. } if arm_has_jump(body))),
+            NodeKind::Guard { else_block, .. } => arm_has_jump(else_block),
+            _ => false,
+        }
+    }
+    fn find(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::For { .. }
+            | NodeKind::While { .. }
+            | NodeKind::Loop { .. }
+            | NodeKind::FnDecl { .. }
+            | NodeKind::Lambda { .. } => false,
+            NodeKind::Match { arms, .. } => match_has_statement_arm(arms)
+                && arms.iter().any(
+                    |a| matches!(&a.kind, NodeKind::MatchArm { body, .. } if arm_has_jump(body)),
+                ),
+            NodeKind::Block { stmts, tail } => {
+                stmts.iter().any(find) || tail.as_deref().is_some_and(find)
+            }
+            NodeKind::If {
+                then_block,
+                else_block,
+                ..
+            } => find(then_block) || else_block.as_deref().is_some_and(find),
+            NodeKind::Guard { else_block, .. } => find(else_block),
+            _ => false,
+        }
+    }
+    find(body)
+}
+
+/// If `param` is a method parameter that binds the receiver `self`, return
+/// `Some(is_mut)` carrying its mutability; otherwise `None`.
+///
+/// The AIR keeps `self` as an ordinary leading `Param` whose pattern is a
+/// `BindPat { name: "self" }`. Backends with native receivers (Rust `&self` /
+/// `&mut self`, Go `func (self *T)`, Python `self`) consume this param to emit
+/// the receiver and must not also emit it as a normal positional parameter.
+#[must_use]
+pub fn param_binds_self(param: &AIRNode) -> Option<bool> {
+    let NodeKind::Param { pattern, .. } = &param.kind else {
+        return None;
+    };
+    if let NodeKind::BindPat { name, is_mut } = &pattern.kind {
+        if name.name == "self" {
+            return Some(*is_mut);
+        }
+    }
+    None
+}
+
+/// Recognise a *desugared instance method call*.
+///
+/// The AIR lowerer rewrites `recv.method(args)` into
+/// `Call { callee: FieldAccess(recv, method), args: [recv, ...args] }`, cloning
+/// the receiver into both the field-access object and the leading argument
+/// (so they share a [`NodeId`](bock_air::NodeId)). This helper detects that
+/// shape — callee is a `FieldAccess` whose object is identical to the first
+/// argument — and returns the receiver, the method name, and the remaining
+/// (non-self) arguments. Targets with native method receivers (Rust, Go,
+/// Python) use this to emit `recv.method(rest)` instead of double-passing the
+/// receiver. Associated calls (`Type.method(...)`) prepend no self and are not
+/// matched here.
+#[must_use]
+pub fn desugared_self_call<'a>(
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a bock_ast::Ident, &'a [AirArg])> {
+    let NodeKind::FieldAccess { object, field } = &callee.kind else {
+        return None;
+    };
+    let first = args.first()?;
+    // The lowerer clones the receiver into both positions, so the self arg
+    // and the field-access object are the *same* node (same NodeId). A genuine
+    // `(p.f)(p)` field-closure call would have two distinct receiver nodes.
+    if first.value.id == object.id {
+        Some((object.as_ref(), field, &args[1..]))
+    } else {
+        None
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -662,5 +831,208 @@ mod tests {
     fn module_declares_main_returns_false_for_empty_module() {
         let m = module_with(vec![]);
         assert!(!module_declares_main_fn(&m));
+    }
+
+    // ── Statement / match / desugar helpers ─────────────────────────────────
+
+    fn n(id: u32, kind: NodeKind) -> AIRNode {
+        AIRNode::new(id, dummy_span(), kind)
+    }
+
+    fn match_arm(id: u32, body: AIRNode) -> AIRNode {
+        n(
+            id,
+            NodeKind::MatchArm {
+                pattern: Box::new(n(id + 1, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(body),
+            },
+        )
+    }
+
+    #[test]
+    fn node_is_statement_classifies_control_flow() {
+        assert!(node_is_statement(&n(1, NodeKind::Break { value: None })));
+        assert!(node_is_statement(&n(1, NodeKind::Continue)));
+        assert!(node_is_statement(&n(1, NodeKind::Return { value: None })));
+        assert!(!node_is_statement(&n(
+            1,
+            NodeKind::Literal {
+                lit: bock_ast::Literal::Int("1".into())
+            }
+        )));
+    }
+
+    #[test]
+    fn arm_body_is_statement_for_block_with_statement_tail() {
+        let block_tail_break = n(
+            1,
+            NodeKind::Block {
+                stmts: vec![],
+                tail: Some(Box::new(n(2, NodeKind::Break { value: None }))),
+            },
+        );
+        assert!(arm_body_is_statement(&block_tail_break));
+        // A block with no tail yields no value → statement.
+        let empty = n(
+            3,
+            NodeKind::Block {
+                stmts: vec![],
+                tail: None,
+            },
+        );
+        assert!(arm_body_is_statement(&empty));
+    }
+
+    #[test]
+    fn match_has_statement_arm_detects_break() {
+        let arms = vec![
+            match_arm(10, n(12, NodeKind::Break { value: None })),
+            match_arm(
+                20,
+                n(
+                    22,
+                    NodeKind::Literal {
+                        lit: bock_ast::Literal::Int("0".into()),
+                    },
+                ),
+            ),
+        ];
+        assert!(match_has_statement_arm(&arms));
+
+        let value_arms = vec![match_arm(
+            30,
+            n(
+                32,
+                NodeKind::Literal {
+                    lit: bock_ast::Literal::Int("0".into()),
+                },
+            ),
+        )];
+        assert!(!match_has_statement_arm(&value_arms));
+    }
+
+    #[test]
+    fn desugared_self_call_matches_shared_receiver_id() {
+        // Receiver node with id 5 cloned into both the FieldAccess object and
+        // the leading arg — the lowerer\'s desugared-method marker.
+        let recv = n(5, NodeKind::Identifier { name: ident("p") });
+        let callee = n(
+            6,
+            NodeKind::FieldAccess {
+                object: Box::new(recv.clone()),
+                field: ident("m"),
+            },
+        );
+        let args = vec![
+            AirArg {
+                label: None,
+                value: recv,
+            },
+            AirArg {
+                label: None,
+                value: n(7, NodeKind::Identifier { name: ident("x") }),
+            },
+        ];
+        let got = desugared_self_call(&callee, &args).expect("should match");
+        assert_eq!(got.1.name, "m");
+        assert_eq!(got.2.len(), 1); // one non-self arg
+
+        // A genuine field-closure call `(p.f)(p)` has *distinct* receiver
+        // nodes (different ids), so it is not treated as a method call.
+        let p1 = n(8, NodeKind::Identifier { name: ident("p") });
+        let p2 = n(9, NodeKind::Identifier { name: ident("p") });
+        let callee2 = n(
+            10,
+            NodeKind::FieldAccess {
+                object: Box::new(p1),
+                field: ident("f"),
+            },
+        );
+        let args2 = vec![AirArg {
+            label: None,
+            value: p2,
+        }];
+        assert!(desugared_self_call(&callee2, &args2).is_none());
+    }
+
+    #[test]
+    fn param_binds_self_detects_self_param() {
+        let self_p = n(
+            1,
+            NodeKind::Param {
+                pattern: Box::new(n(
+                    2,
+                    NodeKind::BindPat {
+                        name: ident("self"),
+                        is_mut: false,
+                    },
+                )),
+                ty: None,
+                default: None,
+            },
+        );
+        assert_eq!(param_binds_self(&self_p), Some(false));
+
+        let other = n(
+            3,
+            NodeKind::Param {
+                pattern: Box::new(n(
+                    4,
+                    NodeKind::BindPat {
+                        name: ident("x"),
+                        is_mut: false,
+                    },
+                )),
+                ty: None,
+                default: None,
+            },
+        );
+        assert_eq!(param_binds_self(&other), None);
+    }
+
+    #[test]
+    fn loop_needs_break_label_when_match_arm_breaks() {
+        // loop body: { match _ { _ => break } }
+        let match_node = n(
+            1,
+            NodeKind::Match {
+                scrutinee: Box::new(n(2, NodeKind::Identifier { name: ident("i") })),
+                arms: vec![match_arm(3, n(5, NodeKind::Break { value: None }))],
+            },
+        );
+        let body = n(
+            6,
+            NodeKind::Block {
+                stmts: vec![match_node],
+                tail: None,
+            },
+        );
+        assert!(loop_needs_break_label(&body));
+
+        // A match whose arms only return values needs no label.
+        let value_match = n(
+            10,
+            NodeKind::Match {
+                scrutinee: Box::new(n(11, NodeKind::Identifier { name: ident("i") })),
+                arms: vec![match_arm(
+                    12,
+                    n(
+                        14,
+                        NodeKind::Literal {
+                            lit: bock_ast::Literal::Int("0".into()),
+                        },
+                    ),
+                )],
+            },
+        );
+        let body2 = n(
+            15,
+            NodeKind::Block {
+                stmts: vec![value_match],
+                tail: None,
+            },
+        );
+        assert!(!loop_needs_break_label(&body2));
     }
 }

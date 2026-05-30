@@ -1,0 +1,44 @@
+// TEST: exec_self_method
+// EXPECT: output "sum=5;scaled=20"
+// EXPECT: targets rust, go, python, js
+//
+// Regression fixture for the codegen-correctness workstream (defect 3):
+// instance methods that take `self`. The AIR lowerer desugars `p.m(x)` into
+// `Call(FieldAccess(p, m), [p, x])` (self prepended) while keeping `self` as a
+// declared parameter. Before the fix:
+//   * Rust emitted `fn sum(&self, self: _)` and called `p.sum(p)` — double self.
+//   * Go emitted `func (p *Point) sum(self interface{})` but used `self.X` in
+//     the body, and called `p.Sum(p)` — undefined `self`, extra arg.
+//   * Python emitted `def sum(self, self)` and called `p.sum(p)` — duplicate
+//     parameter / extra arg.
+// JS was already self-consistent (explicit `self` param + `p.sum(p)`). TS is
+// excluded here: its prototype-method assignment (`Point.prototype.sum =
+// function(self)`) does not type-check under `tsc` (method not on the class
+// type; `self` implicitly `any`) — a pre-existing TS defect, not defect 3.
+//
+// Exercises a method with no extra args (`sum`) and one with an extra arg
+// (`scale`) to cover both `args[1..]` empty and non-empty at the call site.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Point {
+  x: Int
+  y: Int
+}
+
+impl Point {
+  fn sum(self) -> Int {
+    self.x + self.y
+  }
+
+  fn scale(self, factor: Int) -> Int {
+    (self.x + self.y) * factor
+  }
+}
+
+fn main() -> Void {
+  let p: Point = Point { x: 2, y: 3 }
+  println("sum=${p.sum()};scaled=${p.scale(4)}")
+}

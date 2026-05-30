@@ -25,7 +25,9 @@ pub use bock_ai::{Rule, RuleCache};
 pub use error::CodegenError;
 pub use gaps::{detect_gaps, CapabilityGap};
 pub use generator::{
-    CodeGenerator, GeneratedCode, OutputFile, SourceInfo, SourceMap, SourceMapEntry, SourceMapping,
+    arm_body_is_statement, desugared_self_call, loop_needs_break_label, match_has_statement_arm,
+    node_is_statement, param_binds_self, CodeGenerator, GeneratedCode, OutputFile, SourceInfo,
+    SourceMap, SourceMapEntry, SourceMapping,
 };
 pub use go::GoGenerator;
 pub use js::JsGenerator;

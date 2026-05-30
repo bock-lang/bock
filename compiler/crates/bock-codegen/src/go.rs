@@ -32,6 +32,33 @@ fn go_module_uses_concurrency(items: &[AIRNode]) -> bool {
     })
 }
 
+/// Whether a Go loop needs a label so a statement-arm `match`'s `break`/
+/// `continue` can target the loop instead of the inner `switch`.
+fn go_loop_needs_label(body: &AIRNode) -> bool {
+    crate::generator::loop_needs_break_label(body)
+}
+
+/// Decide whether a Go `match` should lower to a *type*-switch
+/// (`switch v := s.(type) { case T: }`) rather than a *value*-switch
+/// (`switch s { case 5: }`).
+///
+/// Constructor and record patterns dispatch on the scrutinee's dynamic type
+/// (enum variants are distinct Go structs), so any such pattern forces a
+/// type-switch. Literal and bind patterns dispatch on value. A match whose
+/// arms are only wildcard/bind patterns defaults to a value-switch.
+fn go_match_is_type_switch(arms: &[AIRNode]) -> bool {
+    arms.iter().any(|arm| {
+        matches!(
+            &arm.kind,
+            NodeKind::MatchArm { pattern, .. }
+                if matches!(
+                    pattern.kind,
+                    NodeKind::ConstructorPat { .. } | NodeKind::RecordPat { .. }
+                )
+        )
+    })
+}
+
 /// Runtime helpers for Bock concurrency in Go. A Channel is a wrapper
 /// over `chan interface{}` so the generic shape is simple; `spawn`
 /// launches a goroutine whose result is piped through a 1-element
@@ -56,6 +83,52 @@ func (c *__bockChannel) close()              {}
 // so this is the identity on a receive channel.
 func __bockSpawn(ch interface{}) interface{} { return ch }
 ";
+
+/// Runtime helpers for Bock `Optional[T]` in Go. Go has no sum type, so an
+/// optional is a tagged struct: `tag` is `"Some"` or `"None"`, `v` carries the
+/// payload for `Some`. `__bockSome`/`__bockNone` are the constructors; matches
+/// dispatch on `.tag` and read `.v` for the bound value.
+const OPTIONAL_RUNTIME_GO: &str = "// ── Bock Optional runtime ──
+type __bockOption struct {
+	tag string
+	v   interface{}
+}
+
+func __bockSome(v interface{}) __bockOption { return __bockOption{tag: \"Some\", v: v} }
+
+var __bockNone = __bockOption{tag: \"None\"}
+";
+
+/// True if the module references `Optional`, `Some`, or `None` anywhere (so the
+/// Optional runtime prelude must be emitted). A cheap structural scan over the
+/// debug rendering, mirroring `go_module_uses_concurrency`.
+fn go_module_uses_optional(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"Optional\"")
+            || s.contains("TypeOptional")
+            || s.contains("\"Some\"")
+            || s.contains("\"None\"")
+    })
+}
+
+/// True if a `match`\'s arms dispatch on the `Optional` constructors
+/// `Some`/`None` (so the Go backend emits a tag-based switch over
+/// `__bockOption`). Recognised by a constructor pattern whose final path
+/// segment is `Some` or `None`.
+fn go_match_is_optional(arms: &[AIRNode]) -> bool {
+    arms.iter().any(|arm| {
+        if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
+            if let NodeKind::ConstructorPat { path, .. } = &pattern.kind {
+                return path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| matches!(seg.name.as_str(), "Some" | "None"));
+            }
+        }
+        false
+    })
+}
 
 /// Go code generator implementing the `CodeGenerator` trait.
 #[derive(Debug)]
@@ -87,6 +160,7 @@ impl CodeGenerator for GoGenerator {
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
         let mut ctx = GoEmitCtx::new();
         ctx.collect_async_fns(module);
+        ctx.collect_methods(module);
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -226,6 +300,23 @@ struct GoEmitCtx {
     /// of the function (goroutine started, `<-chan T` returned). Without this,
     /// `await task()` would try to receive from a `T`, not `chan T`.
     async_fns: HashSet<String>,
+    /// Names of `public` methods (declared in impl/class/trait blocks). Used at
+    /// desugared method-call sites to pick PascalCase (public) vs camelCase
+    /// (private) so the call matches the method definition's Go casing.
+    public_methods: HashSet<String>,
+    /// Loop-label stack. In Go, `break` inside a `switch` exits the switch, not
+    /// an enclosing `for`. When a statement-arm `match` (lowered to a `switch`)
+    /// contains a `break`/`continue` meant for the loop, the loop is given a
+    /// label and the jump is emitted as `break <label>` / `continue <label>`.
+    /// An entry is pushed for every active loop; `Some` once a label has been
+    /// allocated for it. Only allocated labels are emitted (Go errors on an
+    /// unused label).
+    loop_labels: Vec<Option<String>>,
+    /// When > 0, `break`/`continue` are being emitted inside a `switch` arm and
+    /// must target the innermost labelled loop rather than the switch.
+    switch_label_depth: usize,
+    /// Monotonic counter for unique loop-label names.
+    loop_label_counter: usize,
 }
 
 impl GoEmitCtx {
@@ -244,6 +335,10 @@ impl GoEmitCtx {
             public_fns: HashSet::new(),
             void_effect_ops: HashSet::new(),
             async_fns: HashSet::new(),
+            public_methods: HashSet::new(),
+            loop_labels: Vec::new(),
+            switch_label_depth: 0,
+            loop_label_counter: 0,
         }
     }
 
@@ -260,6 +355,32 @@ impl GoEmitCtx {
                 } = &item.kind
                 {
                     self.async_fns.insert(name.name.clone());
+                }
+            }
+        }
+    }
+
+    /// Pre-scan all impl/class/trait blocks for `public` method names so call
+    /// sites can match the Go method casing (PascalCase public, camelCase
+    /// private).
+    fn collect_methods(&mut self, module: &AIRNode) {
+        if let NodeKind::Module { items, .. } = &module.kind {
+            for item in items {
+                let methods = match &item.kind {
+                    NodeKind::ImplBlock { methods, .. }
+                    | NodeKind::ClassDecl { methods, .. }
+                    | NodeKind::TraitDecl { methods, .. } => methods,
+                    _ => continue,
+                };
+                for m in methods {
+                    if let NodeKind::FnDecl {
+                        visibility, name, ..
+                    } = &m.kind
+                    {
+                        if matches!(visibility, Visibility::Public) {
+                            self.public_methods.insert(name.name.clone());
+                        }
+                    }
                 }
             }
         }
@@ -385,6 +506,14 @@ impl GoEmitCtx {
                 let a = arg_strs.first().map_or(String::new(), |s| s.clone());
                 format!("(func() <-chan struct{{}} {{ __ch := make(chan struct{{}}); go func() {{ time.Sleep(time.Duration({a})); close(__ch) }}(); return __ch }})()")
             }
+            // Optional constructors → tagged runtime struct.
+            "Some" => {
+                let a = arg_strs
+                    .first()
+                    .map_or_else(|| "nil".to_string(), |s| s.clone());
+                format!("__bockSome({a})")
+            }
+            "None" => "__bockNone".to_string(),
             _ => return Ok(None),
         };
         Ok(Some(code))
@@ -537,6 +666,10 @@ impl GoEmitCtx {
             NodeKind::Module { imports, items, .. } => {
                 if go_module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_GO);
+                    self.buf.push('\n');
+                }
+                if go_module_uses_optional(items) {
+                    self.buf.push_str(OPTIONAL_RUNTIME_GO);
                     self.buf.push('\n');
                 }
                 for imp in imports {
@@ -934,12 +1067,16 @@ impl GoEmitCtx {
         body: &AIRNode,
     ) -> Result<(), CodegenError> {
         let is_public = matches!(visibility, Visibility::Public);
-        let fn_name = if is_public {
+        // The program entry point is always Go's `func main()`, never the
+        // exported `func Main()` that PascalCasing a `public fn main` would
+        // produce (Go would then report "function main is undeclared").
+        let is_entry_point = name == "main";
+        let fn_name = if is_public && !is_entry_point {
             to_pascal_case(name)
         } else {
             to_camel_case(name)
         };
-        if is_public {
+        if is_public && !is_entry_point {
             self.public_fns.insert(name.to_string());
         }
         let type_params = self.format_generic_params(generic_params);
@@ -1083,13 +1220,25 @@ impl GoEmitCtx {
             } else {
                 to_camel_case(&name.name)
             };
-            let receiver_var = receiver_type
-                .chars()
-                .next()
-                .unwrap_or('r')
-                .to_lowercase()
-                .to_string();
-            let param_strs = self.collect_param_strs(params);
+            // The AIR keeps `self` as a leading `Param` and method bodies refer
+            // to `self.Field`. Name the Go receiver `self` and drop the leading
+            // `self` param so the body resolves with no rewrite — otherwise the
+            // receiver was `p` while the body referenced an undefined `self`,
+            // and `self` also leaked in as a stray `interface{}` parameter.
+            let (receiver_var, rest) = match params.first().map(crate::generator::param_binds_self)
+            {
+                Some(Some(_)) => ("self".to_string(), &params[1..]),
+                _ => (
+                    receiver_type
+                        .chars()
+                        .next()
+                        .unwrap_or('r')
+                        .to_lowercase()
+                        .to_string(),
+                    &params[..],
+                ),
+            };
+            let param_strs = self.collect_param_strs(rest);
             let effects = self.effects_params(effect_clause);
             let mut all_params = param_strs;
             all_params.extend(effects);
@@ -1317,6 +1466,7 @@ impl GoEmitCtx {
                 body,
             } => {
                 let binding = self.pattern_to_go_binding(pattern);
+                self.emit_loop_label_prefix(body);
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}for _, {binding} := range ");
                 self.emit_expr(iterable)?;
@@ -1325,9 +1475,11 @@ impl GoEmitCtx {
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
+                self.loop_labels.pop();
                 Ok(())
             }
             NodeKind::While { condition, body } => {
+                self.emit_loop_label_prefix(body);
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}for ");
                 self.emit_expr(condition)?;
@@ -1336,14 +1488,17 @@ impl GoEmitCtx {
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
+                self.loop_labels.pop();
                 Ok(())
             }
             NodeKind::Loop { body } => {
+                self.emit_loop_label_prefix(body);
                 self.writeln("for {");
                 self.indent += 1;
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
+                self.loop_labels.pop();
                 Ok(())
             }
             NodeKind::Return { value } => {
@@ -1363,13 +1518,27 @@ impl GoEmitCtx {
                     let _ = write!(self.buf, "{ind}// break value: ");
                     self.emit_expr(val)?;
                     self.buf.push('\n');
-                    self.writeln("break");
-                } else {
-                    self.writeln("break");
                 }
+                // Inside a statement-arm `switch`, a bare `break` would exit
+                // the switch; target the enclosing loop's label instead.
+                if self.switch_label_depth > 0 {
+                    if let Some(label) = self.innermost_loop_label() {
+                        self.writeln(&format!("break {label}"));
+                        return Ok(());
+                    }
+                }
+                self.writeln("break");
                 Ok(())
             }
             NodeKind::Continue => {
+                // `continue` already targets the loop even from inside a switch,
+                // but use the label when one is in scope for symmetry/clarity.
+                if self.switch_label_depth > 0 {
+                    if let Some(label) = self.innermost_loop_label() {
+                        self.writeln(&format!("continue {label}"));
+                        return Ok(());
+                    }
+                }
                 self.writeln("continue");
                 Ok(())
             }
@@ -1525,6 +1694,10 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::Identifier { name } => {
+                if name.name == "None" {
+                    self.buf.push_str("__bockNone");
+                    return Ok(());
+                }
                 let emitted = if is_prelude_ctor(&name.name) {
                     name.name.clone()
                 } else if self.public_fns.contains(&name.name) {
@@ -1610,6 +1783,29 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                // Desugared instance method call `Call(FieldAccess(recv, m),
+                // [recv, ...rest])`: emit `recv.M(rest)` using Go method casing
+                // so the receiver flows through the native `self` receiver
+                // rather than as a duplicated `interface{}` argument.
+                if let Some((recv, method, rest)) =
+                    crate::generator::desugared_self_call(callee, args)
+                {
+                    self.emit_expr(recv)?;
+                    let go_method = if self.public_methods.contains(&method.name) {
+                        to_pascal_case(&method.name)
+                    } else {
+                        to_camel_case(&method.name)
+                    };
+                    let _ = write!(self.buf, ".{go_method}(");
+                    for (i, arg) in rest.iter().enumerate() {
+                        if i > 0 {
+                            self.buf.push_str(", ");
+                        }
+                        self.emit_expr(&arg.value)?;
+                    }
+                    self.buf.push(')');
                     return Ok(());
                 }
                 // Pass handler args to effectful function calls.
@@ -1926,6 +2122,10 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => {
+                // `Optional` matches dispatch on the runtime tag.
+                if go_match_is_optional(arms) {
+                    return self.emit_optional_match_expr(scrutinee, arms);
+                }
                 // Match in expression position: emit as IIFE with switch.
                 self.buf.push_str("func() interface{} { switch ");
                 self.emit_expr(scrutinee)?;
@@ -2005,15 +2205,162 @@ impl GoEmitCtx {
 
     // ── Match → switch/if-else ──────────────────────────────────────────────
 
-    fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
-        let ind = self.indent_str();
-        let _ = write!(self.buf, "{ind}switch __v := ");
+    /// Push a loop scope, emitting a Go label before the loop iff a contained
+    /// statement-arm `match` needs to `break`/`continue` the loop (Go's `break`
+    /// otherwise exits the inner `switch`). Must be paired with a
+    /// `self.loop_labels.pop()` after the loop body is emitted.
+    fn emit_loop_label_prefix(&mut self, body: &AIRNode) {
+        if go_loop_needs_label(body) {
+            self.loop_label_counter += 1;
+            let label = format!("__bockLoop{}", self.loop_label_counter);
+            let ind = self.indent_str();
+            // A Go label sits in column-0-ish; we keep current indent for
+            // readability — gofmt would re-align but the program is valid.
+            let _ = writeln!(self.buf, "{ind}{label}:");
+            self.loop_labels.push(Some(label));
+        } else {
+            self.loop_labels.push(None);
+        }
+    }
+
+    /// The label of the innermost loop, if one was allocated. Used by
+    /// `break`/`continue` emitted inside a statement-arm `switch`.
+    fn innermost_loop_label(&self) -> Option<&str> {
+        self.loop_labels.last().and_then(|l| l.as_deref())
+    }
+
+    /// Emit an `Optional` `match` in expression position as an IIFE that
+    /// dispatches on the runtime tag (`__bockOption.tag`). `Some(v)` binds
+    /// `v` from `.v` (as `interface{}`); `None`/`_` is the fallthrough.
+    fn emit_optional_match_expr(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<(), CodegenError> {
+        self.buf.push_str("func() interface{} { __opt := ");
         self.emit_expr(scrutinee)?;
-        self.buf.push_str("; __v.(type) {\n");
+        self.buf.push_str("; ");
+        self.emit_optional_match_arms(arms, /*as_expr=*/ true)?;
+        self.buf.push_str(" }()");
+        Ok(())
+    }
+
+    /// Emit an `Optional` `match` in statement position as an if/else chain on
+    /// the runtime tag.
+    fn emit_optional_match_stmt(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<(), CodegenError> {
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}__opt := ");
+        self.emit_expr(scrutinee)?;
+        self.buf.push('\n');
+        self.write_indent();
+        self.emit_optional_match_arms(arms, /*as_expr=*/ false)?;
+        self.buf.push('\n');
+        Ok(())
+    }
+
+    /// Shared body for [`emit_optional_match_expr`] /
+    /// [`emit_optional_match_stmt`]: an if/else chain on the option tag. In
+    /// expression mode each arm body is `return`ed; in statement mode the arm
+    /// body is emitted as a block.
+    fn emit_optional_match_arms(
+        &mut self,
+        arms: &[AIRNode],
+        as_expr: bool,
+    ) -> Result<(), CodegenError> {
+        let mut first = true;
+        let arm_count = arms.len();
+        for (idx, arm) in arms.iter().enumerate() {
+            let NodeKind::MatchArm { pattern, body, .. } = &arm.kind else {
+                continue;
+            };
+            let is_last = idx + 1 == arm_count;
+            // Determine the tag test and any bound name. The final arm is
+            // rendered as a plain `else` so the if-chain is exhaustive from
+            // Go\'s control-flow view (Bock matches are exhaustive). Its bound
+            // name (e.g. the `Some(v)` value) is still extracted.
+            let (cond, bind): (String, Option<String>) = match &pattern.kind {
+                NodeKind::ConstructorPat { path, fields } => {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    let bind = fields.first().map(|f| self.pattern_to_binding_name(f));
+                    if is_last {
+                        (String::new(), bind)
+                    } else {
+                        (format!("__opt.tag == \"{variant}\""), bind)
+                    }
+                }
+                // Wildcard / bind pattern → catch-all.
+                _ => (String::new(), None),
+            };
+            if first {
+                first = false;
+                if cond.is_empty() {
+                    self.buf.push('{');
+                } else {
+                    let _ = write!(self.buf, "if {cond} {{");
+                }
+            } else if cond.is_empty() {
+                self.buf.push_str(" else {");
+            } else {
+                let _ = write!(self.buf, " else if {cond} {{");
+            }
+            self.buf.push(' ');
+            if let Some(name) = &bind {
+                if name != "_" {
+                    let _ = write!(self.buf, "{name} := __opt.v; _ = {name}; ");
+                }
+            }
+            if as_expr {
+                self.buf.push_str("return ");
+                self.emit_block_as_expr(body)?;
+                self.buf.push(' ');
+            } else {
+                self.buf.push('\n');
+                self.indent += 1;
+                self.emit_block_body(body)?;
+                self.indent -= 1;
+                self.write_indent();
+            }
+            self.buf.push('}');
+        }
+        // Expression mode needs a trailing value if no arm matched. A `;`
+        // separates it from the preceding `}` (Go requires a terminator).
+        if as_expr {
+            self.buf.push_str("; return nil");
+        }
+        Ok(())
+    }
+
+    fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
+        // `Optional` matches dispatch on the runtime tag, not a Go type/value
+        // switch.
+        if go_match_is_optional(arms) {
+            return self.emit_optional_match_stmt(scrutinee, arms);
+        }
+        // Choose value-switch (`switch v { case 5: }`) vs type-switch
+        // (`switch v := s.(type) { case T: }`) by pattern kind: constructor /
+        // record patterns dispatch on dynamic type; literal / bind patterns
+        // dispatch on value.
+        let type_switch = go_match_is_type_switch(arms);
+        let ind = self.indent_str();
+        if type_switch {
+            let _ = write!(self.buf, "{ind}switch __v := ");
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str("; __v.(type) {\n");
+        } else {
+            let _ = write!(self.buf, "{ind}switch ");
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str(" {\n");
+        }
         self.indent += 1;
+        self.switch_label_depth += 1;
         for arm in arms {
             self.emit_match_arm(arm)?;
         }
+        self.switch_label_depth -= 1;
         self.indent -= 1;
         self.writeln("}");
         Ok(())
@@ -2028,7 +2375,7 @@ impl GoEmitCtx {
         {
             let ind = self.indent_str();
             match &pattern.kind {
-                NodeKind::WildcardPat => {
+                NodeKind::WildcardPat | NodeKind::BindPat { .. } => {
                     let _ = write!(self.buf, "{ind}default:");
                 }
                 _ => {
@@ -2151,7 +2498,11 @@ impl GoEmitCtx {
                     .collect::<Vec<_>>()
                     .join(".");
                 let go_name = self.map_type_name(&name);
-                if args.is_empty() {
+                // Runtime container types (`__bockOption`, slices, maps) carry
+                // their element type as `interface{}`, not as a Go generic
+                // parameter; never append `[T]` to a mapped runtime type.
+                let is_mapped_runtime = go_name != name;
+                if args.is_empty() || is_mapped_runtime {
                     go_name
                 } else {
                     let arg_strs: Vec<String> = args.iter().map(|a| self.type_to_go(a)).collect();
@@ -2176,7 +2527,11 @@ impl GoEmitCtx {
                 format!("func({}) {}", param_strs.join(", "), self.type_to_go(ret))
             }
             NodeKind::TypeOptional { inner } => {
-                format!("*{}", self.type_to_go(inner))
+                // `T?` lowers to the tagged Optional runtime struct, not a Go
+                // pointer — pointers can\'t represent `Some(nil-able-T)` vs
+                // `None`, and the match dispatches on the tag.
+                let _ = inner;
+                "__bockOption".to_string()
             }
             NodeKind::TypeSelf => "/* Self */".into(),
             _ => "interface{}".into(),
@@ -2196,6 +2551,7 @@ impl GoEmitCtx {
             "Any" => "interface{}".into(),
             "Never" => "interface{}".into(),
             "Channel" => "*__bockChannel".into(),
+            "Optional" => "__bockOption".into(),
             other => other.into(),
         }
     }
@@ -2210,7 +2566,8 @@ impl GoEmitCtx {
                     .collect::<Vec<_>>()
                     .join(".");
                 let go_name = self.map_type_name(&name);
-                if args.is_empty() {
+                let is_mapped_runtime = go_name != name;
+                if args.is_empty() || is_mapped_runtime {
                     go_name
                 } else {
                     let arg_strs: Vec<String> =
@@ -2240,7 +2597,8 @@ impl GoEmitCtx {
                 )
             }
             TypeExpr::Optional { inner, .. } => {
-                format!("*{}", self.ast_type_to_go(inner))
+                let _ = inner;
+                "__bockOption".to_string()
             }
             TypeExpr::SelfType { .. } => "/* Self */".into(),
         }
@@ -2270,6 +2628,22 @@ impl GoEmitCtx {
                 self.emit_node(s)?;
             }
             if let Some(t) = tail {
+                // A statement tail (`return`/`break`/`continue`/assignment) is
+                // emitted as a statement, never via `emit_expr` (which would
+                // fall through to `/* unsupported */` for control-flow nodes).
+                if crate::generator::node_is_statement(t) {
+                    self.emit_node(t)?;
+                    return Ok(());
+                }
+                // A `match` with statement arms has no value; emit it in
+                // statement position (a Go `switch`) rather than as an
+                // expression IIFE, regardless of whether a return was wanted.
+                if let NodeKind::Match { scrutinee, arms } = &t.kind {
+                    if crate::generator::match_has_statement_arm(arms) {
+                        self.emit_match(scrutinee, arms)?;
+                        return Ok(());
+                    }
+                }
                 let should_return = emit_return && !self.is_void_call(t);
                 if should_return {
                     let ind = self.indent_str();
@@ -2282,8 +2656,18 @@ impl GoEmitCtx {
                     self.buf.push('\n');
                 }
             }
+        } else if crate::generator::node_is_statement(node) {
+            // A bare statement body (`break`/`continue`/`return`/assignment):
+            // emit through the statement path, never as an expression.
+            self.emit_node(node)?;
         } else {
             // Single expression as body.
+            if let NodeKind::Match { scrutinee, arms } = &node.kind {
+                if crate::generator::match_has_statement_arm(arms) {
+                    self.emit_match(scrutinee, arms)?;
+                    return Ok(());
+                }
+            }
             let should_return = emit_return && !self.is_void_call(node);
             if should_return {
                 let ind = self.indent_str();
@@ -3443,6 +3827,85 @@ mod tests {
         assert!(out.contains("go func() {"), "got: {out}");
         assert!(out.contains("__ch <- Task1()"), "got: {out}");
         assert!(out.contains("return __ch"), "got: {out}");
+    }
+
+    /// A `public fn main` must still emit Go\'s entry `func main()`, not the
+    /// PascalCased `func Main()` (codegen-correctness defect 6).
+    #[test]
+    fn public_main_emits_entry_point() {
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(2, vec![], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("func main() {"), "got: {out}");
+        assert!(!out.contains("func Main"), "got: {out}");
+    }
+
+    /// The Optional runtime prelude is emitted only when the module uses
+    /// `Optional`/`Some`/`None` (codegen-correctness defect 4).
+    #[test]
+    fn optional_runtime_gated_on_use() {
+        // A module that constructs `Some`/`None` pulls in the runtime.
+        let some_call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "Some")),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(12, "1"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(2, vec![some_call], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("type __bockOption struct"), "got: {out}");
+        assert!(out.contains("__bockSome("), "got: {out}");
+
+        // A module that does not mention Optional gets no prelude.
+        let f2 = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(2, vec![], None)),
+            },
+        );
+        let out2 = gen(&module(vec![], vec![f2]));
+        assert!(!out2.contains("__bockOption"), "got: {out2}");
     }
 
     #[test]

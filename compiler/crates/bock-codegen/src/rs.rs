@@ -950,9 +950,19 @@ impl RsEmitCtx {
             };
             let async_kw = if *is_async { "async " } else { "" };
             let generics = self.generic_params_to_rs(generic_params);
-            let param_strs = self.collect_param_strs(params);
+            // The AIR keeps `self` as a leading `Param`; consume it to form the
+            // native Rust receiver and emit the remaining params positionally.
+            // Without this the method gets both `&self` and a `self: _` param.
+            let (receiver, rest) = match params.first().map(crate::generator::param_binds_self) {
+                Some(Some(is_mut)) => {
+                    let recv = if is_mut { "&mut self" } else { "&self" };
+                    (recv.to_string(), &params[1..])
+                }
+                _ => ("&self".to_string(), &params[..]),
+            };
+            let param_strs = self.collect_param_strs(rest);
             let effects = self.effects_params(effect_clause);
-            let mut all_params = vec!["&self".to_string()];
+            let mut all_params = vec![receiver];
             all_params.extend(param_strs);
             all_params.extend(effects);
             let ret = return_type
@@ -1001,9 +1011,16 @@ impl RsEmitCtx {
         {
             let async_kw = if *is_async { "async " } else { "" };
             let generics = self.generic_params_to_rs(generic_params);
-            let param_strs = self.collect_param_strs(params);
+            let (receiver, rest) = match params.first().map(crate::generator::param_binds_self) {
+                Some(Some(is_mut)) => {
+                    let recv = if is_mut { "&mut self" } else { "&self" };
+                    (recv.to_string(), &params[1..])
+                }
+                _ => ("&self".to_string(), &params[..]),
+            };
+            let param_strs = self.collect_param_strs(rest);
             let effects = self.effects_params(effect_clause);
-            let mut all_params = vec!["&self".to_string()];
+            let mut all_params = vec![receiver];
             all_params.extend(param_strs);
             all_params.extend(effects);
             let ret = return_type
@@ -1515,6 +1532,24 @@ impl RsEmitCtx {
                 if self.try_emit_concurrency_call(callee, args)? {
                     return Ok(());
                 }
+                // Desugared instance method call `Call(FieldAccess(recv, m),
+                // [recv, ...rest])`: emit `recv.m(rest)` so the receiver flows
+                // through Rust's native `&self`, not as a duplicated argument.
+                if let Some((recv, method, rest)) =
+                    crate::generator::desugared_self_call(callee, args)
+                {
+                    self.emit_expr(recv)?;
+                    let _ = write!(self.buf, ".{}", to_snake_case(&method.name));
+                    self.buf.push('(');
+                    for (i, arg) in rest.iter().enumerate() {
+                        if i > 0 {
+                            self.buf.push_str(", ");
+                        }
+                        self.emit_expr(&arg.value)?;
+                    }
+                    self.buf.push(')');
+                    return Ok(());
+                }
                 // Pass handler args to effectful function calls.
                 let effects_args = if let NodeKind::Identifier { name } = &callee.kind {
                     self.build_effects_call_args_rs(&name.name)
@@ -1940,6 +1975,22 @@ impl RsEmitCtx {
                 self.emit_expr(g)?;
             }
             self.buf.push_str(" => ");
+            // A statement-bodied arm (`break`/`continue`/`return`/assignment,
+            // or a block whose tail is one) has no value. Rust `match` arms
+            // accept statements directly, so route such a body through the
+            // statement emitter inside a `{ }` block.
+            if crate::generator::arm_body_is_statement(body) {
+                self.buf.push_str("{\n");
+                self.indent += 1;
+                if let NodeKind::Block { .. } = &body.kind {
+                    self.emit_block_body(body)?;
+                } else {
+                    self.emit_stmt(body)?;
+                }
+                self.indent -= 1;
+                self.writeln("}");
+                return Ok(());
+            }
             // Single-expression body → inline; otherwise block.
             if let NodeKind::Block { stmts, tail } = &body.kind {
                 if stmts.is_empty() {
@@ -2150,11 +2201,21 @@ impl RsEmitCtx {
             }
             self.task_bound_names = prev;
             if let Some(t) = tail {
+                // A statement tail (`return`/`break`/`continue`/assignment) is
+                // emitted via the statement emitter — `emit_expr` has no arm
+                // for these control-flow nodes and would emit
+                // `/* unsupported */`.
+                if crate::generator::node_is_statement(t) {
+                    self.emit_stmt(t)?;
+                    return Ok(());
+                }
                 // Tail expression without semicolon (Rust implicit return).
                 self.write_indent();
                 self.emit_expr(t)?;
                 self.buf.push('\n');
             }
+        } else if crate::generator::node_is_statement(node) {
+            self.emit_stmt(node)?;
         } else {
             // Single expression as body (implicit return).
             self.write_indent();
@@ -2872,6 +2933,105 @@ mod tests {
         let out = gen(&module(vec![], vec![imp]));
         assert!(out.contains("impl Printable for Point {"), "got: {out}");
         assert!(out.contains("fn print(&self)"), "got: {out}");
+    }
+
+    fn self_param(id: u32) -> AIRNode {
+        node(
+            id,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(id + 100, "self")),
+                ty: None,
+                default: None,
+            },
+        )
+    }
+
+    /// A method whose declared params lead with `self` must emit a native
+    /// `&self` receiver — not both `&self` and a stray `self: _` param
+    /// (codegen-correctness defect 3).
+    #[test]
+    fn self_method_consumes_self_param() {
+        let field = node(
+            10,
+            NodeKind::FieldAccess {
+                object: Box::new(id_node(11, "self")),
+                field: ident("x"),
+            },
+        );
+        let imp = node(
+            1,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(node(
+                    2,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Point"]),
+                        args: vec![],
+                    },
+                )),
+                where_clause: vec![],
+                methods: vec![node(
+                    3,
+                    NodeKind::FnDecl {
+                        annotations: vec![],
+                        visibility: Visibility::Public,
+                        is_async: false,
+                        name: ident("get_x"),
+                        generic_params: vec![],
+                        params: vec![self_param(4)],
+                        return_type: None,
+                        effect_clause: vec![],
+                        where_clause: vec![],
+                        body: Box::new(block(5, vec![], Some(field))),
+                    },
+                )],
+            },
+        );
+        let out = gen(&module(vec![], vec![imp]));
+        assert!(out.contains("fn get_x(&self)"), "got: {out}");
+        assert!(
+            !out.contains("self: _"),
+            "self param leaked as a positional param: {out}"
+        );
+    }
+
+    /// A desugared instance call `Call(FieldAccess(p, m), [p, x])` emits
+    /// `p.m(x)` — the prepended self arg is dropped (defect 3, call site).
+    #[test]
+    fn self_method_call_drops_prepended_self() {
+        let recv = id_node(20, "p");
+        let callee = node(
+            21,
+            NodeKind::FieldAccess {
+                object: Box::new(recv.clone()),
+                field: ident("scale"),
+            },
+        );
+        let call = node(
+            22,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                // First arg shares the receiver\'s NodeId (id 20) — the marker
+                // the lowerer sets for a desugared method call.
+                args: vec![
+                    AirArg {
+                        label: None,
+                        value: recv,
+                    },
+                    AirArg {
+                        label: None,
+                        value: int_lit(23, "4"),
+                    },
+                ],
+                type_args: vec![],
+            },
+        );
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&call).unwrap();
+        assert_eq!(ctx.buf, "p.scale(4_i64)", "got: {}", ctx.buf);
     }
 
     #[test]
