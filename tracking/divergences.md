@@ -36,26 +36,32 @@ status(open | resolved→link)`
   the user/stdlib trait-impl table, so `impl Comparable for Int` + a call site
   → E4001 (#104). Stdlib traits cover only stdlib-defined types today.
 - **Classification:** gap (missing checker↔bock-core bridge)
-- **Disposition:** fix-impl → `queue.md` Q-bridge, gated on Design's DQ6
-  (carries a stdlib-impl-vs-intrinsic precedence/coherence question). A
-  near-universal prerequisite for a *useful* core stdlib.
-- **Status:** open
+- **Disposition:** fix-impl → `queue.md` Q-bridge. Design **DQ6 ruled the model**
+  (compiler-provided canonical primitive conformances registered into the
+  trait-impl table; sealed). Bridge in-flight (`feat/stdlib-primitive-bridge`).
+- **Status:** open (model decided 2026-05-30; resolves when Q-bridge lands)
 
-### DV5 — §18.2 prelude vs §18.3 import for fundamental traits
-- **§:** §18.2 / §18.3 · **spec-says:** §18.2 lists `Comparable`/`Equatable`
-  as PRELUDE ("always available without import"); §18.3 lists them as
-  `core.compare` members · **impl-does:** matches the named-import model —
-  bare `Ordering`/`Less` without `use core.compare` → E1001; no prelude
-  injection. Internally inconsistent spec.
-- **Classification:** gap (spec internal inconsistency / undecided import model)
-- **Disposition:** decide via `design-questions.md` DQ9 (prelude vs import for
-  the fundamental traits), then reconcile §18.2/§18.3. Surfaced #104.
+### DV6 — trait bounds unenforced in the production pipeline
+- **§:** — (impl correctness; relates to §18.5 trait conformance) ·
+  **spec-says:** `where (T: Comparable)` bounds are checked · **impl-does:** the
+  checker's `impl_table` is `None` in the real pipeline (`build_from` runs only
+  in tests), so `check_trait_bounds_at_call` returns early — **bounds are
+  silently unenforced** in `bock check/build/run`. Found by the Q-bridge plan.
+- **Classification:** impl-bug (latent; bound-checking never wired)
+- **Disposition:** fix-impl → folded into `queue.md` Q-bridge (T1 wires
+  `ImplTable::build_from` into `check_module`). May surface latent bound failures
+  in existing code (Q-bridge has a STOP-and-surface gate for exactly this).
 - **Status:** open
 
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)
 
+- **DV5 §18.2 prelude vs §18.3 import for fundamental traits** — gap (spec
+  internal inconsistency) → Design DQ9 ruled the model "defined in core.*,
+  re-exported into the prelude" (§18.2/§18.3 consistent); §18.2 amended to add
+  `Ordering`/`Less`/`Equal`/`Greater`. Spec reconciled → #106. Impl side (prelude
+  injection) tracked as `queue.md` Q-prelude-inject.
 - **DV2 §13.3/§13.4 concurrency Reserved status** — gap (the
   `20260514-0449` changelog asserted channels + sync primitives were
   "Reserved per the D1+D2 batch", but no such batch existed and the spec

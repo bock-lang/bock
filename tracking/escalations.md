@@ -101,7 +101,7 @@ changelog) and, for DQ8, schedules the type-checker change if required.
 **Recommendation:** none on the merits (core-spec is Design's call). DQ6 is the
 highest-leverage — it makes the implementation model normative for all 11 modules.
 **Awaiting:** Design Chat (with the operator) decisions, routed back here.
-**Status:** pending
+**Status:** resolved
 
 **Update (2026-05-30 00:31 UTC) — `core.compare` (#104) added evidence + a 4th question:**
 - **DQ6 gained its crux:** #104 proved stdlib trait impls cannot cover primitive
@@ -115,3 +115,32 @@ highest-leverage — it makes the implementation model normative for all 11 modu
   `Equatable` — an internal spec inconsistency (DV5). The impl matches named-import.
 - **Highest leverage now:** DQ6 — the module fan-out is paused on it. DQ7/DQ8/DQ9
   remain non-blocking (pilot/modules proceed on safe defaults).
+
+**Response (2026-05-30 01:53 UTC):** Design decided all four (full text in
+`design-questions.md` DQ6–DQ9). DQ6: compiler-provided canonical primitive
+conformances in the trait-impl table (the bridge), sealed (no user impl of a core
+trait for a primitive); mechanism stays non-normative; strictness is per-package.
+DQ7: `core.error` v1 = `message()` only (supersedes the May-29 `source` lean —
+trait-object dependency). DQ8: named imports sufficient for v1; module-qualified
+deferred. DQ9: prelude = "defined in core.*, re-exported"; §18.2 amended (+Ordering).
+**Authorized actions:** spec reconciled in #106; the bridge (Q1a) dispatched as
+`feat/stdlib-primitive-bridge`; prelude-injection (Q-prelude-inject) + bare-import
+rejection (Q-import-reject) queued. The bridge plan surfaced **DQ10** (below) +
+a latent bug (`divergences.md` DV6: bounds unenforced in production).
+
+## [2026-05-30 02:13 UTC] Q-bridge plan → normative primitive-conformance matrix (DQ10)
+
+**Type:** design (core-spec)
+**Severity:** low (non-blocking — bridge proceeds on a proposed matrix)
+**Trigger:** the Q-bridge plan needs to know which (primitive × core-trait)
+conformances are normative; §18.2/§18.5 name the traits but never pin the matrix.
+**Context (in `design-questions.md` DQ10):** is `Bool: Comparable` normative? May
+`Float` conform to `Equatable`/`Hashable` given `NaN != NaN` breaks their laws?
+The bridge implements a proposed matrix (Equatable: Int/Float/String/Bool/Char;
+Comparable: minus Bool; Displayable: all; Hashable: minus Float) and proceeds on
+it; Design ratifies/refines (additive). Also flags §18.5 operator-gating for *user*
+types as an unimplemented follow-up.
+**Recommendation:** none on the merits (core-spec is Design's). The proposed matrix
+follows Rust/Swift precedent (no `Float: Hashable`; conservative on `Bool` ordering).
+**Awaiting:** Design ratification of the normative matrix; non-blocking.
+**Status:** pending
