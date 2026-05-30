@@ -1,0 +1,45 @@
+//! `core.error` — the foundational error abstraction for the Bock standard
+//! library.
+//!
+//! This module is pure Bock (a trait, a record, an impl, and a constructor),
+//! so it compiles to every target with no per-target runtime shim. It is the
+//! pilot for the embedded source-compiled stdlib loading mechanism: a user's
+//! `use core.error.{Error, SimpleError, error}` resolves against this module
+//! through the standard module registry.
+
+module core.error
+
+/// The common interface for error values.
+///
+/// Any type that can describe itself as a human-readable message can implement
+/// `Error`, so functions that work with failures can accept `Error` uniformly
+/// rather than a concrete error type.
+public trait Error {
+  /// Returns this error's human-readable message.
+  fn message(self) -> String
+}
+
+/// A minimal, ready-to-use `Error` carrying a single message string.
+///
+/// Use `SimpleError` (typically via the `error` constructor) when you need an
+/// error value but do not have a domain-specific error type.
+public record SimpleError {
+  /// The human-readable message describing what went wrong.
+  message: String
+}
+
+/// `SimpleError` satisfies `Error` by returning its stored message.
+impl Error for SimpleError {
+  /// Returns the stored message.
+  public fn message(self) -> String {
+    self.message
+  }
+}
+
+/// Constructs a `SimpleError` from a message string.
+///
+/// This is the ergonomic way to create an error value:
+/// `error("file not found")`.
+public fn error(message: String) -> SimpleError {
+  SimpleError { message: message }
+}

@@ -116,6 +116,10 @@ struct ParsedFile {
     filename: String,
     file_id: bock_errors::FileId,
     module: bock_ast::Module,
+    /// Whether this is an embedded core-stdlib source (prepended by the loader)
+    /// rather than a user file. Stdlib modules compile, register, and run like
+    /// any other, but their non-error diagnostics are not surfaced.
+    is_stdlib: bool,
 }
 
 /// Lex and parse a single file, adding it to the shared [`SourceMap`].
@@ -157,6 +161,48 @@ fn parse_file(path: &Path, source_map: &mut SourceMap) -> Result<ParsedFile, ()>
         filename,
         file_id,
         module,
+        is_stdlib: false,
+    })
+}
+
+/// Lex and parse an embedded core-stdlib source into a [`ParsedFile`].
+///
+/// Mirrors [`parse_file`] but takes the source text directly (the embedded
+/// stdlib is compiled into the binary, not read from disk).
+fn parse_stdlib_source(
+    src: &crate::stdlib::StdlibSource,
+    source_map: &mut SourceMap,
+) -> Result<ParsedFile, ()> {
+    let filename = src.logical_path.display().to_string();
+    let file_id = source_map.add_file(src.logical_path.clone(), src.source.clone());
+    let source_file = source_map.get_file(file_id);
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    let mut lexer = Lexer::new(source_file);
+    let tokens = lexer.tokenize();
+    collect_diagnostics(&mut diags, lexer.diagnostics());
+
+    if has_errors(&diags) {
+        print_diagnostics(&diags, &filename, &source_file.content);
+        return Err(());
+    }
+
+    let mut parser = Parser::new(tokens, source_file);
+    let module = parser.parse_module();
+    collect_diagnostics(&mut diags, parser.diagnostics());
+
+    if has_errors(&diags) {
+        print_diagnostics(&diags, &filename, &source_file.content);
+        return Err(());
+    }
+
+    Ok(ParsedFile {
+        path: src.logical_path.clone(),
+        filename,
+        file_id,
+        module,
+        is_stdlib: true,
     })
 }
 
@@ -170,6 +216,16 @@ async fn run_project(
     let mut source_map = SourceMap::new();
     let mut parsed_files: Vec<ParsedFile> = Vec::new();
     let mut found_errors = false;
+
+    // Prepend the embedded core-stdlib sources so they compile, register, and
+    // become available to the interpreter before user modules, letting a user
+    // `main` resolve and run `use core.<name>.{...}` with no special-casing.
+    for src in crate::stdlib::core_sources() {
+        match parse_stdlib_source(&src, &mut source_map) {
+            Ok(pf) => parsed_files.push(pf),
+            Err(()) => found_errors = true,
+        }
+    }
 
     for file_path in files {
         match parse_file(file_path, &mut source_map) {
@@ -255,14 +311,18 @@ async fn run_project(
         let capability_diags = bock_types::verify_capabilities(&air_module, strictness);
         collect_as_warnings(&mut all_diagnostics, &capability_diags);
 
-        // Print warnings
-        let warnings: Vec<&Diagnostic> = all_diagnostics
-            .iter()
-            .filter(|d| d.severity != Severity::Error)
-            .collect();
-        if !warnings.is_empty() {
-            let to_render: Vec<Diagnostic> = warnings.into_iter().cloned().collect();
-            print_diagnostics(&to_render, &pf.filename, &source_file.content);
+        // Print warnings. Stdlib modules surface only errors (compiler
+        // defects); their development-mode warnings describe internal code the
+        // user did not author and would otherwise be noise on every `bock run`.
+        if !pf.is_stdlib {
+            let warnings: Vec<&Diagnostic> = all_diagnostics
+                .iter()
+                .filter(|d| d.severity != Severity::Error)
+                .collect();
+            if !warnings.is_empty() {
+                let to_render: Vec<Diagnostic> = warnings.into_iter().cloned().collect();
+                print_diagnostics(&to_render, &pf.filename, &source_file.content);
+            }
         }
 
         // 4e. Register exports

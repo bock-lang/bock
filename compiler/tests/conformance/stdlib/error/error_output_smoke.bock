@@ -1,0 +1,17 @@
+// TEST: stdlib_error_output_smoke
+// EXPECT: output "boom"
+//
+// A `main` that constructs an error via `core.error.error(...)` and prints its
+// message. NOTE: the harness currently *parses* `// EXPECT: output` directives
+// but does not yet execute fixtures (no conformance execution runner exists).
+// Cross-target conformance *execution* is staged for the Q-fconf task; until
+// then this fixture is validated by loading (no LoadError) and by the CLI-level
+// `bock run` smoke test in bock-cli's `stdlib_error` integration suite, which
+// asserts this exact "boom" output against the real interpreter.
+module main
+
+use core.error.{error}
+
+public fn main() {
+  println(error("boom").message())
+}

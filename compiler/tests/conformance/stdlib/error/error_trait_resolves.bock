@@ -1,0 +1,12 @@
+// TEST: stdlib_error_trait_resolves
+// EXPECT: no_errors
+//
+// The `core.error.Error` trait resolves through the embedded stdlib via a
+// named import and can be used as a parameter type and method receiver.
+module userapp
+
+use core.error.{Error}
+
+public fn describe(e: Error) -> String {
+  e.message()
+}
