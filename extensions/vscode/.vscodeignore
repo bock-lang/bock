@@ -8,3 +8,5 @@ esbuild.js
 **/*.map
 **/*.ts
 !out/**/*.js
+test/**
+.mocharc.json
