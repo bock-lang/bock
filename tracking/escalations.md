@@ -160,3 +160,19 @@ conversion matrix (parallels DQ10); (2) whether canonical conversions are sealed
 surface + Rust/Swift precedent; refining any is non-breaking.
 **Awaiting:** Design ratification; non-blocking (R1 proceeds).
 **Status:** pending
+
+## [2026-05-30 04:19 UTC] core.iter protocol shape (DQ12)
+
+**Type:** design (core-spec)
+**Severity:** low (non-blocking — iter is paused on Q-codegen-fixes anyway; this
+ratifies in parallel)
+**Trigger:** §18.3 doesn't pin the `Iterator`/`Iterable` protocol shape; the
+`core.iter` plan chose a minimum-useful floor and escalates the surface.
+**Context (in `design-questions.md` DQ12):** generic vs associated-type protocol
+(planned generic — assoc-types are inert today); next()/iter() signatures; lazy vs
+eager (planned eager floor); which combinators are normative; whether `for`
+requires `Iterable` for built-ins (planned: native fast path for built-ins).
+**Recommendation:** none on merits (Design's). The floor is implementable now;
+ratify the normative surface before/as iter resumes post-codegen-workstream.
+**Awaiting:** Design ratification; non-blocking.
+**Status:** pending

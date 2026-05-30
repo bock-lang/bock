@@ -7,7 +7,7 @@
 Live summary derived from `tracking/queue.md` (items per section):
 
 - Ready: 13
-- v1-blocking: 1
+- v1-blocking: 2
 - Blocked: 5
 - Deferred: 1
 
@@ -29,8 +29,14 @@ Live summary derived from `tracking/queue.md` (items per section):
   exposes `new`, `build`, `run`, `check` (incl. `--only`/`--brief`/
   `--strict`), `test`, `fmt`, `repl`, `inspect`, `pin`, `unpin`,
   `override`, `cache`, `promote`, `pkg`, `doc`, `model`, `lsp`.
-- **Targets** — JS, TS, Python, Rust, Go codegen, exercised by the
-  example projects (source-mirrored output paths, #28).
+- **Targets** — JS, TS, Python, Rust, Go codegen. **CAVEAT (DV9, 2026-05-30):**
+  the v1 "5-target parity" property is **not yet true or tested** — the
+  `core.iter` spike exposed that general constructs (statement-bodied `match`
+  arms on all backends; `self`-methods on Rust/Go/Python; `Optional` runtime on
+  Go/Python) fail codegen, undetected because conformance never EXECUTED. The
+  codegen-correctness workstream (Q-fconf execution conformance → Q-codegen-fixes)
+  is in flight to restore + verify parity. `bock check` (typecheck) on examples is
+  green; running the generated code per-target was never tested until now.
 - **Type system** — bidirectional inference, generics, trait-style
   constraints, effect inference.
 - **Conformance** — fixtures across `effects/interp/parse/time/types`

@@ -66,6 +66,22 @@ decided→link)`
   proceeds on the floor. Reconcile §18.3 if Design ratifies/changes any.
 - **Status:** escalated → Design (escalations.md)
 
+### DQ12 — `core.iter` protocol shape
+- **Questions** (surfaced by the `core.iter` plan; iter is PAUSED on Q-codegen-fixes,
+  so this can ratify in parallel): the protocol shape isn't pinned in §18.3
+  ("Iterator trait + combinators"). (1) **generic `Iterator[T]`/`Iterable[T]`** (the
+  planned floor; associated types are end-to-end inert today) vs associated-type
+  `type Item`; (2) `next()`/`iter()` signatures (`next -> Optional[T]`); (3) **lazy
+  vs eager** combinators (floor = eager List-returning); (4) which combinators are
+  **normative** for v1 (the changelog lists ~25; the feasible floor is far smaller);
+  (5) does `for` require `Iterable` for **built-ins** too, or may List/Map/Set keep
+  the native fast path (planned: native fast path for built-ins, protocol for user
+  types)?
+- **§:** §18.3 / §18.5 / §18.2 · **context:** ship the minimum-useful floor when iter
+  resumes; Design ratifies the normative surface. Pairs with DQ10/DQ11 as stdlib-
+  surface ratification.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and

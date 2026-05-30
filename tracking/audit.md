@@ -860,3 +860,42 @@ vscode test-infra, conformance execution Q-fconf), @performance example (pending
   Next (per the directed-step cadence): R1's `iter` (collection conformances) or `effect`
     (effect-system bridge) — each an infra-then-module step; await operator direction on
     sequencing, or pick up the decided-ready items (Q-prelude-inject/Q-import-reject) / bugs.
+
+[2026-05-30 04:19 UTC] core.iter STOP → codegen-correctness workstream (operator-decided); PR1 dispatched
+  Input: operator directed "proceed with core.iter." The iter impl session hit its T1 STOP
+    gate and STOPPED correctly — a decisive negative result, and THE BIG FINDING of the session.
+  What the iter spike found: the `for`→Iterable protocol desugar type-checks but is
+    UNCODEGENABLE on Rust/Go (and Python), due to PRE-EXISTING codegen defects bigger than
+    core.iter, reproduced with minimal non-iterator programs → DV9:
+      1. statement-bodied match arms (break/continue/return/assign) → "/* unsupported */" on
+         ALL 5 backends; 2. Go match-as-expression-IIFE breaks statement arms; 3. self-methods
+         broken on Rust, Go, AND Python (plan corrected the brief's "Py OK" — `def swap(self,
+         self)`); JS/TS OK; 4. Go (and Python) have no Optional[T] runtime; 5. interpreter runs
+         method bodies in an empty env (Some/None/top-level fns invisible). Also: the for→
+         protocol desugar must live in the CHECKER, not AIR lowering (types unknown at lower).
+  THE INSIGHT (v1 impact): these break GENERAL Bock→Rust/Go/Python, so the v1 "5-target codegen
+    parity" property is currently FALSE — never caught because conformance never EXECUTES
+    (Q-fconf). The road to v1 has a codegen-correctness + execution-conformance gate underneath
+    that the stdlib build exposed. Surfaced via AskUserQuestion (a genuine strategic/scope fork).
+  DECISION (operator, AskUserQuestion): "Fix codegen first" — v1-blocking codegen-correctness
+    workstream + wire execution conformance; resume core.iter after.
+  Plan (Plan agent → plans/2026-05-30-codegen-correctness-conformance-plan.md): TWO PRs.
+    PR1 = execution conformance (Q-fconf): run()+capture on ToolchainRegistry (only validates
+    today), a compiler/tests/execution.rs [[test]] (discover→build→run→diff Output fixtures,
+    skip-if-absent + BOCK_CONFORMANCE_REQUIRE), run-conformance.sh + fix the 2 stale refs,
+    known-good fixtures. Pure infra; turns DV9 into red tests. PR2 = the codegen+interp fixes
+    (#1-#5) verified green by PR1. Scope guard: statement-POSITION match arms only (expr-
+    position temp-hoist deferred); Python Optional = fast-follow; Q-self-subst separate. No
+    spec gates (Optional repr non-normative).
+  Dispatched: PR1 (feat/conformance-execution) — pure harness, NO codegen change, NO ci.yml
+    change (runs under cargo test, skip-if-absent). STOP items: per-target run commands +
+    toolchains present on this box.
+  Tracking (this PR, chore/tracking-20260530-0419): DV9 filed (the parity gap); Q-fconf →
+    in-flight + elevated; Q-codegen-fixes filed (v1-blocking, PR2); core.iter/R1 PAUSED on it;
+    DQ12 filed (iter protocol shape, non-blocking); snapshot codegen-parity CAVEAT (honesty);
+    milestones v1.0 acceptance reframed (execution conformance; parity was unverified); plan
+    doc. The verify-and-STOP discipline (a sub-agent stopping at a gate rather than shipping a
+    module broken on 2 targets) prevented real waste — worth noting.
+  Next: on PR1 — review (esp. the run() commands), gate+CI green, merge; then PR2 (codegen
+    fixes) verified by the new harness; then core.iter resumes; route DQ10/DQ11/DQ12 to Design
+    at leisure. main e1e887d.

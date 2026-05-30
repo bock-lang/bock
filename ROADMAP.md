@@ -15,11 +15,15 @@ the Bock identity.
 - **Release actions (all escalate — external/irreversible):** CI live;
   VS Code extension → marketplace; `bock` → crates.io + GitHub
   Releases; docs site deploy; announcement post.
-- **Mapped items:** `Q-stdlib` (core stdlib — v1-blocking), `D4`, `D5`,
-  `ItemB` (project-mode codegen), `Q-20.1-xref`, `Q-cl-dates`,
-  `Q-cl-0515`, `Q-fconf`, `Q-vscode-test`.
-- **Acceptance:** conformance passes per target; all 20 examples
-  `check`/`build`/`test` clean on ≥ JS+Py+Rust; clippy clean.
+- **Mapped items:** `Q-stdlib` (core stdlib — v1-blocking), **`Q-fconf` +
+  `Q-codegen-fixes` (the codegen-correctness / 5-target-parity gate — v1-blocking;
+  see DV9)**, `D4`, `D5`, `ItemB` (project-mode codegen), `Q-20.1-xref`,
+  `Q-cl-dates`, `Q-cl-0515`, `Q-vscode-test`.
+- **Acceptance:** **execution** conformance passes per target (not just parse —
+  Q-fconf); all 20 examples `check`/`build`/`test` clean on ≥ JS+Py+Rust; clippy
+  clean. NOTE (2026-05-30): the property claim "codegen parity on examples" was
+  found UNVERIFIED + partly false (DV9) — the codegen-correctness workstream is the
+  prerequisite to make it true before the release actions.
 
 ## v1.1 — Editor & Tooling Polish
 **Theme:** delight in the editor; close interpreter gaps.
