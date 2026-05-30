@@ -62,6 +62,34 @@ fn module_uses_optional(items: &[AIRNode]) -> bool {
     })
 }
 
+/// Runtime type for Bock `Result[T, E]` in TypeScript. The value representation
+/// is a tagged object — `{ _tag: "Ok", _0: v }` or `{ _tag: "Err", _0: e }`
+/// (see [`TsEmitCtx::try_emit_prelude_ctor`], the `ResultConstruct` arm, and the
+/// `Result`-match lowering) — so the type is the matching discriminated union,
+/// not the structural `Ok`/`Err` aliases that previously went undefined. Both
+/// arms carry the payload under the same `_0` key the match reads, so a `match r
+/// { Ok(v) => …; Err(e) => … }` lowered to `switch (r._tag)` narrows correctly
+/// and the two-variant union is provably exhaustive (no `default` needed). This
+/// mirrors [`OPTIONAL_RUNTIME_TS`].
+const RESULT_RUNTIME_TS: &str = "\
+// ── Bock Result runtime ──
+type BockResult<T, E> =
+  | { readonly _tag: \"Ok\"; readonly _0: T }
+  | { readonly _tag: \"Err\"; readonly _0: E };
+";
+
+/// True if the module references `Result`, `Ok`, or `Err` anywhere, so the
+/// `Result` runtime type prelude must be emitted. Mirrors [`module_uses_optional`].
+fn module_uses_result(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"Result\"")
+            || s.contains("ResultConstruct")
+            || s.contains("\"Ok\"")
+            || s.contains("\"Err\"")
+    })
+}
+
 const CONCURRENCY_RUNTIME_TS: &str = "\
 // ── Bock concurrency runtime ──
 type __BockChannel<T> = {
@@ -250,6 +278,10 @@ struct TsEmitCtx {
     /// **bundle** of several modules (cross-module `use`, DV13) emits it at most
     /// once (a duplicate `type Option<T>` is a TS redeclaration error).
     optional_runtime_emitted: bool,
+    /// Set once the `Result` runtime prelude has been emitted; deduped across a
+    /// bundle exactly as [`Self::optional_runtime_emitted`] (a duplicate
+    /// `type BockResult<T, E>` is a TS redeclaration error).
+    result_runtime_emitted: bool,
     /// Set once the concurrency runtime prelude has been emitted; deduped across
     /// a bundle exactly as [`Self::optional_runtime_emitted`].
     concurrency_runtime_emitted: bool,
@@ -289,6 +321,7 @@ impl TsEmitCtx {
             loop_label_counter: 0,
             match_temp_counter: 0,
             optional_runtime_emitted: false,
+            result_runtime_emitted: false,
             concurrency_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
@@ -597,6 +630,133 @@ impl TsEmitCtx {
         Ok(true)
     }
 
+    /// Emit a built-in `Optional`/`Result` method call to its TS form.
+    ///
+    /// Recognised via the checker's `recv_kind` annotation
+    /// ([`crate::generator::desugared_optional_method`] /
+    /// [`crate::generator::desugared_result_method`]). Both types use the tagged
+    /// representation (`{ _tag, _0 }`), so the lowering is a ternary on `._tag`,
+    /// wrapped in a *generic* arrow IIFE — `(<T,>(__c: BockOption<T>) => …)(recv)`
+    /// / `(<T, E>(__c: BockResult<T, E>) => …)(recv)` — so the payload type is
+    /// inferred from the receiver (strict-mode clean: no implicit `any`) and the
+    /// receiver is evaluated exactly once. Returns `true` if handled.
+    fn try_emit_container_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        if let Some((recv, method, rest)) =
+            crate::generator::desugared_optional_method(node, callee, args)
+        {
+            self.emit_tagged_container_method(recv, method, rest, "Some", "<T,>", "BockOption<T>")?;
+            return Ok(true);
+        }
+        if let Some((recv, method, rest)) =
+            crate::generator::desugared_result_method(node, callee, args)
+        {
+            self.emit_tagged_container_method(
+                recv,
+                method,
+                rest,
+                "Ok",
+                "<T, E>",
+                "BockResult<T, E>",
+            )?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Lower a tagged-container method on `recv`. `present_tag` is the
+    /// payload-carrying tag (`"Some"`/`"Ok"`); `type_params` / `param_ty` type
+    /// the generic IIFE param (`<T,>` + `BockOption<T>`, or `<T, E>` +
+    /// `BockResult<T, E>`).
+    fn emit_tagged_container_method(
+        &mut self,
+        recv: &AIRNode,
+        method: &str,
+        rest: &[bock_air::AirArg],
+        present_tag: &str,
+        type_params: &str,
+        param_ty: &str,
+    ) -> Result<(), CodegenError> {
+        // Pure tag tests read the receiver once → emit inline.
+        match method {
+            "is_some" | "is_ok" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, "._tag === \"{present_tag}\")");
+                return Ok(());
+            }
+            "is_none" | "is_err" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, "._tag !== \"{present_tag}\")");
+                return Ok(());
+            }
+            _ => {}
+        }
+        let _ = write!(self.buf, "(({type_params}(__c: {param_ty}) => ");
+        match method {
+            "unwrap" => {
+                let _ = write!(
+                    self.buf,
+                    "__c._tag === \"{present_tag}\" ? __c._0 : (undefined as never)"
+                );
+            }
+            "unwrap_or" => {
+                let _ = write!(self.buf, "__c._tag === \"{present_tag}\" ? __c._0 : (");
+                if let Some(d) = rest.first() {
+                    self.emit_expr(&d.value)?;
+                } else {
+                    self.buf.push_str("undefined");
+                }
+                self.buf.push(')');
+            }
+            "map" => {
+                // The callback's parameter type is the concrete payload type the
+                // checker already validated; the generic IIFE param `T` is wider
+                // (unconstrained), so feed the payload through `as any` to satisfy
+                // strict mode without recovering the concrete type here.
+                let _ = write!(
+                    self.buf,
+                    "__c._tag === \"{present_tag}\" ? {{ _tag: \"{present_tag}\" as const, _0: ("
+                );
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf.push_str("(x) => x");
+                }
+                self.buf.push_str(")(__c._0 as any) } : __c");
+            }
+            "flat_map" => {
+                let _ = write!(self.buf, "__c._tag === \"{present_tag}\" ? (");
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf.push_str("(x) => x");
+                }
+                self.buf.push_str(")(__c._0 as any) : __c");
+            }
+            "map_err" => {
+                self.buf
+                    .push_str("__c._tag === \"Ok\" ? __c : { _tag: \"Err\" as const, _0: (");
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf.push_str("(x) => x");
+                }
+                self.buf.push_str(")(__c._0 as any) }");
+            }
+            _ => self.buf.push_str("(undefined as never)"),
+        }
+        self.buf.push_str(")(");
+        self.emit_expr(recv)?;
+        self.buf.push_str("))");
+        Ok(())
+    }
+
     /// Emit a read-only `List` built-in method call to its TS form.
     ///
     /// Mirrors the JS lowering but stays strict-mode clean: the
@@ -809,6 +969,9 @@ impl TsEmitCtx {
             "Set" => "Set".into(),
             "Any" => "any".into(),
             "Never" => "never".into(),
+            // `Result[T, E]` lowers to the tagged-union runtime type, mirroring
+            // `Optional[T]` → `BockOption<T>` (see `RESULT_RUNTIME_TS`).
+            "Result" => "BockResult".into(),
             other => other.into(),
         }
     }
@@ -944,6 +1107,11 @@ impl TsEmitCtx {
                     self.buf.push_str(OPTIONAL_RUNTIME_TS);
                     self.buf.push('\n');
                     self.optional_runtime_emitted = true;
+                }
+                if !self.result_runtime_emitted && module_uses_result(items) {
+                    self.buf.push_str(RESULT_RUNTIME_TS);
+                    self.buf.push('\n');
+                    self.result_runtime_emitted = true;
                 }
                 if !self.concurrency_runtime_emitted && module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_TS);
@@ -2106,6 +2274,9 @@ impl TsEmitCtx {
                 if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
+                if self.try_emit_container_method(node, callee, args)? {
+                    return Ok(());
+                }
                 // Rewrite bare effect operation calls: log(...) → handler.log(...)
                 if let NodeKind::Identifier { name } = &callee.kind {
                     if let Some(effect_name) = self.effect_ops.get(&name.name).cloned() {
@@ -2375,26 +2546,21 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::ResultConstruct { variant, value } => {
-                match variant {
-                    ResultVariant::Ok => {
-                        self.buf.push_str("{ _tag: \"Ok\" as const, value: ");
-                        if let Some(v) = value {
-                            self.emit_expr(v)?;
-                        } else {
-                            self.buf.push_str("undefined");
-                        }
-                        self.buf.push_str(" }");
-                    }
-                    ResultVariant::Err => {
-                        self.buf.push_str("{ _tag: \"Err\" as const, error: ");
-                        if let Some(v) = value {
-                            self.emit_expr(v)?;
-                        } else {
-                            self.buf.push_str("undefined");
-                        }
-                        self.buf.push_str(" }");
-                    }
+                // Use the `_0` payload key — the same shape the surface
+                // `Ok(..)`/`Err(..)` construction (`try_emit_prelude_ctor`) emits
+                // and the `Result` match reads — so construction and match agree
+                // (the old `value`/`error` keys were never read by the match).
+                let tag = match variant {
+                    ResultVariant::Ok => "Ok",
+                    ResultVariant::Err => "Err",
+                };
+                let _ = write!(self.buf, "{{ _tag: \"{tag}\" as const, _0: ");
+                if let Some(v) = value {
+                    self.emit_expr(v)?;
+                } else {
+                    self.buf.push_str("undefined");
                 }
+                self.buf.push_str(" }");
                 Ok(())
             }
             NodeKind::Assign { op, target, value } => {
@@ -3998,7 +4164,11 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("\"Ok\" as const"), "got: {out}");
+        // Reconciled on the `_0` payload key the `Result` match reads.
+        assert!(
+            out.contains("{ _tag: \"Ok\" as const, _0: 42 }"),
+            "got: {out}"
+        );
     }
 
     // ── Record construct ────────────────────────────────────────────────────

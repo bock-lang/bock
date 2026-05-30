@@ -443,6 +443,52 @@ impl RsEmitCtx {
         Ok(Some(code))
     }
 
+    /// Emit a built-in `Optional`/`Result` method call to its Rust form.
+    ///
+    /// Bock `Optional[T]`/`Result[T, E]` lower to Rust's native `Option<T>` /
+    /// `Result<T, E>`, and the built-in methods are (nearly) the native methods,
+    /// so this is mostly a name passthrough — *except* it (a) clones the receiver
+    /// for the by-value (consuming) methods (`unwrap`/`unwrap_or`/`map`/…) so a
+    /// later `r.is_ok()` does not hit a borrow-of-moved-value error when the same
+    /// value is read again, and (b) renames `flat_map` → the native `and_then`.
+    /// `T: Clone` holds for the v1 payload types (Int/Float/String/Bool/nested
+    /// Option/Result). Recognised via the checker's `recv_kind` annotation.
+    /// Returns `true` if handled.
+    fn try_emit_container_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let resolved = crate::generator::desugared_optional_method(node, callee, args)
+            .or_else(|| crate::generator::desugared_result_method(node, callee, args));
+        let Some((recv, method, rest)) = resolved else {
+            return Ok(false);
+        };
+        // `is_*` take `&self` (no move); the rest consume `self`, so clone the
+        // receiver to keep it usable afterwards.
+        let consuming = !matches!(method, "is_some" | "is_none" | "is_ok" | "is_err");
+        let native = match method {
+            "flat_map" => "and_then",
+            other => other,
+        };
+        self.buf.push('(');
+        self.emit_expr(recv)?;
+        self.buf.push(')');
+        if consuming {
+            self.buf.push_str(".clone()");
+        }
+        let _ = write!(self.buf, ".{native}(");
+        for (i, arg) in rest.iter().enumerate() {
+            if i > 0 {
+                self.buf.push_str(", ");
+            }
+            self.emit_expr(&arg.value)?;
+        }
+        self.buf.push(')');
+        Ok(true)
+    }
+
     /// Emit a read-only `List` built-in method call to its Rust form.
     ///
     /// Lists are `Vec<T>`. `len`/`length`/`count` coerce `usize` → `i64`
@@ -1980,6 +2026,9 @@ impl RsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_container_method(node, callee, args)? {
                     return Ok(());
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),

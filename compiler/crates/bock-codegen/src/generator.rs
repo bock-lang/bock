@@ -880,6 +880,121 @@ pub fn primitive_bridge_call<'a>(
     }
 }
 
+// ─── Optional / Result built-in method dispatch ──────────────────────────────
+//
+// `Optional[T]` and `Result[T, E]` expose a small set of built-in methods
+// (`is_some`/`unwrap_or`/`map`, `is_ok`/`unwrap`/…) that the checker resolves to
+// a concrete return type. But codegen sees only the desugared
+// `Call(FieldAccess(recv, m), [recv, …])` — and the *same* method names overlap
+// across the two types (`unwrap`/`unwrap_or`/`map` are on both, and on `List`).
+// Without disambiguation a backend either double-passes the receiver
+// (`o.unwrap_or(o, 0)`, a runtime error in JS) or calls a method the tagged
+// representation does not have (`o.is_some` on a TS `{_tag:"None"}` union). The
+// checker's `recv_kind` annotation (`RECV_KIND_META_KEY`, value `"Optional"` /
+// `"Result"`) records the resolved receiver category on the call node, so each
+// backend reads it here to pick the right lowering on the tagged value.
+
+/// The built-in `Optional[T]` methods this codegen lowers on the tagged value.
+///
+/// `is_some`/`is_none` test the tag; `unwrap`/`unwrap_or` extract the payload (or
+/// a default); `map`/`flat_map` transform it. The set mirrors the checker's
+/// `Optional` method resolution (`checker.rs`), so every method that type-checks
+/// has a lowering.
+pub const OPTIONAL_METHODS: &[&str] = &[
+    "is_some",
+    "is_none",
+    "unwrap",
+    "unwrap_or",
+    "map",
+    "flat_map",
+];
+
+/// The built-in `Result[T, E]` methods this codegen lowers on the tagged value.
+///
+/// `is_ok`/`is_err` test the tag; `unwrap`/`unwrap_or` extract the `Ok` payload
+/// (or a default); `map`/`map_err` transform the `Ok`/`Err` payload. Mirrors the
+/// checker's `Result` method resolution (`checker.rs`).
+pub const RESULT_METHODS: &[&str] = &["is_ok", "is_err", "unwrap", "unwrap_or", "map", "map_err"];
+
+/// The receiver-kind annotation value, when it is one of the built-in container
+/// categories `Optional` or `Result`.
+///
+/// Returns the tag (`"Optional"` / `"Result"`) when the node carries a
+/// `recv_kind` stamp with that exact value, else `None`. This is the
+/// codegen-side reader of the checker→codegen annotation, the disambiguation
+/// crux for the overloaded `unwrap`/`unwrap_or`/`map` method names.
+#[must_use]
+pub fn container_recv_kind(node: &AIRNode) -> Option<&str> {
+    let bock_air::Value::String(tag) =
+        node.metadata.get(bock_types::checker::RECV_KIND_META_KEY)?
+    else {
+        return None;
+    };
+    match tag.as_str() {
+        "Optional" => Some("Optional"),
+        "Result" => Some("Result"),
+        _ => None,
+    }
+}
+
+/// Recognise a *desugared `Optional[T]` built-in method call*.
+///
+/// Building on [`desugared_self_call`], this additionally requires that (a) the
+/// `call_node` carries the checker's `recv_kind = "Optional"` annotation and (b)
+/// the method is one of [`OPTIONAL_METHODS`]. Returns the receiver node, the
+/// method name, and the remaining (non-self) arguments — everything a backend
+/// needs to lower the call on the tagged Optional value
+/// (`(o._tag === "Some" ? o._0 : d)` in JS/TS, `o._0 if isinstance(o,_BockSome)
+/// else d` in Python, an `__bockOption`-tag test in Go, the native method in
+/// Rust).
+///
+/// `call_node` is the full `Call` AIR node (it holds the annotation); `callee`
+/// and `args` are its `callee`/`args` fields, passed separately so a backend can
+/// call this from inside its `NodeKind::Call { callee, args, .. }` arm.
+#[must_use]
+pub fn desugared_optional_method<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    if container_recv_kind(call_node) != Some("Optional") {
+        return None;
+    }
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if OPTIONAL_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
+/// Recognise a *desugared `Result[T, E]` built-in method call*.
+///
+/// The `Result` counterpart of [`desugared_optional_method`]: requires the
+/// `recv_kind = "Result"` annotation and a method in [`RESULT_METHODS`]. Returns
+/// the receiver node, the method name, and the remaining (non-self) arguments.
+/// The `recv_kind` disambiguation is what lets a backend distinguish
+/// `r.unwrap_or(d)` on a `Result` (test `_tag === "Ok"`) from the same call on an
+/// `Optional` (test `_tag === "Some"`).
+#[must_use]
+pub fn desugared_result_method<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    if container_recv_kind(call_node) != Some("Result") {
+        return None;
+    }
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if RESULT_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
 // ─── Enum-variant registry ──────────────────────────────────────────────────
 //
 // User-defined enum *declarations* already lower correctly per target (JS
@@ -1839,6 +1954,81 @@ mod tests {
             },
         );
         assert!(primitive_bridge_call(&bare, &callee, &args).is_none());
+    }
+
+    #[test]
+    fn container_recv_kind_reads_optional_and_result() {
+        let (call, _, _) = annotated_call("unwrap_or", "Optional", vec![]);
+        assert_eq!(container_recv_kind(&call), Some("Optional"));
+        let (call, _, _) = annotated_call("unwrap_or", "Result", vec![]);
+        assert_eq!(container_recv_kind(&call), Some("Result"));
+        // Non-container tags are not matched.
+        let (call, _, _) = annotated_call("unwrap_or", "List", vec![]);
+        assert_eq!(container_recv_kind(&call), None);
+        let (call, _, _) = annotated_call("compare", "Primitive:Int", vec![]);
+        assert_eq!(container_recv_kind(&call), None);
+    }
+
+    #[test]
+    fn desugared_optional_method_matches_optional_methods() {
+        for &m in OPTIONAL_METHODS {
+            let extra = if matches!(m, "unwrap_or" | "map" | "flat_map") {
+                vec![n(7, NodeKind::Identifier { name: ident("x") })]
+            } else {
+                vec![]
+            };
+            let n_extra = extra.len();
+            let (call, callee, args) = annotated_call(m, "Optional", extra);
+            let (recv, got, rest) =
+                desugared_optional_method(&call, &callee, &args).expect("should match");
+            assert_eq!(got, m);
+            assert_eq!(rest.len(), n_extra);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+            // A `Result`-tagged call must NOT match the Optional recogniser.
+            let (call_r, callee_r, args_r) = annotated_call(m, "Result", vec![]);
+            assert!(desugared_optional_method(&call_r, &callee_r, &args_r).is_none());
+        }
+    }
+
+    #[test]
+    fn desugared_result_method_matches_result_methods() {
+        for &m in RESULT_METHODS {
+            let extra = if matches!(m, "unwrap_or" | "map" | "map_err") {
+                vec![n(7, NodeKind::Identifier { name: ident("x") })]
+            } else {
+                vec![]
+            };
+            let n_extra = extra.len();
+            let (call, callee, args) = annotated_call(m, "Result", extra);
+            let (recv, got, rest) =
+                desugared_result_method(&call, &callee, &args).expect("should match");
+            assert_eq!(got, m);
+            assert_eq!(rest.len(), n_extra);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+            // An `Optional`-tagged call must NOT match the Result recogniser.
+            let (call_o, callee_o, args_o) = annotated_call(m, "Optional", vec![]);
+            assert!(desugared_result_method(&call_o, &callee_o, &args_o).is_none());
+        }
+    }
+
+    #[test]
+    fn container_methods_require_the_annotation() {
+        // The right method name + receiver shape, but no `recv_kind` annotation
+        // → not matched (the disambiguation crux).
+        let (callee, args) = desugared_call("unwrap_or", vec![]);
+        let bare = n(
+            103,
+            NodeKind::Call {
+                callee: Box::new(callee.clone()),
+                args: args.clone(),
+                type_args: vec![],
+            },
+        );
+        assert!(desugared_optional_method(&bare, &callee, &args).is_none());
+        assert!(desugared_result_method(&bare, &callee, &args).is_none());
+        // Annotated container, but a method outside the recognised set.
+        let (call, callee, args) = annotated_call("frobnicate", "Optional", vec![]);
+        assert!(desugared_optional_method(&call, &callee, &args).is_none());
     }
 
     #[test]

@@ -48,6 +48,18 @@ fn py_module_uses_optional(items: &[AIRNode]) -> bool {
     })
 }
 
+/// True if the module references `Result`, `Ok`, or `Err` anywhere, so the
+/// `Result` runtime prelude must be emitted. Mirrors [`py_module_uses_optional`].
+fn py_module_uses_result(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"Result\"")
+            || s.contains("ResultConstruct")
+            || s.contains("\"Ok\"")
+            || s.contains("\"Err\"")
+    })
+}
+
 /// True if the module references the prelude `Ordering` enum, any of its
 /// variants, or a `compare` method call (which the primitive bridge lowers to an
 /// `Ordering` runtime value). Gates emission of [`ORDERING_RUNTIME_PY`], mirroring
@@ -88,6 +100,32 @@ class _BockNone:
         return 'None'
 
 _bock_none = _BockNone()
+";
+
+/// Runtime for Bock `Result[T, E]` in Python. Mirrors `OPTIONAL_RUNTIME_PY`: the
+/// `Ok` payload and the `Err` payload each live in a distinct class with
+/// `__match_args__` so `case _BockOk(v):` / `case _BockErr(e):` bind the payload
+/// positionally — the same shape the surface `Ok(..)`/`Err(..)` construction
+/// emits (`_BockOk(..)` / `_BockErr(..)`). The old codegen emitted bare
+/// `Ok(..)`/`case Ok(_0=n):` against undefined names; this keeps construction and
+/// match in agreement on the same runtime classes.
+const RESULT_RUNTIME_PY: &str = "\
+# ── Bock Result runtime ──
+class _BockOk:
+    __match_args__ = ('_0',)
+    __slots__ = ('_0',)
+    def __init__(self, _0):
+        self._0 = _0
+    def __repr__(self):
+        return f'Ok({self._0!r})'
+
+class _BockErr:
+    __match_args__ = ('_0',)
+    __slots__ = ('_0',)
+    def __init__(self, _0):
+        self._0 = _0
+    def __repr__(self):
+        return f'Err({self._0!r})'
 ";
 
 /// The prelude `Ordering` runtime: the three variants of `core.compare.Ordering`
@@ -316,6 +354,10 @@ struct PyEmitCtx {
     /// once (redefining the `_BockSome`/`_BockNone` helpers is wasteful and
     /// risks shadowing surprises).
     optional_runtime_emitted: bool,
+    /// Set once the `Result` runtime prelude has been emitted; deduped across a
+    /// bundle exactly as [`Self::optional_runtime_emitted`] (redefining the
+    /// `_BockOk`/`_BockErr` classes is wasteful).
+    result_runtime_emitted: bool,
     /// Set once the [`ORDERING_RUNTIME_PY`] prelude has been emitted; deduped
     /// across a bundle exactly as [`Self::optional_runtime_emitted`].
     ordering_runtime_emitted: bool,
@@ -367,6 +409,7 @@ impl PyEmitCtx {
             handling_counter: 0,
             impls_by_target: HashMap::new(),
             optional_runtime_emitted: false,
+            result_runtime_emitted: false,
             ordering_runtime_emitted: false,
             concurrency_runtime_emitted: false,
             needs_union_import: false,
@@ -521,6 +564,18 @@ impl PyEmitCtx {
                 let a = arg_strs.first().map_or(String::new(), |s| s.clone());
                 format!("_BockSome({a})")
             }
+            // Result `Ok(x)` / `Err(e)` constructors → tagged runtime values
+            // (see `RESULT_RUNTIME_PY`), mirroring the `Some` handling above so
+            // construction agrees with the `case _BockOk(..)` / `_BockErr(..)`
+            // match arms.
+            "Ok" => {
+                let a = arg_strs.first().map_or(String::new(), |s| s.clone());
+                format!("_BockOk({a})")
+            }
+            "Err" => {
+                let a = arg_strs.first().map_or(String::new(), |s| s.clone());
+                format!("_BockErr({a})")
+            }
             "sleep" => {
                 self.needs_asyncio_import = true;
                 let a = arg_strs.first().map_or(String::new(), |s| s.clone());
@@ -530,6 +585,129 @@ impl PyEmitCtx {
             _ => return Ok(None),
         };
         Ok(Some(code))
+    }
+
+    /// Emit a built-in `Optional`/`Result` method call to its Python form.
+    ///
+    /// Recognised via the checker's `recv_kind` annotation
+    /// ([`crate::generator::desugared_optional_method`] /
+    /// [`crate::generator::desugared_result_method`]) so the overloaded names
+    /// (`unwrap`/`unwrap_or`/`map`) dispatch to the right `isinstance` test on the
+    /// tagged runtime classes (`_BockSome`/`_BockOk` carry the payload as `._0`).
+    /// The receiver is bound once in a `lambda` so it is evaluated exactly once.
+    /// Returns `true` if handled.
+    fn try_emit_container_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        if let Some((recv, method, rest)) =
+            crate::generator::desugared_optional_method(node, callee, args)
+        {
+            // Optional: present = `_BockSome`; the "map" reconstruction also uses
+            // `_BockSome` for the present case and the receiver `__c` (a
+            // `_bock_none`) for the empty case.
+            self.emit_tagged_container_method(recv, method, rest, "_BockSome", "_BockSome")?;
+            return Ok(true);
+        }
+        if let Some((recv, method, rest)) =
+            crate::generator::desugared_result_method(node, callee, args)
+        {
+            self.emit_tagged_container_method(recv, method, rest, "_BockOk", "_BockErr")?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Lower a tagged-container method on `recv`. `present_cls` is the
+    /// payload-carrying runtime class (`_BockSome`/`_BockOk`); `err_cls` is the
+    /// other class (`_BockNone` for Optional — unused as a constructor since the
+    /// empty case passes the receiver through; `_BockErr` for Result, used by
+    /// `map_err`).
+    fn emit_tagged_container_method(
+        &mut self,
+        recv: &AIRNode,
+        method: &str,
+        rest: &[bock_air::AirArg],
+        present_cls: &str,
+        err_cls: &str,
+    ) -> Result<(), CodegenError> {
+        // Tag tests read the receiver once → emit inline.
+        match method {
+            "is_some" | "is_ok" => {
+                self.buf.push_str("isinstance(");
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, ", {present_cls})");
+                return Ok(());
+            }
+            "is_none" | "is_err" => {
+                self.buf.push_str("(not isinstance(");
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, ", {present_cls}))");
+                return Ok(());
+            }
+            _ => {}
+        }
+        self.buf.push_str("(lambda __c: ");
+        match method {
+            "unwrap" => {
+                let _ = write!(
+                    self.buf,
+                    "__c._0 if isinstance(__c, {present_cls}) else None"
+                );
+            }
+            "unwrap_or" => {
+                let _ = write!(self.buf, "__c._0 if isinstance(__c, {present_cls}) else (");
+                if let Some(d) = rest.first() {
+                    self.emit_expr(&d.value)?;
+                } else {
+                    self.buf.push_str("None");
+                }
+                self.buf.push(')');
+            }
+            "map" => {
+                let _ = write!(self.buf, "{present_cls}((");
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf.push_str("lambda x: x");
+                }
+                let _ = write!(
+                    self.buf,
+                    ")(__c._0)) if isinstance(__c, {present_cls}) else __c"
+                );
+            }
+            "flat_map" => {
+                let _ = write!(self.buf, "(");
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf.push_str("lambda x: x");
+                }
+                let _ = write!(
+                    self.buf,
+                    ")(__c._0) if isinstance(__c, {present_cls}) else __c"
+                );
+            }
+            "map_err" => {
+                let _ = write!(self.buf, "{err_cls}((");
+                if let Some(f) = rest.first() {
+                    self.emit_expr(&f.value)?;
+                } else {
+                    self.buf.push_str("lambda x: x");
+                }
+                let _ = write!(
+                    self.buf,
+                    ")(__c._0)) if isinstance(__c, {err_cls}) else __c"
+                );
+            }
+            _ => self.buf.push_str("None"),
+        }
+        self.buf.push_str(")(");
+        self.emit_expr(recv)?;
+        self.buf.push(')');
+        Ok(())
     }
 
     /// Emit a read-only `List` built-in method call to its Python form.
@@ -827,6 +1005,11 @@ impl PyEmitCtx {
                     self.buf.push_str(OPTIONAL_RUNTIME_PY);
                     self.buf.push('\n');
                     self.optional_runtime_emitted = true;
+                }
+                if !self.result_runtime_emitted && py_module_uses_result(items) {
+                    self.buf.push_str(RESULT_RUNTIME_PY);
+                    self.buf.push('\n');
+                    self.result_runtime_emitted = true;
                 }
                 if !self.ordering_runtime_emitted && py_module_uses_ordering(items) {
                     self.buf.push_str(ORDERING_RUNTIME_PY);
@@ -1928,6 +2111,9 @@ impl PyEmitCtx {
                 if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
+                if self.try_emit_container_method(node, callee, args)? {
+                    return Ok(());
+                }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
                 // [recv, ...rest])`: emit `recv.m(rest)` so the receiver binds
                 // Python's `self` rather than being passed twice.
@@ -2212,26 +2398,22 @@ impl PyEmitCtx {
                 Ok(())
             }
             NodeKind::ResultConstruct { variant, value } => {
-                match variant {
-                    ResultVariant::Ok => {
-                        self.buf.push_str("{\"_tag\": \"Ok\", \"value\": ");
-                        if let Some(v) = value {
-                            self.emit_expr(v)?;
-                        } else {
-                            self.buf.push_str("None");
-                        }
-                        self.buf.push('}');
-                    }
-                    ResultVariant::Err => {
-                        self.buf.push_str("{\"_tag\": \"Err\", \"error\": ");
-                        if let Some(v) = value {
-                            self.emit_expr(v)?;
-                        } else {
-                            self.buf.push_str("None");
-                        }
-                        self.buf.push('}');
-                    }
+                // Construct the Result-runtime classes (`_BockOk`/`_BockErr`) —
+                // the same shape the surface `Ok(..)`/`Err(..)` construction and
+                // the `case _BockOk(..)`/`_BockErr(..)` match use. The old
+                // dict-with-`value`/`error`-keys shape disagreed with the match
+                // (which reads the runtime classes), so reconcile on the classes.
+                let cls = match variant {
+                    ResultVariant::Ok => "_BockOk",
+                    ResultVariant::Err => "_BockErr",
+                };
+                let _ = write!(self.buf, "{cls}(");
+                if let Some(v) = value {
+                    self.emit_expr(v)?;
+                } else {
+                    self.buf.push_str("None");
                 }
+                self.buf.push(')');
                 Ok(())
             }
             NodeKind::Assign { op, target, value } => {
@@ -2437,6 +2619,20 @@ impl PyEmitCtx {
                         self.buf.push_str("_BockNone()");
                         return Ok(());
                     }
+                    // Result `Ok`/`Err` patterns dispatch on the Result runtime
+                    // classes (see `RESULT_RUNTIME_PY`), mirroring `Some`/`None`.
+                    // Both carry a single payload bound positionally via
+                    // `__match_args__ = ('_0',)`.
+                    "Ok" | "Err" => {
+                        let cls = if leaf == "Ok" { "_BockOk" } else { "_BockErr" };
+                        if let Some(f) = fields.first() {
+                            let name = self.pattern_to_binding_name(f);
+                            let _ = write!(self.buf, "{cls}({name})");
+                        } else {
+                            let _ = write!(self.buf, "{cls}(_)");
+                        }
+                        return Ok(());
+                    }
                     _ => {}
                 }
                 // Prelude `Ordering` variant pattern → its Ordering-runtime class
@@ -2584,6 +2780,10 @@ impl PyEmitCtx {
                 let cls: &str = match leaf {
                     "Some" => "_BockSome",
                     "None" => "_BockNone",
+                    // Result `Ok`/`Err` test against the Result-runtime classes,
+                    // mirroring `Some`/`None`.
+                    "Ok" => "_BockOk",
+                    "Err" => "_BockErr",
                     // Prelude `Ordering` variants test against the Ordering-runtime
                     // class so an expression-position match (`lambda __v:
                     // isinstance(__v, _BockOrderingLess) …`) recognises the
@@ -2615,9 +2815,12 @@ impl PyEmitCtx {
         whole_scrutinee_bind: bool,
     ) -> Result<(), CodegenError> {
         match &pattern.kind {
-            // `Some(x)` binds the payload `__v._0`.
+            // `Some(x)` / `Ok(x)` / `Err(e)` bind the payload `__v._0`.
             NodeKind::ConstructorPat { path, fields }
-                if path.segments.last().is_some_and(|s| s.name == "Some") =>
+                if path
+                    .segments
+                    .last()
+                    .is_some_and(|s| matches!(s.name.as_str(), "Some" | "Ok" | "Err")) =>
             {
                 if let Some(f) = fields.first() {
                     let name = self.pattern_to_binding_name(f);
@@ -2684,6 +2887,14 @@ impl PyEmitCtx {
                     .map(|s| s.name.as_str())
                     .collect::<Vec<_>>()
                     .join(".");
+                // `Result[T, E]` lowers to the tagged Result-runtime classes, not
+                // a subscripted generic — the value is `_BockOk(...)` /
+                // `_BockErr(...)`, so the annotation is the union `_BockOk |
+                // _BockErr` with no `[T, E]` (which would be a Python error on a
+                // union). Mirrors the `TypeOptional` arm below.
+                if name == "Result" {
+                    return "_BockOk | _BockErr".to_string();
+                }
                 let py_name = self.map_type_name(&name);
                 if args.is_empty() {
                     py_name
@@ -2757,6 +2968,11 @@ impl PyEmitCtx {
                     .map(|s| s.name.as_str())
                     .collect::<Vec<_>>()
                     .join(".");
+                // See the `Result` case in `type_to_py`: lowers to the tagged
+                // Result-runtime union, no subscript.
+                if name == "Result" {
+                    return "_BockOk | _BockErr".to_string();
+                }
                 let py_name = self.map_type_name(&name);
                 if args.is_empty() {
                     py_name
@@ -4266,14 +4482,10 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(
-            out.contains("{\"_tag\": \"Ok\", \"value\": 42}"),
-            "got: {out}"
-        );
-        assert!(
-            out.contains("{\"_tag\": \"Err\", \"error\": \"failed\"}"),
-            "got: {out}"
-        );
+        // Reconciled on the `_BockOk`/`_BockErr` runtime classes the `Result`
+        // match reads (the old dict-with-`value`/`error`-keys shape disagreed).
+        assert!(out.contains("_BockOk(42)"), "got: {out}");
+        assert!(out.contains("_BockErr(\"failed\")"), "got: {out}");
     }
 
     #[test]

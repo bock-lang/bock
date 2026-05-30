@@ -1,0 +1,31 @@
+// TEST: exec_result_methods
+// EXPECT: output "ok:7;err:0"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Built-in `Result[T, E]` method dispatch (codegen-completeness P1-c):
+// `unwrap_or` and `is_ok` on a tagged Result value. Each backend reads the
+// checker's `recv_kind = "Result"` annotation to disambiguate the overloaded
+// `unwrap_or` (vs the same name on `Optional`/`List`) and emit the right tag
+// test (`_tag === "Ok"` / `isinstance(_, _BockOk)` / `.tag == "Ok"` / native
+// `Result::unwrap_or`).
+//
+// `unwrap_or` (by-value) runs before `is_ok` (`&self`) on the same receiver,
+// the ordering that exposed the Rust borrow-of-moved defect (now fixed by
+// cloning the receiver for the consuming methods).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn run(r: Result[Int, String]) -> String {
+  let v: Int = r.unwrap_or(0)
+  let good: Bool = r.is_ok()
+  if (good) {
+    return "ok:${v}"
+  }
+  return "err:${v}"
+}
+
+fn main() -> Void {
+  println("${run(Ok(7))};${run(Err("nope"))}")
+}

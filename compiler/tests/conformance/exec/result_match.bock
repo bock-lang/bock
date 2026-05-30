@@ -1,0 +1,42 @@
+// TEST: exec_result_match
+// EXPECT: output "ok:42;err:bad"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Cross-target `Result[T, E]` construction + `match` on both arms
+// (codegen-completeness P1-c). Before this work, only JS and Rust ran:
+//
+// - TS: `Result<...>` was an undefined type (no runtime). Now a `BockResult<T,
+//   E>` discriminated-union runtime is emitted and `Result` maps to it.
+// - Python: `Ok(..)`/`Err(..)` were bare undefined calls and `case Ok(_0=n):`
+//   referenced an undefined class. Now `_BockOk`/`_BockErr` runtime classes are
+//   emitted; construction is `_BockOk(..)`/`_BockErr(..)` and the match is
+//   `case _BockOk(n):` / `case _BockErr(e):`.
+// - Go: `Result[..]`/`Ok`/`Err` were undefined and the `match` mis-routed to a
+//   user-enum *type-switch* (`case Ok:` against an undefined Go type) with
+//   broken indentation. Now a `__bockResult` tagged-struct runtime is emitted
+//   and the match dispatches on `.tag` (mirroring the proven Optional path).
+//
+// All four payload representations are reconciled on the single `_0`/`.v` key
+// the match reads — construction and match agree per target.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn parse(s: String) -> Result[Int, String] {
+  if (s == "42") {
+    return Ok(42)
+  }
+  return Err("bad")
+}
+
+fn describe(s: String) -> String {
+  match parse(s) {
+    Ok(n) => return "ok:${n}"
+    Err(e) => return "err:${e}"
+  }
+}
+
+fn main() -> Void {
+  println("${describe("42")};${describe("x")}")
+}
