@@ -1,0 +1,53 @@
+// TEST: exec_self_return
+// EXPECT: output "doubled=42;sum=63"
+// EXPECT: targets js, python, rust
+//
+// Regression fixture for Q-self-subst (codegen-completeness P2): an impl block
+// that writes `Self` in its OWN method signature.
+//
+// `Doubler.doubled(self) -> Self` writes `Self` in *return* position, and
+// `Doubler.add(self, other: Self) -> Int` writes `Self` in *parameter*
+// position. Before the checker fix, the impl method's own registered signature
+// kept `Named("Self")` (only trait-declared method types were substituted), so
+// both call sites hit E4001 (`Named("Self")` vs `Named("Doubler")`). The
+// checker now substitutes `Self` -> the impl's target type across each impl
+// method's params and return type at registration.
+//
+// Targets: js, python, rust emit and execute correct code (Rust lowers both
+// positions to its native `Self`). ts and go are intentionally OMITTED — both
+// have a *codegen* gap (separate workstream, not this pure-checker fix), each
+// surfaced as an OPEN in this session's PR:
+//   * Go renders a `TypeSelf` outside a *trait*-impl method as the
+//     `/* Self */` placeholder (`bock-codegen/src/go.rs` only sets
+//     `go_self_subst` when `use_value_receiver` is true), emitting an invalid
+//     Go signature (missing return / param type).
+//   * TS lowers `Self` to the `this` type, but the impl methods are assigned to
+//     `Doubler.prototype = function(...): this { … }`; TS only permits a `this`
+//     type inside a class/interface member, so `tsc` rejects it (TS2526).
+// Both gaps are orthogonal to (and unblocked by) the checker fix.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale; not load-bearing here since go is omitted, but kept
+// consistent with the other exec fixtures).
+module main
+
+record Doubler {
+  value: Int
+}
+
+impl Doubler {
+  fn doubled(self) -> Self {
+    Doubler { value: self.value + self.value }
+  }
+
+  fn add(self, other: Self) -> Int {
+    self.value + other.value
+  }
+}
+
+fn main() -> Void {
+  let d: Doubler = Doubler { value: 21 }
+  let bigger: Doubler = d.doubled()
+  let extra: Doubler = Doubler { value: 21 }
+  println("doubled=${bigger.value};sum=${bigger.add(extra)}")
+}
