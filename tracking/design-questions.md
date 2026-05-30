@@ -153,6 +153,15 @@ decided→link)`
   pragmatic path. Non-blocking — bundling works on all 5.
 - **Status:** escalated → Design (escalations.md)
 
+### DQ20 — `expr?` (error-propagation operator) lowering
+- **Question:** the `?` operator (Propagate) is a no-op on js/ts/py/go (Rust emits native `?`). Correct lowering
+  must early-return on `Err`/`None`, which needs the enclosing function's return type at the `Propagate` site
+  (Err-vs-None) — not currently on the AIR node. Add a checker annotation (like `recv_kind`, #137) for the
+  return-type context + an expression→early-return transform, or restrict `?` to certain positions?
+- **§:** §error-handling / codegen · **context:** surfaced by #138 (P1-c); deferred from P1 →
+  Q-codegen-completeness P4. Non-blocking (no regression; Rust works).
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and
