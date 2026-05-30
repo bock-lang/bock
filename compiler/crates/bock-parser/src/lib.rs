@@ -4149,7 +4149,7 @@ impl<'src> Parser<'src> {
 
         // Determine whether this is `impl Trait for Type` or `impl Type`.
         // Disambiguate by scanning ahead: if we see `for` after a type path, it's a trait impl.
-        let (trait_path, target) = self.parse_impl_header();
+        let (trait_path, trait_args, target) = self.parse_impl_header();
 
         let where_clause = self.parse_where_clause();
 
@@ -4167,6 +4167,7 @@ impl<'src> Parser<'src> {
             annotations,
             generic_params,
             trait_path,
+            trait_args,
             target,
             where_clause,
             type_assignments: vec![],
@@ -4175,7 +4176,12 @@ impl<'src> Parser<'src> {
     }
 
     /// Parse the `[Trait for] Type` header of an impl block.
-    fn parse_impl_header(&mut self) -> (Option<TypePath>, TypeExpr) {
+    ///
+    /// Returns `(trait_path, trait_args, target)`. `trait_args` captures the
+    /// type arguments applied to a parameterized trait, e.g. `[Int]` in
+    /// `impl From[Int] for Float`; it is empty for `impl Type` and for
+    /// non-parameterized traits.
+    fn parse_impl_header(&mut self) -> (Option<TypePath>, Vec<TypeExpr>, TypeExpr) {
         // Parse the first type path and check if `for` follows.
         let first = self.parse_type_expr();
 
@@ -4183,15 +4189,16 @@ impl<'src> Parser<'src> {
             // `impl Trait for Type`
             let _ = self.advance(); // consume `for`
             let target = self.parse_type_expr();
-            // Extract the type path from the first TypeExpr (must be Named).
-            let trait_path = match &first {
-                TypeExpr::Named { path, .. } => Some(path.clone()),
-                _ => None,
+            // Extract the type path and any type arguments from the first
+            // TypeExpr (must be Named).
+            let (trait_path, trait_args) = match &first {
+                TypeExpr::Named { path, args, .. } => (Some(path.clone()), args.clone()),
+                _ => (None, vec![]),
             };
-            (trait_path, target)
+            (trait_path, trait_args, target)
         } else {
             // `impl Type`
-            (None, first)
+            (None, vec![], first)
         }
     }
 

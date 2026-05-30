@@ -1,0 +1,26 @@
+// TEST: stdlib_convert_try_from
+// EXPECT: no_errors
+//
+// `TryFrom[Source] for Target` is the fallible-conversion trait: a user type
+// implements it to parse / validate a source value, returning
+// `Result[Self, ConvertError]`. The associated-function call
+// `Target.try_from(source)` resolves the parameterized `TryFrom[Source]` impl
+// and type-checks against its declared signature. `TryFrom` is NOT
+// blanket-reversed (there is no `TryInto` in v1).
+module userapp
+
+use core.convert.{TryFrom, ConvertError}
+
+public record Port {
+  number: Int
+}
+
+impl TryFrom[Int] for Port {
+  public fn try_from(value: Int) -> Result[Port, ConvertError] {
+    Ok(Port { number: value })
+  }
+}
+
+public fn parse_port(n: Int) -> Result[Port, ConvertError] {
+  Port.try_from(n)
+}

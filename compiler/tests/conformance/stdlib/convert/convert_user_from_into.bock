@@ -1,0 +1,40 @@
+// TEST: stdlib_convert_user_from_into
+// EXPECT: no_errors
+//
+// A user module defines its own `From[Celsius] for Fahrenheit` conversion
+// (importing the `From` trait from `core.convert`) and exercises both
+// conversion entry points within the same module:
+//   * `Fahrenheit.from(c)` — the explicit associated-function call, and
+//   * `c.into()` — the blanket `Into[Fahrenheit] for Celsius` the compiler
+//     derives from the explicit `From`. Its target `Fahrenheit` is supplied by
+//     the return-type position, the way return-type-driven `.into()` resolves.
+//
+// Both must type-check against the parameterized `From[Celsius]` impl. Note
+// `.into()` is resolved from the impl table of the *defining* module, so this
+// fixture co-locates the impl and the use; see the session PR notes on the
+// cross-module `.into()` limitation.
+module userapp
+
+use core.convert.{From, Into}
+
+public record Celsius {
+  degrees: Float
+}
+
+public record Fahrenheit {
+  degrees: Float
+}
+
+impl From[Celsius] for Fahrenheit {
+  public fn from(value: Celsius) -> Fahrenheit {
+    Fahrenheit { degrees: value.degrees * 1.8 + 32.0 }
+  }
+}
+
+public fn via_from(c: Celsius) -> Fahrenheit {
+  Fahrenheit.from(c)
+}
+
+public fn via_into(c: Celsius) -> Fahrenheit {
+  c.into()
+}

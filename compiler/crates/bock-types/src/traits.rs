@@ -49,17 +49,35 @@ pub type ImplId = u32;
 /// A reference to a named trait, identified by its fully-qualified name.
 ///
 /// Examples: `"Equatable"`, `"Std.Io.Writable"`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TraitRef {
     /// Fully-qualified name of the trait.
     pub name: String,
+    /// Type arguments applied to a parameterized trait, e.g. `[Int]` in
+    /// `From[Int]`. Empty for non-parameterized traits.
+    pub args: Vec<Type>,
 }
 
 impl TraitRef {
-    /// Create a `TraitRef` from any string-like value.
+    /// Create a `TraitRef` for a non-parameterized trait from any string-like
+    /// value. The argument list is empty.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            args: vec![],
+        }
+    }
+
+    /// Create a `TraitRef` for a parameterized trait, e.g.
+    /// `TraitRef::parameterized("From", vec![Type::Primitive(Int)])` for
+    /// `From[Int]`.
+    #[must_use]
+    pub fn parameterized(name: impl Into<String>, args: Vec<Type>) -> Self {
+        Self {
+            name: name.into(),
+            args,
+        }
     }
 
     fn from_path(path: &TypePath) -> Self {
@@ -69,7 +87,7 @@ impl TraitRef {
             .map(|s| s.name.as_str())
             .collect::<Vec<_>>()
             .join(".");
-        Self { name }
+        Self { name, args: vec![] }
     }
 }
 
@@ -107,6 +125,20 @@ pub struct ImplEntry {
     /// this to `false`. Canonical entries are sealed: user code may not add
     /// its own `impl` of a core trait for a primitive (`E4011`).
     pub is_canonical: bool,
+    /// Type arguments applied to the implemented trait, e.g. `[Int]` in
+    /// `impl From[Int] for Float`. Empty for non-parameterized traits.
+    pub trait_args: Vec<Type>,
+    /// `true` when this entry was synthesized by the compiler from another
+    /// impl rather than written by the user — e.g. the blanket
+    /// `Into[U] for T` derived from an explicit `From[T] for U`. A derived
+    /// entry never wins over an explicit one and never triggers a coherence
+    /// error against an explicit impl.
+    pub is_derived: bool,
+    /// The structured target [`Type`] of the impl, when it could be resolved
+    /// from the AIR target node. Used to synthesize blanket reverse impls
+    /// (e.g. deriving `Into[U]` from `From[T] for U`). `None` for entries
+    /// built from an unrecognized target node.
+    pub target_type: Option<Type>,
 }
 
 /// Maps `(TraitRef, Type)` pairs to impl blocks and supports method dispatch.
@@ -127,8 +159,16 @@ pub struct ImplEntry {
 pub struct ImplTable {
     /// All registered impl entries indexed by [`ImplId`].
     entries: HashMap<ImplId, ImplEntry>,
-    /// Trait impl index: `(trait_name, type_key) → ImplId` (concrete impls only).
+    /// Trait impl index: `(trait_name, type_key) → ImplId` (concrete,
+    /// non-parameterized impls only). Untouched by parameterized-trait support
+    /// so all pre-existing (Q-bridge) behavior is bit-identical.
     trait_impl_index: HashMap<(String, String), ImplId>,
+    /// Parameterized trait impl index:
+    /// `(trait_name, trait_arg_key, target_type_key) → ImplId`. Used for traits
+    /// that carry type arguments, e.g. `From[Int] for Float`. Keyed on the
+    /// three-tuple so `From[Int] for Float` and `From[String] for Float`
+    /// coexist without a coherence collision.
+    param_trait_impl_index: HashMap<(String, String, String), ImplId>,
     /// Inherent impl index: `type_key → ImplId`.
     inherent_impl_index: HashMap<String, ImplId>,
     /// Supertrait graph: `trait_name → list of direct supertrait names`.
@@ -148,6 +188,7 @@ impl ImplTable {
         Self {
             entries: HashMap::new(),
             trait_impl_index: HashMap::new(),
+            param_trait_impl_index: HashMap::new(),
             inherent_impl_index: HashMap::new(),
             supertraits: HashMap::new(),
             assoc_types: HashMap::new(),
@@ -170,19 +211,76 @@ impl ImplTable {
                 table.visit_item(item);
             }
         }
+        // Second pass: synthesize blanket `Into[U] for T` from each explicit
+        // `From[T] for U`. Runs after all explicit impls so an explicit
+        // `Into` always wins (the synthesized entry is skipped if its slot
+        // is occupied — see `synthesize_blanket_into`).
+        table.synthesize_blanket_into();
         table
+    }
+
+    /// For every explicit `impl From[T] for U`, synthesize the blanket reverse
+    /// `impl Into[U] for T`, marked `is_derived`.
+    ///
+    /// Skips synthesis when the `Into[U] for T` slot is already occupied — an
+    /// explicit `Into` impl always wins and a derived entry never triggers an
+    /// `E4010` coherence error against an explicit impl. Only `From` impls
+    /// with exactly one trait argument participate (the v1 surface);
+    /// `TryFrom` is intentionally NOT blanket-reversed.
+    fn synthesize_blanket_into(&mut self) {
+        // Collect first to avoid mutating while iterating.
+        let froms: Vec<(Type, Type)> = self
+            .entries
+            .values()
+            .filter_map(|e| {
+                let tr = e.trait_ref.as_ref()?;
+                if tr.name != "From" || tr.args.len() != 1 || e.is_generic {
+                    return None;
+                }
+                // From[T] for U  →  source T = tr.args[0], target U = e.type_key's type.
+                let source = tr.args[0].clone();
+                let target = e.target_type.clone()?;
+                Some((source, target))
+            })
+            .collect();
+
+        for (source, target) in froms {
+            // Reverse: Into[target] for source.
+            let into_arg_key = trait_arg_key(std::slice::from_ref(&target));
+            let into_target_key = type_key(&source);
+            let occupied = self.param_trait_impl_index.contains_key(&(
+                "Into".to_owned(),
+                into_arg_key,
+                into_target_key,
+            ));
+            if occupied {
+                // Explicit (or already-derived) Into wins — never clobber.
+                continue;
+            }
+            self.register_param_trait_impl("Into", std::slice::from_ref(&target), &source, true);
+        }
     }
 
     fn visit_item(&mut self, node: &AIRNode) {
         match &node.kind {
             NodeKind::ImplBlock {
                 trait_path,
+                trait_args,
                 target,
                 methods,
                 generic_params,
                 ..
             } => {
-                let trait_ref = trait_path.as_ref().map(TraitRef::from_path);
+                // Resolve the trait's type arguments (e.g. `[Int]` in
+                // `impl From[Int] for Float`) into `Type`s, and build a
+                // parameterized `TraitRef` when present.
+                let resolved_trait_args: Vec<Type> =
+                    trait_args.iter().map(type_from_node).collect();
+                let trait_ref = trait_path.as_ref().map(|p| {
+                    let mut tr = TraitRef::from_path(p);
+                    tr.args = resolved_trait_args.clone();
+                    tr
+                });
                 let type_key = type_key_from_node(target);
                 let is_generic = !generic_params.is_empty();
 
@@ -216,19 +314,40 @@ impl ImplTable {
                 }
 
                 // Coherence: detect exact-type duplicates (skip generic impls).
+                // Parameterized traits key on the (trait, trait-args, target)
+                // three-tuple, so `From[Int] for Float` and
+                // `From[String] for Float` do not collide; non-parameterized
+                // traits use the original two-tuple index (bit-identical to
+                // the Q-bridge behavior).
                 if !is_generic {
                     if let Some(tr) = &trait_ref {
-                        let index_key = (tr.name.clone(), type_key.clone());
-                        if self.trait_impl_index.contains_key(&index_key) {
-                            self.diags.error(
-                                E_COHERENCE_OVERLAP,
-                                format!(
-                                    "conflicting implementations of trait `{}` for type `{}`",
-                                    tr.name, type_key,
-                                ),
-                                node.span,
-                            );
-                            return;
+                        if tr.args.is_empty() {
+                            let index_key = (tr.name.clone(), type_key.clone());
+                            if self.trait_impl_index.contains_key(&index_key) {
+                                self.diags.error(
+                                    E_COHERENCE_OVERLAP,
+                                    format!(
+                                        "conflicting implementations of trait `{}` for type `{}`",
+                                        tr.name, type_key,
+                                    ),
+                                    node.span,
+                                );
+                                return;
+                            }
+                        } else {
+                            let arg_key = trait_arg_key(&tr.args);
+                            let index_key = (tr.name.clone(), arg_key.clone(), type_key.clone());
+                            if self.param_trait_impl_index.contains_key(&index_key) {
+                                self.diags.error(
+                                    E_COHERENCE_OVERLAP,
+                                    format!(
+                                        "conflicting implementations of trait `{}[{}]` for type `{}`",
+                                        tr.name, arg_key, type_key,
+                                    ),
+                                    node.span,
+                                );
+                                return;
+                            }
                         }
                     }
                 }
@@ -254,14 +373,22 @@ impl ImplTable {
                 // Register in the appropriate index.
                 if let Some(tr) = &trait_ref {
                     if !is_generic {
-                        self.trait_impl_index
-                            .insert((tr.name.clone(), type_key.clone()), id);
+                        if tr.args.is_empty() {
+                            self.trait_impl_index
+                                .insert((tr.name.clone(), type_key.clone()), id);
+                        } else {
+                            self.param_trait_impl_index.insert(
+                                (tr.name.clone(), trait_arg_key(&tr.args), type_key.clone()),
+                                id,
+                            );
+                        }
                     }
                 } else {
                     // Inherent impl — last registration wins for the type key.
                     self.inherent_impl_index.insert(type_key.clone(), id);
                 }
 
+                let target_type = Some(type_from_node(target));
                 self.entries.insert(
                     id,
                     ImplEntry {
@@ -271,6 +398,9 @@ impl ImplTable {
                         methods: method_names,
                         is_generic,
                         is_canonical: false,
+                        trait_args: resolved_trait_args,
+                        is_derived: false,
+                        target_type,
                     },
                 );
             }
@@ -323,36 +453,70 @@ impl ImplTable {
     /// [`register_canonical_conformances`] for the compiler-provided
     /// primitive conformances.
     pub fn register_trait_impl(&mut self, trait_name: impl Into<String>, ty: &Type) -> ImplId {
-        self.register_trait_impl_inner(trait_name, ty, false)
+        self.register_trait_impl_inner(trait_name, &[], ty, false, false)
     }
 
-    /// Inner registration shared by [`register_trait_impl`] and
-    /// [`register_canonical_conformances`].
+    /// Programmatically register a *parameterized* trait impl for a concrete
+    /// type, e.g. `From[Source] for Target`. Like [`Self::register_trait_impl`] the
+    /// entry is not marked canonical. Pass `is_derived = true` for an entry
+    /// synthesized from another impl (e.g. the blanket `Into`).
+    pub fn register_param_trait_impl(
+        &mut self,
+        trait_name: impl Into<String>,
+        trait_args: &[Type],
+        ty: &Type,
+        is_derived: bool,
+    ) -> ImplId {
+        self.register_trait_impl_inner(trait_name, trait_args, ty, false, is_derived)
+    }
+
+    /// Inner registration shared by [`Self::register_trait_impl`],
+    /// [`Self::register_param_trait_impl`], and [`register_canonical_conformances`].
     ///
     /// This bypasses the orphan/sealing check applied to user `impl` blocks in
     /// [`Self::visit_item`], so the compiler's own canonical registration is
     /// never rejected.
+    ///
+    /// `trait_args` empty routes into the original two-tuple `trait_impl_index`
+    /// (bit-identical to the Q-bridge behavior); non-empty routes into the
+    /// parameterized three-tuple `param_trait_impl_index`.
     fn register_trait_impl_inner(
         &mut self,
         trait_name: impl Into<String>,
+        trait_args: &[Type],
         ty: &Type,
         is_canonical: bool,
+        is_derived: bool,
     ) -> ImplId {
         let id = self.alloc_id();
         let trait_name = trait_name.into();
         let key = type_key(ty);
+        let args_vec = trait_args.to_vec();
+        let trait_ref = if args_vec.is_empty() {
+            TraitRef::new(&trait_name)
+        } else {
+            TraitRef::parameterized(&trait_name, args_vec.clone())
+        };
         self.entries.insert(
             id,
             ImplEntry {
                 id,
-                trait_ref: Some(TraitRef::new(&trait_name)),
+                trait_ref: Some(trait_ref),
                 type_key: key.clone(),
                 methods: vec![],
                 is_generic: false,
                 is_canonical,
+                trait_args: args_vec.clone(),
+                is_derived,
+                target_type: Some(ty.clone()),
             },
         );
-        self.trait_impl_index.insert((trait_name, key), id);
+        if args_vec.is_empty() {
+            self.trait_impl_index.insert((trait_name, key), id);
+        } else {
+            self.param_trait_impl_index
+                .insert((trait_name, trait_arg_key(&args_vec), key), id);
+        }
         id
     }
 
@@ -423,6 +587,37 @@ impl ImplTable {
             .copied()
     }
 
+    fn find_param_trait_impl(
+        &self,
+        trait_name: &str,
+        trait_arg_key: &str,
+        type_key: &str,
+    ) -> Option<ImplId> {
+        self.param_trait_impl_index
+            .get(&(
+                trait_name.to_owned(),
+                trait_arg_key.to_owned(),
+                type_key.to_owned(),
+            ))
+            .copied()
+    }
+
+    /// Returns `true` if *any* parameterized impl of `trait_name` exists for
+    /// `type_key`, regardless of the trait's type argument.
+    ///
+    /// This backs the v1 *arg-imprecise* satisfaction of a parameterized bound
+    /// such as `T: Into[U]`: because the bound's type argument is dropped at
+    /// parse time (the `where`-clause stores only the trait path), the checker
+    /// cannot key on the exact `[U]`. It instead accepts the bound when the
+    /// concrete `T` implements the trait for *some* argument. See the
+    /// session PR notes for this documented limitation.
+    #[must_use]
+    pub fn has_any_param_trait_impl(&self, trait_name: &str, type_key: &str) -> bool {
+        self.param_trait_impl_index
+            .keys()
+            .any(|(t, _arg, ty)| t == trait_name && ty == type_key)
+    }
+
     fn find_inherent_impl(&self, type_key: &str) -> Option<ImplId> {
         self.inherent_impl_index.get(type_key).copied()
     }
@@ -444,10 +639,20 @@ impl Default for ImplTable {
 ///
 /// To verify that supertrait obligations are also satisfied, call
 /// [`check_supertrait_obligations`] on the result.
+///
+/// For a parameterized trait (`trait_ref.args` non-empty), the lookup keys on
+/// the `(trait_name, trait_arg_key, target_type_key)` three-tuple, so
+/// `From[Int] for Float` and `From[String] for Float` resolve independently.
+/// Non-parameterized traits use the original two-tuple index (unchanged from
+/// the Q-bridge behavior).
 #[must_use]
 pub fn resolve_impl(trait_ref: &TraitRef, ty: &Type, impls: &ImplTable) -> Option<ImplId> {
     let key = type_key(ty);
-    impls.find_trait_impl(&trait_ref.name, &key)
+    if trait_ref.args.is_empty() {
+        impls.find_trait_impl(&trait_ref.name, &key)
+    } else {
+        impls.find_param_trait_impl(&trait_ref.name, &trait_arg_key(&trait_ref.args), &key)
+    }
 }
 
 /// Check that all transitively required supertraits of `trait_ref` are
@@ -538,6 +743,17 @@ pub fn type_key(ty: &Type) -> String {
         Type::Flexible(_) => "Flexible".to_string(),
         Type::Error => "Error".to_string(),
     }
+}
+
+/// Produce a canonical key string for a parameterized trait's type arguments.
+///
+/// `From[Int]` yields `"Int"`; `Pair[Int, String]` yields `"Int, String"`;
+/// a non-parameterized trait yields the empty string. The key is the third
+/// component (well, second of the trait portion) of the parameterized
+/// lookup tuple and mirrors [`type_key`]'s encoding.
+#[must_use]
+pub fn trait_arg_key(args: &[Type]) -> String {
+    args.iter().map(type_key).collect::<Vec<_>>().join(", ")
 }
 
 /// Extract a canonical trait name string from a [`TypePath`].
@@ -690,7 +906,7 @@ pub fn register_canonical_conformances(table: &mut ImplTable) {
     let register = |table: &mut ImplTable, trait_name: &str, prims: &[PrimitiveType]| {
         for p in prims {
             let ty = Type::Primitive(p.clone());
-            table.register_trait_impl_inner(trait_name, &ty, true);
+            table.register_trait_impl_inner(trait_name, &[], &ty, true, false);
         }
     };
 
@@ -740,6 +956,89 @@ pub fn register_canonical_conformances(table: &mut ImplTable) {
     // Hashable: base (no Float — NaN breaks the hash/eq law) + sized ints only.
     register(table, "Hashable", HASHABLE_BASE);
     register(table, "Hashable", SIZED_INTS);
+}
+
+/// Register the compiler-provided canonical *conversions* between primitive
+/// types into `table`.
+///
+/// These populate the parameterized `From`/`TryFrom` indexes (and, for each
+/// `From`, the blanket reverse `Into`) so that `(5).into()` resolving to a
+/// `Float`, `Float.from(3)`, and `Int.try_from(s)` all type-check uniformly
+/// with user conversions. Call this **after** [`ImplTable::build_from`] and
+/// [`register_canonical_conformances`].
+///
+/// The v1 *minimum-useful* matrix (the normative matrix is escalated to Design,
+/// parallel to DQ10):
+/// - `From[Int] for Float`
+/// - signed-integer widening: each narrower signed int → each wider one, and
+///   every sized signed int → the unsized `Int`
+/// - `From[Float32] for Float`
+/// - `From[Char] for String`
+/// - `TryFrom[String] for Int` and `TryFrom[String] for Float`
+///
+/// **Lossy / narrowing conversions are intentionally excluded from v1** — a
+/// narrowing conversion must go through `TryFrom`, or is deferred. These
+/// canonical conversions ship **unsealed** (whether to seal them under §18.5
+/// is an escalated Design question): user code may currently add its own
+/// conversions for primitives.
+pub fn register_canonical_conversions(table: &mut ImplTable) {
+    // Register `From[source] for target`, plus its blanket reverse
+    // `Into[target] for source` (marked derived). Both are canonical-internal
+    // registrations that bypass user sealing.
+    let from = |table: &mut ImplTable, source: PrimitiveType, target: PrimitiveType| {
+        let source_ty = Type::Primitive(source);
+        let target_ty = Type::Primitive(target);
+        table.register_param_trait_impl(
+            "From",
+            std::slice::from_ref(&source_ty),
+            &target_ty,
+            false,
+        );
+        // Blanket reverse: Into[target] for source.
+        table.register_param_trait_impl("Into", std::slice::from_ref(&target_ty), &source_ty, true);
+    };
+
+    // From[Int] for Float.
+    from(table, PrimitiveType::Int, PrimitiveType::Float);
+
+    // From[Float32] for Float.
+    from(table, PrimitiveType::Float32, PrimitiveType::Float);
+
+    // From[Char] for String.
+    from(table, PrimitiveType::Char, PrimitiveType::String);
+
+    // Signed-integer widening: narrower → wider, in size order, plus every
+    // sized signed int → the unsized `Int`. Widening is always lossless.
+    const SIGNED_WIDENING: &[PrimitiveType] = &[
+        PrimitiveType::Int8,
+        PrimitiveType::Int16,
+        PrimitiveType::Int32,
+        PrimitiveType::Int64,
+        PrimitiveType::Int128,
+    ];
+    for (i, narrow) in SIGNED_WIDENING.iter().enumerate() {
+        for wide in &SIGNED_WIDENING[i + 1..] {
+            from(table, narrow.clone(), wide.clone());
+        }
+        // Every sized signed int widens into the unsized `Int`.
+        from(table, narrow.clone(), PrimitiveType::Int);
+    }
+
+    // Fallible parsing conversions: TryFrom[String] for Int / for Float. These
+    // are NOT blanket-reversed (no TryInto in v1).
+    let string_ty = Type::Primitive(PrimitiveType::String);
+    table.register_param_trait_impl(
+        "TryFrom",
+        std::slice::from_ref(&string_ty),
+        &Type::Primitive(PrimitiveType::Int),
+        false,
+    );
+    table.register_param_trait_impl(
+        "TryFrom",
+        std::slice::from_ref(&string_ty),
+        &Type::Primitive(PrimitiveType::Float),
+        false,
+    );
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -842,6 +1141,37 @@ mod tests {
             annotations: vec![],
             generic_params: vec![],
             trait_path,
+            trait_args: vec![],
+            target: Box::new(make_type_named(target_name)),
+            where_clause: vec![],
+            methods,
+        })
+    }
+
+    /// Build `impl Trait[arg_names...] for Target { methods }`.
+    fn make_param_impl_block(
+        trait_name: &str,
+        trait_arg_names: &[&str],
+        target_name: &str,
+        methods: Vec<AIRNode>,
+    ) -> AIRNode {
+        use bock_ast::{Ident, TypePath};
+        let trait_path = Some(TypePath {
+            segments: vec![Ident {
+                name: trait_name.to_owned(),
+                span: dummy_span(),
+            }],
+            span: dummy_span(),
+        });
+        let trait_args = trait_arg_names
+            .iter()
+            .map(|n| make_type_named(n))
+            .collect::<Vec<_>>();
+        make_air_node(NodeKind::ImplBlock {
+            annotations: vec![],
+            generic_params: vec![],
+            trait_path,
+            trait_args,
             target: Box::new(make_type_named(target_name)),
             where_clause: vec![],
             methods,
@@ -933,6 +1263,9 @@ mod tests {
                 methods: vec!["print".to_owned()],
                 is_generic: false,
                 is_canonical: false,
+                trait_args: vec![],
+                is_derived: false,
+                target_type: None,
             },
         );
         table
@@ -967,6 +1300,9 @@ mod tests {
                 methods: vec!["print".to_owned()],
                 is_generic: false,
                 is_canonical: false,
+                trait_args: vec![],
+                is_derived: false,
+                target_type: None,
             },
         );
         table
@@ -1092,6 +1428,7 @@ mod tests {
                 }],
                 span: dummy_span(),
             }),
+            trait_args: vec![],
             target: Box::new(make_type_named("T")),
             where_clause: vec![],
             methods: vec![],
@@ -1106,6 +1443,7 @@ mod tests {
                 }],
                 span: dummy_span(),
             }),
+            trait_args: vec![],
             target: Box::new(make_type_named("T")),
             where_clause: vec![],
             methods: vec![],
@@ -1377,5 +1715,241 @@ mod tests {
         register_canonical_conformances(&mut table);
         assert!(!table.diags.has_errors());
         assert!(resolve_impl(&TraitRef::new("Comparable"), &int(), &table).is_some());
+    }
+
+    // ── Parameterized-trait resolution (T2/T3) ─────────────────────────────────
+
+    #[test]
+    fn param_impl_distinct_args_resolve_independently() {
+        // impl From[Int] for Float  and  impl From[String] for Float
+        // must resolve to different impls — no false collision.
+        let from_int = make_param_impl_block("From", &["Int"], "Float", vec![make_fn_decl("from")]);
+        let from_str =
+            make_param_impl_block("From", &["String"], "Float", vec![make_fn_decl("from")]);
+        let module = make_module(vec![from_int, from_str]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(
+            !table.diags.has_errors(),
+            "distinct trait args must not collide"
+        );
+        let float = Type::Primitive(PrimitiveType::Float);
+        let id_int = resolve_impl(
+            &TraitRef::parameterized("From", vec![int()]),
+            &float,
+            &table,
+        );
+        let id_str = resolve_impl(
+            &TraitRef::parameterized("From", vec![Type::Primitive(PrimitiveType::String)]),
+            &float,
+            &table,
+        );
+        assert!(id_int.is_some(), "From[Int] for Float should resolve");
+        assert!(id_str.is_some(), "From[String] for Float should resolve");
+        assert_ne!(id_int, id_str, "the two impls must be distinct");
+    }
+
+    #[test]
+    fn param_impl_missing_arg_does_not_resolve() {
+        // Only From[Int] for Float is registered; From[Bool] for Float is not.
+        let from_int = make_param_impl_block("From", &["Int"], "Float", vec![make_fn_decl("from")]);
+        let module = make_module(vec![from_int]);
+        let table = ImplTable::build_from(&module);
+        let float = Type::Primitive(PrimitiveType::Float);
+        assert!(resolve_impl(
+            &TraitRef::parameterized("From", vec![bool_ty()]),
+            &float,
+            &table
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn param_impl_duplicate_args_collide() {
+        // Two identical impl From[Int] for Float → E4010 coherence error.
+        let a = make_param_impl_block("From", &["Int"], "Float", vec![make_fn_decl("from")]);
+        let b = make_param_impl_block("From", &["Int"], "Float", vec![make_fn_decl("from")]);
+        let module = make_module(vec![a, b]);
+        let table = ImplTable::build_from(&module);
+        assert!(
+            table.diags.has_errors(),
+            "duplicate From[Int] for Float must be a coherence error"
+        );
+    }
+
+    #[test]
+    fn param_and_nonparam_indexes_are_independent() {
+        // A non-parameterized impl and a parameterized impl of the same trait
+        // name for the same target type live in separate indexes and do not
+        // collide. (Edge case; primarily a sanity check on index isolation.)
+        let bare = make_impl_block(Some("From"), "Float", vec![make_fn_decl("from")]);
+        let param = make_param_impl_block("From", &["Int"], "Float", vec![make_fn_decl("from")]);
+        let module = make_module(vec![bare, param]);
+        let table = ImplTable::build_from(&module);
+        assert!(!table.diags.has_errors());
+        let float = Type::Primitive(PrimitiveType::Float);
+        assert!(resolve_impl(&TraitRef::new("From"), &float, &table).is_some());
+        assert!(resolve_impl(
+            &TraitRef::parameterized("From", vec![int()]),
+            &float,
+            &table
+        )
+        .is_some());
+    }
+
+    // ── Blanket From ⇒ Into synthesis (T4) ─────────────────────────────────────
+
+    #[test]
+    fn blanket_into_derived_from_explicit_from() {
+        // impl From[Int] for Float  ⇒  derived impl Into[Float] for Int.
+        let from = make_param_impl_block("From", &["Int"], "Float", vec![make_fn_decl("from")]);
+        let module = make_module(vec![from]);
+        let table = ImplTable::build_from(&module);
+        assert!(!table.diags.has_errors());
+
+        let float = Type::Primitive(PrimitiveType::Float);
+        // Into[Float] for Int must resolve.
+        let into_id = resolve_impl(
+            &TraitRef::parameterized("Into", vec![float.clone()]),
+            &int(),
+            &table,
+        );
+        assert!(
+            into_id.is_some(),
+            "blanket Into[Float] for Int should resolve"
+        );
+        let entry = table.get_entry(into_id.unwrap()).unwrap();
+        assert!(
+            entry.is_derived,
+            "synthesized Into entry must be is_derived"
+        );
+    }
+
+    #[test]
+    fn blanket_into_does_not_clobber_explicit() {
+        // Explicit  impl Into[U] for A  plus  impl From[A] for U  must not
+        // produce E4010, and resolution must return the EXPLICIT Into.
+        let explicit_into =
+            make_param_impl_block("Into", &["Float"], "Apple", vec![make_fn_decl("into")]);
+        let from = make_param_impl_block("From", &["Apple"], "Float", vec![make_fn_decl("from")]);
+        let module = make_module(vec![explicit_into, from]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(
+            !table.diags.has_errors(),
+            "explicit Into + blanket From must not collide"
+        );
+        let float = Type::Primitive(PrimitiveType::Float);
+        let apple = Type::Named(NamedType {
+            name: "Apple".to_owned(),
+        });
+        let into_id = resolve_impl(
+            &TraitRef::parameterized("Into", vec![float]),
+            &apple,
+            &table,
+        )
+        .expect("Into[Float] for Apple should resolve");
+        let entry = table.get_entry(into_id).unwrap();
+        assert!(
+            !entry.is_derived,
+            "explicit Into must win over the blanket-derived one"
+        );
+    }
+
+    // ── Canonical primitive conversions (T8) ───────────────────────────────────
+
+    #[test]
+    fn canonical_conversions_register_from_int_for_float() {
+        let mut table = ImplTable::new();
+        register_canonical_conversions(&mut table);
+        let float = Type::Primitive(PrimitiveType::Float);
+        // From[Int] for Float resolves.
+        assert!(resolve_impl(
+            &TraitRef::parameterized("From", vec![int()]),
+            &float,
+            &table
+        )
+        .is_some());
+        // Blanket Into[Float] for Int resolves.
+        assert!(resolve_impl(
+            &TraitRef::parameterized("Into", vec![float]),
+            &int(),
+            &table
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn canonical_conversions_widen_signed_ints() {
+        let mut table = ImplTable::new();
+        register_canonical_conversions(&mut table);
+        // Int8 -> Int64 (widening) and Int8 -> Int.
+        let i8 = Type::Primitive(PrimitiveType::Int8);
+        let i64 = Type::Primitive(PrimitiveType::Int64);
+        assert!(resolve_impl(
+            &TraitRef::parameterized("From", vec![i8.clone()]),
+            &i64,
+            &table
+        )
+        .is_some());
+        assert!(resolve_impl(
+            &TraitRef::parameterized("From", vec![i8.clone()]),
+            &int(),
+            &table
+        )
+        .is_some());
+        // Narrowing Int64 -> Int8 is NOT registered (lossy, excluded from v1).
+        assert!(resolve_impl(&TraitRef::parameterized("From", vec![i64]), &i8, &table).is_none());
+    }
+
+    #[test]
+    fn canonical_conversions_try_from_string() {
+        let mut table = ImplTable::new();
+        register_canonical_conversions(&mut table);
+        let string = Type::Primitive(PrimitiveType::String);
+        assert!(resolve_impl(
+            &TraitRef::parameterized("TryFrom", vec![string.clone()]),
+            &int(),
+            &table
+        )
+        .is_some());
+        assert!(resolve_impl(
+            &TraitRef::parameterized("TryFrom", vec![string]),
+            &Type::Primitive(PrimitiveType::Float),
+            &table
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn blanket_into_not_derived_for_try_from() {
+        // TryFrom is intentionally NOT blanket-reversed (no TryInto in v1).
+        let tryfrom = make_param_impl_block(
+            "TryFrom",
+            &["String"],
+            "Int",
+            vec![make_fn_decl("try_from")],
+        );
+        let module = make_module(vec![tryfrom]);
+        let table = ImplTable::build_from(&module);
+        let string = Type::Primitive(PrimitiveType::String);
+        assert!(
+            resolve_impl(
+                &TraitRef::parameterized("TryInto", vec![int()]),
+                &string,
+                &table
+            )
+            .is_none(),
+            "no TryInto should be synthesized"
+        );
+        assert!(
+            resolve_impl(
+                &TraitRef::parameterized("Into", vec![int()]),
+                &string,
+                &table
+            )
+            .is_none(),
+            "TryFrom must not synthesize a (lossless) Into"
+        );
     }
 }

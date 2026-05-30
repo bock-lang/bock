@@ -2843,6 +2843,7 @@ mod tests {
                 annotations: vec![],
                 generic_params: vec![],
                 trait_path: Some(type_path(&["Printable"])),
+                trait_args: vec![],
                 target: Box::new(node(
                     2,
                     NodeKind::TypeNamed {
@@ -3952,6 +3953,7 @@ mod tests {
                 annotations: vec![],
                 generic_params: vec![],
                 trait_path: Some(type_path(&["Greet"])),
+                trait_args: vec![],
                 target: Box::new(node(
                     21,
                     NodeKind::TypeNamed {

@@ -970,6 +970,9 @@ pub struct ImplBlock {
     pub generic_params: Vec<GenericParam>,
     /// The trait being implemented, if any.
     pub trait_path: Option<TypePath>,
+    /// Type arguments applied to the trait, e.g. `[Int]` in `impl From[Int] for
+    /// Float`. Empty for non-parameterized traits.
+    pub trait_args: Vec<TypeExpr>,
     /// The type being implemented.
     pub target: TypeExpr,
     pub where_clause: Vec<TypeConstraint>,

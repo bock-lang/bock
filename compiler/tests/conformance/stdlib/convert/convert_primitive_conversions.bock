@@ -1,0 +1,30 @@
+// TEST: stdlib_convert_primitive_conversions
+// EXPECT: no_errors
+//
+// The compiler registers a canonical matrix of lossless primitive
+// conversions (`From[source] for target` plus the derived blanket `Into`).
+// They are reachable through return-type-driven `.into()`:
+//   * `Int  -> Float`            (let f: Float = (5).into())
+//   * `Int8 -> Int64`            (signed widening)
+//   * `Float32 -> Float`
+//   * `Char -> String`
+// Lossy / narrowing conversions are intentionally excluded from v1 (they must
+// go through `TryFrom`); see `convert_primitive_narrowing_excluded`.
+module userapp
+
+public fn int_to_float() -> Float {
+  let f: Float = (5).into()
+  f
+}
+
+public fn widen(x: Int8) -> Int64 {
+  x.into()
+}
+
+public fn f32_to_float(x: Float32) -> Float {
+  x.into()
+}
+
+public fn char_to_string(c: Char) -> String {
+  c.into()
+}

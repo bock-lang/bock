@@ -3776,6 +3776,7 @@ mod tests {
             NodeKind::ImplBlock {
                 annotations: vec![],
                 trait_path: Some(type_path(&["Logger"])),
+                trait_args: vec![],
                 target: Box::new(type_node(11, "StdLogger")),
                 generic_params: vec![],
                 methods: vec![node(

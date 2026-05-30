@@ -1,0 +1,16 @@
+// TEST: stdlib_convert_stdlib_from
+// EXPECT: no_errors
+//
+// The `core.convert` module ships a sample `From[Celsius] for Fahrenheit`
+// conversion. A user importing `Celsius` and `Fahrenheit` resolves the
+// associated-function call `Fahrenheit.from(c)` across the module boundary
+// (the conversion method is exported with the `Fahrenheit` record and
+// type-checks against its declared `from(value: Celsius) -> Fahrenheit`
+// signature).
+module userapp
+
+use core.convert.{Celsius, Fahrenheit}
+
+public fn to_f(c: Celsius) -> Fahrenheit {
+  Fahrenheit.from(c)
+}

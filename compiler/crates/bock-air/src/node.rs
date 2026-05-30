@@ -267,6 +267,10 @@ pub enum NodeKind {
         annotations: Vec<Annotation>,
         generic_params: Vec<GenericParam>,
         trait_path: Option<TypePath>,
+        /// Type arguments applied to the trait, e.g. `[Int]` in
+        /// `impl From[Int] for Float`. Each is a type-expression node. Empty
+        /// for non-parameterized traits.
+        trait_args: Vec<AIRNode>,
         /// The type being implemented (a type-expression node).
         target: Box<AIRNode>,
         where_clause: Vec<TypeConstraint>,

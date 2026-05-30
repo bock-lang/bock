@@ -1,0 +1,12 @@
+// TEST: stdlib_convert_primitive_narrowing_excluded
+// EXPECT: error E4012 at 11:3
+//
+// Lossy / narrowing primitive conversions are NOT part of the v1 canonical
+// matrix: a widening `Int -> Int8` via `.into()` is rejected with `E4012`
+// because no `From[Int] for Int8` (lossless) conversion is registered.
+// Narrowing must be expressed via `TryFrom` instead.
+module userapp
+
+public fn narrow(x: Int) -> Int8 {
+  x.into()
+}

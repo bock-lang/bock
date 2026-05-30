@@ -272,6 +272,52 @@ mod tests {
     }
 
     #[test]
+    fn stdlib_convert_fixtures_parse_directives() {
+        // The `core.convert` conformance fixtures must load cleanly and expose
+        // their directives (the descriptive `//` block must not swallow the
+        // TEST/EXPECT lines, and the narrowing fixture's `error E<code> at
+        // <line>:<col>` directive must parse).
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dir = manifest.join("conformance/stdlib/convert");
+        let results = discover_tests(&dir);
+        assert!(
+            results.len() >= 4,
+            "expected at least 4 stdlib/convert fixtures, got {}",
+            results.len()
+        );
+        let mut cases = Vec::new();
+        for result in &results {
+            match result {
+                Ok(tc) => cases.push(tc),
+                Err(e) => panic!("stdlib/convert fixture failed to load: {e}"),
+            }
+        }
+        let by_name = |n: &str| cases.iter().find(|c| c.name == n);
+
+        assert_eq!(
+            by_name("stdlib_convert_user_from_into")
+                .expect("missing stdlib_convert_user_from_into")
+                .expectations,
+            vec![Expectation::NoErrors]
+        );
+        assert_eq!(
+            by_name("stdlib_convert_primitive_conversions")
+                .expect("missing stdlib_convert_primitive_conversions")
+                .expectations,
+            vec![Expectation::NoErrors]
+        );
+        let narrowing = by_name("stdlib_convert_primitive_narrowing_excluded")
+            .expect("missing stdlib_convert_primitive_narrowing_excluded");
+        assert_eq!(
+            narrowing.expectations,
+            vec![Expectation::ErrorAt {
+                code: "E4012".to_string(),
+                location: expectation::Location { line: 11, col: 3 },
+            }]
+        );
+    }
+
+    #[test]
     fn blank_lines_between_directives() {
         let src = "// TEST: spaced\n\n// EXPECT: no_errors\n\nfn foo() {}\n";
         let tc = parse_test_file(&fake_path(), src).unwrap();
