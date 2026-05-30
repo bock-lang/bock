@@ -18,6 +18,7 @@ mod pkg;
 mod promote;
 mod repl;
 mod run;
+mod stdlib;
 mod test;
 
 /// The Bock programming language compiler and toolchain.

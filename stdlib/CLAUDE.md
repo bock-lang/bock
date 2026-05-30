@@ -3,6 +3,69 @@
 This subtree holds Bock's standard library, organized as `std.*`
 packages.
 
+## The v1 Core (`core.*`)
+
+The **v1 core** standard library lives under `stdlib/core/` and is
+distinct from the broader `std.*` packages above. It is the minimal,
+always-available foundation (`core.error`, and siblings as they land).
+
+### Layout
+
+```
+stdlib/
+  core/
+    error/
+      error.bock     module core.error  (the pilot module)
+    <module>/
+      <module>.bock  module core.<module>
+```
+
+One directory per core module; the module's public surface lives in
+`<module>/<module>.bock` and declares `module core.<module>` at the top.
+
+### Loading model
+
+**Core ships embedded in the compiler.** The `bock` binary embeds every
+`stdlib/core/**/*.bock` source at build time (via the crate build script
+`compiler/crates/bock-cli/build.rs`, surfaced through
+`compiler/crates/bock-cli/src/stdlib.rs::core_sources`). At `check`,
+`build`, and `run` time, the CLI **prepends the parsed core sources to
+the parsed-files set before the user-file loop**, so they flow through
+the exact same multi-file pipeline (dependency sort → per-module compile
+→ register in the `ModuleRegistry`) and land in the registry before any
+user module. A user's `use core.<module>.{...}` (named import form) then
+resolves with no special-casing.
+
+Because core is embedded, a built `bock` resolves `core.*` from any
+working directory with no filesystem access — inside or outside the
+repo. A dev-only `$BOCK_STDLIB=<dir>` environment override reads the
+core sources from disk instead, for iterating on stdlib sources without
+a recompile.
+
+Diagnostics: core modules compile like any other module, but their
+**non-error** diagnostics (e.g. development-mode context-annotation
+recommendations) are **not surfaced** to the user — they describe
+internal stdlib code the user did not author. Core **errors** still
+surface (they are compiler defects).
+
+### Shims
+
+**Shims only where a host primitive is needed** — deferred until a
+module needs one. `core.error` is pure Bock (a trait + record + impl +
+constructor), so it needs **no** per-target runtime shim; that is why it
+is the pilot for the embedded source-compiled loading mechanism. When a
+future core module requires a host primitive, its per-target shim is
+added at that point (see the note on shim paths below).
+
+### Conformance
+
+Core fixtures live under `compiler/tests/conformance/stdlib/<module>/`
+in the harness's inline-directive format (`// TEST:` / `// EXPECT:
+no_errors` / `// EXPECT: output "..."`), not as separate `.expected`
+files. Cross-target source-emission is additionally verified by
+`compiler/crates/bock-cli/tests/stdlib_error_targets.rs`. Full
+conformance **execution** across targets is the separate Q-fconf task.
+
 ## Layout
 
 ```
@@ -45,6 +108,12 @@ Each package directory contains:
 4. **Wire codegen.** Each codegen backend may need a runtime shim
    for the new package. Add shims under
    `compiler/crates/bock-codegen-<target>/runtime/std/<name>/`.
+
+   > Note: this `bock-codegen-<target>` path is stale. Codegen now
+   > lives in a single `bock-codegen` crate (see
+   > `compiler/crates/bock-codegen/`), not per-target crates. Update
+   > this path when the shim layout is settled for the first core
+   > module that needs one.
 
 5. **Conformance.** Add fixtures under
    `compiler/tests/conformance/stdlib/<name>/` exercising the

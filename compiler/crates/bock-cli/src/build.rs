@@ -96,6 +96,17 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
     let mut parsed_files: Vec<ParsedFile> = Vec::new();
     let mut found_errors = false;
 
+    // Prepend the embedded core-stdlib sources so they compile and register
+    // through the SAME pipeline before user modules, letting a user module
+    // resolve and codegen `use core.<name>.{...}` with no special-casing. Each
+    // core module is emitted per target exactly like a user module.
+    for src in crate::stdlib::core_sources() {
+        match parse_stdlib_source(&src, &mut source_map) {
+            Ok(pf) => parsed_files.push(pf),
+            Err(()) => found_errors = true,
+        }
+    }
+
     for file_path in &files {
         match parse_file(file_path, &mut source_map) {
             Ok(pf) => parsed_files.push(pf),
@@ -148,6 +159,7 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
             source_file,
             &registry,
             strictness,
+            pf.is_stdlib,
         ) {
             Ok((air_module, checker)) => {
                 // Register exports for downstream modules
@@ -406,6 +418,10 @@ struct ParsedFile {
     filename: String,
     file_id: bock_errors::FileId,
     module: bock_ast::Module,
+    /// Whether this is an embedded core-stdlib source (prepended by the loader)
+    /// rather than a user file. Stdlib modules compile and emit like any other,
+    /// but their non-error diagnostics are not surfaced to the user.
+    is_stdlib: bool,
 }
 
 /// Lex and parse a single file, adding it to the shared [`SourceMap`].
@@ -451,6 +467,49 @@ fn parse_file(path: &Path, source_map: &mut SourceMap) -> Result<ParsedFile, ()>
         filename,
         file_id,
         module,
+        is_stdlib: false,
+    })
+}
+
+/// Lex and parse an embedded core-stdlib source into a [`ParsedFile`].
+///
+/// Mirrors [`parse_file`] but takes the source text directly (the embedded
+/// stdlib is compiled into the binary, not read from disk) and registers it in
+/// the shared [`SourceMap`] under its logical (repo-relative) path.
+fn parse_stdlib_source(
+    src: &crate::stdlib::StdlibSource,
+    source_map: &mut SourceMap,
+) -> Result<ParsedFile, ()> {
+    let filename = src.logical_path.display().to_string();
+    let file_id = source_map.add_file(src.logical_path.clone(), src.source.clone());
+    let source_file = source_map.get_file(file_id);
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    let mut lexer = Lexer::new(source_file);
+    let tokens = lexer.tokenize();
+    collect_diagnostics(&mut diags, lexer.diagnostics());
+
+    if has_errors(&diags) {
+        print_diagnostics(&diags, &filename, &source_file.content);
+        return Err(());
+    }
+
+    let mut parser = Parser::new(tokens, source_file);
+    let module = parser.parse_module();
+    collect_diagnostics(&mut diags, parser.diagnostics());
+
+    if has_errors(&diags) {
+        print_diagnostics(&diags, &filename, &source_file.content);
+        return Err(());
+    }
+
+    Ok(ParsedFile {
+        path: src.logical_path.clone(),
+        filename,
+        file_id,
+        module,
+        is_stdlib: true,
     })
 }
 
@@ -464,7 +523,19 @@ fn compile_frontend_with_registry(
     source_file: &bock_source::SourceFile,
     registry: &ModuleRegistry,
     strictness: Strictness,
+    is_stdlib: bool,
 ) -> Result<(bock_types::AIRModule, TypeChecker), ()> {
+    // Embedded stdlib modules are always compiled at development strictness,
+    // regardless of the user's `--strict`/`--release`: the user's strictness
+    // governs their code, not trusted internal stdlib sources. This keeps
+    // stdlib completeness gaps as warnings (suppressed below for stdlib) rather
+    // than errors that would fail a `--strict` build on unauthored code.
+    let strictness = if is_stdlib {
+        Strictness::Development
+    } else {
+        strictness
+    };
+
     let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
 
     // Name resolution (with registry for cross-file imports)
@@ -509,14 +580,18 @@ fn compile_frontend_with_registry(
         return Err(());
     }
 
-    // Print warnings
-    let warnings: Vec<&Diagnostic> = all_diagnostics
-        .iter()
-        .filter(|d| d.severity != Severity::Error)
-        .collect();
-    if !warnings.is_empty() {
-        let to_render: Vec<Diagnostic> = warnings.into_iter().cloned().collect();
-        print_diagnostics(&to_render, filename, &source_file.content);
+    // Print warnings. Stdlib modules surface only errors (compiler defects):
+    // their development-mode warnings describe internal code the user did not
+    // author and would otherwise be noise on every `bock build`.
+    if !is_stdlib {
+        let warnings: Vec<&Diagnostic> = all_diagnostics
+            .iter()
+            .filter(|d| d.severity != Severity::Error)
+            .collect();
+        if !warnings.is_empty() {
+            let to_render: Vec<Diagnostic> = warnings.into_iter().cloned().collect();
+            print_diagnostics(&to_render, filename, &source_file.content);
+        }
     }
 
     Ok((air_module, checker))

@@ -270,6 +270,18 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
     let mut source_map = SourceMap::new();
     let mut parsed_files: Vec<ParsedFile> = Vec::new();
 
+    // Prepend the embedded core-stdlib sources so they flow through the SAME
+    // pipeline (dependency sort + per-module compile) and land in the registry
+    // before any user module resolves `use core.<name>.{...}` against them.
+    // Each source's own `module core.<name>` declaration derives its module id,
+    // so there is no special-casing in name resolution or the type checker.
+    for src in crate::stdlib::core_sources() {
+        match parse_stdlib_source(&src, &mut source_map, !options.brief) {
+            Ok(pf) => parsed_files.push(pf),
+            Err(()) => found_errors = true,
+        }
+    }
+
     for file_path in &files {
         match parse_file(file_path, &mut source_map, !options.brief) {
             Ok(pf) => parsed_files.push(pf),
@@ -320,8 +332,9 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
         collect_diagnostics(&mut all_diagnostics, &resolve_diags);
 
         if has_errors(&all_diagnostics) {
+            let to_print = diagnostics_to_surface(&all_diagnostics, pf.is_stdlib);
             print_diagnostics(
-                &all_diagnostics,
+                &to_print,
                 &pf.filename,
                 &source_file.content,
                 !options.brief,
@@ -354,7 +367,18 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
 
         // The chosen strictness (development by default, production under
         // `--strict`) threads through every strictness-gated pass below.
-        let strictness = options.strictness();
+        // Embedded stdlib modules are always checked at development strictness,
+        // regardless of the user's `--strict`: the user's strictness governs
+        // the user's code, not trusted internal stdlib sources. This keeps
+        // stdlib completeness gaps (e.g. missing `@context`) as warnings —
+        // which are then suppressed for stdlib (see `diagnostics_to_surface`) —
+        // rather than promoting them to errors that would fail the user's
+        // `--strict` check on code they did not author.
+        let strictness = if pf.is_stdlib {
+            Strictness::Development
+        } else {
+            options.strictness()
+        };
 
         // 4d. Ownership and effect analysis — part of the default full check.
         // Neither is a v1 `--only` aspect, so they run only when no `--only`
@@ -393,9 +417,14 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
         // diagnostic (the selected aspects' output, errors and warnings alike).
         let module_has_errors = has_errors(&all_diagnostics);
 
-        if !all_diagnostics.is_empty() {
+        // Stdlib modules surface only errors (compiler defects); their
+        // development-mode warnings describe internal code the user did not
+        // write, so they are not leaked into user output. User modules surface
+        // every diagnostic.
+        let to_print = diagnostics_to_surface(&all_diagnostics, pf.is_stdlib);
+        if !to_print.is_empty() {
             print_diagnostics(
-                &all_diagnostics,
+                &to_print,
                 &pf.filename,
                 &source_file.content,
                 !options.brief,
@@ -427,6 +456,13 @@ struct ParsedFile {
     filename: String,
     file_id: bock_errors::FileId,
     module: bock_ast::Module,
+    /// Whether this file is an embedded core-stdlib source (prepended by the
+    /// loader) rather than a user file. Stdlib modules are compiled and
+    /// registered exactly like user modules, but their *non-error* diagnostics
+    /// (e.g. development-mode context-annotation recommendations) are not
+    /// surfaced to the user — they describe internal stdlib code the user did
+    /// not write. Stdlib *errors* still surface (they are compiler defects).
+    is_stdlib: bool,
 }
 
 /// Lex and parse a single file, adding it to the shared [`SourceMap`].
@@ -476,6 +512,57 @@ fn parse_file(
         filename,
         file_id,
         module,
+        is_stdlib: false,
+    })
+}
+
+/// Lex and parse an embedded core-stdlib source into a [`ParsedFile`].
+///
+/// Mirrors [`parse_file`] but takes the source text directly (the embedded
+/// stdlib is compiled into the binary, not read from disk) and registers it in
+/// the shared [`SourceMap`] under its logical (repo-relative) path so any
+/// diagnostic renders against a stable, recognizable location.
+///
+/// Returns `Err(())` if lexing or parsing produced errors (already printed). A
+/// parse error here is a compiler-internal defect (the embedded sources are
+/// fixed at build time), so it surfaces with the logical path for diagnosis.
+fn parse_stdlib_source(
+    src: &crate::stdlib::StdlibSource,
+    source_map: &mut SourceMap,
+    show_context: bool,
+) -> Result<ParsedFile, ()> {
+    let filename = src.logical_path.display().to_string();
+    let file_id = source_map.add_file(src.logical_path.clone(), src.source.clone());
+    let source_file = source_map.get_file(file_id);
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    // Lex
+    let mut lexer = Lexer::new(source_file);
+    let tokens = lexer.tokenize();
+    collect_diagnostics(&mut diags, lexer.diagnostics());
+
+    if has_errors(&diags) {
+        print_diagnostics(&diags, &filename, &source_file.content, show_context);
+        return Err(());
+    }
+
+    // Parse
+    let mut parser = Parser::new(tokens, source_file);
+    let module = parser.parse_module();
+    collect_diagnostics(&mut diags, parser.diagnostics());
+
+    if has_errors(&diags) {
+        print_diagnostics(&diags, &filename, &source_file.content, show_context);
+        return Err(());
+    }
+
+    Ok(ParsedFile {
+        path: src.logical_path.clone(),
+        filename,
+        file_id,
+        module,
+        is_stdlib: true,
     })
 }
 
@@ -489,6 +576,25 @@ fn collect_diagnostics(acc: &mut Vec<Diagnostic>, bag: &DiagnosticBag) {
 /// Check if any diagnostic in the list is an error.
 fn has_errors(diagnostics: &[Diagnostic]) -> bool {
     diagnostics.iter().any(|d| d.severity == Severity::Error)
+}
+
+/// Returns the diagnostics that should be surfaced to the user for a module.
+///
+/// For user modules this is every diagnostic. For embedded core-stdlib modules
+/// (`is_stdlib`), only errors are surfaced: stdlib errors are compiler defects
+/// and must be visible, but non-error diagnostics (e.g. development-mode
+/// context-annotation recommendations) describe internal stdlib code the user
+/// did not author and would otherwise be noise on every `bock check`.
+fn diagnostics_to_surface(diagnostics: &[Diagnostic], is_stdlib: bool) -> Vec<Diagnostic> {
+    if is_stdlib {
+        diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .cloned()
+            .collect()
+    } else {
+        diagnostics.to_vec()
+    }
 }
 
 /// Print diagnostics, optionally with source context.

@@ -234,6 +234,44 @@ mod tests {
     }
 
     #[test]
+    fn stdlib_error_fixtures_parse_directives() {
+        // The `core.error` conformance fixtures must load cleanly and expose
+        // their directives (the descriptive `//` comment block after the
+        // directives must not swallow the TEST/EXPECT lines).
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dir = manifest.join("conformance/stdlib/error");
+        let results = discover_tests(&dir);
+        assert!(
+            results.len() >= 3,
+            "expected at least 3 stdlib/error fixtures, got {}",
+            results.len()
+        );
+        let mut cases = Vec::new();
+        for result in &results {
+            match result {
+                Ok(tc) => cases.push(tc),
+                Err(e) => panic!("stdlib/error fixture failed to load: {e}"),
+            }
+        }
+        let by_name = |n: &str| cases.iter().find(|c| c.name == n);
+
+        let trait_case =
+            by_name("stdlib_error_trait_resolves").expect("missing stdlib_error_trait_resolves");
+        assert_eq!(trait_case.expectations, vec![Expectation::NoErrors]);
+
+        let ctor_case = by_name("stdlib_error_construct_and_use")
+            .expect("missing stdlib_error_construct_and_use");
+        assert_eq!(ctor_case.expectations, vec![Expectation::NoErrors]);
+
+        let output_case =
+            by_name("stdlib_error_output_smoke").expect("missing stdlib_error_output_smoke");
+        assert_eq!(
+            output_case.expectations,
+            vec![Expectation::Output("boom".to_string())]
+        );
+    }
+
+    #[test]
     fn blank_lines_between_directives() {
         let src = "// TEST: spaced\n\n// EXPECT: no_errors\n\nfn foo() {}\n";
         let tc = parse_test_file(&fake_path(), src).unwrap();

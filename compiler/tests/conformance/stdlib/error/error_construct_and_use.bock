@@ -1,0 +1,16 @@
+// TEST: stdlib_error_construct_and_use
+// EXPECT: no_errors
+//
+// `SimpleError` and the `error(...)` constructor from `core.error` build an
+// error value, and `.message()` reads it back.
+module userapp
+
+use core.error.{SimpleError, error}
+
+public fn make() -> SimpleError {
+  error("boom")
+}
+
+public fn read(e: SimpleError) -> String {
+  e.message()
+}
