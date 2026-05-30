@@ -161,6 +161,7 @@ impl CodeGenerator for GoGenerator {
         let mut ctx = GoEmitCtx::new();
         ctx.collect_async_fns(module);
         ctx.collect_methods(module);
+        ctx.collect_optional_returns(module);
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -207,6 +208,8 @@ impl CodeGenerator for GoGenerator {
         for (module, source_path) in modules {
             let mut ctx = GoEmitCtx::new();
             ctx.async_fns = global_async_fns.clone();
+            ctx.collect_methods(module);
+            ctx.collect_optional_returns(module);
             ctx.emit_node(module)?;
             let (body, needs_fmt, needs_sync, needs_time) = ctx.into_parts();
 
@@ -317,6 +320,20 @@ struct GoEmitCtx {
     switch_label_depth: usize,
     /// Monotonic counter for unique loop-label names.
     loop_label_counter: usize,
+    /// Maps a function name → the Go element type of its `Optional[T]` return
+    /// (`int64` for `-> Int?`). Pre-scanned across the module so a `match`
+    /// whose scrutinee is a call (`match next(it) { Some(x) => ... }`) can
+    /// type-assert the bound payload. Functions not returning an Optional are
+    /// absent.
+    fn_optional_ret_elem: HashMap<String, String>,
+    /// Maps an in-scope variable name → the Go element type of its `Optional[T]`
+    /// (e.g. an `o: Int?` parameter or a `let o: Int? = ...` binding maps to
+    /// `int64`). Lets a `match o { Some(x) => ... }` type-assert `__opt.v` to
+    /// the concrete element type instead of leaving it `interface{}`. The Go
+    /// Optional runtime stores the payload as `interface{}`, so without this
+    /// assertion any typed use of the bound value (`x + 10`) fails Go
+    /// compilation. Scoped per function body and restored on exit.
+    var_optional_elem: HashMap<String, String>,
 }
 
 impl GoEmitCtx {
@@ -339,6 +356,8 @@ impl GoEmitCtx {
             loop_labels: Vec::new(),
             switch_label_depth: 0,
             loop_label_counter: 0,
+            fn_optional_ret_elem: HashMap::new(),
+            var_optional_elem: HashMap::new(),
         }
     }
 
@@ -383,6 +402,98 @@ impl GoEmitCtx {
                     }
                 }
             }
+        }
+    }
+
+    /// Pre-scan top-level functions whose declared return type is `Optional[T]`,
+    /// recording `fn name → Go element type` of `T`. This lets a `match` whose
+    /// scrutinee is a call to such a function (`match next(it) { Some(x) => ...
+    /// }`) type-assert the bound payload to its concrete type. Must run before
+    /// any match is emitted, so it covers forward references within the module.
+    fn collect_optional_returns(&mut self, module: &AIRNode) {
+        if let NodeKind::Module { items, .. } = &module.kind {
+            for item in items {
+                if let NodeKind::FnDecl {
+                    name,
+                    return_type: Some(rt),
+                    ..
+                } = &item.kind
+                {
+                    if let Some(elem) = self.optional_elem_go_type(rt) {
+                        self.fn_optional_ret_elem.insert(name.name.clone(), elem);
+                    }
+                }
+            }
+        }
+    }
+
+    /// If `node` is an `Optional[T]` type expression, return the Go type of its
+    /// element `T`; otherwise `None`. Used to type-assert the `interface{}`
+    /// payload of the Go Optional runtime back to its concrete element type at
+    /// `match` arms. The element type is reachable structurally here because it
+    /// lives in the `TypeOptional`/`Optional`-named node, unlike at the
+    /// scrutinee expression (whose carried `type_info` is a stub).
+    fn optional_elem_go_type(&self, node: &AIRNode) -> Option<String> {
+        match &node.kind {
+            NodeKind::TypeOptional { inner } => Some(self.type_to_go(inner)),
+            NodeKind::TypeNamed { path, args } => {
+                let is_optional = path.segments.last().is_some_and(|s| s.name == "Optional");
+                if is_optional {
+                    Some(
+                        args.first()
+                            .map_or_else(|| "interface{}".to_string(), |a| self.type_to_go(a)),
+                    )
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Record the Optional element Go types of a function/lambda's parameters
+    /// into the variable scope, so a `match param { Some(x) => ... }` inside the
+    /// body can type-assert the payload. Returns the previous scope so the
+    /// caller can restore it on exit (Go has no block-scoped reset here).
+    fn enter_param_optional_scope(&mut self, params: &[AIRNode]) -> HashMap<String, String> {
+        let saved = self.var_optional_elem.clone();
+        for p in params {
+            if let NodeKind::Param {
+                pattern,
+                ty: Some(t),
+                ..
+            } = &p.kind
+            {
+                if let Some(elem) = self.optional_elem_go_type(t) {
+                    let name = to_camel_case(&self.pattern_to_binding_name(pattern));
+                    self.var_optional_elem.insert(name, elem);
+                }
+            }
+        }
+        saved
+    }
+
+    /// Resolve the Go element type to assert for the payload of a `Some` bound in
+    /// a `match` on `scrutinee`. Reachable for the common, structurally
+    /// determinable cases: an identifier (parameter or typed `let`) and a call
+    /// to a function with a known `Optional[T]` return. Returns `None` when the
+    /// element type cannot be determined structurally, in which case the binding
+    /// is left as the runtime `interface{}` (no regression: that is the prior
+    /// behavior, and `${v}`-style interpolation still works).
+    fn scrutinee_optional_elem(&self, scrutinee: &AIRNode) -> Option<String> {
+        match &scrutinee.kind {
+            NodeKind::Identifier { name } => self
+                .var_optional_elem
+                .get(&to_camel_case(&name.name))
+                .cloned(),
+            NodeKind::Call { callee, .. } => {
+                if let NodeKind::Identifier { name } = &callee.kind {
+                    self.fn_optional_ret_elem.get(&name.name).cloned()
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1107,11 +1218,13 @@ impl GoEmitCtx {
             self.current_handler_vars
                 .insert(ename.clone(), to_camel_case(ename));
         }
+        let saved_opt_scope = self.enter_param_optional_scope(params);
         if name == "main" || is_void {
             self.emit_block_body(body)?;
         } else {
             self.emit_block_body_return(body)?;
         }
+        self.var_optional_elem = saved_opt_scope;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         self.writeln("}");
@@ -1263,11 +1376,13 @@ impl GoEmitCtx {
                 self.current_handler_vars
                     .insert(ename.clone(), to_camel_case(ename));
             }
+            let saved_opt_scope = self.enter_param_optional_scope(rest);
             if return_type.is_some() && !is_void {
                 self.emit_block_body_return(body)?;
             } else {
                 self.emit_block_body(body)?;
             }
+            self.var_optional_elem = saved_opt_scope;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
             self.writeln("}");
@@ -1406,6 +1521,12 @@ impl GoEmitCtx {
             } => {
                 let binding = self.pattern_to_go_binding(pattern);
                 if let Some(t) = ty {
+                    // Record an `Optional[T]` binding's element type so a later
+                    // `match binding { Some(x) => ... }` can type-assert `x`.
+                    if let Some(elem) = self.optional_elem_go_type(t) {
+                        self.var_optional_elem
+                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
+                    }
                     let type_str = self.type_to_go(t);
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}var {binding} {type_str} = ");
@@ -2237,10 +2358,11 @@ impl GoEmitCtx {
         scrutinee: &AIRNode,
         arms: &[AIRNode],
     ) -> Result<(), CodegenError> {
+        let elem = self.scrutinee_optional_elem(scrutinee);
         self.buf.push_str("func() interface{} { __opt := ");
         self.emit_expr(scrutinee)?;
         self.buf.push_str("; ");
-        self.emit_optional_match_arms(arms, /*as_expr=*/ true)?;
+        self.emit_optional_match_arms(arms, /*as_expr=*/ true, elem.as_deref())?;
         self.buf.push_str(" }()");
         Ok(())
     }
@@ -2252,12 +2374,13 @@ impl GoEmitCtx {
         scrutinee: &AIRNode,
         arms: &[AIRNode],
     ) -> Result<(), CodegenError> {
+        let elem = self.scrutinee_optional_elem(scrutinee);
         let ind = self.indent_str();
         let _ = write!(self.buf, "{ind}__opt := ");
         self.emit_expr(scrutinee)?;
         self.buf.push('\n');
         self.write_indent();
-        self.emit_optional_match_arms(arms, /*as_expr=*/ false)?;
+        self.emit_optional_match_arms(arms, /*as_expr=*/ false, elem.as_deref())?;
         self.buf.push('\n');
         Ok(())
     }
@@ -2270,6 +2393,7 @@ impl GoEmitCtx {
         &mut self,
         arms: &[AIRNode],
         as_expr: bool,
+        some_elem_ty: Option<&str>,
     ) -> Result<(), CodegenError> {
         let mut first = true;
         let arm_count = arms.len();
@@ -2282,18 +2406,24 @@ impl GoEmitCtx {
             // rendered as a plain `else` so the if-chain is exhaustive from
             // Go\'s control-flow view (Bock matches are exhaustive). Its bound
             // name (e.g. the `Some(v)` value) is still extracted.
-            let (cond, bind): (String, Option<String>) = match &pattern.kind {
+            // `bind` is the payload name (the `v` in `Some(v)`); `bind_is_payload`
+            // is true only when it binds the `Some` payload (not a catch-all
+            // binding of the whole option), so the `interface{}` payload type
+            // assertion applies to exactly that case.
+            let (cond, bind, bind_is_payload): (String, Option<String>, bool) = match &pattern.kind
+            {
                 NodeKind::ConstructorPat { path, fields } => {
                     let variant = path.segments.last().map_or("", |s| s.name.as_str());
                     let bind = fields.first().map(|f| self.pattern_to_binding_name(f));
+                    let is_payload = bind.is_some() && variant == "Some";
                     if is_last {
-                        (String::new(), bind)
+                        (String::new(), bind, is_payload)
                     } else {
-                        (format!("__opt.tag == \"{variant}\""), bind)
+                        (format!("__opt.tag == \"{variant}\""), bind, is_payload)
                     }
                 }
                 // Wildcard / bind pattern → catch-all.
-                _ => (String::new(), None),
+                _ => (String::new(), None, false),
             };
             if first {
                 first = false;
@@ -2310,7 +2440,22 @@ impl GoEmitCtx {
             self.buf.push(' ');
             if let Some(name) = &bind {
                 if name != "_" {
-                    let _ = write!(self.buf, "{name} := __opt.v; _ = {name}; ");
+                    // The runtime stores the payload as `interface{}`. Assert it
+                    // back to the concrete element type so typed use of the bound
+                    // value (`x + 10`, a typed call) compiles. The element type
+                    // comes from the scrutinee's `Optional[T]` (resolved
+                    // structurally by the caller); when unknown, fall back to the
+                    // bare `interface{}` payload — no regression, but typed use
+                    // would not compile, which only happens if the scrutinee's
+                    // element type is not structurally determinable.
+                    match (bind_is_payload, some_elem_ty) {
+                        (true, Some(ty)) => {
+                            let _ = write!(self.buf, "{name} := __opt.v.({ty}); _ = {name}; ");
+                        }
+                        _ => {
+                            let _ = write!(self.buf, "{name} := __opt.v; _ = {name}; ");
+                        }
+                    }
                 }
             }
             if as_expr {
@@ -3906,6 +4051,114 @@ mod tests {
         );
         let out2 = gen(&module(vec![], vec![f2]));
         assert!(!out2.contains("__bockOption"), "got: {out2}");
+    }
+
+    /// The Go Optional runtime stores the `Some` payload as `interface{}`. A
+    /// `match` arm binding it (`Some(x)`) must type-assert to the scrutinee's
+    /// concrete element type so typed use (`x + 10`) compiles. The element type
+    /// is resolved structurally from the `Optional[T]` parameter scrutinee.
+    #[test]
+    fn optional_match_some_payload_type_asserted() {
+        // fn addTen(o: Int?) -> Int { match o { Some(x) => return x; None => return 0 } }
+        let opt_int_ty = node(
+            200,
+            NodeKind::TypeOptional {
+                inner: Box::new(node(
+                    201,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                )),
+            },
+        );
+        let o_param = node(
+            30,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(31, "o")),
+                ty: Some(Box::new(opt_int_ty)),
+                default: None,
+            },
+        );
+        let some_arm = node(
+            40,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    41,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Some"]),
+                        fields: vec![bind_pat(42, "x")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    43,
+                    vec![node(
+                        44,
+                        NodeKind::Return {
+                            value: Some(Box::new(id_node(45, "x"))),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let none_arm = node(
+            50,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    51,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["None"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    52,
+                    vec![node(
+                        53,
+                        NodeKind::Return {
+                            value: Some(Box::new(int_lit(54, "0"))),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let match_stmt = node(
+            60,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(61, "o")),
+                arms: vec![some_arm, none_arm],
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("addTen"),
+                generic_params: vec![],
+                params: vec![o_param],
+                return_type: Some(Box::new(node(
+                    2,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(3, vec![match_stmt], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("x := __opt.v.(int64);"),
+            "Some payload should be type-asserted to the element type, got: {out}"
+        );
     }
 
     #[test]

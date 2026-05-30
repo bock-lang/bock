@@ -33,6 +33,47 @@ fn py_module_uses_concurrency(items: &[AIRNode]) -> bool {
     })
 }
 
+/// True if the module references `Optional`, `Some`, or `None` anywhere, so the
+/// Optional runtime prelude must be emitted. A cheap structural scan over the
+/// debug rendering, mirroring [`py_module_uses_concurrency`] and the Go/TS
+/// backends' `*_module_uses_optional`.
+fn py_module_uses_optional(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"Optional\"")
+            || s.contains("TypeOptional")
+            || s.contains("\"Some\"")
+            || s.contains("\"None\"")
+    })
+}
+
+/// Runtime for Bock `Optional[T]` in Python. The *value* representation mirrors
+/// JS/TS/Go: a tagged value with a `Some` payload or a `None` marker. Python's
+/// `None` is a keyword (and a distinct concept), so Bock's `None` must NOT
+/// collide with it — it lowers to the singleton `_bock_none`, and `Some(x)` to
+/// `_BockSome(x)`. `__match_args__` lets `case _BockSome(v):` bind the payload
+/// positionally; `case _BockNone():` matches the marker. This keeps type and
+/// value in agreement and makes `match o { Some(x) => ...; None => ... }` lower
+/// to valid structural pattern matching (the old codegen emitted bare
+/// `Some`/`None` with no definitions and `case None():`, a `SyntaxError`).
+const OPTIONAL_RUNTIME_PY: &str = "\
+# ── Bock Optional runtime ──
+class _BockSome:
+    __match_args__ = ('_0',)
+    __slots__ = ('_0',)
+    def __init__(self, _0):
+        self._0 = _0
+    def __repr__(self):
+        return f'Some({self._0!r})'
+
+class _BockNone:
+    __slots__ = ()
+    def __repr__(self):
+        return 'None'
+
+_bock_none = _BockNone()
+";
+
 const CONCURRENCY_RUNTIME_PY: &str = "\
 # ── Bock concurrency runtime ──
 import asyncio as __bock_asyncio
@@ -249,6 +290,13 @@ impl PyEmitCtx {
             }
             "todo" => "raise NotImplementedError()".to_string(),
             "unreachable" => "raise RuntimeError(\"unreachable\")".to_string(),
+            // Optional `Some(x)` constructor → tagged runtime value (see
+            // `OPTIONAL_RUNTIME_PY`). `None` is not a call; it lowers in the
+            // `Identifier` arm to the `_bock_none` singleton.
+            "Some" => {
+                let a = arg_strs.first().map_or(String::new(), |s| s.clone());
+                format!("_BockSome({a})")
+            }
             "sleep" => {
                 self.needs_asyncio_import = true;
                 let a = arg_strs.first().map_or(String::new(), |s| s.clone());
@@ -404,6 +452,10 @@ impl PyEmitCtx {
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         match &node.kind {
             NodeKind::Module { imports, items, .. } => {
+                if py_module_uses_optional(items) {
+                    self.buf.push_str(OPTIONAL_RUNTIME_PY);
+                    self.buf.push('\n');
+                }
                 if py_module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_PY);
                     self.buf.push('\n');
@@ -1285,7 +1337,16 @@ impl PyEmitCtx {
                 Ok(())
             }
             NodeKind::Identifier { name } => {
-                self.buf.push_str(&identifier_to_py(&name.name));
+                // Bock's Optional `None` constructor must not collide with
+                // Python's `None` keyword: it lowers to the `_bock_none`
+                // singleton of the Optional runtime (see `OPTIONAL_RUNTIME_PY`).
+                // Python's own `None` (Void/Unit) is emitted as a `Literal::Unit`,
+                // not an identifier, so this rewrite is unambiguous.
+                if name.name == "None" {
+                    self.buf.push_str("_bock_none");
+                } else {
+                    self.buf.push_str(&identifier_to_py(&name.name));
+                }
                 Ok(())
             }
             NodeKind::BinaryOp { op, left, right } => {
@@ -1820,6 +1881,28 @@ impl PyEmitCtx {
                 Literal::Unit => self.buf.push_str("None"),
             },
             NodeKind::ConstructorPat { path, fields } => {
+                // Optional `Some`/`None` patterns dispatch on the Optional
+                // runtime classes (see `OPTIONAL_RUNTIME_PY`), not on a bare
+                // `Some(...)` / `None()` class (the latter is undefined, and
+                // `case None():` is a Python `SyntaxError`). `_BockSome` exposes
+                // `__match_args__ = ('_0',)` so the payload binds positionally.
+                let leaf = path.segments.last().map_or("", |s| s.name.as_str());
+                match leaf {
+                    "Some" => {
+                        if let Some(f) = fields.first() {
+                            let name = self.pattern_to_binding_name(f);
+                            let _ = write!(self.buf, "_BockSome({name})");
+                        } else {
+                            self.buf.push_str("_BockSome(_)");
+                        }
+                        return Ok(());
+                    }
+                    "None" => {
+                        self.buf.push_str("_BockNone()");
+                        return Ok(());
+                    }
+                    _ => {}
+                }
                 let variant_name = path
                     .segments
                     .iter()
@@ -1967,7 +2050,14 @@ impl PyEmitCtx {
                 )
             }
             NodeKind::TypeOptional { inner } => {
-                format!("{} | None", self.type_to_py(inner))
+                // `T?` lowers to the tagged Optional runtime, not `T | None`:
+                // the value is `_BockSome(...)` / `_bock_none`, so the annotation
+                // must describe those classes for type and value to agree (mirrors
+                // Go's `__bockOption` and TS's `BockOption<T>`). The element type
+                // `T` is preserved as a comment for readability; Python does not
+                // enforce annotations at runtime.
+                let _ = inner;
+                "_BockSome | _BockNone".to_string()
             }
             NodeKind::TypeSelf => "Self".into(),
             _ => "Any".into(),
@@ -2022,7 +2112,10 @@ impl PyEmitCtx {
                 )
             }
             TypeExpr::Optional { inner, .. } => {
-                format!("{} | None", self.ast_type_to_py(inner))
+                // See the `TypeOptional` arm of `type_to_py`: the tagged Optional
+                // runtime classes must match the emitted tagged value.
+                let _ = inner;
+                "_BockSome | _BockNone".to_string()
             }
             TypeExpr::SelfType { .. } => "Self".into(),
         }
@@ -4491,5 +4584,161 @@ mod tests {
         let out = gen(&module(vec![], vec![f]));
         assert!(!out.contains("create_task"), "got: {out}");
         assert!(out.contains("a = 42"), "got: {out}");
+    }
+
+    /// Q-py-optional: the Python Optional runtime is emitted when a module uses
+    /// Optional/`Some`/`None`; `Some(x)` and `None` lower to the tagged runtime
+    /// values (`_BockSome(...)` / `_bock_none`), and an Optional `match` lowers
+    /// to structural arms (`case _BockSome(x):` / `case _BockNone():`) — not the
+    /// old bare `Some`/`None` (undefined) and `case None():` (a SyntaxError).
+    #[test]
+    fn optional_runtime_construct_and_match() {
+        // fn describe(o: Int?) -> Int {
+        //   match o { Some(x) => return x; None => return Some(0); }  (Some forces construction)
+        // }
+        let opt_int_ty = node(
+            200,
+            NodeKind::TypeOptional {
+                inner: Box::new(node(
+                    201,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                )),
+            },
+        );
+        let o_param = node(
+            30,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(31, "o")),
+                ty: Some(Box::new(opt_int_ty)),
+                default: None,
+            },
+        );
+        // Construct Some(1) and None in the body so the prelude + constructors
+        // are exercised.
+        let some_call = node(
+            70,
+            NodeKind::Call {
+                callee: Box::new(id_node(71, "Some")),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(72, "1"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let none_ref = id_node(73, "None");
+        let some_arm = node(
+            40,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    41,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Some"]),
+                        fields: vec![bind_pat(42, "x")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    43,
+                    vec![node(
+                        44,
+                        NodeKind::Return {
+                            value: Some(Box::new(id_node(45, "x"))),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let none_arm = node(
+            50,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    51,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["None"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    52,
+                    vec![node(
+                        53,
+                        NodeKind::Return {
+                            value: Some(Box::new(int_lit(54, "0"))),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let match_stmt = node(
+            60,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(61, "o")),
+                arms: vec![some_arm, none_arm],
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("describe"),
+                generic_params: vec![],
+                params: vec![o_param],
+                return_type: Some(Box::new(node(
+                    2,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    3,
+                    vec![
+                        node(
+                            80,
+                            NodeKind::LetBinding {
+                                is_mut: false,
+                                pattern: Box::new(bind_pat(81, "a")),
+                                ty: None,
+                                value: Box::new(some_call),
+                            },
+                        ),
+                        node(
+                            82,
+                            NodeKind::LetBinding {
+                                is_mut: false,
+                                pattern: Box::new(bind_pat(83, "b")),
+                                ty: None,
+                                value: Box::new(none_ref),
+                            },
+                        ),
+                        match_stmt,
+                    ],
+                    None,
+                )),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        // Runtime prelude is present.
+        assert!(out.contains("class _BockSome:"), "got: {out}");
+        assert!(out.contains("class _BockNone:"), "got: {out}");
+        assert!(out.contains("_bock_none = _BockNone()"), "got: {out}");
+        // Constructors lower to the runtime values, not bare `Some`/`None`.
+        assert!(out.contains("_BockSome(1)"), "got: {out}");
+        assert!(out.contains("b = _bock_none"), "got: {out}");
+        // Match arms are structural, not `Some(...)` / `case None():`.
+        assert!(out.contains("case _BockSome(x):"), "got: {out}");
+        assert!(out.contains("case _BockNone():"), "got: {out}");
+        assert!(!out.contains("case None()"), "got: {out}");
     }
 }

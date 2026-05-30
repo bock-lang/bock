@@ -1,0 +1,64 @@
+// TEST: exec_optional_typed_payload
+// EXPECT: output "16;0;42"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression fixture for the cross-target Optional *payload* story: a
+// `match o { Some(x) => <typed use of x> ... }` whose bound payload is used in
+// a *typed* position (arithmetic `x + 6`, a typed call `double(x)`), not just
+// interpolated. This is the case `core.iter` needs and the one that exposed two
+// codegen defects the `${v}`-only `go_optional_runtime.bock` fixture masked:
+//
+// - Go (typed-payload defect): the Optional runtime stores the `Some` payload as
+//   `interface{}`, and the `match` arm bound it as a bare `x := __opt.v` with no
+//   type assertion, so `x + 6` failed `go build` ("mismatched types interface{}
+//   and untyped int"). Fixed by type-asserting `x := __opt.v.(int64)` using the
+//   scrutinee's structurally-resolved `Optional[T]` element type.
+//
+// - Python (Q-py-optional): there was no Optional runtime at all — `Some`/`None`
+//   were emitted bare (undefined) and a `None` arm emitted `case None():`, a
+//   `SyntaxError`. Fixed with a tagged Optional runtime (`_BockSome`/`_BockNone`
+//   + the `_bock_none` singleton, since Bock `None` must not collide with
+//   Python's `None` keyword) and structural arms `case _BockSome(x):` /
+//   `case _BockNone():`.
+//
+// The scrutinee is exercised in two structurally-distinct shapes the Go fix must
+// resolve: a parameter (`addSix(o)`) and a direct call result (`match
+// firstPositive(...)`).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn firstPositive(a: Int, b: Int) -> Int? {
+  if (a > 0) {
+    return Some(a)
+  }
+  if (b > 0) {
+    return Some(b)
+  }
+  return None
+}
+
+fn double(n: Int) -> Int {
+  return n * 2
+}
+
+// Scrutinee is a parameter; payload used in typed arithmetic.
+fn addSix(o: Int?) -> Int {
+  match o {
+    Some(x) => return x + 6
+    None => return 0
+  }
+}
+
+// Scrutinee is a call result; payload passed to a typed function.
+fn doubleOr(a: Int, b: Int) -> Int {
+  match firstPositive(a, b) {
+    Some(x) => return double(x)
+    None => return -1
+  }
+}
+
+fn main() -> Void {
+  println("${addSix(firstPositive(10, 0))};${addSix(firstPositive(0, 0))};${doubleOr(21, 0)}")
+}

@@ -180,6 +180,13 @@ struct TsEmitCtx {
     switch_label_depth: usize,
     /// Monotonic counter for unique loop-label names.
     loop_label_counter: usize,
+    /// Monotonic counter for unique `match` scrutinee temporaries. A non-trivial
+    /// scrutinee (a call, etc.) is hoisted into `const __matchN = <scrutinee>;`
+    /// once, so it is evaluated a single time and — crucially for TypeScript —
+    /// the discriminated-union narrowing on `__matchN._tag` flows to `__matchN._0`
+    /// in the arm bodies. Re-emitting the scrutinee expression inline (the prior
+    /// behavior) both double-evaluated it and defeated narrowing (TS2339 on `_0`).
+    match_temp_counter: usize,
 }
 
 impl TsEmitCtx {
@@ -201,6 +208,7 @@ impl TsEmitCtx {
             loop_labels: Vec::new(),
             switch_label_depth: 0,
             loop_label_counter: 0,
+            match_temp_counter: 0,
         }
     }
 
@@ -2164,26 +2172,55 @@ impl TsEmitCtx {
             }
         });
 
-        if is_adt {
+        // Hoist a non-trivial scrutinee into a single `const __matchN = …;` so it
+        // is evaluated once and TS narrowing on `__matchN._tag` reaches the
+        // payload access `__matchN._0` in the arm bodies. A bare identifier is
+        // already a stable reference — leave it inline.
+        let temp = if matches!(scrutinee.kind, NodeKind::Identifier { .. }) {
+            None
+        } else {
+            self.match_temp_counter += 1;
+            let name = format!("__match{}", self.match_temp_counter);
             let ind = self.indent_str();
-            let _ = write!(self.buf, "{ind}switch (");
+            let _ = write!(self.buf, "{ind}const {name} = ");
             self.emit_expr(scrutinee)?;
+            self.buf.push_str(";\n");
+            Some(name)
+        };
+
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}switch (");
+        self.emit_scrutinee_ref(scrutinee, temp.as_deref())?;
+        if is_adt {
             self.buf.push_str("._tag) {\n");
         } else {
-            let ind = self.indent_str();
-            let _ = write!(self.buf, "{ind}switch (");
-            self.emit_expr(scrutinee)?;
             self.buf.push_str(") {\n");
         }
         self.indent += 1;
         self.switch_label_depth += 1;
         for arm in arms {
-            self.emit_match_arm(arm, is_adt, scrutinee)?;
+            self.emit_match_arm(arm, is_adt, scrutinee, temp.as_deref())?;
         }
         self.switch_label_depth -= 1;
         self.indent -= 1;
         self.writeln("}");
         Ok(())
+    }
+
+    /// Emit a reference to the match scrutinee: the hoisted temp name when one
+    /// was introduced, else the scrutinee expression inline (a bare identifier).
+    fn emit_scrutinee_ref(
+        &mut self,
+        scrutinee: &AIRNode,
+        temp: Option<&str>,
+    ) -> Result<(), CodegenError> {
+        match temp {
+            Some(name) => {
+                self.buf.push_str(name);
+                Ok(())
+            }
+            None => self.emit_expr(scrutinee),
+        }
     }
 
     /// Emit a TS label before a loop iff a contained statement-arm `match`
@@ -2209,6 +2246,7 @@ impl TsEmitCtx {
         arm: &AIRNode,
         is_adt: bool,
         scrutinee: &AIRNode,
+        temp: Option<&str>,
     ) -> Result<(), CodegenError> {
         if let NodeKind::MatchArm {
             pattern,
@@ -2225,7 +2263,7 @@ impl TsEmitCtx {
                     self.indent += 1;
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}const {} = ", name.name);
-                    self.emit_expr(scrutinee)?;
+                    self.emit_scrutinee_ref(scrutinee, temp)?;
                     self.buf.push_str(";\n");
                     self.indent -= 1;
                 }
@@ -2259,7 +2297,7 @@ impl TsEmitCtx {
                             let binding = self.pattern_to_binding_name(field);
                             let ind = self.indent_str();
                             let _ = write!(self.buf, "{ind}const {binding} = ");
-                            self.emit_expr(scrutinee)?;
+                            self.emit_scrutinee_ref(scrutinee, temp)?;
                             let _ = writeln!(self.buf, "._{i};");
                         }
                         self.indent -= 1;
@@ -2280,12 +2318,12 @@ impl TsEmitCtx {
                                 let binding = self.pattern_to_binding_name(pat);
                                 let ind = self.indent_str();
                                 let _ = write!(self.buf, "{ind}const {binding} = ");
-                                self.emit_expr(scrutinee)?;
+                                self.emit_scrutinee_ref(scrutinee, temp)?;
                                 let _ = writeln!(self.buf, ".{field_name};");
                             } else {
                                 let ind = self.indent_str();
                                 let _ = write!(self.buf, "{ind}const {field_name} = ");
-                                self.emit_expr(scrutinee)?;
+                                self.emit_scrutinee_ref(scrutinee, temp)?;
                                 let _ = writeln!(self.buf, ".{field_name};");
                             }
                         }
@@ -4166,6 +4204,93 @@ mod tests {
         assert!(
             out.contains("{ _tag: \"Some\" as const, _0: 7 }"),
             "Some should lower to the matching tagged-object value, got: {out}"
+        );
+    }
+
+    /// A `match` whose scrutinee is a call (not a bare identifier) must hoist it
+    /// into a single `const __matchN = …;`. Re-emitting the call inline at the
+    /// switch head and in each payload binding both double-evaluated it and
+    /// defeated TS discriminated-union narrowing (TS2339 on `_0`, since
+    /// `f()._0` is a fresh, un-narrowed expression). The hoisted temp is a
+    /// stable reference TS narrows correctly.
+    #[test]
+    fn match_call_scrutinee_hoisted_to_temp() {
+        // match f() { Some(x) => x; None => 0 }
+        let scrutinee = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "f")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let some_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Some"]),
+                        fields: vec![bind_pat(22, "x")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(23, vec![], Some(id_node(24, "x")))),
+            },
+        );
+        let none_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    31,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["None"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(32, vec![], Some(int_lit(33, "0")))),
+            },
+        );
+        let match_stmt = node(
+            40,
+            NodeKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![some_arm, none_arm],
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("run"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(2, vec![match_stmt], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("const __match1 = f();"),
+            "call scrutinee should be hoisted to a temp, got: {out}"
+        );
+        assert!(
+            out.contains("switch (__match1._tag)"),
+            "switch should dispatch on the hoisted temp, got: {out}"
+        );
+        assert!(
+            out.contains("const x = __match1._0;"),
+            "payload binding should read the hoisted temp (for narrowing), got: {out}"
+        );
+        // The call must not be re-emitted inline (single evaluation).
+        assert!(
+            !out.contains("f()._tag") && !out.contains("f()._0"),
+            "call scrutinee must not be re-emitted inline, got: {out}"
         );
     }
 }
