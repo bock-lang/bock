@@ -1,0 +1,60 @@
+// TEST: impl_self_signature_substitution
+// EXPECT: no_errors
+//
+// Regression fixture for Q-self-subst (codegen-completeness P2): an impl block
+// that writes `Self` in its OWN method signature — `-> Self` in return position
+// and `other: Self` in parameter position — must type-check.
+//
+// Before the fix, the checker substituted `Self` -> the concrete target only
+// for *trait-declared* method types, not for the impl method's own registered
+// `FnSig`, so the registered signature kept `Named("Self")`. Call sites then
+// hit E4001 (`Named("Self")` vs the concrete target) — which is why
+// `core.compare`'s `Comparable` impls had to write the CONCRETE operand type
+// (`other: Key`) as a workaround rather than `other: Self`.
+//
+// The fix substitutes `Self` -> the impl's target across each impl method's
+// param and return types at registration. This fixture exercises both
+// positions in a plain (non-trait) `impl` and via a trait `impl` that writes
+// `Self` directly (the form the workaround previously precluded).
+module userapp
+
+record Doubler {
+  value: Int
+}
+
+impl Doubler {
+  // `-> Self` in return position.
+  public fn doubled(self) -> Self {
+    Doubler { value: self.value + self.value }
+  }
+
+  // `other: Self` in parameter position.
+  public fn add(self, other: Self) -> Int {
+    self.value + other.value
+  }
+}
+
+trait Ranked {
+  fn beats(self, other: Self) -> Bool
+}
+
+record Card {
+  rank: Int
+}
+
+impl Ranked for Card {
+  // A trait impl may now write `other: Self` directly instead of the concrete
+  // operand type the old E4001 forced.
+  public fn beats(self, other: Self) -> Bool {
+    self.rank > other.rank
+  }
+}
+
+public fn use_doubler(d: Doubler) -> Int {
+  let bigger: Doubler = d.doubled()
+  bigger.add(d)
+}
+
+public fn use_card(a: Card, b: Card) -> Bool {
+  a.beats(b)
+}

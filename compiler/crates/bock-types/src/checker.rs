@@ -850,6 +850,21 @@ impl TypeChecker {
                             effects: vec![],
                         });
 
+                        // Substitute `Self` -> the impl's target type across the
+                        // method signature (params + return). An explicit `Self`
+                        // written in an impl method's own signature — e.g.
+                        // `fn double(self) -> Self` or `fn combine(self, other:
+                        // Self)` — lowers to `Type::Named("Self")`, which the
+                        // trait-method resolution path substitutes but the impl
+                        // method's own registered `FnSig` did not, yielding E4001
+                        // at call sites (Named("Self") vs the concrete target).
+                        // This mirrors the trait-method `self_params=["Self"]`
+                        // substitution. Associated-type `Self::Output` is out of
+                        // scope (parsed as a distinct type path, not `Self`).
+                        let self_params = ["Self".to_string()];
+                        let self_args = [target_ty.clone()];
+                        let fn_ty = substitute_type_params(&fn_ty, &self_params, &self_args);
+
                         self.method_types
                             .entry(target_name.clone())
                             .or_default()
@@ -4821,6 +4836,153 @@ mod tests {
             "errors: {:?}",
             checker.diags.iter().collect::<Vec<_>>()
         );
+    }
+
+    // ── impl-method `Self` substitution (Q-self-subst) ───────────────────
+
+    /// Build an `impl <target> { <method>(self, <extra params>) -> <ret> }`
+    /// AIR module node and return it ready for `collect_sig`.
+    ///
+    /// `extra_params` are `(name, type_node)` pairs appended after the
+    /// untyped `self`; `ret` is the method's return-type node.
+    fn impl_with_method(
+        gen: &NodeIdGen,
+        target: &str,
+        method: &str,
+        extra_params: Vec<(&str, AIRNode)>,
+        ret: AIRNode,
+    ) -> AIRNode {
+        let self_pat = make_node(
+            gen,
+            NodeKind::BindPat {
+                name: ident("self"),
+                is_mut: false,
+            },
+        );
+        let self_param = make_node(
+            gen,
+            NodeKind::Param {
+                pattern: Box::new(self_pat),
+                ty: None,
+                default: None,
+            },
+        );
+        let mut params = vec![self_param];
+        for (pname, pty) in extra_params {
+            let pat = make_node(
+                gen,
+                NodeKind::BindPat {
+                    name: ident(pname),
+                    is_mut: false,
+                },
+            );
+            params.push(make_node(
+                gen,
+                NodeKind::Param {
+                    pattern: Box::new(pat),
+                    ty: Some(Box::new(pty)),
+                    default: None,
+                },
+            ));
+        }
+        let body = make_node(
+            gen,
+            NodeKind::Block {
+                stmts: vec![],
+                tail: None,
+            },
+        );
+        let method_node = make_node(
+            gen,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: bock_ast::Visibility::Public,
+                is_async: false,
+                name: ident(method),
+                generic_params: vec![],
+                params,
+                return_type: Some(Box::new(ret)),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        make_node(
+            gen,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(type_named_node(gen, target)),
+                where_clause: vec![],
+                methods: vec![method_node],
+            },
+        )
+    }
+
+    /// `impl Doubler { fn double(self) -> Self }` must register `double` with a
+    /// concrete `Doubler` *return* type, not the un-substituted `Named("Self")`
+    /// that previously leaked to call sites as E4001.
+    #[test]
+    fn impl_method_self_in_return_is_substituted() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        let self_ret = make_node(&gen, NodeKind::TypeSelf);
+        let impl_node = impl_with_method(&gen, "Doubler", "double", vec![], self_ret);
+        checker.collect_sig(&impl_node);
+
+        let method_ty = checker
+            .method_types
+            .get("Doubler")
+            .and_then(|m| m.get("double"))
+            .expect("double should be registered on Doubler");
+        let Type::Function(fn_ty) = method_ty else {
+            panic!("expected a function type, got {method_ty:?}");
+        };
+        // `self` param resolves to the target type, and `-> Self` is now the
+        // concrete target — no residual `Named("Self")` anywhere.
+        let doubler = Type::Named(crate::NamedType {
+            name: "Doubler".into(),
+        });
+        assert_eq!(*fn_ty.ret, doubler, "return `Self` should become Doubler");
+        assert_eq!(fn_ty.params, vec![doubler]);
+    }
+
+    /// `impl Counter { fn combine(self, other: Self) -> Int }` must register
+    /// `combine` with the `other` *parameter* typed as the concrete target,
+    /// not the un-substituted `Named("Self")`.
+    #[test]
+    fn impl_method_self_in_param_is_substituted() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        let other_ty = make_node(&gen, NodeKind::TypeSelf);
+        let int_ret = type_named_node(&gen, "Int");
+        let impl_node = impl_with_method(
+            &gen,
+            "Counter",
+            "combine",
+            vec![("other", other_ty)],
+            int_ret,
+        );
+        checker.collect_sig(&impl_node);
+
+        let method_ty = checker
+            .method_types
+            .get("Counter")
+            .and_then(|m| m.get("combine"))
+            .expect("combine should be registered on Counter");
+        let Type::Function(fn_ty) = method_ty else {
+            panic!("expected a function type, got {method_ty:?}");
+        };
+        let counter = Type::Named(crate::NamedType {
+            name: "Counter".into(),
+        });
+        // params: [self -> Counter, other: Self -> Counter]
+        assert_eq!(fn_ty.params, vec![counter.clone(), counter]);
+        assert_eq!(*fn_ty.ret, Type::Primitive(PrimitiveType::Int));
     }
 
     // ── check_mode: lambda from context ──────────────────────────────────
