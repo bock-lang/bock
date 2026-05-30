@@ -470,6 +470,13 @@ fn builtin_python_spec() -> ToolchainSpec {
 }
 
 fn builtin_rust_spec() -> ToolchainSpec {
+    // `rustc -o <name>` with an extension-less name produces `<name>` with NO
+    // `.exe` on Windows (verified: `rustc -o main_bin` → `main_bin`, never
+    // `main_bin.exe`). Windows can't spawn an extension-less file (CreateProcess
+    // appends `.exe` when searching), so give `-o` the platform exe suffix; the
+    // produced name then matches the artifact the run step spawns — `main_bin.exe`
+    // on Windows, `main_bin` on Unix (EXE_SUFFIX is empty there).
+    let out_name = format!("main_bin{}", std::env::consts::EXE_SUFFIX);
     ToolchainSpec {
         target_id: "rust".to_string(),
         display_name: "Rust compiler".to_string(),
@@ -485,7 +492,7 @@ fn builtin_rust_spec() -> ToolchainSpec {
         // PATH-resolved `./main_bin`, which would fail on Windows.
         run_plan: RunPlan {
             steps: vec![
-                RunStep::new("rustc", &["--edition", "2021", "main.rs", "-o", "main_bin"]),
+                RunStep::new("rustc", &["--edition", "2021", "main.rs", "-o", &out_name]),
                 RunStep::artifact("main_bin"),
             ],
         },
@@ -980,7 +987,7 @@ mod tests {
         assert!(spec.run_plan.steps[0].args.contains(&"main.rs".to_string()));
         assert!(spec.run_plan.steps[0]
             .args
-            .contains(&"main_bin".to_string()));
+            .contains(&format!("main_bin{}", std::env::consts::EXE_SUFFIX)));
         // The run step is a produced artifact (spawned by workdir path with the
         // platform exe suffix), not a PATH-resolved `./main_bin` — this is the
         // cross-platform fix. Its base name carries no `./` and no `.exe`.
