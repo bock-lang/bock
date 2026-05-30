@@ -1,6 +1,6 @@
 // TEST: exec_go_optional_runtime
 // EXPECT: output "got 7;nothing"
-// EXPECT: targets go, rust, js, ts
+// EXPECT: targets go, rust, js, ts, python
 //
 // Regression fixture for the codegen-correctness workstream (defect 4):
 // `Optional[T]` with `Some`/`None` and an Optional `match`. Go had no Optional
@@ -17,8 +17,14 @@
 // `__bockOption`) and maps `Optional[T]` to it, so type and value agree, the
 // `switch (o._tag)` match narrows, and the two-variant union is exhaustive.
 //
-// Still restricted away from python: the Python `Optional`/`Some`/`None`
-// runtime is a documented fast-follow (out of scope for this Go-focused defect).
+// Python (Q-py-optional): Python previously had no Optional runtime at all —
+// `Some`/`None` were emitted bare (undefined) and a `None` match arm emitted
+// `case None():`, a `SyntaxError` (`None` is a keyword). The fix adds a tagged
+// Optional runtime (`_BockSome`/`_BockNone` + the `_bock_none` singleton, so
+// Bock `None` does not collide with Python's `None`) and structural match arms
+// `case _BockSome(v):` / `case _BockNone():`, mirroring the JS/TS/Go tagged
+// representation. This fixture confines the payload to `${v}` interpolation;
+// `optional_typed_payload.bock` exercises typed payload use across all 5.
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).

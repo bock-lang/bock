@@ -140,6 +140,12 @@ struct EmitCtx {
     switch_label_depth: usize,
     /// Monotonic counter for unique loop-label names.
     loop_label_counter: usize,
+    /// Monotonic counter for unique `match` scrutinee temporaries. A non-trivial
+    /// scrutinee (a call, etc.) is hoisted into `const __matchN = <scrutinee>;`
+    /// once, so it is evaluated a single time. Re-emitting the scrutinee inline
+    /// in every arm (the prior behavior) double-evaluated it — a real bug for a
+    /// scrutinee with side effects, e.g. a stateful iterator's `match next(it)`.
+    match_temp_counter: usize,
 }
 
 impl EmitCtx {
@@ -160,6 +166,7 @@ impl EmitCtx {
             loop_labels: Vec::new(),
             switch_label_depth: 0,
             loop_label_counter: 0,
+            match_temp_counter: 0,
         }
     }
 
@@ -1744,21 +1751,34 @@ impl EmitCtx {
             }
         });
 
-        if is_adt {
+        // Hoist a non-trivial scrutinee into a single `const __matchN = …;` so it
+        // is evaluated once (re-emitting it in every arm double-evaluated it — a
+        // real bug for a scrutinee with side effects). A bare identifier is
+        // already a stable reference, so leave it inline.
+        let temp = if matches!(scrutinee.kind, NodeKind::Identifier { .. }) {
+            None
+        } else {
+            self.match_temp_counter += 1;
+            let name = format!("__match{}", self.match_temp_counter);
             let ind = self.indent_str();
-            let _ = write!(self.buf, "{ind}switch (");
+            let _ = write!(self.buf, "{ind}const {name} = ");
             self.emit_expr(scrutinee)?;
+            self.buf.push_str(";\n");
+            Some(name)
+        };
+
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}switch (");
+        self.emit_scrutinee_ref(scrutinee, temp.as_deref())?;
+        if is_adt {
             self.buf.push_str("._tag) {\n");
         } else {
-            let ind = self.indent_str();
-            let _ = write!(self.buf, "{ind}switch (");
-            self.emit_expr(scrutinee)?;
             self.buf.push_str(") {\n");
         }
         self.indent += 1;
         self.switch_label_depth += 1;
         for arm in arms {
-            self.emit_match_arm(arm, is_adt, scrutinee)?;
+            self.emit_match_arm(arm, is_adt, scrutinee, temp.as_deref())?;
         }
         self.switch_label_depth -= 1;
         self.indent -= 1;
@@ -1766,11 +1786,28 @@ impl EmitCtx {
         Ok(())
     }
 
+    /// Emit a reference to the match scrutinee: the hoisted temp name when one
+    /// was introduced, else the scrutinee expression inline (a bare identifier).
+    fn emit_scrutinee_ref(
+        &mut self,
+        scrutinee: &AIRNode,
+        temp: Option<&str>,
+    ) -> Result<(), CodegenError> {
+        match temp {
+            Some(name) => {
+                self.buf.push_str(name);
+                Ok(())
+            }
+            None => self.emit_expr(scrutinee),
+        }
+    }
+
     fn emit_match_arm(
         &mut self,
         arm: &AIRNode,
         is_adt: bool,
         scrutinee: &AIRNode,
+        temp: Option<&str>,
     ) -> Result<(), CodegenError> {
         if let NodeKind::MatchArm {
             pattern,
@@ -1788,7 +1825,7 @@ impl EmitCtx {
                     self.indent += 1;
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}const {} = ", name.name);
-                    self.emit_expr(scrutinee)?;
+                    self.emit_scrutinee_ref(scrutinee, temp)?;
                     self.buf.push_str(";\n");
                     self.indent -= 1;
                 }
@@ -1823,7 +1860,7 @@ impl EmitCtx {
                             let binding = self.pattern_to_binding_name(field);
                             let ind = self.indent_str();
                             let _ = write!(self.buf, "{ind}const {binding} = ");
-                            self.emit_expr(scrutinee)?;
+                            self.emit_scrutinee_ref(scrutinee, temp)?;
                             let _ = writeln!(self.buf, "._{i};");
                         }
                         self.indent -= 1;
@@ -1844,12 +1881,12 @@ impl EmitCtx {
                                 let binding = self.pattern_to_binding_name(pat);
                                 let ind = self.indent_str();
                                 let _ = write!(self.buf, "{ind}const {binding} = ");
-                                self.emit_expr(scrutinee)?;
+                                self.emit_scrutinee_ref(scrutinee, temp)?;
                                 let _ = writeln!(self.buf, ".{field_name};");
                             } else {
                                 let ind = self.indent_str();
                                 let _ = write!(self.buf, "{ind}const {field_name} = ");
-                                self.emit_expr(scrutinee)?;
+                                self.emit_scrutinee_ref(scrutinee, temp)?;
                                 let _ = writeln!(self.buf, ".{field_name};");
                             }
                         }
@@ -4461,6 +4498,90 @@ mod tests {
         assert!(
             src.contains("(async () => { await main(); })();"),
             "async entry wrapper missing, got: {src}"
+        );
+    }
+
+    /// A `match` whose scrutinee is a call must be hoisted into a single
+    /// `const __matchN = …;` so it is evaluated once. Re-emitting the call
+    /// inline in each arm double-evaluated it — a real bug for a scrutinee with
+    /// side effects (e.g. a stateful iterator's `match next(it)`).
+    #[test]
+    fn match_call_scrutinee_hoisted_to_temp() {
+        // match f() { Some(x) => x; None => 0 }
+        let scrutinee = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "f")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let some_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Some"]),
+                        fields: vec![bind_pat(22, "x")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(23, vec![], Some(id_node(24, "x")))),
+            },
+        );
+        let none_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    31,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["None"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(32, vec![], Some(int_lit(33, "0")))),
+            },
+        );
+        let match_stmt = node(
+            40,
+            NodeKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![some_arm, none_arm],
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("run"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(2, vec![match_stmt], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("const __match1 = f();"),
+            "call scrutinee should be hoisted to a temp, got: {out}"
+        );
+        assert!(
+            out.contains("switch (__match1._tag)"),
+            "switch should dispatch on the hoisted temp, got: {out}"
+        );
+        assert!(
+            out.contains("const x = __match1._0;"),
+            "payload binding should read the hoisted temp, got: {out}"
+        );
+        assert!(
+            !out.contains("f()._tag") && !out.contains("f()._0"),
+            "call scrutinee must not be re-emitted inline, got: {out}"
         );
     }
 }
