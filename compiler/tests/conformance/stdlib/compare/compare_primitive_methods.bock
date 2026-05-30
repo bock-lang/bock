@@ -1,0 +1,28 @@
+// TEST: stdlib_compare_primitive_methods
+// EXPECT: no_errors
+//
+// Q-bridge (#104): a primitive's core-trait method resolves to the trait's
+// declared return type, not the intrinsic fallback. `(a).compare(b)` on `Int`
+// yields `Ordering` (matchable on `Less`/`Equal`/`Greater` and assignable to an
+// `Ordering` return), and `s.eq(t)` on `String` yields `Bool` — dispatched
+// through the compiler-registered canonical conformance. Codegen still lowers
+// these via the intrinsic fast path (no dynamic dispatch).
+module userapp
+
+use core.compare.{Ordering, Comparable, Equatable}
+
+public fn describe(a: Int, b: Int) -> String {
+  match a.compare(b) {
+    Less => "less"
+    Equal => "equal"
+    Greater => "greater"
+  }
+}
+
+public fn order_two(a: Int, b: Int) -> Ordering {
+  a.compare(b)
+}
+
+public fn same(a: String, b: String) -> Bool {
+  a.eq(b)
+}

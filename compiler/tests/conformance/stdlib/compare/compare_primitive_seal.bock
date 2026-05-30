@@ -1,0 +1,21 @@
+// TEST: stdlib_compare_primitive_seal
+// EXPECT: error E4011 at 17:1
+//
+// Q-bridge sealing (Q1b): core-trait conformances for primitive types are
+// sealed (compiler-provided). A user `impl Comparable for Int` is an orphan-rule
+// violation and is rejected with `E4011`; the newtype pattern is the escape
+// hatch. Scoped strictly to the (core trait, primitive) quadrant.
+//
+// NOTE: the conformance harness parses directives but does not yet execute
+// fixtures (execution is staged for Q-fconf); the `E4011` behavior is asserted
+// by the `bock-cli` `stdlib_primitive_bridge` integration suite against the
+// real checker.
+module userapp
+
+use core.compare.{Comparable, Ordering}
+
+impl Comparable for Int {
+  public fn compare(self, other: Int) -> Ordering {
+    Equal
+  }
+}

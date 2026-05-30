@@ -248,6 +248,13 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             description: "Two `impl` blocks apply to the same type and violate coherence.",
             spec_refs: &["§4.4"],
         },
+        DiagnosticCodeInfo {
+            code: "E4011",
+            severity: Severity::Error,
+            summary: "Cannot implement a core trait for a primitive type.",
+            description: "Core traits (`Equatable`, `Comparable`, `Displayable`, `Hashable`) have sealed, compiler-provided conformances for primitive types. User code may not add its own `impl` of a core trait for a primitive (an orphan-rule violation). Wrap the primitive in a newtype and implement the trait for that instead.",
+            spec_refs: &["§18.5"],
+        },
         // ── Ownership (5xxx) ───────────────────────────────────────────
         DiagnosticCodeInfo {
             code: "E5001",
