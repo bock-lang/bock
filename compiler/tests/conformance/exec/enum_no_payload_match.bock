@@ -1,0 +1,32 @@
+// TEST: exec_enum_no_payload_match
+// EXPECT: output "R;G;B"
+// EXPECT: targets js, ts, python, rust, go
+//
+// User-defined enum with UNIT (no-payload) variants — construction at a use
+// site (`Color.Red` lowers to a bare variant reference) and a `match` whose
+// arms are each a unit-variant constructor pattern. Before the variant-registry
+// fix, the construction site lowered through the generic `Identifier` path
+// (js → `to_camel_case` → `red`, undefined) and the match never recognised the
+// arms as ADT variants on the struct/record-pattern targets.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Color {
+  Red
+  Green
+  Blue
+}
+
+fn label(c: Color) -> String {
+  match c {
+    Red => return "R"
+    Green => return "G"
+    Blue => return "B"
+  }
+}
+
+fn main() -> Void {
+  println("${label(Red)};${label(Green)};${label(Blue)}")
+}

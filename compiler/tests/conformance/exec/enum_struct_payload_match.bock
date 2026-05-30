@@ -1,0 +1,47 @@
+// TEST: exec_enum_struct_payload_match
+// EXPECT: output "5;9;100"
+// EXPECT: targets js, ts, python, rust, go
+//
+// User-defined enum with STRUCT (named-field-payload) variants. This is the
+// fixture that exposes the JS/TS `is_adt` bug and the Go type-switch gap.
+//
+// CRITICAL to the bug exposure: the `match` has NO tuple/unit *constructor*
+// pattern arm — every payload arm is a *record* pattern (`Circle { radius }`),
+// and the catch-all is a wildcard `_` (a `WildcardPat`, not a `ConstructorPat`).
+// A bare unit-variant name like `Nil` would parse to a `ConstructorPat`, which
+// would have set the old `is_adt` flag and masked the defect; using only record
+// patterns + `_` keeps the match all-`RecordPat`. Before the variant-registry
+// fix:
+//   - js/ts set `is_adt` solely on the presence of a `ConstructorPat` arm, so
+//     this all-`RecordPat` match never dispatched on `._tag`; every arm fell
+//     through to `default:`, returning the same arm for every input,
+//   - go emitted a value-switch on the unqualified variant name with no field
+//     binding, referencing undefined types/bindings.
+//
+// Field binding covered: single shorthand (`{ radius }`), multi-field
+// (`{ width, height }`, both used), and the `_` default returning a constant.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Area {
+  Circle { radius: Int }
+  Rect { width: Int, height: Int }
+  Blank { tag: Int }
+}
+
+fn measure(a: Area) -> Int {
+  match a {
+    Circle { radius } => return radius
+    Rect { width, height } => return width + height
+    _ => return 100
+  }
+}
+
+fn main() -> Void {
+  let c: Area = Circle { radius: 5 }
+  let r: Area = Rect { width: 4, height: 5 }
+  let b: Area = Blank { tag: 7 }
+  println("${measure(c)};${measure(r)};${measure(b)}")
+}

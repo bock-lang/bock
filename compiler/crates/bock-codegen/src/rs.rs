@@ -92,6 +92,8 @@ impl CodeGenerator for RsGenerator {
 
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
         let mut ctx = RsEmitCtx::new();
+        ctx.enum_variants =
+            crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -131,6 +133,9 @@ impl CodeGenerator for RsGenerator {
         };
 
         let mut ctx = RsEmitCtx::new();
+        // Pre-scan enum variants across the whole bundle so a `use`d enum's
+        // variants resolve at a construction/pattern site in another module.
+        ctx.enum_variants = crate::generator::collect_enum_variants(modules);
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
                 ctx.buf.push('\n');
@@ -187,6 +192,13 @@ struct RsEmitCtx {
     /// emits it at most once (a duplicate `struct __BockChannel` is a Rust
     /// redefinition error).
     concurrency_runtime_emitted: bool,
+    /// User-enum-variant registry (DV14). Maps a variant name to its enum so a
+    /// construction (`Circle { .. }`, `Rect(..)`, `Empty`) and a match pattern
+    /// can be qualified `Enum::Variant`, which Rust requires (an unqualified
+    /// variant does not resolve at the crate root). Pre-scanned across the
+    /// bundle; consulted *after* the bespoke Optional/Result paths so those are
+    /// never regressed.
+    enum_variants: crate::generator::EnumVariantRegistry,
 }
 
 impl RsEmitCtx {
@@ -202,7 +214,33 @@ impl RsEmitCtx {
             fn_effects: HashMap::new(),
             composite_effects: HashMap::new(),
             concurrency_runtime_emitted: false,
+            enum_variants: crate::generator::EnumVariantRegistry::new(),
         }
+    }
+
+    /// The `Enum::` qualifier for a variant *path* if its last segment is a
+    /// registered user enum variant, else `None`. The built-in
+    /// `Optional`/`Result` pre-seeds are intentionally excluded here: their
+    /// constructions and patterns are handled by the bespoke Rust lowering
+    /// (`Some(x)`/`None`/`Ok`/`Err` map to `std::option`/`std::result`), which
+    /// must not be rewritten to `Optional::Some`.
+    fn variant_enum_qualifier(&self, path: &bock_ast::TypePath) -> Option<String> {
+        let info = crate::generator::registered_variant(&self.enum_variants, path)?;
+        if matches!(info.enum_name.as_str(), "Optional" | "Result") {
+            return None;
+        }
+        Some(info.enum_name.clone())
+    }
+
+    /// As [`Self::variant_enum_qualifier`] but for a bare identifier name (a
+    /// unit-variant construction lowers to `Identifier`, or a tuple-variant
+    /// construction's callee is an `Identifier`).
+    fn variant_enum_qualifier_for_name(&self, name: &str) -> Option<String> {
+        let info = self.enum_variants.get(name)?;
+        if matches!(info.enum_name.as_str(), "Optional" | "Result") {
+            return None;
+        }
+        Some(info.enum_name.clone())
     }
 
     fn finish(mut self) -> String {
@@ -1558,7 +1596,14 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::Identifier { name } => {
-                self.buf.push_str(&identifier_to_rs(&name.name));
+                // A bare identifier naming a registered unit variant is a
+                // construction (`Empty` → `Shape::Empty`); Rust requires the
+                // enum qualifier.
+                if let Some(enum_name) = self.variant_enum_qualifier_for_name(&name.name) {
+                    let _ = write!(self.buf, "{enum_name}::{}", name.name);
+                } else {
+                    self.buf.push_str(&identifier_to_rs(&name.name));
+                }
                 Ok(())
             }
             NodeKind::BinaryOp { op, left, right } => {
@@ -1629,6 +1674,21 @@ impl RsEmitCtx {
                 if let Some(code) = self.map_prelude_call(callee, args)? {
                     self.buf.push_str(&code);
                     return Ok(());
+                }
+                // A call whose callee names a registered tuple variant is a
+                // construction (`Rect(3.0, 4.0)` → `Shape::Rect(3.0, 4.0)`).
+                if let NodeKind::Identifier { name } = &callee.kind {
+                    if let Some(enum_name) = self.variant_enum_qualifier_for_name(&name.name) {
+                        let _ = write!(self.buf, "{enum_name}::{}(", name.name);
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 {
+                                self.buf.push_str(", ");
+                            }
+                            self.emit_expr(&arg.value)?;
+                        }
+                        self.buf.push(')');
+                        return Ok(());
+                    }
                 }
                 if self.try_emit_time_assoc_call(callee, args)? {
                     return Ok(());
@@ -1770,12 +1830,19 @@ impl RsEmitCtx {
                 fields,
                 spread,
             } => {
-                let type_name = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("::");
+                // A struct-variant construction (`Circle { radius: .. }`) must
+                // be qualified `Shape::Circle { .. }`; a plain record keeps its
+                // path unqualified.
+                let type_name = if let Some(enum_name) = self.variant_enum_qualifier(path) {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    format!("{enum_name}::{variant}")
+                } else {
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::")
+                };
                 self.buf.push_str(&type_name);
                 self.buf.push_str(" { ");
                 for (i, f) in fields.iter().enumerate() {
@@ -1872,6 +1939,10 @@ impl RsEmitCtx {
                             self.buf.push_str("{}");
                             let mut sub = RsEmitCtx::new();
                             sub.indent = self.indent;
+                            // The sub-context must see the same enum-variant
+                            // registry so an interpolated variant construction
+                            // (`${label(Red)}`) is qualified `Color::Red` too.
+                            sub.enum_variants = self.enum_variants.clone();
                             sub.emit_expr(expr)?;
                             format_args.push(sub.buf);
                         }
@@ -2154,12 +2225,18 @@ impl RsEmitCtx {
                 Literal::Unit => self.buf.push_str("()"),
             },
             NodeKind::ConstructorPat { path, fields } => {
-                let variant_name = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("::");
+                // Qualify a user enum-variant pattern `Enum::Variant`; built-in
+                // and non-variant paths keep their original `::`-joined form.
+                let variant_name = if let Some(enum_name) = self.variant_enum_qualifier(path) {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    format!("{enum_name}::{variant}")
+                } else {
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::")
+                };
                 if fields.is_empty() {
                     self.buf.push_str(&variant_name);
                 } else {
@@ -2174,12 +2251,16 @@ impl RsEmitCtx {
                 }
             }
             NodeKind::RecordPat { path, fields, rest } => {
-                let type_name = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("::");
+                let type_name = if let Some(enum_name) = self.variant_enum_qualifier(path) {
+                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
+                    format!("{enum_name}::{variant}")
+                } else {
+                    path.segments
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::")
+                };
                 let _ = write!(self.buf, "{type_name} {{ ");
                 for (i, f) in fields.iter().enumerate() {
                     if i > 0 {
