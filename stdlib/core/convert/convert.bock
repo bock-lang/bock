@@ -1,0 +1,107 @@
+//! `core.convert` — value-conversion abstractions for the Bock standard
+//! library.
+//!
+//! This module is pure Bock (four traits, an error record, and a sample
+//! temperature conversion), so it compiles to every target with no per-target
+//! runtime shim. It is the first parameterized-trait module: `From[T]`,
+//! `Into[T]`, and `TryFrom[T]` carry the source type as a trait type argument,
+//! so a single type can implement `From[A]` and `From[B]` independently. The
+//! compiler derives the blanket `Into[U] for T` from each explicit
+//! `From[T] for U`, so implementing `From` is sufficient to get `.into()`.
+
+module core.convert
+
+/// The interface for infallible conversion *from* a source type `T` into the
+/// implementing type.
+///
+/// `impl From[Source] for Target` defines how a `Source` becomes a `Target`.
+/// Implementing `From` is the canonical way to add a conversion: the compiler
+/// derives the blanket `Into[Target]` for `Source`, so `source.into()` works
+/// wherever a `Target` is expected.
+public trait From[T] {
+  /// Builds the implementing type from a value of the source type `T`.
+  fn from(value: T) -> Self
+}
+
+/// The interface for infallible conversion of the implementing type *into* a
+/// target type `T`.
+///
+/// You rarely implement `Into` directly: an `impl From[A] for B` automatically
+/// yields `Into[B] for A`. Implement `Into` explicitly only when the reverse
+/// `From` is not desirable. An explicit `Into` always wins over the derived
+/// blanket one.
+public trait Into[T] {
+  /// Converts `self` into a value of the target type `T`.
+  fn into(self) -> T
+}
+
+/// The interface for fallible conversion *from* a source type `T`, returning a
+/// [`ConvertError`] when the value cannot be represented in the implementing
+/// type.
+///
+/// Use `TryFrom` for narrowing or parsing conversions that can fail, e.g.
+/// parsing a `String` into an `Int`. Unlike `From`, `TryFrom` is **not**
+/// blanket-reversed — there is no `TryInto` in the v1 surface.
+public trait TryFrom[T] {
+  /// Attempts to build the implementing type from `value`, returning
+  /// `Result[Self, ConvertError]`.
+  fn try_from(value: T) -> Result[Self, ConvertError]
+}
+
+/// The interface for types that can render themselves as a `String`.
+///
+/// `Displayable` is the human-readable string projection of a value; it is the
+/// conversion-module counterpart to a `toString`/`Display` trait.
+public trait Displayable {
+  /// Returns this value's human-readable `String` representation.
+  fn to_string(self) -> String
+}
+
+/// The error produced by a failed `TryFrom` conversion.
+///
+/// Carries a human-readable `message` describing why the conversion could not
+/// be performed (e.g. an out-of-range value or an unparseable string).
+public record ConvertError {
+  /// The human-readable message describing why the conversion failed.
+  message: String
+}
+
+/// Constructs a `ConvertError` from a message string.
+///
+/// The ergonomic way to produce a conversion failure:
+/// `convert_error("value out of range")`.
+public fn convert_error(message: String) -> ConvertError {
+  ConvertError { message: message }
+}
+
+/// A temperature in degrees Celsius.
+///
+/// Paired with `Fahrenheit` to provide a concrete, ready-to-use conversion
+/// that exercises parameterized-trait resolution: `impl From[Celsius] for
+/// Fahrenheit` lets `c.into()` and `Fahrenheit::from(c)` both produce a
+/// `Fahrenheit`.
+public record Celsius {
+  /// The temperature value, in degrees Celsius.
+  degrees: Float
+}
+
+/// A temperature in degrees Fahrenheit.
+///
+/// The target of the sample `From[Celsius]` conversion; see `Celsius`.
+public record Fahrenheit {
+  /// The temperature value, in degrees Fahrenheit.
+  degrees: Float
+}
+
+/// `Fahrenheit` is constructed from a `Celsius` via the standard
+/// `F = C * 9/5 + 32` formula.
+///
+/// This is the sample user conversion that proves parameterized-trait
+/// resolution end to end: it registers `From[Celsius] for Fahrenheit`, from
+/// which the compiler derives the blanket `Into[Fahrenheit] for Celsius`.
+impl From[Celsius] for Fahrenheit {
+  /// Converts a `Celsius` reading into the equivalent `Fahrenheit` reading.
+  public fn from(value: Celsius) -> Fahrenheit {
+    Fahrenheit { degrees: value.degrees * 1.8 + 32.0 }
+  }
+}

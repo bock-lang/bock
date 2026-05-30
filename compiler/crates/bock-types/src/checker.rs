@@ -56,6 +56,16 @@ const E_WHERE_CLAUSE: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 4005,
 };
+/// `E4012` — a `.into()` call (or `from`/`try_from`) could not be resolved:
+/// no `From`/`Into`/`TryFrom` impl exists for the required source and target
+/// types. For `.into()` the target is taken from the expected type, so the
+/// call site must have a reachable expected type (a `let y: U =`, an `fn -> U`
+/// return position, or an argument to a typed parameter); see the v1
+/// annotation-required limitation in the `core.convert` docs.
+const E_NO_CONVERSION: DiagnosticCode = DiagnosticCode {
+    prefix: 'E',
+    number: 4012,
+};
 
 // ─── TypeVarId generator ──────────────────────────────────────────────────────
 
@@ -460,6 +470,10 @@ impl TypeChecker {
         // its own registration.
         let mut impl_table = ImplTable::build_from(module);
         crate::traits::register_canonical_conformances(&mut impl_table);
+        // Canonical primitive conversions (`From`/`TryFrom` + blanket `Into`),
+        // registered after conformances so `(5).into()`, `Float.from(3)`, and
+        // `Int.try_from(s)` resolve uniformly with user conversions.
+        crate::traits::register_canonical_conversions(&mut impl_table);
         // Surface coherence (`E4010`) and sealing (`E4011`) diagnostics
         // produced during table construction.
         self.diags.absorb(&impl_table.diags);
@@ -1226,7 +1240,17 @@ impl TypeChecker {
                     .collect::<Vec<_>>()
                     .join(".");
                 let trait_ref = TraitRef::new(&trait_name);
-                if resolve_impl(&trait_ref, &concrete_ty, impl_table).is_none() {
+                // Exact (non-parameterized) lookup first; then fall back to
+                // *arg-imprecise* satisfaction for a parameterized bound such
+                // as `T: Into[U]`. The bound's type argument is dropped at
+                // parse time (the `where` clause stores only the trait path),
+                // so a parameterized bound is satisfied when the concrete type
+                // implements the trait for *some* argument. This is the
+                // documented v1 limitation (see the session PR notes).
+                let concrete_key = crate::traits::type_key(&concrete_ty);
+                let satisfied = resolve_impl(&trait_ref, &concrete_ty, impl_table).is_some()
+                    || impl_table.has_any_param_trait_impl(&trait_name, &concrete_key);
+                if !satisfied {
                     self.diags.error(
                         E_WHERE_CLAUSE,
                         format!(
@@ -2087,6 +2111,66 @@ impl TypeChecker {
                     self.env.pop_scope();
                 }
                 self.record(node, expected.clone());
+            }
+
+            // ── Check mode for `.into()` (return-type-driven conversion) ──────
+            // A `receiver.into()` call lowers to
+            // `Call { callee: FieldAccess(receiver, "into"), args: [self] }`.
+            // In check mode the target type `U` comes from the expected type:
+            // we look up the blanket/explicit `Into[U] for A` impl (where `A`
+            // is the receiver type). On success the call's type is exactly `U`;
+            // on failure we emit `E4012`. This is the inline resolution hook —
+            // no obligation queue. If the expected type is not yet concrete
+            // (no reachable annotation) we fall through to ordinary inference,
+            // which keeps `.into()` usable only where a target type is known
+            // (the documented v1 annotation-required limitation).
+            NodeKind::Call { callee, args, .. }
+                if args.len() == 1
+                    && matches!(
+                        &callee.kind,
+                        NodeKind::FieldAccess { field, .. } if field.name == "into"
+                    ) =>
+            {
+                let target = self.subst.apply(expected);
+                // Infer the receiver (the desugared `self` argument).
+                let receiver_ty = if let NodeKind::Call { args, .. } = &mut node.kind {
+                    self.infer_node(&mut args[0].value)
+                } else {
+                    unreachable!()
+                };
+                let receiver_ty = self.subst.apply(&receiver_ty);
+
+                // Only attempt conversion resolution when both the target and
+                // the receiver are concrete enough to key the impl table. A
+                // type-variable target means no reachable annotation — fall
+                // through to generic inference.
+                let resolvable = !matches!(target, Type::TypeVar(_) | Type::Error)
+                    && !matches!(receiver_ty, Type::TypeVar(_) | Type::Error);
+                if resolvable {
+                    if let Some(table) = self.impl_table.as_ref() {
+                        let trait_ref = TraitRef::parameterized("Into", vec![target.clone()]);
+                        if resolve_impl(&trait_ref, &receiver_ty, table).is_some() {
+                            self.record(node, target.clone());
+                            return;
+                        }
+                        // No matching conversion: emit a precise diagnostic.
+                        self.diags.error(
+                            E_NO_CONVERSION,
+                            format!(
+                                "cannot convert `{}` into `{}` via `.into()`: no `From`/`Into`                                  impl relates these types",
+                                crate::traits::type_key(&receiver_ty),
+                                crate::traits::type_key(&target),
+                            ),
+                            span,
+                        );
+                        self.record(node, target.clone());
+                        return;
+                    }
+                }
+                // Fall through: no impl table or target not reachable.
+                let inferred = self.infer_node(node);
+                let expected = self.subst.apply(expected);
+                self.unify_or_error(&inferred, &expected, span, "expression");
             }
 
             // ── Everything else: infer then check ─────────────────────────────

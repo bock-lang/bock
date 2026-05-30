@@ -1,0 +1,27 @@
+// TEST: stdlib_convert_output_smoke
+// EXPECT: output "out of range"
+//
+// A `main` that builds a `ConvertError` via the `core.convert.convert_error`
+// constructor and prints its `message`. The constructor body runs through the
+// embedded `core.convert` module cross-module.
+//
+// NOTE: the harness currently *parses* `// EXPECT: output` directives but does
+// not yet execute fixtures (cross-target execution is staged for the Q-fconf
+// task). Until then this fixture is validated by loading (no LoadError) and by
+// the CLI-level `bock run` smoke in bock-cli's `stdlib_convert` integration
+// suite, which asserts this exact "out of range" output against the real
+// interpreter.
+//
+// The smoke deliberately exercises the free `convert_error` constructor and a
+// field access rather than a conversion trait method: at run time the
+// interpreter cannot dispatch `Type.from(x)` (user associated functions), the
+// derived blanket `Into.into` (no method body), or `Displayable.to_string`
+// (shadowed by the universal record `to_string` builtin) — type-checking and
+// codegen handle all three. See the session PR notes.
+module main
+
+use core.convert.{convert_error}
+
+public fn main() {
+  println(convert_error("out of range").message)
+}

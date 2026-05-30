@@ -308,6 +308,11 @@ impl<'a> Lowerer<'a> {
     fn lower_impl(&mut self, decl: &ImplBlock, scope: u32) -> AIRNode {
         let impl_scope = self.alloc_scope();
         let target = Box::new(self.lower_type(&decl.target, impl_scope));
+        let trait_args = decl
+            .trait_args
+            .iter()
+            .map(|t| self.lower_type(t, impl_scope))
+            .collect();
         let methods = decl
             .methods
             .iter()
@@ -319,6 +324,7 @@ impl<'a> Lowerer<'a> {
                 annotations: decl.annotations.clone(),
                 generic_params: decl.generic_params.clone(),
                 trait_path: decl.trait_path.clone(),
+                trait_args,
                 target,
                 where_clause: decl.where_clause.clone(),
                 methods,

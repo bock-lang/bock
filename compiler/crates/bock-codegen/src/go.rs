@@ -3331,6 +3331,7 @@ mod tests {
                 annotations: vec![],
                 generic_params: vec![],
                 trait_path: None,
+                trait_args: vec![],
                 target: Box::new(node(
                     2,
                     NodeKind::TypeNamed {
@@ -4207,6 +4208,7 @@ mod tests {
                 annotations: vec![],
                 target: Box::new(type_named_node(21, "StdoutLogger")),
                 trait_path: Some(type_path(&["Logger"])),
+                trait_args: vec![],
                 generic_params: vec![],
                 where_clause: vec![],
                 methods: vec![method],
