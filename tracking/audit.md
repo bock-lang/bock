@@ -798,3 +798,34 @@ vscode test-infra, conformance execution Q-fconf), @performance example (pending
   Follow-up: on the bridge PR — handle the T1 STOP outcome, review, gate+CI green, merge;
     then fan out R1 (convert/iter/effect) + land Q-prelude-inject/Q-import-reject; route
     DQ10 to Design at leisure (non-blocking).
+
+[2026-05-30 02:41 UTC] Q-bridge LANDED (#108); pre-PR gate gains cargo doc; R1 unblocked
+  Bridge result: the T1 STOP gate came back GREEN — wiring `ImplTable::build_from` into
+    `check_module` kept all 2275 baseline tests passing (no code relied on the previously
+    unenforced bounds), fixing DV6. Canonical primitive conformances registered (the
+    proposed matrix; nothing forced a DQ10 deviation); `max[T: Comparable](1,2)` checks,
+    non-conforming → E4005; `(1).compare(2)`→Ordering; sealing → E4011 with newtype control
+    compiling; codegen byte-identical (no dynamic dispatch). 2296 tests.
+  CI hiccup + fix: the matrix was green but `cargo doc` FAILED — a public doc comment in
+    the new code linked to a private item (rustdoc::private_intra_doc_links, -D warnings).
+    ROOT CAUSE beyond the one link: `cargo doc` is NOT in the documented pre-PR gate
+    (CLAUDE.md lists fmt/clippy/test) NOR the /project:session teardown (which runs
+    `mdbook build`, the prose site — a DIFFERENT check from rustdoc). So sessions can't
+    catch rustdoc failures locally. Fixed the link directly (proportionate CI-greening
+    touch; SendMessage unavailable, a fresh agent disproportionate) → verified `cargo doc`
+    clean → pushed → 12/12 green → merged #108 (main f8f9155).
+  Process fix (this PR): added `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+    --all-features` to the canonical pre-PR sequence (CLAUDE.md) AND the /project:session
+    teardown, with notes distinguishing it from the mdBook prose check. Prevents recurrence.
+    Going forward my Agent-dispatch gate instructions include cargo doc too.
+  New finding (#108 OPEN): cross-module where-bound enforcement gap — the export ABI
+    (`ExportedSymbol`) carries a fn's type string but not its trait bounds, so imported
+    generic fns' bounds aren't enforced. Pre-existing, orthogonal to the bridge (local
+    bounds enforce); filed as DV7 / queue Q-xmod-bounds. Not blocking the fan-out.
+  Tracking (this PR, chore/tracking-20260530-0241): Q-bridge removed (landed #108);
+    Q-stdlib fan-out UNBLOCKED (R1 convert/iter/effect resume, de-risk each new unknown);
+    DV4 + DV6 → resolved (#108); DV7 + Q-xmod-bounds filed; cargo-doc gate fix; snapshot +
+    graph + critical path; audit. DQ10 stays escalated (non-blocking; matrix unchanged).
+  Next: resume the R1 fan-out one module at a time (convert first — validates parameterized-
+    trait resolution; then iter [collection conformances], effect [effect-system bridge]) +
+    land Q-prelude-inject/Q-import-reject. main f8f9155.

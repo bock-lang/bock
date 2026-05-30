@@ -72,9 +72,10 @@ The canonical pre-PR sequence:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-All three must exit zero. Notes on each:
+All four must exit zero. Notes on each:
 
 - **`cargo fmt --all -- --check`** — exits non-zero if any
   workspace member has formatting drift. If it fails, run
@@ -86,8 +87,15 @@ All three must exit zero. Notes on each:
   examples, and benches; default clippy without `--all-targets`
   skips tests, which is the most common cause of CI surprises.
 - **`cargo test --workspace`** — runs tests across every crate.
+- **`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+  --all-features`** — builds the rustdoc API docs, failing on any
+  rustdoc warning (broken/private intra-doc links, etc.). CI runs the
+  `cargo doc` job with `-D warnings`; omitting it locally is a common
+  "works locally, fails in CI" surprise (e.g. a public doc comment
+  linking to a private item). This is distinct from `mdbook build docs`,
+  which checks the prose doc site, not the API docs.
 
-The `/project:session` teardown runs all three before pushing.
+The `/project:session` teardown runs all four before pushing.
 If any fail, the push is aborted, the worktree is preserved,
 and the session is told what to fix and amend.
 

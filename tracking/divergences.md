@@ -23,40 +23,37 @@ status(open | resolved→link)`
   (#104); 9 remain. Loading mechanism (embedded source-compiled) works.
 - **Classification:** spec-ahead-of-impl
 - **Disposition:** implement the remaining 9 (→ queue `Q-stdlib`, SCOPED via
-  DQ5). §18.3 v1-status reconciled in #100. Fan-out paused on `Q-bridge`/DQ6
-  (DV4). Remains open until all 11 land.
-- **Status:** open (2/11 landed; fan-out paused on Q-bridge/DQ6)
+  DQ5). §18.3 v1-status reconciled in #100. Fan-out **UNBLOCKED** — Q-bridge
+  landed (#108, resolving DV4 + DV6). Remains open until all 11 land.
+- **Status:** open (2/11 landed; fan-out unblocked — R1 resuming)
 
-### DV4 — stdlib trait impls can't cover primitive types
-- **§:** §18.3 (+§18.2) · **spec-says:** `core.compare`'s `Comparable`/
-  `Equatable` (and analogous traits across modules) apply to the language's
-  values, primitives included · **impl-does:** primitive receivers resolve
-  methods via the hardcoded intrinsic table in
-  `bock-types/src/checker.rs::resolve_method_return_type` and never consult
-  the user/stdlib trait-impl table, so `impl Comparable for Int` + a call site
-  → E4001 (#104). Stdlib traits cover only stdlib-defined types today.
-- **Classification:** gap (missing checker↔bock-core bridge)
-- **Disposition:** fix-impl → `queue.md` Q-bridge. Design **DQ6 ruled the model**
-  (compiler-provided canonical primitive conformances registered into the
-  trait-impl table; sealed). Bridge in-flight (`feat/stdlib-primitive-bridge`).
-- **Status:** open (model decided 2026-05-30; resolves when Q-bridge lands)
-
-### DV6 — trait bounds unenforced in the production pipeline
-- **§:** — (impl correctness; relates to §18.5 trait conformance) ·
-  **spec-says:** `where (T: Comparable)` bounds are checked · **impl-does:** the
-  checker's `impl_table` is `None` in the real pipeline (`build_from` runs only
-  in tests), so `check_trait_bounds_at_call` returns early — **bounds are
-  silently unenforced** in `bock check/build/run`. Found by the Q-bridge plan.
-- **Classification:** impl-bug (latent; bound-checking never wired)
-- **Disposition:** fix-impl → folded into `queue.md` Q-bridge (T1 wires
-  `ImplTable::build_from` into `check_module`). May surface latent bound failures
-  in existing code (Q-bridge has a STOP-and-surface gate for exactly this).
+### DV7 — cross-module where-bound enforcement gap
+- **§:** — (impl correctness; §18.5 trait conformance across modules) ·
+  **spec-says:** `where (T: Comparable)` bounds hold for imported generic
+  functions too · **impl-does:** `ExportedSymbol` carries only a function's type
+  string, not its trait bounds, so `seed_imported_generic_fn` sets
+  `where_clause: vec![]` — bounds on **imported** generic fns aren't enforced.
+  Locally-defined bounded fns now enforce correctly (#108).
+- **Classification:** gap (export ABI omits trait bounds)
+- **Disposition:** fix-impl → `queue.md` Q-xmod-bounds (thread where-clauses
+  through the export ABI). Pre-existing; surfaced by Q-bridge (#108). Orthogonal
+  to the bridge; not blocking the fan-out (stdlib generics are defined locally).
 - **Status:** open
 
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)
 
+- **DV4 stdlib trait impls can't cover primitive types** — gap (missing
+  checker↔bock-core bridge) → Design DQ6 ruled the model; the compiler now
+  registers canonical primitive conformances into the trait-impl table (sealed),
+  so primitives satisfy core-trait bounds + resolve trait methods, codegen
+  unchanged (no dynamic dispatch). resolved → #108.
+- **DV6 trait bounds unenforced in the production pipeline** — impl-bug (latent;
+  `impl_table` was `None`, so `where`-bounds were never checked) → #108 wires
+  `ImplTable::build_from` into `check_module`; all 2275 baseline tests stayed
+  green (no code relied on the unenforced bounds) + bounds now enforced
+  (non-conforming type → E4005). resolved → #108. (Cross-module case → DV7.)
 - **DV5 §18.2 prelude vs §18.3 import for fundamental traits** — gap (spec
   internal inconsistency) → Design DQ9 ruled the model "defined in core.*,
   re-exported into the prelude" (§18.2/§18.3 consistent); §18.2 amended to add

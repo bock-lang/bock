@@ -175,6 +175,17 @@ if ! cargo test --workspace; then
   exit 1
 fi
 
+# Rustdoc API-doc check (matches CI's `cargo doc` job; catches broken
+# or private intra-doc links that -D warnings rejects). Distinct from
+# the mdBook prose-site build below.
+if ! RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features; then
+  echo ""
+  echo "ERROR: cargo doc failed (rustdoc warnings treated as errors)."
+  echo "  Common cause: a public doc comment linking to a private item."
+  echo "  Fix the intra-doc links and amend; worktree preserved at $WORKTREE."
+  exit 1
+fi
+
 # Documentation build check (catches broken references and
 # unbuildable docs at PR time rather than CI time)
 if [ -f docs/book.toml ]; then

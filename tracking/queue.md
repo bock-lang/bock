@@ -75,11 +75,18 @@ reconciliation; repo wins). See audit.md._
   module path with neither a brace-list nor a wildcard (bare `use core.error`) is
   not a v1 form; reject with a diagnostic pointing at the braced form. Decided by
   DQ8; module-qualified access deferred to v1.x.
+- **[Q-xmod-bounds] Cross-module where-bound enforcement** — bug · ready ·
+  `compiler/crates/bock-types/` (export ABI) · — · links #108 · note: where-clause
+  bounds on **imported** generic functions aren't enforced — `ExportedSymbol`
+  carries only a function's type string, not its trait bounds, so
+  `seed_imported_generic_fn` sets `where_clause: vec![]`. Locally-defined bounded
+  fns enforce correctly (wired in #108); thread bounds through the export ABI to
+  close the cross-module case. Pre-existing; surfaced by Q-bridge (#108).
 
 ## v1-blocking
 
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (2/11 landed; fan-out paused on Q-bridge/DQ6) · `stdlib/`,
+  **v1-BLOCKING** (2/11 landed; fan-out UNBLOCKED — Q-bridge in #108) · `stdlib/`,
   `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: **DECIDED a v1 deliverable** (operator, 2026-05-29) and
   **SCOPE decided by Design 2026-05-29** (DQ5; §18.3 tiering reconciled in
@@ -94,22 +101,16 @@ reconciliation; repo wins). See audit.md._
   `core.types/math/memory/concurrency` are Reserved for v1.x. **Progress:**
   the loading mechanism + `core.error` landed (#103); `core.compare` landed
   (#104, validating generics — work with a `Self`-substitution caveat, see
-  Q-self-subst). **Fan-out PAUSED** pending **Q-bridge** + Design's DQ6: #104
-  confirmed stdlib trait impls cannot cover primitive types until the checker↔
-  bock-core bridge exists, so further trait modules (convert/iter/effect) have
-  low value until then. Plan: `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`.
-
-- **[Q-bridge] canonical primitive trait conformances** — impl · **v1-BLOCKING**
-  (in-flight) · `compiler/crates/bock-types/`, `bock-errors/` · — · links DV4, DV6,
-  Q-stdlib, DQ6, DQ10 · note: Design **DQ6 ruled the model** — the compiler
-  registers canonical primitive conformances into the trait-impl table (sealed;
-  user impl of a core trait for a primitive rejected). ALSO wires the table into
-  the production pipeline (**DV6**: `impl_table` is `None` today, so `where`-bounds
-  are silently unenforced). Plan:
-  `plans/2026-05-30-primitive-conformance-bridge-plan.md`; branch
-  `feat/stdlib-primitive-bridge` (front-loaded STOP gate). Proposed conformance
-  matrix; the *normative* matrix → DQ10 (escalated, non-blocking). Unblocks the
-  R1 module fan-out.
+  Q-self-subst). **Fan-out UNBLOCKED:** Q-bridge landed (#108) — primitives now
+  conform to the core traits and generic bounds are enforced. Resume R1's
+  remaining modules (convert/iter/effect), each on the proven error/compare
+  pattern, but note each carries a NEW unknown to validate (de-risk one at a
+  time): `convert`'s Into/From half needs parameterized-trait resolution (a
+  separate gap; its `Displayable` half is covered by the bridge); `iter` needs
+  trait conformances for collection types (an analogous bridge for List/Map/Set);
+  `effect` bridges the built-in effect system. Plans:
+  `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`,
+  `plans/2026-05-30-primitive-conformance-bridge-plan.md`.
 
 ## Blocked
 
@@ -142,19 +143,20 @@ reconciliation; repo wins). See audit.md._
 ## Dependency graph
 
 ```
-[#103 foundation+error, #104 compare, #106 spec batch: LANDED]
-Q-bridge (DQ6, in-flight) ──→ Q-stdlib fan-out (convert/iter/effect → R2 → R3) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
+[#103 foundation+error, #104 compare, #106 spec batch, #108 Q-bridge: LANDED]
+Q-stdlib fan-out (convert/iter/effect → R2 → R3) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
+  ⮑ each remaining R1 module carries a new unknown to validate (convert: parameterized traits; iter: collection conformances; effect: effect-system bridge)
 (decided-ready: Q-prelude-inject [DQ9], Q-import-reject [DQ8])
 (independent / ready: Q-cl-dates, Q-cl-0515, Q-20.1-xref, Q-vscode-test, Q-fconf)
-(bugs, ready: Q-fmt-bock, Q-interp-enum, Q-self-subst)
+(bugs, ready: Q-fmt-bock, Q-interp-enum, Q-self-subst, Q-xmod-bounds)
 ```
 
-**Critical path to v1.0:** foundation + `core.error` + `core.compare` LANDED
-(#103/#104); the stdlib Design batch (Q1–Q4 = DQ6–DQ9) is reconciled into the spec
-(#106). **Q-bridge is now in-flight** (DQ6 ruled the model): it registers canonical
-primitive conformances + wires the trait-impl table into the pipeline (fixing DV6).
-When it lands, the module fan-out resumes — R1's remaining modules (convert/iter/
-effect) → R2 → R3 → D4 → D5 → ItemB. Prelude injection (Q-prelude-inject) + the
-bare-import rejection (Q-import-reject) are decided and can land alongside. The
-"ship what's done" vs §18-full-stdlib tension stays resolved in favor of shipping
-the core stdlib in v1.
+**Critical path to v1.0:** foundation + `core.error` + `core.compare` (#103/#104),
+the stdlib Design batch reconciled (#106), and **Q-bridge LANDED (#108)** —
+primitives conform to the core traits, generic bounds are enforced (DV6 fixed).
+The module **fan-out now resumes**: R1's remaining modules (convert/iter/effect),
+each de-risked one at a time (each carries a new unknown — see Q-stdlib note) →
+R2 → R3 → D4 → D5 → ItemB. Prelude injection (Q-prelude-inject) + bare-import
+rejection (Q-import-reject) are decided and can land alongside. The "ship what's
+done" vs §18-full-stdlib tension stays resolved in favor of shipping the core
+stdlib in v1.
