@@ -46,14 +46,14 @@ changes.
 
 The embedded source-compiled loading mechanism is **live** (#103): `core.*`
 modules ship as Bock source bundled in the `bock` binary and resolve through
-the module registry (hermetic; works from any cwd). **2 of 11 v1 modules
-landed** — `core.error` (#103), `core.compare` (#104). The 2026-05-30 Design
-stdlib batch (DQ6–DQ9) is reconciled into the spec (#106), and **Q-bridge landed
-(#108)**: the compiler registers canonical primitive conformances + the trait-impl
-table is now wired into the pipeline, so primitives satisfy core-trait bounds and
-generic `where`-bounds are enforced (fixing the latent DV6 bug). The module fan-out
-(R1's remaining convert/iter/effect) is now **unblocked**. The prelude (≈9 builtins
-+ type-checker intrinsics) is
+the module registry (hermetic; works from any cwd). **3 of 11 v1 modules
+landed** — `core.error` (#103), `core.compare` (#104), `core.convert` (#110).
+The 2026-05-30 Design stdlib batch (DQ6–DQ9) is reconciled into the spec (#106);
+**Q-bridge (#108)** wired the trait-impl table + canonical primitive conformances
+(primitives satisfy bounds; `where`-bounds enforced; DV6 fixed); **#110** added
+parameterized-trait resolution (From/Into/TryFrom + blanket + primitive
+conversions). R1 remaining: `iter` (collection conformances), `effect`
+(effect-system bridge). The prelude (≈9 builtins + type-checker intrinsics) is
 unchanged pending prelude injection (Q-prelude-inject). See DV1, DV4, MS-stdlib.
 
 ## Phase history

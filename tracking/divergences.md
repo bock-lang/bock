@@ -40,6 +40,19 @@ status(open | resolved→link)`
   to the bridge; not blocking the fan-out (stdlib generics are defined locally).
 - **Status:** open
 
+### DV8 — cross-module trait-impl resolution for `.into()`
+- **§:** — (impl correctness; cross-module impl visibility) · **spec-says:** a
+  `From`/`Into` impl is usable wherever the trait + types are in scope, across
+  modules · **impl-does:** `.into()` resolves via the impl-table, which isn't
+  seeded across module boundaries, so an `impl From[A] for B` in one module isn't
+  visible to `.into()` in another (`.from()` + trait methods DO cross modules via
+  method seeding). Surfaced by `core.convert` (#110).
+- **Classification:** gap (impl-table not seeded cross-module)
+- **Disposition:** fix-impl → `queue.md` Q-xmod-impl. Pairs with DV7 as the
+  cross-module-impl-surface theme. Not blocking (fixtures/stdlib co-locate impl
+  with use).
+- **Status:** open
+
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)
