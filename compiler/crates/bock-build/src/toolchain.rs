@@ -36,6 +36,27 @@ pub struct ToolchainSpec {
     pub install_hint: String,
 }
 
+/// How a [`RunStep`]'s `command` should be resolved when spawned.
+///
+/// This distinguishes "invoke a toolchain on PATH" from "execute a file the
+/// previous step produced in the working directory". The distinction is what
+/// makes execution cross-platform: a produced artifact is *not* on PATH and on
+/// Windows carries an `.exe` suffix, so it must be spawned by its workdir path
+/// (with [`std::env::consts::EXE_SUFFIX`] appended) rather than looked up like
+/// a toolchain binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepKind {
+    /// `command` is a toolchain binary resolved on PATH (e.g. `node`, `rustc`,
+    /// `python3`, `go`, `tsc`). Spawned by name; a spawn `NotFound` means the
+    /// toolchain is missing.
+    Toolchain,
+    /// `command` is the base name of an artifact a prior step produced in the
+    /// working directory (e.g. `main_bin`). It is spawned as
+    /// `<workdir>/<command><EXE_SUFFIX>` — never resolved on PATH — so it runs
+    /// portably on Windows (`main_bin.exe`) and Unix (`main_bin`) alike.
+    Artifact,
+}
+
 /// A single command in a target's execution plan.
 ///
 /// Steps run in order from the program's working directory. The entrypoint
@@ -44,18 +65,40 @@ pub struct ToolchainSpec {
 /// path. The *last* step's captured stdout is the program's output.
 #[derive(Debug, Clone)]
 pub struct RunStep {
-    /// The program to invoke (looked up on PATH, e.g. `node`, `python3`).
+    /// The program to invoke. Resolution depends on [`RunStep::kind`]:
+    /// a [`StepKind::Toolchain`] command is looked up on PATH (e.g. `node`,
+    /// `python3`); a [`StepKind::Artifact`] command is the base name of a
+    /// produced binary spawned by its workdir path with the platform exe
+    /// suffix appended.
     pub command: String,
     /// Literal arguments passed to `command`, in order.
     pub args: Vec<String>,
+    /// Whether `command` is a PATH-resolved toolchain or a produced artifact.
+    pub kind: StepKind,
 }
 
 impl RunStep {
-    /// Construct a step from a command name and string arguments.
+    /// Construct a PATH-resolved toolchain step from a command name and string
+    /// arguments (e.g. `node main.js`, `rustc … main.rs -o main_bin`).
     pub fn new(command: impl Into<String>, args: &[&str]) -> Self {
         Self {
             command: command.into(),
             args: args.iter().map(|a| (*a).to_string()).collect(),
+            kind: StepKind::Toolchain,
+        }
+    }
+
+    /// Construct a step that executes a produced artifact in the working
+    /// directory. `name` is the artifact's base name (no exe suffix, no `./`):
+    /// the platform [`EXE_SUFFIX`](std::env::consts::EXE_SUFFIX) is appended and
+    /// the file is spawned by its workdir path, so it never goes through PATH /
+    /// toolchain detection. Used for compiled targets such as Rust whose
+    /// compile step writes `main_bin` (`main_bin.exe` on Windows).
+    pub fn artifact(name: impl Into<String>) -> Self {
+        Self {
+            command: name.into(),
+            args: Vec::new(),
+            kind: StepKind::Artifact,
         }
     }
 }
@@ -427,6 +470,13 @@ fn builtin_python_spec() -> ToolchainSpec {
 }
 
 fn builtin_rust_spec() -> ToolchainSpec {
+    // `rustc -o <name>` with an extension-less name produces `<name>` with NO
+    // `.exe` on Windows (verified: `rustc -o main_bin` → `main_bin`, never
+    // `main_bin.exe`). Windows can't spawn an extension-less file (CreateProcess
+    // appends `.exe` when searching), so give `-o` the platform exe suffix; the
+    // produced name then matches the artifact the run step spawns — `main_bin.exe`
+    // on Windows, `main_bin` on Unix (EXE_SUFFIX is empty there).
+    let out_name = format!("main_bin{}", std::env::consts::EXE_SUFFIX);
     ToolchainSpec {
         target_id: "rust".to_string(),
         display_name: "Rust compiler".to_string(),
@@ -434,12 +484,16 @@ fn builtin_rust_spec() -> ToolchainSpec {
         version_args: vec!["--version".to_string()],
         compile_command: "rustc".to_string(),
         compile_args: vec!["--edition".to_string(), "2021".to_string()],
-        // Compile `main.rs` to a `main_bin` binary, then execute it. The
-        // produced binary lives in `workdir`, so it is invoked as `./main_bin`.
+        // Compile `main.rs` to a `main_bin` binary, then execute the produced
+        // artifact. The binary lives in `workdir` (named `main_bin` on Unix,
+        // `main_bin.exe` on Windows — rustc appends the platform exe suffix to
+        // an extension-less `-o` name), so the run step is an
+        // [`StepKind::Artifact`] spawned by its workdir path rather than a
+        // PATH-resolved `./main_bin`, which would fail on Windows.
         run_plan: RunPlan {
             steps: vec![
-                RunStep::new("rustc", &["--edition", "2021", "main.rs", "-o", "main_bin"]),
-                RunStep::new("./main_bin", &[]),
+                RunStep::new("rustc", &["--edition", "2021", "main.rs", "-o", &out_name]),
+                RunStep::artifact("main_bin"),
             ],
         },
         install_hint: "Install Rust via rustup: https://rustup.rs/".to_string(),
@@ -589,7 +643,18 @@ fn run_program(spec: &ToolchainSpec, workdir: &Path) -> Result<RunOutput, Toolch
     let mut final_exit: Option<i32> = None;
 
     for (idx, step) in steps.iter().enumerate() {
-        let mut cmd = Command::new(&step.command);
+        // Resolve the program to spawn. A toolchain step is looked up on PATH
+        // by name; a produced-artifact step is spawned by its workdir path with
+        // the platform exe suffix appended, so it never goes through PATH /
+        // toolchain detection (which is what broke Rust execution on Windows).
+        let program = match step.kind {
+            StepKind::Toolchain => PathBuf::from(&step.command),
+            StepKind::Artifact => {
+                workdir.join(format!("{}{}", step.command, std::env::consts::EXE_SUFFIX))
+            }
+        };
+
+        let mut cmd = Command::new(&program);
         cmd.args(&step.args);
         cmd.current_dir(workdir);
 
@@ -918,11 +983,17 @@ mod tests {
             "rust runs compile then binary"
         );
         assert_eq!(spec.run_plan.steps[0].command, "rustc");
+        assert_eq!(spec.run_plan.steps[0].kind, StepKind::Toolchain);
         assert!(spec.run_plan.steps[0].args.contains(&"main.rs".to_string()));
         assert!(spec.run_plan.steps[0]
             .args
-            .contains(&"main_bin".to_string()));
-        assert_eq!(spec.run_plan.steps[1].command, "./main_bin");
+            .contains(&format!("main_bin{}", std::env::consts::EXE_SUFFIX)));
+        // The run step is a produced artifact (spawned by workdir path with the
+        // platform exe suffix), not a PATH-resolved `./main_bin` — this is the
+        // cross-platform fix. Its base name carries no `./` and no `.exe`.
+        assert_eq!(spec.run_plan.steps[1].command, "main_bin");
+        assert_eq!(spec.run_plan.steps[1].kind, StepKind::Artifact);
+        assert!(spec.run_plan.steps[1].args.is_empty());
     }
 
     #[test]
