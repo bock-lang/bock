@@ -34,7 +34,7 @@ pub mod exports;
 pub use exports::{collect_exports, type_to_type_ref};
 
 pub mod seed_imports;
-pub use seed_imports::seed_imports;
+pub use seed_imports::{seed_imports, seed_prelude, PRELUDE_FROM_CORE};
 
 pub mod vocab;
 

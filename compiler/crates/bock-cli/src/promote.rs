@@ -21,7 +21,7 @@ use bock_lexer::Lexer;
 use bock_lsp::format_type;
 use bock_parser::Parser;
 use bock_source::SourceMap;
-use bock_types::{collect_exports, seed_imports, Strictness, Type, TypeChecker};
+use bock_types::{collect_exports, seed_imports, seed_prelude, Strictness, Type, TypeChecker};
 
 use crate::check::{discover_bock_files, register_type_builtins};
 
@@ -305,6 +305,7 @@ fn analyze(files: &[PathBuf], target_strictness: Strictness) -> anyhow::Result<V
 
         let mut checker = TypeChecker::new();
         register_type_builtins(&mut checker);
+        seed_prelude(&mut checker, &registry);
         seed_imports(&mut checker, &pf.module.imports, &registry);
         checker.check_module(&mut air_module);
 

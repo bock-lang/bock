@@ -1,0 +1,25 @@
+// TEST: stdlib_prelude_convert_from_into
+// EXPECT: no_errors
+//
+// The prelude convert traits `From`/`Into` (from `core.convert`) are
+// implementable and the derived blanket `.into()` is callable, all without an
+// explicit `use core.convert`.
+module userapp
+
+public record Meters {
+  value: Float
+}
+
+public record Feet {
+  value: Float
+}
+
+impl From[Meters] for Feet {
+  public fn from(value: Meters) -> Feet {
+    Feet { value: value.value * 3.28084 }
+  }
+}
+
+public fn to_feet(m: Meters) -> Feet {
+  m.into()
+}

@@ -1,0 +1,20 @@
+// TEST: stdlib_prelude_displayable
+// EXPECT: no_errors
+//
+// The prelude `Displayable` trait (from `core.convert`) is implementable
+// without an import.
+module userapp
+
+public record Name {
+  text: String
+}
+
+impl Displayable for Name {
+  public fn to_string(self) -> String {
+    self.text
+  }
+}
+
+public fn render(n: Name) -> String {
+  n.to_string()
+}

@@ -208,6 +208,29 @@ pub fn extract_dependencies(imports: &[ImportDecl]) -> HashSet<ModuleId> {
         .collect()
 }
 
+/// Augments a user module's dependency set with the implicit prelude
+/// dependencies: every embedded core (`is_stdlib`) module.
+///
+/// The §18.2 prelude makes core-defined symbols (`Ordering`, `Comparable`,
+/// `Into`, …) available in every module without an explicit `use`. To seed
+/// those symbols from the registry, the core modules that define them must be
+/// compiled and registered *before* any user module. These implicit edges
+/// encode that ordering in the dependency graph, so the topological sort always
+/// places the core modules first.
+///
+/// `core_module_ids` is the set of embedded core module ids; `self_id` is the
+/// id of the module whose deps are being augmented (excluded to avoid a
+/// self-edge for a core module). For stdlib modules themselves pass an empty
+/// `core_module_ids` (or simply do not call this) so they keep only their own
+/// explicit edges and cannot form a prelude self-cycle.
+pub fn add_prelude_deps(deps: &mut HashSet<ModuleId>, self_id: &str, core_module_ids: &[ModuleId]) {
+    for core_id in core_module_ids {
+        if core_id != self_id {
+            deps.insert(core_id.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

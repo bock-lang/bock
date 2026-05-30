@@ -1,0 +1,20 @@
+// TEST: stdlib_prelude_equatable
+// EXPECT: no_errors
+//
+// The prelude `Equatable` trait (from `core.compare`) is implementable without
+// an import.
+module userapp
+
+public record Tag {
+  id: Int
+}
+
+impl Equatable for Tag {
+  public fn eq(self, other: Tag) -> Bool {
+    self.id == other.id
+  }
+}
+
+public fn same(a: Tag, b: Tag) -> Bool {
+  a.eq(b)
+}
