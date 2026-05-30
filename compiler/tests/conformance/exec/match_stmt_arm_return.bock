@@ -3,7 +3,7 @@
 //
 // Regression fixture for the codegen-correctness workstream (defects 1 & 2):
 // `match` arms with `return` bodies in statement position (not inside a loop,
-// so no loop label is involved). `return` is the cleanest statement arm — it
+// so no loop label is involved). `return` is the cleanest statement arm -- it
 // lowers identically across Rust (match arm), Go (switch), Python (match/case)
 // and JS/TS (switch). Before the fix these arms emitted `/* unsupported */`
 // (Rust) or value-returning IIFEs/lambdas that discarded the `return`.

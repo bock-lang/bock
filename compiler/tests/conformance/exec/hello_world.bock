@@ -6,7 +6,7 @@
 // (js, ts, python, rust, go), printing exactly `hello world` to stdout.
 //
 // `main` is intentionally NOT `public`: a `public fn main` lowers to Go's
-// exported `func Main`, which is not Go's entry point — that is a separate
+// exported `func Main`, which is not Go's entry point -- that is a separate
 // codegen defect tracked for the codegen-correctness follow-up, not this
 // pure-infrastructure PR.
 module main

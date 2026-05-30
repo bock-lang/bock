@@ -3,7 +3,7 @@
 //
 // Regression fixture for the codegen-correctness workstream (defect 6):
 // a `public fn main`. The Go backend PascalCases public function names, so
-// `public fn main` lowered to `func Main()` — not Go's entry point — and
+// `public fn main` lowered to `func Main()` -- not Go's entry point -- and
 // `go run` failed with "function main is undeclared". The fix special-cases the
 // program entry point: a `main` function is never PascalCased, so it emits
 // `func main()`. The other four targets already handled `public fn main`.

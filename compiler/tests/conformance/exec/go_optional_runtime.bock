@@ -4,7 +4,7 @@
 //
 // Regression fixture for the codegen-correctness workstream (defect 4):
 // `Optional[T]` with `Some`/`None` and an Optional `match`. Go had no Optional
-// runtime — it emitted bare `Some`/`None`/`Optional[int64]` with no definitions
+// runtime -- it emitted bare `Some`/`None`/`Optional[int64]` with no definitions
 // and a value-switch on `.tag`, so `go run` failed to compile. The fix adds a
 // Go runtime prelude (a tagged `__bockOption` + `__bockSome`/`__bockNone`),
 // maps `Optional` in `map_type_name`, lowers the `Some`/`None` constructors,
@@ -13,7 +13,7 @@
 // Restricted to go/rust/js: the Python `Optional`/`Some`/`None` runtime is a
 // documented fast-follow (out of scope), and TypeScript's Optional *type*
 // lowering (`number | null`) disagrees with its tagged-object value lowering so
-// `tsc` rejects it (a pre-existing, separate TS defect — see PR notes). Both are
+// `tsc` rejects it (a pre-existing, separate TS defect -- see PR notes). Both are
 // out of scope for this Go-focused defect.
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go

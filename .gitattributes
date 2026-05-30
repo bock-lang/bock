@@ -1,0 +1,3 @@
+# Bock source is parsed directly by the compiler; CRLF (esp. around multi-byte
+# chars) breaks the lexer on Windows. Force LF for checked-in .bock source.
+*.bock text eol=lf
