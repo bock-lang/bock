@@ -420,10 +420,39 @@ pub fn module_main_fn_is_async(module: &AIRModule) -> bool {
 /// control flow or mutation and yields no usable value in expression position.
 ///
 /// These are exactly the node kinds a target's expression form (ternary, IIFE,
-/// value-`match` arm) cannot host: `break`, `continue`, `return`, and
-/// assignment.
+/// value-`match` arm) cannot host: `break`, `continue`, `return`, assignment,
+/// and an `if` that yields no value.
+///
+/// An `if` is statement-like — and so must be emitted in statement position
+/// rather than lowered to a ternary / IIFE — exactly when it produces no value:
+///
+/// - it has **no `else` branch** (a value-less `if` cannot be an expression), or
+/// - it has an `else` branch but **both branches are statement bodies** (e.g.
+///   `if (c) { return a } else { return b }`), so neither yields a value.
+///
+/// A value `if/else` (e.g. `let x = if (c) { 1 } else { 2 }`) always has an
+/// `else` whose branches end in an *expression* tail, so
+/// [`arm_body_is_statement`] returns `false` for them and the `if` stays an
+/// expression. `if let … = expr` returning a value is likewise unaffected: with
+/// an expression-tail `else` it is not classified here.
 #[must_use]
 pub fn node_is_statement(node: &AIRNode) -> bool {
+    if let NodeKind::If {
+        then_block,
+        else_block,
+        ..
+    } = &node.kind
+    {
+        return match else_block {
+            // No `else`: the `if` yields no value, so it is a statement.
+            None => true,
+            // With an `else`, the `if` is a statement only when *both* branches
+            // are statement bodies (neither yields a usable value). A value
+            // `if/else` has expression-tail branches and falls through to
+            // `false`, keeping it an expression.
+            Some(else_b) => arm_body_is_statement(then_block) && arm_body_is_statement(else_b),
+        };
+    }
     matches!(
         node.kind,
         NodeKind::Break { .. }
@@ -902,6 +931,129 @@ mod tests {
                 lit: bock_ast::Literal::Int("1".into())
             }
         )));
+    }
+
+    /// A `{ tail }` block carrying a single tail node.
+    fn block_with_tail(id: u32, tail: AIRNode) -> AIRNode {
+        n(
+            id,
+            NodeKind::Block {
+                stmts: vec![],
+                tail: Some(Box::new(tail)),
+            },
+        )
+    }
+
+    /// A bare `1` literal node (an expression with a usable value).
+    fn int_lit(id: u32) -> AIRNode {
+        n(
+            id,
+            NodeKind::Literal {
+                lit: bock_ast::Literal::Int("1".into()),
+            },
+        )
+    }
+
+    /// An `if` node: `if <cond> <then_block> [else <else_block>]`. Condition is
+    /// a placeholder; only the branch shapes matter for classification.
+    fn if_node(id: u32, then_block: AIRNode, else_block: Option<AIRNode>) -> AIRNode {
+        n(
+            id,
+            NodeKind::If {
+                let_pattern: None,
+                condition: Box::new(n(id + 100, NodeKind::Placeholder)),
+                then_block: Box::new(then_block),
+                else_block: else_block.map(Box::new),
+            },
+        )
+    }
+
+    #[test]
+    fn node_is_statement_classifies_no_else_if_as_statement() {
+        // `if (c) { return }` — no else, yields no value → statement (DV15).
+        let no_else = if_node(
+            1,
+            block_with_tail(2, n(3, NodeKind::Return { value: None })),
+            None,
+        );
+        assert!(node_is_statement(&no_else));
+
+        // `if (c) { break }` and `if (c) { continue }` likewise.
+        let no_else_break = if_node(
+            10,
+            block_with_tail(11, n(12, NodeKind::Break { value: None })),
+            None,
+        );
+        assert!(node_is_statement(&no_else_break));
+    }
+
+    #[test]
+    fn node_is_statement_classifies_all_statement_if_else_as_statement() {
+        // `if (c) { return a } else { return b }` — both branches statements,
+        // neither yields a value → statement.
+        let stmt_both = if_node(
+            1,
+            block_with_tail(2, n(3, NodeKind::Return { value: None })),
+            Some(block_with_tail(4, n(5, NodeKind::Break { value: None }))),
+        );
+        assert!(node_is_statement(&stmt_both));
+    }
+
+    #[test]
+    fn node_is_statement_leaves_value_if_else_an_expression() {
+        // `let x = if (c) { 1 } else { 2 }` — both branches end in an
+        // expression tail, so the `if` yields a value and must stay an
+        // expression. Misclassifying it as a statement would break value `if`.
+        let value_if = if_node(
+            1,
+            block_with_tail(2, int_lit(3)),
+            Some(block_with_tail(4, int_lit(5))),
+        );
+        assert!(!node_is_statement(&value_if));
+        assert!(!arm_body_is_statement(&value_if));
+    }
+
+    #[test]
+    fn node_is_statement_leaves_mixed_if_else_an_expression() {
+        // One statement branch, one value branch → the `if` can yield a value
+        // on the value branch, so it is not a pure statement. Stays expression.
+        let mixed = if_node(
+            1,
+            block_with_tail(2, n(3, NodeKind::Return { value: None })),
+            Some(block_with_tail(4, int_lit(5))),
+        );
+        assert!(!node_is_statement(&mixed));
+    }
+
+    #[test]
+    fn node_is_statement_handles_else_if_chains() {
+        // `if (a) { return } else if (b) { break }` — the `else` is itself a
+        // no-else statement `if`, so the whole chain is a statement.
+        let inner = if_node(
+            20,
+            block_with_tail(21, n(22, NodeKind::Break { value: None })),
+            None,
+        );
+        let chain = if_node(
+            1,
+            block_with_tail(2, n(3, NodeKind::Return { value: None })),
+            Some(inner),
+        );
+        assert!(node_is_statement(&chain));
+
+        // `if (a) { return } else if (b) { 1 } else { 2 }` — the trailing
+        // else-if yields a value, so the chain stays an expression.
+        let value_inner = if_node(
+            30,
+            block_with_tail(31, int_lit(32)),
+            Some(block_with_tail(33, int_lit(34))),
+        );
+        let mixed_chain = if_node(
+            40,
+            block_with_tail(41, n(42, NodeKind::Return { value: None })),
+            Some(value_inner),
+        );
+        assert!(!node_is_statement(&mixed_chain));
     }
 
     #[test]
