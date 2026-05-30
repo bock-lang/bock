@@ -1,30 +1,26 @@
 // TEST: exec_generic_record
-// EXPECT: output "42;hi"
-// EXPECT: targets js, ts, python, rust
+// EXPECT: output "42;hi;42"
+// EXPECT: targets js, ts, python, rust, go
 //
 // Generic record (`record Box[T] { value: T }`) codegen: a type-parameterized
 // value type, constructed at two distinct instantiations (`Box[Int]` and
-// `Box[String]`) and read back via field access.
+// `Box[String]`), read back via field access, and read back via a generic
+// method (`fn get(self) -> T`).
 //
-// This is the regression fixture for the Python generics defect (DV12, Python
-// slice): `record Box[T]` emitted `class Box:` with a field annotation
+// Originally the regression fixture for the Python generics defect (DV12,
+// Python slice): `record Box[T]` emitted `class Box:` with a field annotation
 // `value: T` and no `T = TypeVar("T")` / `Generic[T]`, so the module raised
-// `NameError: name 'T' is not defined` at class-evaluation time, before `main`
-// ran. The fix emits `T = TypeVar("T")` once per type parameter (deduped across
-// the bundle), adds `Generic[T, …]` to the class bases, and imports
-// `TypeVar`/`Generic` from `typing`.
+// `NameError: name 'T' is not defined` at class-evaluation time. The fix emits
+// `T = TypeVar("T")` once per type parameter (deduped across the bundle), adds
+// `Generic[T, …]` to the class bases, and imports `TypeVar`/`Generic`.
 //
-// `// EXPECT: targets` deliberately OMITS `go`: Go emits the struct literal
-// without its type argument (`Box{Value: 42}` rather than `Box[int64]{…}`), so
-// `go build` rejects "generic type Box[T any] without instantiation" — a
-// separate, pre-existing Go-backend defect tracked under DV12. The cross-target
-// generics work (Go construction-site type-argument inference; TS/Rust generic
-// *methods* — a `Box[T]` method body further breaks TS interface-merge and
-// Rust `impl<T>`) is a later session; this fixture seeds it. Flip `go` on (and
-// add a generic method) once that lands.
-//
-// The fixture stays to construct-and-read (no method) precisely so it remains
-// green on js/ts/rust today, isolating the Python TypeVar/Generic fix.
+// `go` is now included (codegen-completeness P1-b2 / DV12): Go's generic
+// construction now emits the explicit instantiation `Box[int64]{…}` (Go does
+// not infer struct type args from composite-literal fields) and the generic
+// method receiver emits `func (self *Box[T]) ...`. The generic-method half also
+// fixed the TS declaration-merge (`interface Box<T>`) and Rust `impl<T> Box<T>`
+// (with a synthesized `T: Clone` bound + `self.value.clone()` for the
+// field-returning getter).
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).
@@ -34,8 +30,14 @@ record Box[T] {
   value: T
 }
 
+impl Box {
+  fn get(self) -> T {
+    return self.value
+  }
+}
+
 fn main() -> Void {
   let n = Box { value: 42 }
   let s = Box { value: "hi" }
-  println("${n.value};${s.value}")
+  println("${n.value};${s.value};${n.get()}")
 }

@@ -1,0 +1,66 @@
+// TEST: exec_generic_record_method
+// EXPECT: output "42;hi;52"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Generic record WITH a method: `record Box[T] { value: T }` plus an
+// `impl Box { fn get(self) -> T }`, constructed at two instantiations
+// (`Box[Int]`, `Box[String]`) and method-called. Exercises the cross-target
+// generics-codegen work (DV12 / codegen-completeness P1-b2), which previously
+// failed to compile on Go, TS, and Rust for distinct reasons:
+//
+//   * Go: the method receiver emitted `func (self *Box) get() T` — Go requires
+//     the type-param list on a generic type's receiver (`func (self *Box[T])`)
+//     and `T` is otherwise undefined; the struct construction emitted
+//     `Box{Value: 42}` rather than the `Box[int64]{...}` Go requires (Go does
+//     not infer struct type args from composite-literal fields). Both fixed by
+//     threading the record's generic params (from a decl pre-scan) into method
+//     emission and inferring the construction's type args from field values.
+//   * TS: the declaration-merging `interface Box { ... }` dropped the `<T>`
+//     (`impl Box`'s own generic params are empty — `T` lives on the record), so
+//     `tsc` rejected `All declarations of 'Box' must have identical type
+//     parameters` and `Cannot find name 'T'`. Fixed by recovering the record's
+//     `<T>` so the merged `interface Box<T>` lands on the generic class and the
+//     prototype function re-declares `<T>`.
+//   * Rust: `impl Box { ... }` emitted bare `impl Box` (undefined `T`) because
+//     the impl carries no generic params of its own. Fixed by synthesizing
+//     `impl<T> Box<T>` from a record/enum decl pre-scan. A `get(self) -> T`
+//     getter additionally moves a non-`Copy` field out of the `&self` receiver,
+//     so the field read is lowered to `self.value.clone()` with a `T: Clone`
+//     impl bound and `#[derive(Clone)]` on the record (synthesized only for a
+//     generic impl that returns a `self` field by value — never to
+//     over-constrain a generic impl that doesn't).
+//
+// The `combine` method exercises a generic method that returns a value computed
+// from the field (not a bare field move), confirming the receiver `[T]`/`<T>`
+// threading works for non-getter method bodies too.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Box[T] {
+  value: T
+}
+
+impl Box {
+  fn get(self) -> T {
+    return self.value
+  }
+}
+
+record IntBox {
+  n: Int
+}
+
+impl IntBox {
+  fn plus(self, k: Int) -> Int {
+    return self.n + k
+  }
+}
+
+fn main() -> Void {
+  let n = Box { value: 42 }
+  let s = Box { value: "hi" }
+  let b = IntBox { n: 42 }
+  println("${n.get()};${s.get()};${b.plus(10)}")
+}

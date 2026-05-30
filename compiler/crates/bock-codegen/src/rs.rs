@@ -94,6 +94,9 @@ impl CodeGenerator for RsGenerator {
         let mut ctx = RsEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
+        ctx.generic_decls =
+            crate::generator::collect_generic_decls(&[(module, std::path::Path::new(""))]);
+        ctx.collect_clone_targets(module);
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -136,6 +139,13 @@ impl CodeGenerator for RsGenerator {
         // Pre-scan enum variants across the whole bundle so a `use`d enum's
         // variants resolve at a construction/pattern site in another module.
         ctx.enum_variants = crate::generator::collect_enum_variants(modules);
+        // Pre-scan generic-type declarations so an `impl Box { ... }` recovers
+        // the `<T>` declared on `record Box[T]` even across module boundaries,
+        // and the clone-target set so `RecordDecl` emission can derive `Clone`.
+        ctx.generic_decls = crate::generator::collect_generic_decls(modules);
+        for (module, _) in modules {
+            ctx.collect_clone_targets(module);
+        }
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
                 ctx.buf.push('\n');
@@ -199,6 +209,24 @@ struct RsEmitCtx {
     /// bundle; consulted *after* the bespoke Optional/Result paths so those are
     /// never regressed.
     enum_variants: crate::generator::EnumVariantRegistry,
+    /// Generic-type declaration registry: a record/enum/class name → its
+    /// declared generic params. An `impl Box { ... }` block carries no params of
+    /// its own (the `T` is declared on `record Box[T]`); Rust requires the impl
+    /// to introduce and apply them (`impl<T> Box<T> { ... }`). This recovers them
+    /// at the impl site. Pre-scanned across the bundle (mirrors
+    /// [`Self::enum_variants`]).
+    generic_decls: crate::generator::GenericDeclRegistry,
+    /// Records whose `impl` returns a `self` field by value and so need
+    /// `#[derive(Clone)]` plus a `T: Clone` bound on the generic impl (a `&self`
+    /// method cannot move a non-`Copy` field out, so the field read is lowered
+    /// to `self.field.clone()`). Populated by [`Self::collect_clone_targets`]
+    /// before emission so the `RecordDecl` can decide whether to derive `Clone`.
+    clone_target_records: std::collections::HashSet<String>,
+    /// True while emitting a method body whose impl target is generic and clones
+    /// `self` fields. Gates the `self.field` → `self.field.clone()` rewrite so it
+    /// applies only inside such methods (never to general field reads, which
+    /// would be noisy and could over-require `Clone`).
+    in_clone_self_method: bool,
 }
 
 impl RsEmitCtx {
@@ -215,7 +243,91 @@ impl RsEmitCtx {
             composite_effects: HashMap::new(),
             concurrency_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
+            generic_decls: crate::generator::GenericDeclRegistry::new(),
+            clone_target_records: std::collections::HashSet::new(),
+            in_clone_self_method: false,
         }
+    }
+
+    /// Pre-scan a module's `impl` blocks and mark each *generic* record whose
+    /// impl returns a `self` field by value — those need `#[derive(Clone)]` and
+    /// a `T: Clone` impl bound because a `&self` method cannot move a non-`Copy`
+    /// field out. Returning `self.field` (Bock's by-value receiver consuming a
+    /// field) is lowered to `self.field.clone()`. Only generic targets are
+    /// considered: a concrete record returning a non-`Copy` field is the
+    /// pre-existing, orthogonal `&self` move-out defect, left untouched here.
+    fn collect_clone_targets(&mut self, module: &AIRModule) {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            return;
+        };
+        for item in items {
+            let NodeKind::ImplBlock {
+                target, methods, ..
+            } = &item.kind
+            else {
+                continue;
+            };
+            let target_name = self.type_expr_to_string(target);
+            // Only generic targets (the `impl<T> Box<T>` synthesis case).
+            let is_generic = self
+                .generic_decls
+                .get(&target_name)
+                .is_some_and(|p| !p.is_empty());
+            if !is_generic {
+                continue;
+            }
+            let returns_self_field = methods.iter().any(Self::method_returns_self_field);
+            if returns_self_field {
+                self.clone_target_records.insert(target_name);
+            }
+        }
+    }
+
+    /// True when a method's body returns a bare `self.field` by value — either an
+    /// explicit `return self.field` or a `self.field` block-tail. Such a return
+    /// moves the field out of the `&self` receiver and so requires a clone (and a
+    /// `Clone` bound) under Rust's borrow rules.
+    fn method_returns_self_field(method: &AIRNode) -> bool {
+        let NodeKind::FnDecl { body, .. } = &method.kind else {
+            return false;
+        };
+        Self::block_returns_self_field(body)
+    }
+
+    /// Does this node, in value/return position, evaluate to a `self.field`?
+    fn block_returns_self_field(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::Block { stmts, tail } => {
+                if let Some(t) = tail {
+                    // The tail may be a bare `self.field` (implicit return) or a
+                    // `return self.field;` statement (Bock allows an explicit
+                    // `return` in tail position).
+                    if Self::is_self_field(t) || Self::stmt_returns_self_field(t) {
+                        return true;
+                    }
+                }
+                stmts.iter().any(Self::stmt_returns_self_field)
+            }
+            _ => Self::is_self_field(node),
+        }
+    }
+
+    /// A `return self.field;` statement (or a nested block/return that does).
+    fn stmt_returns_self_field(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::Return { value: Some(v) } => Self::is_self_field(v),
+            NodeKind::Block { .. } => Self::block_returns_self_field(node),
+            _ => false,
+        }
+    }
+
+    /// True when `node` is exactly `self.<field>`.
+    fn is_self_field(node: &AIRNode) -> bool {
+        matches!(
+            &node.kind,
+            NodeKind::FieldAccess { object, .. }
+                if matches!(&object.kind, NodeKind::Identifier { name } if name.name == "self")
+        )
     }
 
     /// The `Enum::` qualifier for a variant *path* if its last segment is a
@@ -638,6 +750,70 @@ impl RsEmitCtx {
     }
 
     /// Emit generic parameter list: `<T, U: Foo>`.
+    /// Render a *use-site* generic argument list (`<T>`, `<T, U>`) — bare param
+    /// names, no bounds — for a type reference like `Box<T>`. Empty for none.
+    fn generic_param_args_rs(&self, params: &[bock_ast::GenericParam]) -> String {
+        if params.is_empty() {
+            return String::new();
+        }
+        let names: Vec<&str> = params.iter().map(|p| p.name.name.as_str()).collect();
+        format!("<{}>", names.join(", "))
+    }
+
+    /// Render an impl's generic-param declaration, optionally adding a `Clone`
+    /// bound to every param. Used for a generic clone-target impl whose method
+    /// returns `self.field` by value (the field read clones, so `T: Clone`).
+    fn generic_params_to_rs_with_clone(
+        &self,
+        params: &[bock_ast::GenericParam],
+        add_clone: bool,
+    ) -> String {
+        if params.is_empty() {
+            return String::new();
+        }
+        let items: Vec<String> = params
+            .iter()
+            .map(|p| {
+                let mut bounds: Vec<String> = p
+                    .bounds
+                    .iter()
+                    .map(|b| {
+                        b.segments
+                            .iter()
+                            .map(|s| s.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join("::")
+                    })
+                    .collect();
+                if add_clone && !bounds.iter().any(|b| b == "Clone") {
+                    bounds.push("Clone".to_string());
+                }
+                if bounds.is_empty() {
+                    p.name.name.clone()
+                } else {
+                    format!("{}: {}", p.name.name, bounds.join(" + "))
+                }
+            })
+            .collect();
+        format!("<{}>", items.join(", "))
+    }
+
+    /// The bare name of a named type expression (`Box` for `Box[T]`), dropping
+    /// any generic arguments. Used to look a target up in the generic-decl
+    /// registry, which is keyed by the undecorated declaration name.
+    fn type_expr_base_name(&self, node: &AIRNode) -> String {
+        match &node.kind {
+            NodeKind::TypeNamed { path, .. } => path
+                .segments
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join("::"),
+            NodeKind::Identifier { name } => name.name.clone(),
+            _ => "Unknown".into(),
+        }
+    }
+
     fn generic_params_to_rs(&self, params: &[bock_ast::GenericParam]) -> String {
         if params.is_empty() {
             return String::new();
@@ -753,6 +929,12 @@ impl RsEmitCtx {
             } => {
                 let vis = vis_str(*visibility);
                 let generics = self.generic_params_to_rs(generic_params);
+                // A generic record whose `impl` returns a `self` field by value
+                // needs `Clone` (the field read is lowered to `.clone()` because
+                // a `&self` method cannot move a non-`Copy` field out).
+                if self.clone_target_records.contains(&name.name) {
+                    self.writeln("#[derive(Clone)]");
+                }
                 self.writeln(&format!("{vis}struct {}{generics} {{", name.name));
                 self.indent += 1;
                 for f in fields {
@@ -840,21 +1022,57 @@ impl RsEmitCtx {
             NodeKind::ImplBlock {
                 generic_params,
                 trait_path,
+                trait_args,
                 target,
                 where_clause,
                 methods,
                 ..
             } => {
-                let generics = self.generic_params_to_rs(generic_params);
-                let target_name = self.type_expr_to_string(target);
+                let target_base = self.type_expr_base_name(target);
+                let target_rendered = self.type_expr_to_string(target);
+                // Resolve the params the impl introduces. When the impl declares
+                // its own (`impl[T] Box[T]`), use them and trust the target the
+                // user wrote. When it declares none but the target is a generic
+                // record/enum (`impl Box { ... }`, `T` on `record Box[T]`), Rust
+                // requires the impl to both introduce and apply the params:
+                // synthesize `impl<T> Box<T>`.
+                let synth_params: Vec<bock_ast::GenericParam> = if generic_params.is_empty() {
+                    self.generic_decls
+                        .get(&target_base)
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    generic_params.to_vec()
+                };
+                // Returning `self.field` clones it, so a generic clone-target
+                // gets a `T: Clone` bound (only on these — never over-constrain a
+                // generic impl that doesn't move a field out).
+                let add_clone_bound = trait_path.is_none()
+                    && self.clone_target_records.contains(&target_base)
+                    && !synth_params.is_empty();
+                let generics = self.generic_params_to_rs_with_clone(&synth_params, add_clone_bound);
+                // The applied target type. Prefer the form the user wrote if it
+                // already carries args (`impl Box[T]`); otherwise synthesize
+                // `Box<T>` from the recovered params.
+                let target_name = if !generic_params.is_empty() || synth_params.is_empty() {
+                    target_rendered
+                } else {
+                    format!("{target_base}{}", self.generic_param_args_rs(&synth_params))
+                };
                 let where_cl = self.where_clause_to_rs(where_clause);
                 if let Some(tp) = trait_path {
-                    let trait_name = tp
+                    let mut trait_name = tp
                         .segments
                         .iter()
                         .map(|s| s.name.as_str())
                         .collect::<Vec<_>>()
                         .join("::");
+                    // Trait type arguments: `impl From<Int> for Float`.
+                    if !trait_args.is_empty() {
+                        let args: Vec<String> =
+                            trait_args.iter().map(|a| self.type_to_rs(a)).collect();
+                        trait_name.push_str(&format!("<{}>", args.join(", ")));
+                    }
                     self.writeln(&format!(
                         "impl{generics} {trait_name} for {target_name}{where_cl} {{"
                     ));
@@ -862,6 +1080,8 @@ impl RsEmitCtx {
                     self.writeln(&format!("impl{generics} {target_name}{where_cl} {{"));
                 }
                 let suppress_vis = trait_path.is_some();
+                let prev_clone_self = self.in_clone_self_method;
+                self.in_clone_self_method = add_clone_bound;
                 self.indent += 1;
                 for (i, method) in methods.iter().enumerate() {
                     if i > 0 {
@@ -870,6 +1090,7 @@ impl RsEmitCtx {
                     self.emit_method_inner(method, suppress_vis)?;
                 }
                 self.indent -= 1;
+                self.in_clone_self_method = prev_clone_self;
                 self.writeln("}");
                 Ok(())
             }
@@ -1767,6 +1988,15 @@ impl RsEmitCtx {
             NodeKind::FieldAccess { object, field } => {
                 self.emit_expr(object)?;
                 let _ = write!(self.buf, ".{}", to_snake_case(&field.name));
+                // Inside a generic clone-target impl method, reading a `self`
+                // field yields it by value; a `&self` receiver cannot move a
+                // non-`Copy` field out, so clone it. The impl carries the
+                // matching `T: Clone` bound and the record derives `Clone`.
+                if self.in_clone_self_method
+                    && matches!(&object.kind, NodeKind::Identifier { name } if name.name == "self")
+                {
+                    self.buf.push_str(".clone()");
+                }
                 Ok(())
             }
             NodeKind::Index { object, index } => {
@@ -4694,6 +4924,198 @@ mod tests {
         assert!(
             out.contains("inner(&__logger)"),
             "call should use innermost handler, got: {out}"
+        );
+    }
+
+    // ── Generic impl synthesis (DV12 / P1-b2) ─────────────────────────────────
+
+    fn generic_param(id: u32, name: &str) -> GenericParam {
+        GenericParam {
+            id,
+            span: span(),
+            name: ident(name),
+            bounds: vec![],
+        }
+    }
+
+    fn named_type(id: u32, name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::TypeNamed {
+                path: type_path(&[name]),
+                args: vec![],
+            },
+        )
+    }
+
+    /// `record Box[T] { value: T }`.
+    fn generic_box_record() -> AIRNode {
+        node(
+            10,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                name: ident("Box"),
+                generic_params: vec![generic_param(11, "T")],
+                fields: vec![RecordDeclField {
+                    id: 12,
+                    span: span(),
+                    name: ident("value"),
+                    ty: TypeExpr::Named {
+                        id: 13,
+                        span: span(),
+                        path: type_path(&["T"]),
+                        args: vec![],
+                    },
+                    default: None,
+                }],
+            },
+        )
+    }
+
+    /// `impl Box { fn get(self) -> T { return self.value } }` — a getter that
+    /// returns a `self` field by value.
+    fn generic_box_getter_impl() -> AIRNode {
+        let self_param = node(
+            20,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(21, "self")),
+                ty: None,
+                default: None,
+            },
+        );
+        let body = block(
+            22,
+            vec![],
+            Some(node(
+                23,
+                NodeKind::Return {
+                    value: Some(Box::new(node(
+                        24,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(25, "self")),
+                            field: ident("value"),
+                        },
+                    ))),
+                },
+            )),
+        );
+        let method = node(
+            26,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("get"),
+                generic_params: vec![],
+                params: vec![self_param],
+                return_type: Some(Box::new(named_type(27, "T"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        node(
+            30,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(named_type(31, "Box")),
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        )
+    }
+
+    #[test]
+    fn generic_impl_synthesizes_impl_and_clone_for_getter() {
+        // `impl Box { fn get(self) -> T { return self.value } }` for
+        // `record Box[T]` must synthesize `impl<T: Clone> Box<T>`, derive
+        // `Clone`, and clone the field read (a `&self` method cannot move a
+        // non-`Copy` field out).
+        let out = gen(&module(
+            vec![],
+            vec![generic_box_record(), generic_box_getter_impl()],
+        ));
+        assert!(
+            out.contains("#[derive(Clone)]"),
+            "generic getter target should derive Clone, got: {out}"
+        );
+        assert!(
+            out.contains("impl<T: Clone> Box<T> {"),
+            "impl should synthesize `<T: Clone>` and apply `Box<T>`, got: {out}"
+        );
+        assert!(
+            out.contains("return self.value.clone();"),
+            "field return should be cloned, got: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_impl_no_clone_when_field_not_returned() {
+        // A generic impl whose method does NOT return a `self` field by value
+        // must NOT be over-constrained with `Clone` or get a `#[derive(Clone)]`.
+        let self_param = node(
+            40,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(41, "self")),
+                ty: None,
+                default: None,
+            },
+        );
+        // `fn id_value(self) -> Int { return 0 }` — returns a literal, not a
+        // `self` field.
+        let body = block(
+            42,
+            vec![],
+            Some(node(
+                43,
+                NodeKind::Return {
+                    value: Some(Box::new(int_lit(44, "0"))),
+                },
+            )),
+        );
+        let method = node(
+            45,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("zero"),
+                generic_params: vec![],
+                params: vec![self_param],
+                return_type: Some(Box::new(named_type(46, "Int"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let impl_block = node(
+            47,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(named_type(48, "Box")),
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        );
+        let out = gen(&module(vec![], vec![generic_box_record(), impl_block]));
+        assert!(
+            out.contains("impl<T> Box<T> {"),
+            "impl should synthesize `<T>` (no Clone) for a non-returning method, got: {out}"
+        );
+        assert!(
+            !out.contains("T: Clone"),
+            "must NOT over-constrain with Clone, got: {out}"
+        );
+        assert!(
+            !out.contains("#[derive(Clone)]"),
+            "must NOT derive Clone when no field is moved out, got: {out}"
         );
     }
 }
