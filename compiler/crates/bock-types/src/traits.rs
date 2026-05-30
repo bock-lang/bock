@@ -669,7 +669,7 @@ const SIZED_FLOATS: &[PrimitiveType] = &[PrimitiveType::Float32, PrimitiveType::
 /// generic-bound satisfaction uniformly (codegen still lowers primitive
 /// operations via the existing intrinsic fast path — no dynamic dispatch).
 ///
-/// Registration uses [`ImplTable::register_trait_impl_inner`] directly, which
+/// Registration uses `ImplTable::register_trait_impl_inner` directly, which
 /// bypasses the sealing check applied to user `impl` blocks, so the compiler's
 /// own registration is never rejected. Call this **after**
 /// [`ImplTable::build_from`] so user-impl sealing runs first.
