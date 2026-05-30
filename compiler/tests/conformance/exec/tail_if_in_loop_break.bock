@@ -1,0 +1,26 @@
+// TEST: exec_tail_if_in_loop_break
+// EXPECT: output "count=4"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DV15 focused variant: a `loop` whose body's LAST statement is a no-else
+// statement `if` that `break`s, and nothing else follows. This isolates the
+// loop-label interaction: a tail `break` that exits the loop directly (not via
+// a lowered statement-arm `switch`) must emit a *plain* `break` — no loop label
+// — on Go/JS/TS. `loop_needs_break_label` keys on a statement-arm `match`, so a
+// bare tail `if { break }` must NOT request a label; this fixture would surface
+// a spurious "unused label" (Go vet / TS) if it did.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let mut count: Int = 0
+  loop {
+    count = count + 1
+    if (count >= 4) {
+      break
+    }
+  }
+  println("count=${count}")
+}

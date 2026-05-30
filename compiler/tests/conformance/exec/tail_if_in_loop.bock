@@ -1,0 +1,76 @@
+// TEST: exec_tail_if_in_loop
+// EXPECT: output "sum=10;r=3;odds=3"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression fixture for the codegen-completeness milestone (DV15): a
+// *no-else* statement `if` in **tail position** of a loop body — i.e. the
+// LAST statement of the block. Such an `if` yields no value, so it must be
+// emitted in statement position, not lowered to a ternary / IIFE.
+//
+// Before the fix, `node_is_statement` recognised only
+// `break`/`continue`/`return`/assignment, so a tail `if (c) { ... }` was not
+// classified as a statement. The block-tail logic in every backend then routed
+// it through the expression path: JS/TS/Python emitted a `/* unsupported */`
+// ternary (invalid), Rust emitted a wrong implicit-`return` of the `if` value
+// (silent-wrong), and Go failed to compile. The fix classifies an `if` as a
+// statement when it has no `else` (or both branches are statement bodies), so
+// each backend's statement-`if` arm is reached.
+//
+// This fixture exercises all three statement-tail forms as the loop-body tail:
+//
+//   - `break`   — `loop { ...; if (i >= 5) { break } }`
+//   - `return`  — `while (...) { if (k % 3 == 0) { return k } ... }` (helper);
+//                 here the `if` is also the tail of the *helper*'s loop body
+//   - `continue`— `loop { ...; if (j % 2 == 0) { continue }; ... }`
+//
+// The tail `break` inside a `for`/`loop` (not inside a statement-arm `switch`)
+// must emit a *plain* `break` on Go/JS/TS — no loop label — so this fixture
+// also guards against a spurious "unused label".
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn first_multiple_of_three(limit: Int) -> Int {
+  let mut k: Int = 1
+  while (k <= limit) {
+    if (k % 3 == 0) {
+      return k
+    }
+    k = k + 1
+  }
+  return -1
+}
+
+fn main() -> Void {
+  // (1) loop whose LAST statement is a no-else `if` that `break`s.
+  let mut sum: Int = 0
+  let mut i: Int = 0
+  loop {
+    sum = sum + i
+    i = i + 1
+    if (i >= 5) {
+      break
+    }
+  }
+
+  // (2) tail `if` that `return`s early, inside a helper's `while` loop.
+  let r: Int = first_multiple_of_three(20)
+
+  // (3) loop with an interior tail-form `if` that `continue`s on evens, so
+  //     only odd j (1, 3, 5) increment the counter.
+  let mut odds: Int = 0
+  let mut j: Int = 0
+  loop {
+    j = j + 1
+    if (j > 6) {
+      break
+    }
+    if (j % 2 == 0) {
+      continue
+    }
+    odds = odds + 1
+  }
+
+  println("sum=${sum};r=${r};odds=${odds}")
+}
