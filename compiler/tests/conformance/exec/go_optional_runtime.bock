@@ -1,6 +1,6 @@
 // TEST: exec_go_optional_runtime
 // EXPECT: output "got 7;nothing"
-// EXPECT: targets go, rust, js
+// EXPECT: targets go, rust, js, ts
 //
 // Regression fixture for the codegen-correctness workstream (defect 4):
 // `Optional[T]` with `Some`/`None` and an Optional `match`. Go had no Optional
@@ -10,11 +10,15 @@
 // maps `Optional` in `map_type_name`, lowers the `Some`/`None` constructors,
 // and dispatches the Optional match on the tag.
 //
-// Restricted to go/rust/js: the Python `Optional`/`Some`/`None` runtime is a
-// documented fast-follow (out of scope), and TypeScript's Optional *type*
-// lowering (`number | null`) disagrees with its tagged-object value lowering so
-// `tsc` rejects it (a pre-existing, separate TS defect -- see PR notes). Both are
-// out of scope for this Go-focused defect.
+// TS (Q-ts-codegen): previously TypeScript's Optional *type* lowering
+// (`number | null`) disagreed with its tagged-object *value* lowering
+// (`{ _tag: "Some", _0: v }` / `{ _tag: "None" }`), so `tsc` rejected it. The
+// fix emits a `BockOption<T>` discriminated-union type prelude (mirroring Go's
+// `__bockOption`) and maps `Optional[T]` to it, so type and value agree, the
+// `switch (o._tag)` match narrows, and the two-variant union is exhaustive.
+//
+// Still restricted away from python: the Python `Optional`/`Some`/`None`
+// runtime is a documented fast-follow (out of scope for this Go-focused defect).
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).

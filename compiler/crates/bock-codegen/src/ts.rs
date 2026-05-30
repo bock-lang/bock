@@ -32,6 +32,36 @@ fn module_uses_concurrency(items: &[AIRNode]) -> bool {
     })
 }
 
+/// Runtime type for Bock `Optional[T]` in TypeScript. The *value*
+/// representation is a tagged object — `{ _tag: "Some", _0: v }` or
+/// `{ _tag: "None" }` (see [`TsEmitCtx::try_emit_prelude_ctor`] and the `None`
+/// identifier in [`TsEmitCtx::emit_expr`]) — so the *type* must be the matching
+/// discriminated union, not `T | null`. This mirrors the Go `__bockOption`
+/// runtime added in the codegen-correctness workstream: type and value agree,
+/// a `match` lowered to `switch (x._tag)` narrows correctly, and the two-variant
+/// union is provably exhaustive (so a `string`-returning match needs no
+/// `default`).
+const OPTIONAL_RUNTIME_TS: &str = "\
+// ── Bock Optional runtime ──
+type BockOption<T> =
+  | { readonly _tag: \"Some\"; readonly _0: T }
+  | { readonly _tag: \"None\" };
+";
+
+/// True if the module references `Optional`, `Some`, or `None` anywhere, so the
+/// Optional runtime type prelude must be emitted. A cheap structural scan over
+/// the debug rendering, mirroring [`module_uses_concurrency`] and the Go
+/// backend's `go_module_uses_optional`.
+fn module_uses_optional(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"Optional\"")
+            || s.contains("TypeOptional")
+            || s.contains("\"Some\"")
+            || s.contains("\"None\"")
+    })
+}
+
 const CONCURRENCY_RUNTIME_TS: &str = "\
 // ── Bock concurrency runtime ──
 type __BockChannel<T> = {
@@ -486,7 +516,11 @@ impl TsEmitCtx {
                 format!("({}) => {}", param_strs.join(", "), self.type_to_ts(ret))
             }
             NodeKind::TypeOptional { inner } => {
-                format!("{} | null", self.type_to_ts(inner))
+                // `T?` lowers to the tagged Optional runtime union, not `T |
+                // null`: the value is `{ _tag: "Some", _0: v }` / `{ _tag:
+                // "None" }`, so the type must describe that. See
+                // `OPTIONAL_RUNTIME_TS`.
+                format!("BockOption<{}>", self.type_to_ts(inner))
             }
             NodeKind::TypeSelf => "this".into(),
             _ => "unknown".into(),
@@ -546,7 +580,9 @@ impl TsEmitCtx {
                 )
             }
             TypeExpr::Optional { inner, .. } => {
-                format!("{} | null", self.ast_type_to_ts(inner))
+                // See the `TypeOptional` arm of `type_to_ts`: the tagged
+                // Optional union must match the emitted tagged-object value.
+                format!("BockOption<{}>", self.ast_type_to_ts(inner))
             }
             TypeExpr::SelfType { .. } => "this".into(),
         }
@@ -587,6 +623,10 @@ impl TsEmitCtx {
         self.mark_span(node.span);
         match &node.kind {
             NodeKind::Module { imports, items, .. } => {
+                if module_uses_optional(items) {
+                    self.buf.push_str(OPTIONAL_RUNTIME_TS);
+                    self.buf.push('\n');
+                }
                 if module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_TS);
                     self.buf.push('\n');
@@ -833,6 +873,44 @@ impl TsEmitCtx {
                 ..
             } => {
                 let target_name = self.type_expr_to_string(target);
+                // Methods are attached via `Target.prototype.m = function(...)`.
+                // For `tsc` to accept `p.m(...)` at call sites, the class type
+                // must declare those members. We emit a declaration-merging
+                // `interface Target { ... }` whose signatures mirror the
+                // prototype functions exactly — crucially including the leading
+                // `self` parameter (the AIR lowerer prepends the receiver as the
+                // first argument and keeps `self` as a declared param, so the
+                // call site is `p.m(p, ...)`). The untyped `self` param is typed
+                // as the impl target, which also removes the implicit-`any`
+                // error inside each method body.
+                let mut iface_sigs: Vec<String> = Vec::new();
+                for method in methods {
+                    if let NodeKind::FnDecl {
+                        is_async,
+                        name,
+                        generic_params,
+                        params,
+                        return_type,
+                        effect_clause,
+                        ..
+                    } = &method.kind
+                    {
+                        let generics = self.generic_params_to_ts(generic_params);
+                        let mut all_params = self.collect_impl_typed_params(params, &target_name);
+                        if let Some(ep) = self.effects_param(effect_clause) {
+                            all_params.push(ep);
+                        }
+                        let ret_str = build_ts_return_type(
+                            *is_async,
+                            return_type.as_deref().map(|r| self.type_to_ts(r)),
+                        );
+                        iface_sigs.push(format!(
+                            "{}{generics}({}){ret_str};",
+                            name.name,
+                            all_params.join(", "),
+                        ));
+                    }
+                }
                 if let Some(tp) = trait_path {
                     let trait_name = tp
                         .segments
@@ -840,14 +918,25 @@ impl TsEmitCtx {
                         .map(|s| s.name.as_str())
                         .collect::<Vec<_>>()
                         .join(".");
-                    // Declaration merging: make the class satisfy the trait/effect
-                    // so `.prototype.x = ...` below type-checks and `new Target()`
-                    // is assignable to the trait's interface type.
-                    self.writeln(&format!(
-                        "interface {target_name} extends {trait_name} {{}}"
-                    ));
+                    // Declaration merging: `extends Trait` keeps `new Target()`
+                    // assignable to the trait's interface type, while the
+                    // concrete signatures (with `self`) make `p.m(p)` resolve.
+                    self.writeln(&format!("interface {target_name} extends {trait_name} {{"));
+                    self.indent += 1;
+                    for sig in &iface_sigs {
+                        self.writeln(sig);
+                    }
+                    self.indent -= 1;
+                    self.writeln("}");
                     self.writeln(&format!("// impl {trait_name} for {target_name}"));
                 } else {
+                    self.writeln(&format!("interface {target_name} {{"));
+                    self.indent += 1;
+                    for sig in &iface_sigs {
+                        self.writeln(sig);
+                    }
+                    self.indent -= 1;
+                    self.writeln("}");
                     self.writeln(&format!("// impl {target_name}"));
                 }
                 for method in methods {
@@ -864,7 +953,7 @@ impl TsEmitCtx {
                     {
                         let async_kw = if *is_async { "async " } else { "" };
                         let generics = self.generic_params_to_ts(generic_params);
-                        let param_list = self.collect_typed_params(params);
+                        let param_list = self.collect_impl_typed_params(params, &target_name);
                         let effects_param = self.effects_param(effect_clause);
                         let mut all_params = param_list;
                         if let Some(ep) = effects_param {
@@ -1164,6 +1253,47 @@ impl TsEmitCtx {
                 } else {
                     None
                 }
+            })
+            .collect()
+    }
+
+    /// Collect typed parameters for an `impl` method, typing an untyped
+    /// receiver (`self`) parameter as the impl target.
+    ///
+    /// Bock impl methods declare `self` with no type annotation
+    /// (`fn sum(self)`), and the AIR lowerer keeps it as a real parameter while
+    /// prepending the receiver at call sites (`p.sum(p)`). Without a type, `tsc`
+    /// flags `self` as implicit `any`; we substitute the target type so the
+    /// method body (`self.x`) and the declaration-merged interface both
+    /// type-check. Non-`self` params, and a `self` that already carries an
+    /// explicit type, are handled exactly as [`Self::collect_typed_params`].
+    fn collect_impl_typed_params(&self, params: &[AIRNode], target_name: &str) -> Vec<String> {
+        params
+            .iter()
+            .filter_map(|p| {
+                let NodeKind::Param {
+                    pattern,
+                    ty,
+                    default,
+                } = &p.kind
+                else {
+                    return None;
+                };
+                let name = self.pattern_to_binding_name(pattern);
+                let ty_str = match ty {
+                    Some(t) => format!(": {}", self.type_to_ts(t)),
+                    None if name == "self" => format!(": {target_name}"),
+                    None => String::new(),
+                };
+                if let Some(def) = default {
+                    let mut ctx = TsEmitCtx::new();
+                    ctx.indent = self.indent;
+                    if ctx.emit_expr_to_string(def).is_ok() {
+                        let (def_str, _) = ctx.finish();
+                        return Some(format!("{name}{ty_str} = {def_str}"));
+                    }
+                }
+                Some(format!("{name}{ty_str}"))
             })
             .collect()
     }
@@ -2505,6 +2635,19 @@ mod tests {
         )
     }
 
+    /// A parameter with no type annotation (e.g. the `self` receiver of an
+    /// impl method, which Bock declares as bare `self`).
+    fn untyped_param_node(id: u32, name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(id + 100, name)),
+                ty: None,
+                default: None,
+            },
+        )
+    }
+
     fn block(id: u32, stmts: Vec<AIRNode>, tail: Option<AIRNode>) -> AIRNode {
         node(
             id,
@@ -3099,6 +3242,9 @@ mod tests {
 
     #[test]
     fn optional_type_emitted() {
+        // `T?` must lower to the tagged `BockOption<T>` union (not `T | null`):
+        // the runtime value is `{ _tag: "Some", _0: v }` / `{ _tag: "None" }`,
+        // so the type has to describe that for `tsc` to accept it (Q-ts-codegen).
         let ctx = TsEmitCtx::new();
         let opt = node(
             1,
@@ -3106,7 +3252,7 @@ mod tests {
                 inner: Box::new(type_node(2, "String")),
             },
         );
-        assert_eq!(ctx.type_to_ts(&opt), "string | null");
+        assert_eq!(ctx.type_to_ts(&opt), "BockOption<string>");
     }
 
     #[test]
@@ -3870,12 +4016,156 @@ mod tests {
 
         let out = gen(&module(vec![], vec![effect_decl, rec, impl_block]));
         assert!(
-            out.contains("interface StdLogger extends Logger {}"),
+            out.contains("interface StdLogger extends Logger {"),
             "impl should emit interface extension for declaration merging, got: {out}"
+        );
+        // The merged interface also declares the concrete method signatures so
+        // `x.log(...)` call sites resolve against the class type.
+        assert!(
+            out.contains("log(msg: string): void;"),
+            "merged interface should declare the method signature, got: {out}"
         );
         assert!(
             out.contains("StdLogger.prototype.log"),
             "impl should attach method to prototype, got: {out}"
+        );
+    }
+
+    #[test]
+    fn impl_self_method_typed_and_declaration_merged() {
+        // Q-ts-codegen defect 1: an inherent impl method with a bare `self`
+        // receiver. The AIR keeps `self` as a real param and prepends the
+        // receiver at call sites. TS must (a) type `self` as the impl target
+        // (no implicit `any`) and (b) declare the method on the class via a
+        // merged interface so `p.sum(p)` type-checks.
+        let rec = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Point"),
+                generic_params: vec![],
+                fields: vec![make_record_field("x", "Int"), make_record_field("y", "Int")],
+            },
+        );
+        let body = block(
+            20,
+            vec![],
+            Some(node(
+                21,
+                NodeKind::BinaryOp {
+                    op: BinOp::Add,
+                    left: Box::new(node(
+                        22,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(23, "self")),
+                            field: ident("x"),
+                        },
+                    )),
+                    right: Box::new(node(
+                        24,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(25, "self")),
+                            field: ident("y"),
+                        },
+                    )),
+                },
+            )),
+        );
+        let impl_block = node(
+            10,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(type_node(11, "Point")),
+                generic_params: vec![],
+                methods: vec![node(
+                    12,
+                    NodeKind::FnDecl {
+                        annotations: vec![],
+                        visibility: Visibility::Public,
+                        is_async: false,
+                        name: ident("sum"),
+                        generic_params: vec![],
+                        params: vec![untyped_param_node(13, "self")],
+                        return_type: Some(Box::new(type_node(14, "Int"))),
+                        effect_clause: vec![],
+                        where_clause: vec![],
+                        body: Box::new(body),
+                    },
+                )],
+                where_clause: vec![],
+            },
+        );
+        let out = gen(&module(vec![], vec![rec, impl_block]));
+        assert!(
+            out.contains("interface Point {"),
+            "inherent impl should emit a declaration-merging interface, got: {out}"
+        );
+        assert!(
+            out.contains("sum(self: Point): number;"),
+            "merged interface should declare the self-typed method, got: {out}"
+        );
+        assert!(
+            out.contains("Point.prototype.sum = function(self: Point): number {"),
+            "prototype function should type the self param as the target, got: {out}"
+        );
+    }
+
+    #[test]
+    fn optional_runtime_prelude_and_value_type_agree() {
+        // Q-ts-codegen defect 2: the Optional *type* and *value* must agree.
+        // A function returning `Int?` gets `BockOption<number>`, the prelude
+        // type is emitted, and `Some`/`None` lower to the matching tagged
+        // objects.
+        let body = block(
+            20,
+            vec![],
+            Some(node(
+                21,
+                NodeKind::Call {
+                    callee: Box::new(id_node(22, "Some")),
+                    args: vec![AirArg {
+                        label: None,
+                        value: int_lit(23, "7"),
+                    }],
+                    type_args: vec![],
+                },
+            )),
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("pick"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: Some(Box::new(node(
+                    2,
+                    NodeKind::TypeOptional {
+                        inner: Box::new(type_node(3, "Int")),
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("type BockOption<T> ="),
+            "Optional runtime type prelude should be emitted, got: {out}"
+        );
+        assert!(
+            out.contains("): BockOption<number> {"),
+            "Optional return type should be BockOption<number>, got: {out}"
+        );
+        assert!(
+            out.contains("{ _tag: \"Some\" as const, _0: 7 }"),
+            "Some should lower to the matching tagged-object value, got: {out}"
         );
     }
 }
