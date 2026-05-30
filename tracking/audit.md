@@ -899,3 +899,53 @@ vscode test-infra, conformance execution Q-fconf), @performance example (pending
   Next: on PR1 — review (esp. the run() commands), gate+CI green, merge; then PR2 (codegen
     fixes) verified by the new harness; then core.iter resumes; route DQ10/DQ11/DQ12 to Design
     at leisure. main e1e887d.
+
+[2026-05-30 07:15 UTC] CODEGEN-CORRECTNESS WORKSTREAM COMPLETE + 5-way fan-out merged (#114-#121)
+  Input: operator confirmed the rust-cache speedup + asked for parallel tasks ("tokens to
+    spare before wind down"). Drove the codegen-correctness workstream to completion + a
+    5-way disjoint fan-out, merging each as it greened (operator winding down; merges mine).
+  CODEGEN-CORRECTNESS WORKSTREAM (the DV9 fix, two PRs):
+    - #114 Q-fconf execution conformance (harness: ToolchainRegistry.run() compiles+runs+diffs
+      stdout per target; compiler/tests/execution.rs; run-conformance.sh; skip-if-absent +
+      BOCK_CONFORMANCE_REQUIRE). Immediately caught a 6th defect: `public fn main`→Go `func Main`.
+    - #115 Windows portability of the harness (rustc -o needs the platform exe suffix:
+      `rustc -o main_bin` produces extension-less `main_bin` on Windows, unspawnable;
+      StepKind::Artifact + `-o main_bin{EXE_SUFFIX}`). VERIFIED ON WINDOWS via the operator
+      running a native-Windows rustc repro (decisive — avoided a blind guess at `main_bin.exe.exe`).
+    - #121 Q-codegen-fixes: all 6 DV9 defects (statement match arms + Go stmt-switch w/ labelled
+      loops; self-methods Rust/Go/Python; Go __bockOption runtime; interp method-body globals env;
+      Go func main). 32/32 exec fixture×target pairs green under REQUIRE=all. DV9 CLOSED — v1
+      "5-target parity" is now REAL + TESTED (was false + untested before).
+  5-WAY FAN-OUT (disjoint crates, parallel): #117 §20.1 cross-refs (Q-20.1-xref), #118 vscode
+    test infra (Q-vscode-test, Mocha+ts-node headless), #119 bock fmt emits valid Bock (Q-fmt-bock
+    — also fixed sibling parens/unit-pattern/trait-arg bugs + 4 tests that were silently passing on
+    invalid input), #120 §18.2 prelude auto-import (Q-prelude-inject, DQ9), #121 (above). All
+    merged green. Plus #116 Swatinem/rust-cache@v2.9.1 (operator re-allowed; faster CI) + #113
+    (removed incidentally-committed example build artifacts).
+  FINDINGS → tracking: DV9 resolved. New queue items: Q-ts-codegen (TS self/Optional fail tsc,
+    pre-existing), Q-py-optional (Python Optional runtime, fast-follow), Q-match-exprpos
+    (expr-position statement-arm match, deferred), Q-ci-vscode-test (wire npm test into CI),
+    Q-stdlib-fmtcheck (fmt --check stdlib now fmt is fixed). DQ13 escalated (§18.2 preludes
+    TryFrom/Error beyond its literal list — Design ratifies/drops). Q-interp-enum partially fixed
+    by #121's method-env (#5) — verify residue. DQ10/DQ11/DQ12 still pending Design.
+  core.iter UNBLOCKED — the codegen prerequisites are met; R1 resumes (iter → effect → R2 → R3).
+  LESSONS (recorded candidly):
+    - **Merge discipline:** I merged #114 with 2 pending Windows checks because I trusted a
+      `gh run watch`/`gh pr checks --watch` EXIT CODE (which returns 0 even with failures) +
+      `--limit 1` grabbed the wrong run. main went red on Windows; fix-forwarded (#115).
+      CORRECTED: every merge now reads the EXPLICIT per-job breakdown (zero `fail`, CLEAN) — never
+      an exit code; auto-merge commands gate on `awk '$2=="fail"'` count == 0 + mergeState==CLEAN.
+    - **Shared-branch worktree tangle:** doing `git switch -C <branch>` in the main checkout while
+      that branch was also checked out in a sub-agent worktree desynced the worktree's working tree
+      (HEAD moved via the shared ref, files didn't) → `git add -A` nearly staged wrong deletions.
+      Caught via `git status` before commit; hard-reset to the merged HEAD + targeted staging.
+      Takeaway: prefer `git add <explicit paths>` (never -A in shared-ref situations); verify
+      `git status` shows ONLY intended changes before committing.
+    - **CRLF/.gitattributes:** the repo had NO .gitattributes; a fixture with em-dashes parsed on
+      Linux but not on the Windows CRLF checkout. Added `*.bock text eol=lf` (#121) + ASCII-only
+      fixtures — closes a latent cross-platform hole.
+  This tracking PR (chore/tracking-20260530-0715): queue rewritten (6 done removed, core.iter
+    unblocked, 5 follow-ups added); DV9 → resolved; DQ13 filed; snapshot parity-now-real;
+    milestones gate-cleared. main 2b562e3.
+  Next: resume core.iter (R1); land the ready follow-ups/bugs as capacity allows; route DQ10-DQ13
+    to Design.

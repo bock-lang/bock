@@ -176,3 +176,16 @@ requires `Iterable` for built-ins (planned: native fast path for built-ins).
 ratify the normative surface before/as iter resumes post-codegen-workstream.
 **Awaiting:** Design ratification; non-blocking.
 **Status:** pending
+
+## [2026-05-30 07:15 UTC] §18.2 prelude membership — TryFrom/Error (DQ13)
+
+**Type:** design (core-spec)
+**Severity:** low (non-blocking; reversible in v1-dev)
+**Trigger:** the prelude-injection impl (#120) preludes `TryFrom` + `Error`, which
+aren't in §18.2's literal trait list (the orchestrator's dispatch prompt named them).
+**Context (design-questions.md DQ13):** amend §18.2 to include `TryFrom`/`Error`
+(both core-defined, fundamental), or drop them from the prelude (require `use`)?
+**Recommendation:** none on merits (Design's call); both are defensible and the change
+is one-line either way.
+**Awaiting:** Design ratification; non-blocking.
+**Status:** pending

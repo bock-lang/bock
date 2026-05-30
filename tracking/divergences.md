@@ -53,31 +53,21 @@ status(open | resolved→link)`
   with use).
 - **Status:** open
 
-### DV9 — codegen incomplete on multiple targets (the v1 "parity" gap)
-- **§:** §20.4 (cross-target correctness) / the v1 "one language, five targets,
-  codegen parity" property · **spec-says:** identical observable behavior on
-  every shipping target · **impl-does:** general Bock constructs fail codegen on
-  Rust/Go/Python (NOT just iterators), empirically reproduced (core.iter spike):
-  (1) statement-bodied `match` arms (`break`/`continue`/`return`/assign) →
-  `/* unsupported */` on **all 5 backends**; (2) Go emits `match` as an
-  expression IIFE → any statement-arm broken; (3) `self`-methods broken on Rust,
-  Go, **and Python** (`def swap(self, self)` → SyntaxError); (4) Go (and Python)
-  have no `Optional[T]` runtime; (5) the interpreter runs method bodies in an
-  empty env (`Some`/`None`/top-level fns invisible).
-- **Classification:** impl-bug (codegen/interp incompleteness)
-- **Why it lurked:** the conformance suite parses but never **executes** per-target
-  (Q-fconf), so codegen output was never run + the "parity" property was never
-  tested. This is the most material divergence found this session.
-- **Disposition:** fix-impl → `queue.md` **Q-codegen-fixes** (PR2), gated on/
-  verified by **Q-fconf** execution conformance (PR1). v1-blocking. Plan:
-  `plans/2026-05-30-codegen-correctness-conformance-plan.md`. Blocks `core.iter`
-  (and credible v1 5-target parity). `Optional` per-target representation is
-  non-normative (implementer's-call).
-- **Status:** open (workstream in flight — PR1 Q-fconf dispatched)
-
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)
+
+- **DV9 codegen incomplete on multiple targets (the v1 "parity" gap)** — impl-bug:
+  general Bock constructs failed codegen on Rust/Go/Python (statement-bodied `match`
+  arms on all 5 backends; Go match-as-IIFE; `self`-methods on Rust/Go/Python; Go/
+  Python `Optional` runtime; interpreter method-body empty env) — so "5-target
+  parity" was false + untested (the conformance suite never executed). RESOLVED via
+  a two-PR workstream: **Q-fconf** execution conformance (#114/#115 — compile + run
+  fixtures per target, diff stdout) + **Q-codegen-fixes** (#121 — all 6 defects
+  fixed, 32/32 fixture×target pairs green under REQUIRE=all). Parity is now real +
+  tested. Residue (deferred, tracked): expr-position statement-arm match
+  (Q-match-exprpos), Python `Optional` (Q-py-optional), TS self/Optional
+  (Q-ts-codegen). resolved → #114/#115/#121.
 
 - **DV4 stdlib trait impls can't cover primitive types** — gap (missing
   checker↔bock-core bridge) → Design DQ6 ruled the model; the compiler now

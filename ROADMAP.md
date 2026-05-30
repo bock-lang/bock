@@ -15,15 +15,18 @@ the Bock identity.
 - **Release actions (all escalate — external/irreversible):** CI live;
   VS Code extension → marketplace; `bock` → crates.io + GitHub
   Releases; docs site deploy; announcement post.
-- **Mapped items:** `Q-stdlib` (core stdlib — v1-blocking), **`Q-fconf` +
-  `Q-codegen-fixes` (the codegen-correctness / 5-target-parity gate — v1-blocking;
-  see DV9)**, `D4`, `D5`, `ItemB` (project-mode codegen), `Q-20.1-xref`,
-  `Q-cl-dates`, `Q-cl-0515`, `Q-vscode-test`.
-- **Acceptance:** **execution** conformance passes per target (not just parse —
-  Q-fconf); all 20 examples `check`/`build`/`test` clean on ≥ JS+Py+Rust; clippy
-  clean. NOTE (2026-05-30): the property claim "codegen parity on examples" was
-  found UNVERIFIED + partly false (DV9) — the codegen-correctness workstream is the
-  prerequisite to make it true before the release actions.
+- **Mapped items:** `Q-stdlib` (core stdlib — v1-blocking); the codegen-correctness
+  gate **DONE** — `Q-fconf` (#114/#115) + `Q-codegen-fixes` (#121), DV9 closed;
+  `D4`, `D5`, `ItemB` (project-mode codegen), `Q-cl-dates`, `Q-cl-0515`. Done this
+  cycle: `Q-20.1-xref` (#117), `Q-vscode-test` (#118), `Q-fmt-bock` (#119),
+  `Q-prelude-inject` (#120). Parity residue (close before the release actions):
+  `Q-ts-codegen`, `Q-py-optional`.
+- **Acceptance:** **execution** conformance passes per target (Q-fconf, live); all
+  20 examples `check`/`build`/`test` clean on ≥ JS+Py+Rust; clippy clean. UPDATE
+  (2026-05-30): the codegen-correctness gate is **CLEARED** — execution conformance
+  (#114/#115) + the 6 DV9 fixes (#121) made "5-target parity" real and *tested*
+  (32/32 exec fixture×target pairs). Remaining for fully-airtight parity: TS
+  (Q-ts-codegen) + Python Optional (Q-py-optional).
 
 ## v1.1 — Editor & Tooling Polish
 **Theme:** delight in the editor; close interpreter gaps.
