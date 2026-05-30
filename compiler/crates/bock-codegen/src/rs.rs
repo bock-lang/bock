@@ -237,6 +237,74 @@ impl RsEmitCtx {
         Ok(Some(code))
     }
 
+    /// Emit a read-only `List` built-in method call to its Rust form.
+    ///
+    /// Lists are `Vec<T>`. `len`/`length`/`count` coerce `usize` → `i64`
+    /// (`(r.len() as i64)`) so the result composes with Bock's `Int`.
+    /// `Optional`-returning methods use Rust's *native* `Option<T>` (the rep the
+    /// Rust `match` lowering already expects): `get` is `r.get(i as
+    /// usize).cloned()`, `first`/`last` are `r.first()/last().cloned()`, and
+    /// `index_of` maps the found position to `i64`. `.cloned()` requires
+    /// `T: Clone`, which the v1 element types (Int/Float/String/Bool) satisfy.
+    /// `concat` is a functional clone-and-extend.
+    fn try_emit_list_method(
+        &mut self,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_list_method(callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let code = match method {
+            "len" | "length" | "count" => format!("(({recv_str}).len() as i64)"),
+            "is_empty" => format!("({recv_str}).is_empty()"),
+            "get" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                let i = self.expr_to_string(&idx.value)?;
+                format!("({recv_str}).get(({i}) as usize).cloned()")
+            }
+            "first" => format!("({recv_str}).first().cloned()"),
+            "last" => format!("({recv_str}).last().cloned()"),
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                let x = self.expr_to_string(&x.value)?;
+                format!("({recv_str}).contains(&({x}))")
+            }
+            "index_of" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                let x = self.expr_to_string(&x.value)?;
+                format!("({recv_str}).iter().position(|__e| __e == &({x})).map(|__i| __i as i64)")
+            }
+            "concat" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "{{ let mut __v = ({recv_str}).clone(); __v.extend(({o}).iter().cloned()); __v }}"
+                )
+            }
+            "join" => {
+                let Some(sep) = rest.first() else {
+                    return Ok(false);
+                };
+                let sep = self.expr_to_string(&sep.value)?;
+                format!("({recv_str}).join(({sep}).as_str())")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Recognise `Duration.xxx(...)` / `Instant.xxx(...)` associated-function
     /// calls and emit equivalent Rust `std::time` usage. Durations are i64
     /// nanoseconds; Instants are `std::time::Instant`.
@@ -1530,6 +1598,9 @@ impl RsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_method(callee, args)? {
                     return Ok(());
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),

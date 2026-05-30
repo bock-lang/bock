@@ -1,0 +1,31 @@
+// TEST: exec_list_get_out_of_bounds
+// EXPECT: output "20;none;none"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Proves `List.get(i)` returns the `None` tag (not a crash / undefined / panic)
+// for out-of-bounds indices — both past the end (`i >= len`) and negative
+// (`i < 0`) — across every target's tagged Optional representation
+// (JS/TS `{_tag:"None"}`, Python `_bock_none`, Go `__bockNone`, Rust native
+// `None`). The in-bounds case yields `Some` with the typed payload.
+//
+// Each lookup uses its own list binding: Rust functions take parameters by
+// value, so passing one owned `List` to `at` repeatedly would move it (a
+// pre-existing, List-independent Rust codegen trait). A fresh list per call
+// keeps the fixture focused on the `get` bounds behaviour.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn at(nums: List[Int], i: Int) -> String {
+  match nums.get(i) {
+    Some(x) => return "${x}"
+    None => return "none"
+  }
+}
+
+fn main() -> Void {
+  let a: List[Int] = [10, 20, 30]
+  let b: List[Int] = [10, 20, 30]
+  let c: List[Int] = [10, 20, 30]
+  println("${at(a, 1)};${at(b, 5)};${at(c, -1)}")
+}

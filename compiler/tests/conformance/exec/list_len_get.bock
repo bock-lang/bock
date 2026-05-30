@@ -1,0 +1,34 @@
+// TEST: exec_list_len_get
+// EXPECT: output "3;20"
+// EXPECT: targets js, ts, python, rust, go
+//
+// T1 spike for read-only `List` built-in method codegen (Q-list-codegen):
+// `len()` (an `Int`) and `get(i)` (an `Optional[T]`, matched, payload used in a
+// typed `${...}` position). Proves the shared `desugared_list_method`
+// recogniser + per-backend lowering work on all five targets — without it
+// `nums.len()` was emitted verbatim as `nums.len(nums)`, failing at each
+// target's runtime/compile step.
+//
+// The `match` arms `return` (statement arms) so the match lowers in *statement*
+// position on every target — the existing passing-fixture shape
+// (optional_match_method_scrutinee.bock). A bare `println(...)`-arm match at a
+// Void function tail trips a *pre-existing, List-independent* Go defect
+// (statement-position Optional match mis-emitted as an expression IIFE whose
+// `return fmt.Println(...)` returns `(int, error)`); see the PR's OPEN note.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn fmtGet(nums: List[Int]) -> String {
+  let n = nums.len()
+  match nums.get(1) {
+    Some(x) => return "${n};${x}"
+    None => return "${n};none"
+  }
+}
+
+fn main() -> Void {
+  let nums: List[Int] = [10, 20, 30]
+  println(fmtGet(nums))
+}

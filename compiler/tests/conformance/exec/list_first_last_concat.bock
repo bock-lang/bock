@@ -1,0 +1,27 @@
+// TEST: exec_list_first_last_concat
+// EXPECT: output "10;30;5;10;50"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Read-only `List` built-ins: `first`/`last` (Optional[T] over the first/last
+// element), and `concat(other)` (a new `List[T]`). `first`/`last` are lowered
+// as the `get(0)`/`get(len-1)` forms; `concat` is the per-target functional
+// concatenation (`(r).concat(o)` / `r + o` / clone-extend / append-copy). The
+// concatenated list's `len`, `first`, and `last` are then read back, proving
+// `concat` produces a real list the other built-ins operate on.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn optStr(o: Int?) -> String {
+  match o {
+    Some(x) => return "${x}"
+    None => return "none"
+  }
+}
+
+fn main() -> Void {
+  let a: List[Int] = [10, 20, 30]
+  let b: List[Int] = [40, 50]
+  let joined: List[Int] = a.concat(b)
+  println("${optStr(a.first())};${optStr(a.last())};${joined.len()};${optStr(joined.first())};${optStr(joined.last())}")
+}

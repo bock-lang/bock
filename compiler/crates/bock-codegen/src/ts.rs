@@ -491,6 +491,115 @@ impl TsEmitCtx {
         Ok(true)
     }
 
+    /// Emit a read-only `List` built-in method call to its TS form.
+    ///
+    /// Mirrors the JS lowering but stays strict-mode clean: the
+    /// `Optional`-returning methods (`get`/`first`/`last`/`index_of`) wrap the
+    /// receiver in a *generic* arrow IIFE (`<T,>(__r: ReadonlyArray<T>, …):
+    /// BockOption<T> => …`) so the element type `T` is inferred from the
+    /// receiver and the result is the typed `BockOption<T>` union the `match`
+    /// lowering narrows on `._tag`. The receiver is therefore evaluated exactly
+    /// once and no parameter is implicitly `any`.
+    fn try_emit_list_method(
+        &mut self,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_list_method(callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "len" | "length" | "count" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").length");
+            }
+            "is_empty" => {
+                self.buf.push_str("((");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").length === 0)");
+            }
+            "get" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<T,>(__r: ReadonlyArray<T>, __i: number): BockOption<T> => \
+                     (__i >= 0 && __i < __r.length) ? \
+                     { _tag: \"Some\" as const, _0: __r[__i] } : { _tag: \"None\" as const })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push(')');
+            }
+            "first" => {
+                self.buf.push_str(
+                    "(<T,>(__r: ReadonlyArray<T>): BockOption<T> => __r.length > 0 ? \
+                     { _tag: \"Some\" as const, _0: __r[0] } : { _tag: \"None\" as const })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "last" => {
+                self.buf.push_str(
+                    "(<T,>(__r: ReadonlyArray<T>): BockOption<T> => __r.length > 0 ? \
+                     { _tag: \"Some\" as const, _0: __r[__r.length - 1] } : \
+                     { _tag: \"None\" as const })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").includes(");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "index_of" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<T,>(__r: ReadonlyArray<T>, __x: T): BockOption<number> => \
+                     { const __i = __r.indexOf(__x); return __i >= 0 ? \
+                     { _tag: \"Some\" as const, _0: __i } : { _tag: \"None\" as const }; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "concat" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").concat(");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "join" => {
+                let Some(sep) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").join(");
+                self.emit_expr(&sep.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     // ── Type emission ────────────────────────────────────────────────────────
 
     /// Emit a type expression from an AIR type node to a TS type string.
@@ -1780,6 +1889,9 @@ impl TsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_method(callee, args)? {
                     return Ok(());
                 }
                 // Rewrite bare effect operation calls: log(...) → handler.log(...)

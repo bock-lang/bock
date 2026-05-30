@@ -308,6 +308,103 @@ impl PyEmitCtx {
         Ok(Some(code))
     }
 
+    /// Emit a read-only `List` built-in method call to its Python form.
+    ///
+    /// Python lists are native, so `len`/`is_empty`/`contains`/`concat` map to
+    /// `len(r)`/`(len(r) == 0)`/`(x in r)`/`(r + o)`. `Optional`-returning
+    /// methods (`get`/`first`/`last`/`index_of`) build the tagged Optional
+    /// runtime values (`_BockSome(v)` / `_bock_none`); they wrap the receiver in
+    /// a `lambda` so it is evaluated exactly once.
+    fn try_emit_list_method(
+        &mut self,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_list_method(callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "len" | "length" | "count" => {
+                self.buf.push_str("len(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "is_empty" => {
+                self.buf.push_str("(len(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(") == 0)");
+            }
+            "get" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("(lambda __r, __i: _BockSome(__r[__i]) if 0 <= __i < len(__r) else _bock_none)(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push(')');
+            }
+            "first" => {
+                self.buf
+                    .push_str("(lambda __r: _BockSome(__r[0]) if len(__r) > 0 else _bock_none)(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "last" => {
+                self.buf
+                    .push_str("(lambda __r: _BockSome(__r[-1]) if len(__r) > 0 else _bock_none)(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(&x.value)?;
+                self.buf.push_str(" in ");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "index_of" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(lambda __r, __x: _BockSome(__r.index(__x)) if __x in __r else _bock_none)(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "concat" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(" + ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "join" => {
+                let Some(sep) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(&sep.value)?;
+                self.buf.push_str(").join(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     /// Recognise `Duration.xxx(...)` / `Instant.xxx(...)` associated-function
     /// calls and emit inline arithmetic. Durations are ints (nanoseconds);
     /// Instants are ints representing `time.monotonic_ns()`.
@@ -1400,6 +1497,9 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_method(callee, args)? {
                     return Ok(());
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
