@@ -448,6 +448,23 @@ impl TypeChecker {
             _ => return,
         };
 
+        // Build the trait-impl table from the module's `impl` blocks and wire
+        // it into the checker so where-clause bounds are enforced at call
+        // sites. Without a wired table, `check_trait_bounds_at_call` is a
+        // no-op and bounds go unchecked.
+        //
+        // Order matters (Q1b sealing): `build_from` runs sealing on *user*
+        // impls first; `register_canonical_conformances` then registers the
+        // compiler's primitive conformances via `register_trait_impl_inner`,
+        // which bypasses the sealing check, so the compiler can never reject
+        // its own registration.
+        let mut impl_table = ImplTable::build_from(module);
+        crate::traits::register_canonical_conformances(&mut impl_table);
+        // Surface coherence (`E4010`) and sealing (`E4011`) diagnostics
+        // produced during table construction.
+        self.diags.absorb(&impl_table.diags);
+        self.impl_table = Some(impl_table);
+
         // Pass 1: collect signatures
         for item in &items {
             self.collect_sig(item);
@@ -1365,6 +1382,26 @@ impl TypeChecker {
                         }
                         // Fall through to built-in methods.
                         if let Some(fn_ty) =
+                            self.resolve_builtin_method_fn_type(&obj_ty, &field_name)
+                        {
+                            fn_ty
+                        } else {
+                            self.fresh_var()
+                        }
+                    }
+                    Type::Primitive(_) => {
+                        // Q-bridge (#104): consult canonical trait conformances
+                        // first so e.g. `(1).compare(2)` types as
+                        // `Fn(Int, Int) -> Ordering` rather than the intrinsic
+                        // `compare -> Int` fallback. Falls through to the
+                        // intrinsic method signatures for non-trait methods
+                        // (`abs`, `to_string`, …) or when no conformance is in
+                        // scope.
+                        if let Some(fn_ty) =
+                            self.resolve_primitive_canonical_method_fn_type(&obj_ty, &field_name)
+                        {
+                            fn_ty
+                        } else if let Some(fn_ty) =
                             self.resolve_builtin_method_fn_type(&obj_ty, &field_name)
                         {
                             fn_ty
@@ -2325,6 +2362,87 @@ impl TypeChecker {
 
     // ── Method return-type resolution ─────────────────────────────────────
 
+    /// Resolve a primitive method-call return type via a *canonical* trait
+    /// conformance, if one applies.
+    ///
+    /// Q-bridge (#104): primitives gain trait methods (`compare`, `eq`, …)
+    /// through compiler-registered canonical conformances in `impl_table`.
+    /// This helper fires only when **all** of the following hold:
+    ///
+    /// 1. the receiver is a primitive (checked by the caller),
+    /// 2. some in-scope trait (in `trait_method_types`) declares `method`,
+    /// 3. a canonical conformance for that trait is registered for the
+    ///    receiver in `impl_table`.
+    ///
+    /// When matched, returns the trait method's declared return type with the
+    /// `Self` type mapped to the concrete receiver. Returns `None` (fall
+    /// through to the intrinsic arms) when no such conformance is in scope —
+    /// preserving behavior for code that never imports the core trait.
+    fn resolve_primitive_canonical_method_return(
+        &self,
+        receiver_ty: &Type,
+        method: &str,
+    ) -> Option<Type> {
+        let impl_table = self.impl_table.as_ref()?;
+
+        // Find an in-scope trait that declares `method` AND has a canonical
+        // conformance registered for this receiver. Iterating `trait_method_types`
+        // keeps the lookup gated on the trait actually being imported (cond. 2/3).
+        for (trait_name, methods) in &self.trait_method_types {
+            let Some(Type::Function(fn_ty)) = methods.get(method) else {
+                continue;
+            };
+            let trait_ref = TraitRef::new(trait_name);
+            if resolve_impl(&trait_ref, receiver_ty, impl_table).is_none() {
+                continue;
+            }
+            // Map the trait method's declared return type, substituting the
+            // `Self` placeholder with the concrete receiver type. The return
+            // type is otherwise already concrete (e.g. `Ordering`, `Bool`).
+            let self_params = ["Self".to_string()];
+            let self_args = [receiver_ty.clone()];
+            return Some(substitute_type_params(&fn_ty.ret, &self_params, &self_args));
+        }
+        None
+    }
+
+    /// Resolve the full *function* type of a primitive method call via a
+    /// canonical trait conformance, if one applies.
+    ///
+    /// Q-bridge (#104): the AIR lowers `(1).compare(2)` to
+    /// `Call(FieldAccess(1, "compare"), [1, 2])`, so the `FieldAccess` handler
+    /// resolves the method's whole function type (receiver as the first
+    /// parameter). This mirrors [`Self::resolve_primitive_canonical_method_return`]
+    /// but returns the full `Fn(Self, …) -> Ret` type with every `Self`
+    /// occurrence (params *and* return) mapped to the concrete receiver — so
+    /// `(1).compare(2)` types as `Fn(Int, Int) -> Ordering` and the call
+    /// yields `Ordering`, matchable against its variants.
+    ///
+    /// Gating matches the return-type helper: fires only when the receiver is
+    /// primitive, an in-scope trait declares `method`, and a canonical
+    /// conformance for that trait is registered for the receiver. Falls
+    /// through (returns `None`) otherwise, preserving the intrinsic fast path.
+    fn resolve_primitive_canonical_method_fn_type(
+        &self,
+        receiver_ty: &Type,
+        method: &str,
+    ) -> Option<Type> {
+        let impl_table = self.impl_table.as_ref()?;
+        for (trait_name, methods) in &self.trait_method_types {
+            let Some(fn_ty @ Type::Function(_)) = methods.get(method) else {
+                continue;
+            };
+            let trait_ref = TraitRef::new(trait_name);
+            if resolve_impl(&trait_ref, receiver_ty, impl_table).is_none() {
+                continue;
+            }
+            let self_params = ["Self".to_string()];
+            let self_args = [receiver_ty.clone()];
+            return Some(substitute_type_params(fn_ty, &self_params, &self_args));
+        }
+        None
+    }
+
     /// Resolve the return type of a method call on a known receiver type.
     ///
     /// Returns a concrete type when the receiver type and method name
@@ -2332,6 +2450,22 @@ impl TypeChecker {
     /// variable otherwise.
     fn resolve_method_return_type(&self, receiver_ty: &Type, method: &str) -> Type {
         let receiver_ty = self.subst.apply(receiver_ty);
+
+        // Q-bridge (#104): for a primitive receiver, consult the canonical
+        // trait conformances registered in `impl_table` *before* the intrinsic
+        // `match`. If a registered conformance's trait declares `method`,
+        // return that trait method's declared return type (with `Self` mapped
+        // to the concrete receiver). This makes e.g. `(1).compare(2)` resolve
+        // to `Ordering` (not the intrinsic `Int` fallback) and `a.eq(b)` to
+        // `Bool`, uniformly with user types. Non-trait intrinsics (`abs`,
+        // `to_string`, …) and code that never imports the core trait fall
+        // through to the intrinsic arms below.
+        if matches!(receiver_ty, Type::Primitive(_)) {
+            if let Some(ty) = self.resolve_primitive_canonical_method_return(&receiver_ty, method) {
+                return ty;
+            }
+        }
+
         match &receiver_ty {
             Type::Error => Type::Error,
             // List[T] methods

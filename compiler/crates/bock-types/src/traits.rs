@@ -34,6 +34,13 @@ const E_COHERENCE_OVERLAP: DiagnosticCode = DiagnosticCode {
     number: 4010,
 };
 
+/// `E4011` — a user `impl` tries to implement a sealed core trait for a
+/// primitive type (orphan-rule violation). See [`SEALED_CORE_TRAITS`].
+const E_SEALED_PRIMITIVE_IMPL: DiagnosticCode = DiagnosticCode {
+    prefix: 'E',
+    number: 4011,
+};
+
 // ─── Core types ───────────────────────────────────────────────────────────────
 
 /// Unique identifier for a registered impl block.
@@ -94,6 +101,12 @@ pub struct ImplEntry {
     ///
     /// Generic impls are registered but skipped during coherence checking.
     pub is_generic: bool,
+    /// `true` when this entry was registered by the compiler as a canonical
+    /// conformance for a primitive type (see
+    /// [`register_canonical_conformances`]). User `impl` blocks always set
+    /// this to `false`. Canonical entries are sealed: user code may not add
+    /// its own `impl` of a core trait for a primitive (`E4011`).
+    pub is_canonical: bool,
 }
 
 /// Maps `(TraitRef, Type)` pairs to impl blocks and supports method dispatch.
@@ -173,6 +186,35 @@ impl ImplTable {
                 let type_key = type_key_from_node(target);
                 let is_generic = !generic_params.is_empty();
 
+                // Sealing (Q1b): a *user* `impl <CoreTrait> for <Primitive>` is
+                // an orphan-rule violation — core traits have sealed,
+                // compiler-provided conformances for primitives. The newtype
+                // pattern is the escape hatch. Scoped strictly to the (core
+                // trait, primitive) quadrant; this is NOT a general orphan
+                // model. The compiler's own canonical conformances are added
+                // later via `register_trait_impl_inner`, which bypasses this
+                // check, so they are never rejected.
+                if let Some(tr) = &trait_ref {
+                    if SEALED_CORE_TRAITS.contains(&tr.name.as_str())
+                        && SEALED_PRIMITIVE_KEYS.contains(&type_key.as_str())
+                    {
+                        self.diags
+                            .error(
+                                E_SEALED_PRIMITIVE_IMPL,
+                                format!(
+                                    "cannot implement core trait `{}` for primitive type                                      `{}`: its conformance is provided by the compiler and                                      is sealed",
+                                    tr.name, type_key,
+                                ),
+                                node.span,
+                            )
+                            .note(format!(
+                                "wrap `{type_key}` in a newtype (e.g. `record My{type_key}                                  {{ value: {type_key} }}`) and implement `{}` for that instead",
+                                tr.name,
+                            ));
+                        return;
+                    }
+                }
+
                 // Coherence: detect exact-type duplicates (skip generic impls).
                 if !is_generic {
                     if let Some(tr) = &trait_ref {
@@ -228,6 +270,7 @@ impl ImplTable {
                         type_key,
                         methods: method_names,
                         is_generic,
+                        is_canonical: false,
                     },
                 );
             }
@@ -275,8 +318,26 @@ impl ImplTable {
     /// Programmatically register a trait impl for a concrete type.
     ///
     /// This is a convenience method for tests and downstream passes that need
-    /// to populate the table without building from AIR nodes.
+    /// to populate the table without building from AIR nodes. The registered
+    /// entry is *not* marked canonical; use
+    /// [`register_canonical_conformances`] for the compiler-provided
+    /// primitive conformances.
     pub fn register_trait_impl(&mut self, trait_name: impl Into<String>, ty: &Type) -> ImplId {
+        self.register_trait_impl_inner(trait_name, ty, false)
+    }
+
+    /// Inner registration shared by [`register_trait_impl`] and
+    /// [`register_canonical_conformances`].
+    ///
+    /// This bypasses the orphan/sealing check applied to user `impl` blocks in
+    /// [`Self::visit_item`], so the compiler's own canonical registration is
+    /// never rejected.
+    fn register_trait_impl_inner(
+        &mut self,
+        trait_name: impl Into<String>,
+        ty: &Type,
+        is_canonical: bool,
+    ) -> ImplId {
         let id = self.alloc_id();
         let trait_name = trait_name.into();
         let key = type_key(ty);
@@ -288,6 +349,7 @@ impl ImplTable {
                 type_key: key.clone(),
                 methods: vec![],
                 is_generic: false,
+                is_canonical,
             },
         );
         self.trait_impl_index.insert((trait_name, key), id);
@@ -565,6 +627,121 @@ fn type_from_node(node: &AIRNode) -> Type {
     }
 }
 
+// ─── Canonical primitive conformances (Q-bridge) ────────────────────────────────
+
+/// The set of core-trait names whose conformances for primitive types are
+/// *sealed*: user code may not write its own `impl <CoreTrait> for <Primitive>`
+/// (orphan-rule violation → `E4011`). The newtype pattern is the escape hatch.
+///
+/// Scoped strictly to the (core trait, primitive) quadrant — this is **not** a
+/// general orphan model.
+pub const SEALED_CORE_TRAITS: &[&str] = &["Equatable", "Comparable", "Displayable", "Hashable"];
+
+/// The set of primitive type keys (as produced by [`type_key`]) for which core
+/// traits are sealed. Used together with [`SEALED_CORE_TRAITS`] to detect a
+/// user `impl <CoreTrait> for <Primitive>`.
+pub const SEALED_PRIMITIVE_KEYS: &[&str] = &[
+    "Int", "Float", "String", "Bool", "Char", "Int8", "Int16", "Int32", "Int64", "Int128", "UInt8",
+    "UInt16", "UInt32", "UInt64", "Float32", "Float64",
+];
+
+/// Sized signed/unsigned integer primitives that share `Int`'s conformances.
+const SIZED_INTS: &[PrimitiveType] = &[
+    PrimitiveType::Int8,
+    PrimitiveType::Int16,
+    PrimitiveType::Int32,
+    PrimitiveType::Int64,
+    PrimitiveType::Int128,
+    PrimitiveType::UInt8,
+    PrimitiveType::UInt16,
+    PrimitiveType::UInt32,
+    PrimitiveType::UInt64,
+];
+
+/// Sized floating-point primitives that share `Float`'s conformances.
+const SIZED_FLOATS: &[PrimitiveType] = &[PrimitiveType::Float32, PrimitiveType::Float64];
+
+/// Register the compiler-provided canonical trait conformances for primitive
+/// types into `table`.
+///
+/// These conformances populate the *same* trait-impl index that user `impl`
+/// blocks do, so the type checker resolves primitives' trait methods and
+/// generic-bound satisfaction uniformly (codegen still lowers primitive
+/// operations via the existing intrinsic fast path — no dynamic dispatch).
+///
+/// Registration uses [`ImplTable::register_trait_impl_inner`] directly, which
+/// bypasses the sealing check applied to user `impl` blocks, so the compiler's
+/// own registration is never rejected. Call this **after**
+/// [`ImplTable::build_from`] so user-impl sealing runs first.
+///
+/// The matrix (see the Q-bridge plan; the normative matrix is tracked as
+/// DQ10):
+/// - `Equatable`:   Int, Float, String, Bool, Char + sized ints/floats
+/// - `Comparable`:  Int, Float, String, Char (not Bool) + sized ints/floats
+/// - `Displayable`: Int, Float, String, Bool, Char + sized ints/floats
+/// - `Hashable`:    Int, String, Bool, Char (not Float — NaN) + sized ints
+///
+/// Also registers the supertrait edge `Comparable → Equatable` (§18.5).
+pub fn register_canonical_conformances(table: &mut ImplTable) {
+    // Supertrait obligation: every `Comparable` type is also `Equatable`.
+    table.register_supertrait("Comparable", "Equatable");
+
+    // Helper: register `trait_name` for each primitive in `prims`.
+    let register = |table: &mut ImplTable, trait_name: &str, prims: &[PrimitiveType]| {
+        for p in prims {
+            let ty = Type::Primitive(p.clone());
+            table.register_trait_impl_inner(trait_name, &ty, true);
+        }
+    };
+
+    // Base scalar sets per trait (sized numerics appended below).
+    const EQUATABLE_BASE: &[PrimitiveType] = &[
+        PrimitiveType::Int,
+        PrimitiveType::Float,
+        PrimitiveType::String,
+        PrimitiveType::Bool,
+        PrimitiveType::Char,
+    ];
+    const COMPARABLE_BASE: &[PrimitiveType] = &[
+        PrimitiveType::Int,
+        PrimitiveType::Float,
+        PrimitiveType::String,
+        PrimitiveType::Char,
+    ];
+    const DISPLAYABLE_BASE: &[PrimitiveType] = &[
+        PrimitiveType::Int,
+        PrimitiveType::Float,
+        PrimitiveType::String,
+        PrimitiveType::Bool,
+        PrimitiveType::Char,
+    ];
+    const HASHABLE_BASE: &[PrimitiveType] = &[
+        PrimitiveType::Int,
+        PrimitiveType::String,
+        PrimitiveType::Bool,
+        PrimitiveType::Char,
+    ];
+
+    // Equatable: base + sized ints + sized floats.
+    register(table, "Equatable", EQUATABLE_BASE);
+    register(table, "Equatable", SIZED_INTS);
+    register(table, "Equatable", SIZED_FLOATS);
+
+    // Comparable: base (no Bool) + sized ints + sized floats.
+    register(table, "Comparable", COMPARABLE_BASE);
+    register(table, "Comparable", SIZED_INTS);
+    register(table, "Comparable", SIZED_FLOATS);
+
+    // Displayable: base + sized ints + sized floats.
+    register(table, "Displayable", DISPLAYABLE_BASE);
+    register(table, "Displayable", SIZED_INTS);
+    register(table, "Displayable", SIZED_FLOATS);
+
+    // Hashable: base (no Float — NaN breaks the hash/eq law) + sized ints only.
+    register(table, "Hashable", HASHABLE_BASE);
+    register(table, "Hashable", SIZED_INTS);
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -755,6 +932,7 @@ mod tests {
                 type_key: "Int".to_owned(),
                 methods: vec!["print".to_owned()],
                 is_generic: false,
+                is_canonical: false,
             },
         );
         table
@@ -788,6 +966,7 @@ mod tests {
                 type_key: "Int".to_owned(),
                 methods: vec!["print".to_owned()],
                 is_generic: false,
+                is_canonical: false,
             },
         );
         table
@@ -869,8 +1048,11 @@ mod tests {
 
     #[test]
     fn coherence_allows_different_types() {
-        let impl1 = make_impl_block(Some("Equatable"), "Int", vec![make_fn_decl("equals")]);
-        let impl2 = make_impl_block(Some("Equatable"), "Bool", vec![make_fn_decl("equals")]);
+        // Same trait on two *distinct* (user) types is not an overlap. Uses
+        // user types (`Point`/`Line`) rather than primitives so the (now
+        // sealed) core-trait-for-primitive rule does not apply.
+        let impl1 = make_impl_block(Some("Equatable"), "Point", vec![make_fn_decl("equals")]);
+        let impl2 = make_impl_block(Some("Equatable"), "Line", vec![make_fn_decl("equals")]);
         let module = make_module(vec![impl1, impl2]);
         let table = ImplTable::build_from(&module);
 
@@ -1038,5 +1220,162 @@ mod tests {
         });
         let r = resolve_method(&receiver, "push", &table);
         assert!(r.is_some());
+    }
+
+    // ── Canonical primitive conformances (Q-bridge) ────────────────────────────
+
+    fn float() -> Type {
+        Type::Primitive(PrimitiveType::Float)
+    }
+
+    fn string() -> Type {
+        Type::Primitive(PrimitiveType::String)
+    }
+
+    fn char_ty() -> Type {
+        Type::Primitive(PrimitiveType::Char)
+    }
+
+    #[test]
+    fn canonical_comparable_int_is_registered() {
+        let mut table = ImplTable::new();
+        register_canonical_conformances(&mut table);
+        assert!(resolve_impl(&TraitRef::new("Comparable"), &int(), &table).is_some());
+    }
+
+    #[test]
+    fn canonical_equatable_covers_expected_primitives() {
+        let mut table = ImplTable::new();
+        register_canonical_conformances(&mut table);
+        for ty in [int(), float(), string(), bool_ty(), char_ty()] {
+            assert!(
+                resolve_impl(&TraitRef::new("Equatable"), &ty, &table).is_some(),
+                "Equatable should cover {ty:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_comparable_excludes_bool() {
+        let mut table = ImplTable::new();
+        register_canonical_conformances(&mut table);
+        // Bool is Equatable but intentionally NOT Comparable.
+        assert!(resolve_impl(&TraitRef::new("Equatable"), &bool_ty(), &table).is_some());
+        assert!(resolve_impl(&TraitRef::new("Comparable"), &bool_ty(), &table).is_none());
+    }
+
+    #[test]
+    fn canonical_hashable_excludes_float() {
+        let mut table = ImplTable::new();
+        register_canonical_conformances(&mut table);
+        // Float is Equatable/Comparable but NOT Hashable (NaN breaks hash/eq).
+        assert!(resolve_impl(&TraitRef::new("Equatable"), &float(), &table).is_some());
+        assert!(resolve_impl(&TraitRef::new("Hashable"), &float(), &table).is_none());
+        // Int is Hashable.
+        assert!(resolve_impl(&TraitRef::new("Hashable"), &int(), &table).is_some());
+    }
+
+    #[test]
+    fn canonical_covers_sized_numerics() {
+        let mut table = ImplTable::new();
+        register_canonical_conformances(&mut table);
+        let i32_ty = Type::Primitive(PrimitiveType::Int32);
+        let u64_ty = Type::Primitive(PrimitiveType::UInt64);
+        let f32_ty = Type::Primitive(PrimitiveType::Float32);
+        assert!(resolve_impl(&TraitRef::new("Comparable"), &i32_ty, &table).is_some());
+        assert!(resolve_impl(&TraitRef::new("Equatable"), &u64_ty, &table).is_some());
+        assert!(resolve_impl(&TraitRef::new("Comparable"), &f32_ty, &table).is_some());
+        // Sized float is not Hashable, matching Float.
+        assert!(resolve_impl(&TraitRef::new("Hashable"), &f32_ty, &table).is_none());
+        // Sized int IS Hashable.
+        assert!(resolve_impl(&TraitRef::new("Hashable"), &i32_ty, &table).is_some());
+    }
+
+    #[test]
+    fn canonical_entries_are_marked_canonical() {
+        let mut table = ImplTable::new();
+        register_canonical_conformances(&mut table);
+        let id = resolve_impl(&TraitRef::new("Comparable"), &int(), &table).unwrap();
+        assert!(table.get_entry(id).unwrap().is_canonical);
+    }
+
+    #[test]
+    fn canonical_registers_comparable_equatable_supertrait() {
+        let mut table = ImplTable::new();
+        register_canonical_conformances(&mut table);
+        assert_eq!(table.all_supertraits("Comparable"), vec!["Equatable"]);
+    }
+
+    #[test]
+    fn user_register_trait_impl_is_not_canonical() {
+        let mut table = ImplTable::new();
+        let id = table.register_trait_impl("MyTrait", &named("User"));
+        assert!(!table.get_entry(id).unwrap().is_canonical);
+    }
+
+    // ── Sealing: user `impl <CoreTrait> for <Primitive>` (Q1b / E4011) ─────────
+
+    #[test]
+    fn sealing_rejects_user_impl_core_trait_for_primitive() {
+        // `impl Comparable for Int` in user code must be rejected (E4011).
+        let method = make_fn_decl("compare");
+        let impl_block = make_impl_block(Some("Comparable"), "Int", vec![method]);
+        let module = make_module(vec![impl_block]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(table.diags.has_errors());
+        assert_eq!(table.diags.error_count(), 1);
+        let diag = table.diags.iter().next().unwrap();
+        assert_eq!(diag.code, E_SEALED_PRIMITIVE_IMPL);
+        // The offending impl must NOT have been registered.
+        assert!(resolve_impl(&TraitRef::new("Comparable"), &int(), &table).is_none());
+        // A newtype help note is attached.
+        assert!(diag.notes.iter().any(|n| n.contains("newtype")));
+    }
+
+    #[test]
+    fn sealing_rejects_each_sealed_core_trait_for_primitive() {
+        for trait_name in ["Equatable", "Comparable", "Displayable", "Hashable"] {
+            let impl_block = make_impl_block(Some(trait_name), "String", vec![make_fn_decl("m")]);
+            let module = make_module(vec![impl_block]);
+            let table = ImplTable::build_from(&module);
+            assert!(
+                table.diags.has_errors(),
+                "{trait_name} for String should be sealed"
+            );
+        }
+    }
+
+    #[test]
+    fn sealing_allows_user_impl_core_trait_for_newtype() {
+        // Positive control: `impl Comparable for MyNewtype` is fine.
+        let method = make_fn_decl("compare");
+        let impl_block = make_impl_block(Some("Comparable"), "MyNewtype", vec![method]);
+        let module = make_module(vec![impl_block]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(!table.diags.has_errors());
+        assert!(resolve_impl(&TraitRef::new("Comparable"), &named("MyNewtype"), &table).is_some());
+    }
+
+    #[test]
+    fn sealing_allows_user_impl_noncore_trait_for_primitive() {
+        // A non-core trait for a primitive is out of scope of the seal — the
+        // seal is strictly the (core trait, primitive) quadrant.
+        let impl_block = make_impl_block(Some("MyTrait"), "Int", vec![make_fn_decl("m")]);
+        let module = make_module(vec![impl_block]);
+        let table = ImplTable::build_from(&module);
+        assert!(!table.diags.has_errors());
+    }
+
+    #[test]
+    fn canonical_registration_bypasses_sealing() {
+        // The compiler's own canonical conformances use
+        // `register_trait_impl_inner` and must NOT trip the seal even though
+        // they are (core trait, primitive) pairs.
+        let mut table = ImplTable::new();
+        register_canonical_conformances(&mut table);
+        assert!(!table.diags.has_errors());
+        assert!(resolve_impl(&TraitRef::new("Comparable"), &int(), &table).is_some());
     }
 }

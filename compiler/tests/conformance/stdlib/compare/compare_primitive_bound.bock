@@ -1,0 +1,26 @@
+// TEST: stdlib_compare_primitive_bound
+// EXPECT: no_errors
+//
+// Q-bridge: the compiler registers canonical conformances for primitive types
+// into the same trait-impl table that user `impl` blocks populate, so a
+// generic function bounded by a core trait (`where (T: Comparable)`) accepts
+// primitive arguments. `Int` and `String` both satisfy `Comparable` here.
+// Before the bridge, the bound check was dead (the table was never built in the
+// real pipeline); this fixture exercises the now-wired table on primitives.
+module userapp
+
+use core.compare.{Comparable}
+
+fn needs_cmp[T](x: T) -> T
+  where (T: Comparable)
+{
+  x
+}
+
+public fn an_int() -> Int {
+  needs_cmp(5)
+}
+
+public fn a_string() -> String {
+  needs_cmp("hi")
+}

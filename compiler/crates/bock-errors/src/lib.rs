@@ -191,6 +191,15 @@ impl DiagnosticBag {
         self.items.iter()
     }
 
+    /// Absorb all diagnostics from `other` into this bag, preserving their
+    /// labels and notes.
+    ///
+    /// Used to fold diagnostics produced by a sub-pass (such as
+    /// `ImplTable::build_from`) into the main diagnostic bag.
+    pub fn absorb(&mut self, other: &DiagnosticBag) {
+        self.items.extend(other.items.iter().cloned());
+    }
+
     /// Total number of diagnostics.
     #[must_use]
     pub fn len(&self) -> usize {
