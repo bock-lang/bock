@@ -234,6 +234,68 @@ fn go_module_uses_optional(items: &[AIRNode]) -> bool {
     })
 }
 
+/// The prelude `Ordering` runtime: a small enum type with the three variants as
+/// package-level constants, plus a generic `compare` helper the primitive bridge
+/// calls. Mirrors `OPTIONAL_RUNTIME_GO` — the `core.compare` enum decl is not
+/// bundled into the single-file entry, so `Ordering`/`Less`/`Equal`/`Greater`
+/// and `(x).compare(y)` need this self-contained representation. A value-switch
+/// `case Less:` (the existing Go match lowering for these arms) matches a
+/// `__bockOrdering` constant directly.
+const ORDERING_RUNTIME_GO: &str = "// ── Bock Ordering runtime ──
+type __bockOrdering int
+
+const (
+	Less __bockOrdering = iota - 1
+	Equal
+	Greater
+)
+
+func __bockCompare[T int64 | float64 | string | rune | int | uint64 | float32](a, b T) __bockOrdering {
+	if a < b {
+		return Less
+	}
+	if a == b {
+		return Equal
+	}
+	return Greater
+}
+";
+
+/// True if the module references the prelude `Ordering` enum, any of its
+/// variants, or a `compare` method call (lowered to an `Ordering` runtime
+/// value). Gates emission of [`ORDERING_RUNTIME_GO`], mirroring
+/// [`go_module_uses_optional`].
+fn go_module_uses_ordering(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"Ordering\"")
+            || s.contains("\"Less\"")
+            || s.contains("\"Equal\"")
+            || s.contains("\"Greater\"")
+            || s.contains("\"compare\"")
+    })
+}
+
+/// True if a `match`\'s arms dispatch on the prelude `Ordering` variants
+/// (`Less`/`Equal`/`Greater`), so the Go backend emits a *value*-switch over the
+/// `__bockOrdering` constants rather than the type-switch it uses for user
+/// enums. Recognised by any constructor pattern whose final segment is an
+/// `Ordering` variant.
+fn go_match_is_ordering(arms: &[AIRNode]) -> bool {
+    arms.iter().any(|arm| {
+        if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
+            if let NodeKind::ConstructorPat { path, .. } = &pattern.kind {
+                return path
+                    .segments
+                    .last()
+                    .and_then(|s| crate::generator::ordering_variant(&s.name))
+                    .is_some();
+            }
+        }
+        false
+    })
+}
+
 /// True if a `match`\'s arms dispatch on the `Optional` constructors
 /// `Some`/`None` (so the Go backend emits a tag-based switch over
 /// `__bockOption`). Recognised by a constructor pattern whose final path
@@ -508,6 +570,9 @@ struct GoEmitCtx {
     /// Set once the Optional runtime prelude has been emitted into `buf`;
     /// deduped across a bundle exactly as [`Self::concurrency_runtime_emitted`].
     optional_runtime_emitted: bool,
+    /// Set once the [`ORDERING_RUNTIME_GO`] prelude has been emitted; deduped
+    /// across a bundle exactly as [`Self::optional_runtime_emitted`].
+    ordering_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Go has no sum type, so a user enum is
     /// a sealed interface + per-variant structs named `{enum}{variant}`
     /// (e.g. `ShapeCircle`). The registry lets a construction emit the variant
@@ -566,6 +631,7 @@ impl GoEmitCtx {
             var_list_elem: HashMap::new(),
             concurrency_runtime_emitted: false,
             optional_runtime_emitted: false,
+            ordering_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             var_go_type: HashMap::new(),
@@ -1339,6 +1405,50 @@ impl GoEmitCtx {
         Ok(true)
     }
 
+    /// Lower a primitive trait-bridge method call (`compare`/`eq`/`to_string`/
+    /// `display` on a primitive receiver) to its Go form.
+    ///
+    /// `(1).compare(2)` resolves to `Ordering`; this routes it through the
+    /// generic Ordering-runtime helper `__bockCompare`, returning a
+    /// `__bockOrdering` constant the value-switch / construction sides use. `eq`
+    /// → `==`; `to_string`/`display` → `fmt.Sprintf("%v", x)`.
+    fn try_emit_primitive_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, _prim)) =
+            crate::generator::primitive_bridge_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let code = match method {
+            "compare" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                format!("__bockCompare({recv_str}, {other})")
+            }
+            "eq" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                format!("(({recv_str}) == ({other}))")
+            }
+            "to_string" | "display" => {
+                self.needs_fmt_import = true;
+                format!("fmt.Sprintf(\"%v\", {recv_str})")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Recognise desugared method calls on Duration/Instant values.
     fn try_emit_time_desugared_method(
         &mut self,
@@ -1462,6 +1572,11 @@ impl GoEmitCtx {
                     self.buf.push_str(OPTIONAL_RUNTIME_GO);
                     self.buf.push('\n');
                     self.optional_runtime_emitted = true;
+                }
+                if !self.ordering_runtime_emitted && go_module_uses_ordering(items) {
+                    self.buf.push_str(ORDERING_RUNTIME_GO);
+                    self.buf.push('\n');
+                    self.ordering_runtime_emitted = true;
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -2530,6 +2645,13 @@ impl GoEmitCtx {
                     self.buf.push_str("__bockNone");
                     return Ok(());
                 }
+                // Prelude `Ordering` variant → the bare `__bockOrdering` constant
+                // (`Less`/`Equal`/`Greater`) of the Ordering runtime, which a
+                // value-switch `case Less:` and the `compare` bridge also use.
+                if let Some(variant) = crate::generator::ordering_variant(&name.name) {
+                    self.buf.push_str(variant);
+                    return Ok(());
+                }
                 // A unit-variant reference (`Empty`) → an empty variant-struct
                 // literal `ShapeEmpty{}`.
                 if let Some(enum_name) = self
@@ -2647,6 +2769,9 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
@@ -3266,11 +3391,15 @@ impl GoEmitCtx {
         // A user enum lowers to a type-switch over the sealed-interface concrete
         // variant structs, binding each arm's payload fields from `__v`.
         let user_enum = self.go_match_is_user_enum(arms);
+        // The prelude `Ordering` is a `__bockOrdering` *value* enum (constants),
+        // so its match is a value-switch (`switch o { case Less: }`), never the
+        // type-switch user enums use — `Less` is a constant, not a Go type.
+        let ordering = !user_enum && go_match_is_ordering(arms);
         // Choose value-switch (`switch v { case 5: }`) vs type-switch
         // (`switch v := s.(type) { case T: }`) by pattern kind: constructor /
         // record patterns dispatch on dynamic type; literal / bind patterns
-        // dispatch on value.
-        let type_switch = user_enum || go_match_is_type_switch(arms);
+        // dispatch on value. `Ordering` is forced to a value-switch.
+        let type_switch = !ordering && (user_enum || go_match_is_type_switch(arms));
         let ind = self.indent_str();
         if user_enum {
             // A *narrowing* type-switch: `switch __v := s.(type)` rebinds `__v`
@@ -3296,17 +3425,27 @@ impl GoEmitCtx {
             self.emit_match_arm(arm, user_enum)?;
         }
         // Bock matches are exhaustive, but Go can't prove a type-switch covers
-        // every implementor of a sealed interface, so a function that returns a
-        // value after the switch would fail to compile ("missing return"). When
-        // no arm is a catch-all (`_` / bind), add a `default: panic(...)` so the
-        // switch is total from Go's control-flow view.
-        if user_enum && !go_match_has_default_arm(arms) {
-            self.needs_fmt_import = true;
+        // every implementor of a sealed interface (nor a value-switch every
+        // `__bockOrdering` constant), so a function that returns a value after
+        // the switch would fail to compile ("missing return"). When no arm is a
+        // catch-all (`_` / bind), add a `default: panic(...)` so the switch is
+        // total from Go's control-flow view.
+        if (user_enum || ordering) && !go_match_has_default_arm(arms) {
             let di = self.indent_str();
-            let _ = write!(
-                self.buf,
-                "{di}default:\n{di}\tpanic(fmt.Sprintf(\"unreachable match arm: %v\", __v))\n"
-            );
+            if user_enum {
+                self.needs_fmt_import = true;
+                let _ = write!(
+                    self.buf,
+                    "{di}default:\n{di}\tpanic(fmt.Sprintf(\"unreachable match arm: %v\", __v))\n"
+                );
+            } else {
+                // Value-switch (`Ordering`): the scrutinee is not bound to a
+                // local, so panic with a static message.
+                let _ = write!(
+                    self.buf,
+                    "{di}default:\n{di}\tpanic(\"unreachable match arm\")\n"
+                );
+            }
         }
         self.switch_label_depth -= 1;
         self.indent -= 1;

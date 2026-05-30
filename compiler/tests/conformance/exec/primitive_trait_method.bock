@@ -1,0 +1,45 @@
+// TEST: exec_primitive_trait_method
+// EXPECT: output "eq:yes;ne:no;str:yes;num=42;big=1000"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Primitive-bridge dispatch (codegen-completeness P1-d) for the non-`compare`
+// canonical methods: `Equatable.eq` and `Displayable.to_string`. Both resolve
+// in the checker (to `Bool` / `String`) but the receiver is a primitive with no
+// such method in the target language, so codegen reads the `recv_kind =
+// "Primitive:<Ty>"` annotation and lowers them to the target intrinsic
+// (`==` for `eq`; the target's stringification for `to_string`).
+//
+// `eq` is exercised on `Int` and `String`; `to_string` on two `Int` values. The
+// boolean results are routed through an explicit `if` (rather than interpolating
+// a `Bool`, whose textual form differs across targets — Python `True` vs JS
+// `true`) so the expected output is target-independent.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn yesno(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn intsEqual(a: Int, b: Int) -> Bool {
+  return a.eq(b)
+}
+
+fn strsEqual(a: String, b: String) -> Bool {
+  return a.eq(b)
+}
+
+fn main() -> Void {
+  let eq: String = yesno(intsEqual(7, 7))
+  let ne: String = yesno(intsEqual(7, 8))
+  let se: String = yesno(strsEqual("hi", "hi"))
+  let small: Int = 42
+  let big: Int = 1000
+  let smallStr: String = small.to_string()
+  let bigStr: String = big.to_string()
+  println("eq:${eq};ne:${ne};str:${se};num=${smallStr};big=${bigStr}")
+}

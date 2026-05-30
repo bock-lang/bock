@@ -67,6 +67,67 @@ const E_NO_CONVERSION: DiagnosticCode = DiagnosticCode {
     number: 4012,
 };
 
+// ─── Receiver-type annotation (checker → codegen) ──────────────────────────────
+
+/// AIR metadata key under which the checker stamps a method call's *receiver
+/// type category* so codegen can lower receiver-dependent calls without
+/// re-deriving the type.
+///
+/// The checker resolves a method call's receiver type during inference but
+/// then drops its internal type side-table; codegen sees only the structural
+/// AIR. A bare `(1).compare(2)` and `opt.unwrap_or(d)` are indistinguishable
+/// to a backend without this hint — both desugar to
+/// `Call(FieldAccess(recv, method), [recv, …])`, and the method names overlap
+/// across `Optional`/`Result`/`List`. This key carries the resolved receiver
+/// category from the checker's method-resolution sites to codegen.
+///
+/// The value is a [`Value::String`] produced by [`recv_kind_tag`]; see that
+/// function for the tag grammar. The tag is stamped on the *method-call node*
+/// (the desugared `Call`, or a `MethodCall` that survives to T-AIR), not on the
+/// receiver — so a backend reads `call_node.metadata[RECV_KIND_META_KEY]`.
+pub const RECV_KIND_META_KEY: &str = "recv_kind";
+
+/// Compute the receiver-kind tag for a resolved receiver [`Type`].
+///
+/// The tag is a compact, codegen-facing string identifying which *family* the
+/// receiver belongs to, so a backend can pick the right lowering for an
+/// overloaded method name (`compare`/`eq`/`unwrap_or`/`is_ok`/…):
+///
+/// | Receiver type            | Tag                |
+/// |--------------------------|--------------------|
+/// | `Type::Primitive(Int)`   | `"Primitive:Int"`  |
+/// | `Type::Primitive(Float)` | `"Primitive:Float"`|
+/// | `Type::Optional(_)`      | `"Optional"`       |
+/// | `Type::Result(_, _)`     | `"Result"`         |
+/// | `List[T]`                | `"List"`           |
+/// | `Set[T]` / `Map[K,V]`    | `"Set"` / `"Map"`  |
+/// | other `Generic`          | `"Generic:<ctor>"` |
+/// | `Named(n)`               | `"User:<n>"`       |
+///
+/// Returns `None` for type-inference variables, function types, and other
+/// receivers a backend never needs to special-case — leaving the call to its
+/// existing structural lowering.
+///
+/// The primitive variant carries the specific [`PrimitiveType`] (via its
+/// `Debug` name, e.g. `Int`, `Float`, `String`) because the lowering of e.g.
+/// `compare` differs by primitive (Rust `i64::cmp` vs `f64::partial_cmp`).
+#[must_use]
+pub fn recv_kind_tag(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Primitive(p) => Some(format!("Primitive:{p:?}")),
+        Type::Optional(_) => Some("Optional".to_string()),
+        Type::Result(_, _) => Some("Result".to_string()),
+        Type::Generic(g) => match g.constructor.as_str() {
+            "List" => Some("List".to_string()),
+            "Set" => Some("Set".to_string()),
+            "Map" => Some("Map".to_string()),
+            other => Some(format!("Generic:{other}")),
+        },
+        Type::Named(n) => Some(format!("User:{}", n.name)),
+        _ => None,
+    }
+}
+
 // ─── TypeVarId generator ──────────────────────────────────────────────────────
 
 /// Generates unique [`TypeVarId`]s across a compilation session.
@@ -265,6 +326,24 @@ impl TypeChecker {
     #[must_use]
     pub fn type_of(&self, id: NodeId) -> Option<&Type> {
         self.types.get(&id)
+    }
+
+    /// Stamp the receiver-kind annotation ([`RECV_KIND_META_KEY`]) onto a
+    /// method-call `node` from the resolved `receiver_ty`.
+    ///
+    /// This is the checker→codegen lynchpin (see [`recv_kind_tag`]): at the
+    /// method-resolution sites the checker already knows the receiver type, so
+    /// it records the receiver *category* on the call node for codegen to read
+    /// after the type side-table is dropped. No-ops when the receiver type maps
+    /// to no tag (inference var, function type, …), leaving the call to its
+    /// existing structural lowering. The receiver type is run through the
+    /// current substitution first so a late-unified type var resolves.
+    fn stamp_recv_kind(&self, node: &mut AIRNode, receiver_ty: &Type) {
+        let resolved = self.subst.apply(receiver_ty);
+        if let Some(tag) = recv_kind_tag(&resolved) {
+            node.metadata
+                .insert(RECV_KIND_META_KEY.to_string(), Value::String(tag));
+        }
     }
 
     // ── Getters for export collection ───────────────────────────────────────
@@ -1496,6 +1575,17 @@ impl TypeChecker {
                     unreachable!()
                 };
 
+                // Receiver-type annotation (checker→codegen): a desugared method
+                // call is `Call { callee: FieldAccess(recv, method), args:
+                // [recv, …] }`. Inferring the callee above recorded the
+                // receiver's type in the side-table, so stamp the call node with
+                // the receiver category for codegen (see `RECV_KIND_META_KEY`).
+                if let NodeKind::FieldAccess { object, .. } = &callee_clone.kind {
+                    if let Some(recv_ty) = self.types.get(&object.id).cloned() {
+                        self.stamp_recv_kind(node, &recv_ty);
+                    }
+                }
+
                 // For generic functions, create a fresh instantiation with
                 // new type vars so each call site gets independent inference.
                 // Also capture the sig + fresh_map for trait-bound checking.
@@ -1571,6 +1661,11 @@ impl TypeChecker {
                     } else {
                         unreachable!()
                     };
+                // Receiver-type annotation (checker→codegen): the AIR lowerer
+                // desugars most method calls into the `Call(FieldAccess(…))`
+                // form, but stamp a surviving `MethodCall` too so the annotation
+                // is comprehensive regardless of lowering shape.
+                self.stamp_recv_kind(node, &receiver_ty);
                 self.resolve_method_return_type(&receiver_ty, &method_name)
             }
 
@@ -5402,5 +5497,213 @@ mod tests {
         let ty = checker.infer_expr(&method_call);
         // Unknown method → fresh type variable
         assert!(matches!(ty, Type::TypeVar(_)));
+    }
+
+    // ── Receiver-type annotation (checker → codegen) ─────────────────────────
+
+    #[test]
+    fn recv_kind_tag_maps_each_category() {
+        use crate::NamedType;
+        assert_eq!(
+            recv_kind_tag(&Type::Primitive(PrimitiveType::Int)).as_deref(),
+            Some("Primitive:Int")
+        );
+        assert_eq!(
+            recv_kind_tag(&Type::Primitive(PrimitiveType::Float)).as_deref(),
+            Some("Primitive:Float")
+        );
+        assert_eq!(
+            recv_kind_tag(&Type::Primitive(PrimitiveType::String)).as_deref(),
+            Some("Primitive:String")
+        );
+        assert_eq!(
+            recv_kind_tag(&Type::Optional(Box::new(Type::Primitive(
+                PrimitiveType::Int
+            ))))
+            .as_deref(),
+            Some("Optional")
+        );
+        assert_eq!(
+            recv_kind_tag(&Type::Result(
+                Box::new(Type::Primitive(PrimitiveType::Int)),
+                Box::new(Type::Primitive(PrimitiveType::String)),
+            ))
+            .as_deref(),
+            Some("Result")
+        );
+        assert_eq!(
+            recv_kind_tag(&Type::Generic(GenericType {
+                constructor: "List".into(),
+                args: vec![Type::Primitive(PrimitiveType::Int)],
+            }))
+            .as_deref(),
+            Some("List")
+        );
+        assert_eq!(
+            recv_kind_tag(&Type::Named(NamedType {
+                name: "Point".into(),
+            }))
+            .as_deref(),
+            Some("User:Point")
+        );
+        // No tag for inference vars / function types.
+        assert_eq!(recv_kind_tag(&Type::TypeVar(0)), None);
+    }
+
+    /// Build the desugared method-call shape the lowerer produces for
+    /// `recv.method(args)`: `Call { callee: FieldAccess(recv, method),
+    /// args: [recv, ...args] }`. The receiver node is shared (same id) between
+    /// the field-access object and the first (self) argument.
+    fn desugared_method_call(
+        gen: &NodeIdGen,
+        receiver: AIRNode,
+        method: &str,
+        extra_args: Vec<AIRNode>,
+    ) -> AIRNode {
+        let field_access = make_node(
+            gen,
+            NodeKind::FieldAccess {
+                object: Box::new(receiver.clone()),
+                field: ident(method),
+            },
+        );
+        let mut args = vec![bock_air::AirArg {
+            label: None,
+            value: receiver,
+        }];
+        for a in extra_args {
+            args.push(bock_air::AirArg {
+                label: None,
+                value: a,
+            });
+        }
+        make_node(
+            gen,
+            NodeKind::Call {
+                callee: Box::new(field_access),
+                type_args: vec![],
+                args,
+            },
+        )
+    }
+
+    /// Register a `Comparable { compare(self, Self) -> Ordering }` /
+    /// `Equatable { eq(self, Self) -> Bool }` model + an `impl_table` granting
+    /// the named primitive both conformances, mirroring the canonical
+    /// primitive-bridge wiring.
+    fn with_primitive_comparable(checker: &mut TypeChecker, prim: PrimitiveType) {
+        let self_ty = Type::Named(crate::NamedType {
+            name: "Self".into(),
+        });
+        let mut comparable = HashMap::new();
+        comparable.insert(
+            "compare".to_string(),
+            Type::Function(FnType {
+                params: vec![self_ty.clone(), self_ty.clone()],
+                ret: Box::new(Type::Named(crate::NamedType {
+                    name: "Ordering".into(),
+                })),
+                effects: vec![],
+            }),
+        );
+        checker.insert_trait_method_types("Comparable".to_string(), comparable);
+        let mut equatable = HashMap::new();
+        equatable.insert(
+            "eq".to_string(),
+            Type::Function(FnType {
+                params: vec![self_ty.clone(), self_ty.clone()],
+                ret: Box::new(Type::Primitive(PrimitiveType::Bool)),
+                effects: vec![],
+            }),
+        );
+        checker.insert_trait_method_types("Equatable".to_string(), equatable);
+        checker.impl_table = Some(make_impl_table(&[
+            ("Comparable", Type::Primitive(prim.clone())),
+            ("Equatable", Type::Primitive(prim)),
+        ]));
+    }
+
+    #[test]
+    fn stamps_recv_kind_on_primitive_compare() {
+        // (1).compare(2) → desugared Call. The checker resolves the receiver as
+        // Int and stamps `recv_kind = "Primitive:Int"` on the call node.
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        with_primitive_comparable(&mut checker, PrimitiveType::Int);
+
+        let mut call = desugared_method_call(&gen, int_lit(&gen), "compare", vec![int_lit(&gen)]);
+        let ty = checker.infer_node(&mut call);
+        // Resolves to the trait's declared return (Ordering), not the intrinsic.
+        assert_eq!(
+            ty,
+            Type::Named(crate::NamedType {
+                name: "Ordering".into()
+            })
+        );
+        assert_eq!(
+            call.metadata.get(RECV_KIND_META_KEY),
+            Some(&Value::String("Primitive:Int".to_string())),
+            "expected recv_kind stamped on the compare call node"
+        );
+    }
+
+    #[test]
+    fn stamps_recv_kind_on_primitive_eq_and_to_string() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        with_primitive_comparable(&mut checker, PrimitiveType::Int);
+
+        let mut eq_call = desugared_method_call(&gen, int_lit(&gen), "eq", vec![int_lit(&gen)]);
+        checker.infer_node(&mut eq_call);
+        assert_eq!(
+            eq_call.metadata.get(RECV_KIND_META_KEY),
+            Some(&Value::String("Primitive:Int".to_string())),
+        );
+
+        // `.to_string()` is an intrinsic (not a trait method), but the receiver
+        // kind is still stamped so codegen can lower it.
+        let mut ts_call = desugared_method_call(&gen, int_lit(&gen), "to_string", vec![]);
+        checker.infer_node(&mut ts_call);
+        assert_eq!(
+            ts_call.metadata.get(RECV_KIND_META_KEY),
+            Some(&Value::String("Primitive:Int".to_string())),
+        );
+    }
+
+    #[test]
+    fn stamps_recv_kind_optional_and_list() {
+        // The annotation is comprehensive: it also serves the P1-c consumer
+        // (Optional/Result method dispatch). An `Int?` receiver → "Optional";
+        // a `List[Int]` receiver → "List".
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        // Bind a variable `o: Int?` and call `o.unwrap_or(0)`.
+        checker.env.define(
+            "o",
+            Type::Optional(Box::new(Type::Primitive(PrimitiveType::Int))),
+        );
+        let o_ref = make_node(&gen, NodeKind::Identifier { name: ident("o") });
+        let mut opt_call = desugared_method_call(&gen, o_ref, "unwrap_or", vec![int_lit(&gen)]);
+        checker.infer_node(&mut opt_call);
+        assert_eq!(
+            opt_call.metadata.get(RECV_KIND_META_KEY),
+            Some(&Value::String("Optional".to_string())),
+        );
+
+        checker.env.define(
+            "xs",
+            Type::Generic(GenericType {
+                constructor: "List".into(),
+                args: vec![Type::Primitive(PrimitiveType::Int)],
+            }),
+        );
+        let xs_ref = make_node(&gen, NodeKind::Identifier { name: ident("xs") });
+        let mut list_call = desugared_method_call(&gen, xs_ref, "len", vec![]);
+        checker.infer_node(&mut list_call);
+        assert_eq!(
+            list_call.metadata.get(RECV_KIND_META_KEY),
+            Some(&Value::String("List".to_string())),
+        );
     }
 }

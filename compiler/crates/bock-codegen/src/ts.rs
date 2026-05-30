@@ -706,6 +706,52 @@ impl TsEmitCtx {
         Ok(true)
     }
 
+    /// Lower a primitive trait-bridge method call (`compare`/`eq`/`to_string`/
+    /// `display` on a primitive receiver) to its TS form.
+    ///
+    /// Mirrors the JS lowering, but uses `as const` tags so the ternary's type
+    /// is the discriminated `Ordering` union `tsc` can narrow on `._tag` in the
+    /// match. `eq` → `===`; `to_string`/`display` → `String(x)`.
+    fn try_emit_primitive_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, _prim)) =
+            crate::generator::primitive_bridge_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        match method {
+            "compare" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                let _ = write!(
+                    self.buf,
+                    "(({recv_str}) < ({other}) ? {{ _tag: \"Less\" as const }} : \
+                     (({recv_str}) === ({other}) ? {{ _tag: \"Equal\" as const }} : \
+                     {{ _tag: \"Greater\" as const }}))"
+                );
+            }
+            "eq" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                let _ = write!(self.buf, "(({recv_str}) === ({other}))");
+            }
+            "to_string" | "display" => {
+                let _ = write!(self.buf, "String({recv_str})");
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     // ── Type emission ────────────────────────────────────────────────────────
 
     /// Emit a type expression from an AIR type node to a TS type string.
@@ -1981,6 +2027,11 @@ impl TsEmitCtx {
             NodeKind::Identifier { name } => {
                 if name.name == "None" {
                     self.buf.push_str("{ _tag: \"None\" as const }");
+                } else if let Some(variant) = crate::generator::ordering_variant(&name.name) {
+                    // Prelude `Ordering` variant → an inline tagged object (the
+                    // self-contained representation the primitive-bridge
+                    // `compare` and the `_tag`-switch match also use).
+                    let _ = write!(self.buf, "{{ _tag: \"{variant}\" as const }}");
                 } else if let Some(enum_name) = self
                     .user_variant_for_name(&name.name)
                     .map(|i| i.enum_name.clone())
@@ -2050,6 +2101,9 @@ impl TsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
                 // Rewrite bare effect operation calls: log(...) → handler.log(...)

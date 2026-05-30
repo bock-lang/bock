@@ -794,6 +794,92 @@ pub fn desugared_list_method<'a>(
     }
 }
 
+// ─── Primitive-bridge method dispatch ────────────────────────────────────────
+//
+// The §18.2 core traits (Comparable/Equatable/Displayable) cover primitives via
+// compiler-registered canonical conformances (the Q-bridge), so `(1).compare(2)`
+// type-checks to `Ordering` and `a.eq(b)` to `Bool`. But codegen sees only the
+// desugared `Call(FieldAccess(1, "compare"), [1, 2])` — and `i64`/`number`/`int`
+// have no `.compare`/`.eq` method, so the generic desugared-self-call lowering
+// emits `1.compare(1, 2)` (JS) / `1_i64.compare(2_i64)` (Rust), which fail on
+// every target. This module recognises such calls — using the checker's
+// `recv_kind` annotation (`bock_types::checker::RECV_KIND_META_KEY`) to confirm
+// the receiver is a primitive — so each backend lowers them to the target's
+// intrinsic comparison/equality/stringification.
+
+/// The three variants of the prelude `Ordering` enum (`core.compare`), in the
+/// order the comparison ladder produces them.
+///
+/// `Ordering` is the return type of `Comparable.compare`, so the primitive
+/// bridge constructs one of these per comparison. Under the single-file run
+/// model the `core.compare` enum declaration is not bundled into the entry
+/// file, so each backend lowers `Ordering`/`Less`/`Equal`/`Greater` to a
+/// self-contained representation (Rust's native `std::cmp::Ordering`, a tagged
+/// object in JS/TS, a runtime singleton in Python/Go) — the same treatment the
+/// built-in `Optional`/`Result` receive.
+pub const ORDERING_VARIANTS: &[&str] = &["Less", "Equal", "Greater"];
+
+/// Returns the variant name if `name` is one of the prelude `Ordering` variants
+/// (`Less`/`Equal`/`Greater`), else `None`. The returned `&'static str` is the
+/// canonical spelling, suitable for emitting into target source.
+#[must_use]
+pub fn ordering_variant(name: &str) -> Option<&'static str> {
+    ORDERING_VARIANTS.iter().copied().find(|&v| v == name)
+}
+
+/// The primitive trait-bridge methods this codegen lowers to a target intrinsic.
+///
+/// `compare`/`eq` are the canonical `Comparable`/`Equatable` methods; `to_string`
+/// and `display` are the `Displayable` stringification methods. All resolve in
+/// the checker to a known return type (`Ordering`, `Bool`, `String`) and must be
+/// lowered to the target's intrinsic because the primitive has no such method in
+/// the target language.
+pub const PRIMITIVE_BRIDGE_METHODS: &[&str] = &["compare", "eq", "to_string", "display"];
+
+/// The receiver-kind annotation value, parsed into the primitive type name.
+///
+/// Returns the primitive type's name (e.g. `"Int"`, `"Float"`, `"String"`) when
+/// the node carries a `recv_kind = "Primitive:<Ty>"` metadata stamp, else
+/// `None`. This is the codegen-side reader of the checker→codegen annotation.
+#[must_use]
+pub fn primitive_recv_kind(node: &AIRNode) -> Option<&str> {
+    let bock_air::Value::String(tag) =
+        node.metadata.get(bock_types::checker::RECV_KIND_META_KEY)?
+    else {
+        return None;
+    };
+    tag.strip_prefix("Primitive:")
+}
+
+/// Recognise a *desugared primitive trait-bridge method call*.
+///
+/// Building on [`desugared_self_call`], this additionally requires that (a) the
+/// `call_node` carries the checker's `recv_kind = "Primitive:<Ty>"` annotation
+/// and (b) the method is one of [`PRIMITIVE_BRIDGE_METHODS`]. Returns the
+/// receiver node, the method name, the remaining (non-self) arguments, and the
+/// primitive type name — everything a backend needs to lower the call to its
+/// intrinsic (`x.cmp(&y)` / `x == y` / `x.to_string()` in Rust, the ternary
+/// `Ordering` construction in JS/TS/Python/Go, …).
+///
+/// `call_node` is the full `Call` AIR node (it holds the annotation); `callee`
+/// and `args` are its `callee`/`args` fields, passed separately so a backend can
+/// call this from inside its `NodeKind::Call { callee, args, .. }` match arm.
+#[must_use]
+pub fn primitive_bridge_call<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg], &'a str)> {
+    let prim = primitive_recv_kind(call_node)?;
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if PRIMITIVE_BRIDGE_METHODS.contains(&method) {
+        Some((recv, method, rest, prim))
+    } else {
+        None
+    }
+}
+
 // ─── Enum-variant registry ──────────────────────────────────────────────────
 //
 // User-defined enum *declarations* already lower correctly per target (JS
@@ -1655,6 +1741,104 @@ mod tests {
                 "{m} should not be recognised as a read-only List method"
             );
         }
+    }
+
+    // ── Primitive-bridge / Ordering ──────────────────────────────────────────
+
+    #[test]
+    fn ordering_variant_recognises_only_the_three_variants() {
+        assert_eq!(ordering_variant("Less"), Some("Less"));
+        assert_eq!(ordering_variant("Equal"), Some("Equal"));
+        assert_eq!(ordering_variant("Greater"), Some("Greater"));
+        assert_eq!(ordering_variant("Some"), None);
+        assert_eq!(ordering_variant("less"), None);
+        assert_eq!(ordering_variant("Ordering"), None);
+    }
+
+    /// Build a desugared `recv.method(extra)` call node carrying the checker's
+    /// `recv_kind` annotation `tag`, as the consumer sees it post-checking.
+    fn annotated_call(
+        method: &str,
+        tag: &str,
+        extra: Vec<AIRNode>,
+    ) -> (AIRNode, AIRNode, Vec<AirArg>) {
+        let (callee, args) = desugared_call(method, extra);
+        let mut call = n(
+            100,
+            NodeKind::Call {
+                callee: Box::new(callee.clone()),
+                args: args.clone(),
+                type_args: vec![],
+            },
+        );
+        call.metadata.insert(
+            bock_types::checker::RECV_KIND_META_KEY.to_string(),
+            bock_air::Value::String(tag.to_string()),
+        );
+        (call, callee, args)
+    }
+
+    #[test]
+    fn primitive_recv_kind_reads_the_annotation() {
+        let (call, _, _) = annotated_call("compare", "Primitive:Int", vec![]);
+        assert_eq!(primitive_recv_kind(&call), Some("Int"));
+
+        let (call, _, _) = annotated_call("unwrap_or", "Optional", vec![]);
+        assert_eq!(primitive_recv_kind(&call), None);
+
+        // No annotation → None.
+        let (callee, args) = desugared_call("compare", vec![]);
+        let bare = n(
+            101,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                args,
+                type_args: vec![],
+            },
+        );
+        assert_eq!(primitive_recv_kind(&bare), None);
+    }
+
+    #[test]
+    fn primitive_bridge_call_matches_bridge_methods_on_primitive() {
+        for &m in PRIMITIVE_BRIDGE_METHODS {
+            let extra = if matches!(m, "compare" | "eq") {
+                vec![n(7, NodeKind::Identifier { name: ident("x") })]
+            } else {
+                vec![]
+            };
+            let n_extra = extra.len();
+            let (call, callee, args) = annotated_call(m, "Primitive:Int", extra);
+            let (recv, method, rest, prim) =
+                primitive_bridge_call(&call, &callee, &args).expect("should match");
+            assert_eq!(method, m);
+            assert_eq!(prim, "Int");
+            assert_eq!(rest.len(), n_extra);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+        }
+    }
+
+    #[test]
+    fn primitive_bridge_call_rejects_non_primitive_and_unknown_methods() {
+        // Right method, but the receiver is not a primitive → not a bridge call.
+        let (call, callee, args) = annotated_call("compare", "User:Point", vec![]);
+        assert!(primitive_bridge_call(&call, &callee, &args).is_none());
+
+        // Primitive receiver, but a method the bridge does not cover.
+        let (call, callee, args) = annotated_call("frobnicate", "Primitive:Int", vec![]);
+        assert!(primitive_bridge_call(&call, &callee, &args).is_none());
+
+        // Primitive receiver + bridge method, but no annotation → not matched.
+        let (callee, args) = desugared_call("compare", vec![]);
+        let bare = n(
+            102,
+            NodeKind::Call {
+                callee: Box::new(callee.clone()),
+                args: args.clone(),
+                type_args: vec![],
+            },
+        );
+        assert!(primitive_bridge_call(&bare, &callee, &args).is_none());
     }
 
     #[test]
