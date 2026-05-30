@@ -34,8 +34,79 @@ fn go_module_uses_concurrency(items: &[AIRNode]) -> bool {
 
 /// Whether a Go loop needs a label so a statement-arm `match`'s `break`/
 /// `continue` can target the loop instead of the inner `switch`.
+///
+/// A label is only required when the jumping `match` lowers to a Go `switch`
+/// (where a bare `break` would exit the switch, not the loop). An `Optional`
+/// `match` lowers to an `if __opt.tag == "Some" { ... } else { ... }` chain
+/// instead — a bare `break`/`continue` there already targets the enclosing
+/// `for`, so labelling it produces a *defined-and-not-used* label that Go
+/// rejects. This refines the shared [`crate::generator::loop_needs_break_label`]
+/// for Go's lowering: it returns true only when a non-Optional statement-arm
+/// `match` with a `break`/`continue` is present (not nested under another loop).
 fn go_loop_needs_label(body: &AIRNode) -> bool {
-    crate::generator::loop_needs_break_label(body)
+    /// Does `node` perform a loop `break`/`continue` reachable from a match arm
+    /// without crossing into a nested loop or function?
+    fn arm_has_jump(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::Break { .. } | NodeKind::Continue => true,
+            NodeKind::For { .. }
+            | NodeKind::While { .. }
+            | NodeKind::Loop { .. }
+            | NodeKind::FnDecl { .. }
+            | NodeKind::Lambda { .. } => false,
+            NodeKind::Block { stmts, tail } => {
+                stmts.iter().any(arm_has_jump) || tail.as_deref().is_some_and(arm_has_jump)
+            }
+            NodeKind::If {
+                then_block,
+                else_block,
+                ..
+            } => arm_has_jump(then_block) || else_block.as_deref().is_some_and(arm_has_jump),
+            NodeKind::Match { arms, .. } => arms
+                .iter()
+                .any(|a| matches!(&a.kind, NodeKind::MatchArm { body, .. } if arm_has_jump(body))),
+            NodeKind::Guard { else_block, .. } => arm_has_jump(else_block),
+            _ => false,
+        }
+    }
+    /// Find a *switch*-lowered (non-Optional) statement-arm match that jumps the
+    /// loop, not crossing into a nested loop or function.
+    fn find(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::For { .. }
+            | NodeKind::While { .. }
+            | NodeKind::Loop { .. }
+            | NodeKind::FnDecl { .. }
+            | NodeKind::Lambda { .. } => false,
+            NodeKind::Match { arms, .. } => {
+                // Optional matches lower to if/else where bare break/continue
+                // already target the loop — no label needed for *this* match.
+                let this_needs_label = !go_match_is_optional(arms)
+                    && crate::generator::match_has_statement_arm(arms)
+                    && arms.iter().any(|a| {
+                        matches!(&a.kind, NodeKind::MatchArm { body, .. } if arm_has_jump(body))
+                    });
+                // Even a non-jumping (or Optional) match may *contain* a nested
+                // switch-lowered match that jumps the loop, so always recurse
+                // into the arms.
+                this_needs_label
+                    || arms
+                        .iter()
+                        .any(|a| matches!(&a.kind, NodeKind::MatchArm { body, .. } if find(body)))
+            }
+            NodeKind::Block { stmts, tail } => {
+                stmts.iter().any(find) || tail.as_deref().is_some_and(find)
+            }
+            NodeKind::If {
+                then_block,
+                else_block,
+                ..
+            } => find(then_block) || else_block.as_deref().is_some_and(find),
+            NodeKind::Guard { else_block, .. } => find(else_block),
+            _ => false,
+        }
+    }
+    find(body)
 }
 
 /// Decide whether a Go `match` should lower to a *type*-switch
@@ -88,6 +159,15 @@ func __bockSpawn(ch interface{}) interface{} { return ch }
 /// optional is a tagged struct: `tag` is `"Some"` or `"None"`, `v` carries the
 /// payload for `Some`. `__bockSome`/`__bockNone` are the constructors; matches
 /// dispatch on `.tag` and read `.v` for the bound value.
+///
+/// `__bockAsInt64` / `__bockAsFloat64` recover a numeric payload from the
+/// `interface{}` box. Bock's `Int`/`Float` are Go `int64`/`float64`, but a
+/// payload constructed from an *untyped Go constant* — e.g. `Some(10)` →
+/// `__bockSome(10)` — boxes a Go `int` (the default type of an untyped integer
+/// constant), not an `int64`. A hard `.(int64)` assertion on that box panics
+/// (`interface {} is int, not int64`). These helpers widen the common numeric
+/// boxings instead, so a `Some(x)` payload bound for typed use works whether it
+/// came from a literal, a typed variable, or arithmetic.
 const OPTIONAL_RUNTIME_GO: &str = "// ── Bock Optional runtime ──
 type __bockOption struct {
 	tag string
@@ -97,6 +177,36 @@ type __bockOption struct {
 func __bockSome(v interface{}) __bockOption { return __bockOption{tag: \"Some\", v: v} }
 
 var __bockNone = __bockOption{tag: \"None\"}
+
+func __bockAsInt64(v interface{}) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case int32:
+		return int64(n)
+	case float64:
+		return int64(n)
+	default:
+		return 0
+	}
+}
+
+func __bockAsFloat64(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	default:
+		return 0
+	}
+}
 ";
 
 /// True if the module references `Optional`, `Some`, or `None` anywhere (so the
@@ -162,6 +272,7 @@ impl CodeGenerator for GoGenerator {
         ctx.collect_async_fns(module);
         ctx.collect_methods(module);
         ctx.collect_optional_returns(module);
+        ctx.collect_method_optional_returns(module);
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -210,6 +321,7 @@ impl CodeGenerator for GoGenerator {
             ctx.async_fns = global_async_fns.clone();
             ctx.collect_methods(module);
             ctx.collect_optional_returns(module);
+            ctx.collect_method_optional_returns(module);
             ctx.emit_node(module)?;
             let (body, needs_fmt, needs_sync, needs_time) = ctx.into_parts();
 
@@ -334,6 +446,17 @@ struct GoEmitCtx {
     /// assertion any typed use of the bound value (`x + 10`) fails Go
     /// compilation. Scoped per function body and restored on exit.
     var_optional_elem: HashMap<String, String>,
+    /// Maps a *method* name → the Go element type of its `Optional[T]` return
+    /// (`int64` for `fn next(self) -> Int?`). Pre-scanned across every
+    /// impl/class/trait block so a `match` whose scrutinee is a method call
+    /// (`match it.next() { Some(x) => ... }`, the shape `for x in <Iterable>`
+    /// desugars to) can type-assert the bound payload. This is the method-call
+    /// analogue of [`Self::fn_optional_ret_elem`]. Keyed by method name only
+    /// (Go codegen sees the AIR, not the checker's per-type `method_types`); if
+    /// two methods share a name but return different Optional element types, the
+    /// entry is poisoned (left absent) so the payload falls back to the runtime
+    /// `interface{}` — conservative, never wrong, only un-type-asserted.
+    method_optional_ret_elem: HashMap<String, String>,
 }
 
 impl GoEmitCtx {
@@ -358,6 +481,7 @@ impl GoEmitCtx {
             loop_label_counter: 0,
             fn_optional_ret_elem: HashMap::new(),
             var_optional_elem: HashMap::new(),
+            method_optional_ret_elem: HashMap::new(),
         }
     }
 
@@ -427,6 +551,59 @@ impl GoEmitCtx {
         }
     }
 
+    /// Pre-scan every impl/class/trait block for methods whose declared return
+    /// type is `Optional[T]`, recording `method name → Go element type` of `T`.
+    /// This lets a `match` whose scrutinee is a method call
+    /// (`match it.next() { Some(x) => ... }`) type-assert the bound payload to
+    /// its concrete element type — the shape `for x in <user-Iterable>` desugars
+    /// to (a `loop`/`while` over `it.next(): T?`). Without it the payload stays
+    /// the runtime `interface{}` and any typed use (`sum + x`) fails `go build`.
+    ///
+    /// Keyed by method name only — the Go backend works from the AIR, not the
+    /// checker's per-type `method_types`. If the same method name appears on two
+    /// types with *different* Optional element types, the entry is poisoned (its
+    /// value cleared and a sentinel recorded) so resolution returns `None` and
+    /// the payload safely falls back to `interface{}`. Must run before any match
+    /// is emitted so it covers forward references within the module.
+    fn collect_method_optional_returns(&mut self, module: &AIRNode) {
+        // Methods sharing a name but disagreeing on element type are ambiguous;
+        // track them here so the final map omits them entirely.
+        let mut poisoned: HashSet<String> = HashSet::new();
+        if let NodeKind::Module { items, .. } = &module.kind {
+            for item in items {
+                let methods = match &item.kind {
+                    NodeKind::ImplBlock { methods, .. }
+                    | NodeKind::ClassDecl { methods, .. }
+                    | NodeKind::TraitDecl { methods, .. } => methods,
+                    _ => continue,
+                };
+                for m in methods {
+                    if let NodeKind::FnDecl {
+                        name,
+                        return_type: Some(rt),
+                        ..
+                    } = &m.kind
+                    {
+                        if let Some(elem) = self.optional_elem_go_type(rt) {
+                            match self.method_optional_ret_elem.get(&name.name) {
+                                Some(existing) if *existing != elem => {
+                                    poisoned.insert(name.name.clone());
+                                }
+                                _ => {
+                                    self.method_optional_ret_elem
+                                        .insert(name.name.clone(), elem);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for name in &poisoned {
+            self.method_optional_ret_elem.remove(name);
+        }
+    }
+
     /// If `node` is an `Optional[T]` type expression, return the Go type of its
     /// element `T`; otherwise `None`. Used to type-assert the `interface{}`
     /// payload of the Go Optional runtime back to its concrete element type at
@@ -475,24 +652,37 @@ impl GoEmitCtx {
 
     /// Resolve the Go element type to assert for the payload of a `Some` bound in
     /// a `match` on `scrutinee`. Reachable for the common, structurally
-    /// determinable cases: an identifier (parameter or typed `let`) and a call
-    /// to a function with a known `Optional[T]` return. Returns `None` when the
-    /// element type cannot be determined structurally, in which case the binding
-    /// is left as the runtime `interface{}` (no regression: that is the prior
-    /// behavior, and `${v}`-style interpolation still works).
+    /// determinable cases: an identifier (parameter or typed `let`), a call to a
+    /// function with a known `Optional[T]` return, and a *method call* whose
+    /// method has a known `Optional[T]` return (`match it.next() { Some(x) =>
+    /// ... }`, the shape `for x in <Iterable>` desugars to). Returns `None` when
+    /// the element type cannot be determined structurally, in which case the
+    /// binding is left as the runtime `interface{}` (no regression: that is the
+    /// prior behavior, and `${v}`-style interpolation still works).
     fn scrutinee_optional_elem(&self, scrutinee: &AIRNode) -> Option<String> {
         match &scrutinee.kind {
             NodeKind::Identifier { name } => self
                 .var_optional_elem
                 .get(&to_camel_case(&name.name))
                 .cloned(),
-            NodeKind::Call { callee, .. } => {
-                if let NodeKind::Identifier { name } = &callee.kind {
-                    self.fn_optional_ret_elem.get(&name.name).cloned()
-                } else {
-                    None
-                }
+            // A direct method call (`it.next()`).
+            NodeKind::MethodCall { method, .. } => {
+                self.method_optional_ret_elem.get(&method.name).cloned()
             }
+            NodeKind::Call { callee, args, .. } => match &callee.kind {
+                // Free-function call (`firstPositive(a, b)`).
+                NodeKind::Identifier { name } => self.fn_optional_ret_elem.get(&name.name).cloned(),
+                // The AIR also lowers `recv.method(rest)` into
+                // `Call(FieldAccess(recv, method), [recv, ...rest])`; resolve it
+                // the same way as a direct `MethodCall` so both desugar shapes
+                // get a type-asserted payload.
+                NodeKind::FieldAccess { field, .. }
+                    if crate::generator::desugared_self_call(callee, args).is_some() =>
+                {
+                    self.method_optional_ret_elem.get(&field.name).cloned()
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -2449,6 +2639,21 @@ impl GoEmitCtx {
                     // would not compile, which only happens if the scrutinee's
                     // element type is not structurally determinable.
                     match (bind_is_payload, some_elem_ty) {
+                        // Numeric element types are recovered through the
+                        // widening helpers rather than a hard `.(int64)` /
+                        // `.(float64)` assertion: a payload constructed from an
+                        // untyped Go constant (`Some(10)` → `__bockSome(10)`)
+                        // boxes a Go `int`/`float64`, on which `.(int64)` panics.
+                        (true, Some("int64")) => {
+                            let _ =
+                                write!(self.buf, "{name} := __bockAsInt64(__opt.v); _ = {name}; ");
+                        }
+                        (true, Some("float64")) => {
+                            let _ = write!(
+                                self.buf,
+                                "{name} := __bockAsFloat64(__opt.v); _ = {name}; "
+                            );
+                        }
                         (true, Some(ty)) => {
                             let _ = write!(self.buf, "{name} := __opt.v.({ty}); _ = {name}; ");
                         }
@@ -4155,9 +4360,381 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
+        // The `Int` element type is recovered through the widening helper
+        // `__bockAsInt64` rather than a hard `.(int64)` assertion: a payload
+        // boxed from an untyped Go constant (`Some(10)`) is a Go `int`, on which
+        // `.(int64)` panics at runtime.
         assert!(
-            out.contains("x := __opt.v.(int64);"),
-            "Some payload should be type-asserted to the element type, got: {out}"
+            out.contains("x := __bockAsInt64(__opt.v);"),
+            "Some payload should be recovered via the int64 widening helper, got: {out}"
+        );
+    }
+
+    /// Build an `impl Counter { fn next(self) -> Int? { ... } }` whose method
+    /// has an `Optional[Int]` return type, plus a `match it.next() { Some(x) =>
+    /// return x; None => return 0 }` driver function. Used to exercise the
+    /// method-call-scrutinee payload resolution (the `core.iter` desugar shape).
+    fn iterator_module_with_method_match() -> AIRNode {
+        let opt_int_ty = node(
+            200,
+            NodeKind::TypeOptional {
+                inner: Box::new(node(
+                    201,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                )),
+            },
+        );
+        let next_method = node(
+            10,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("next"),
+                generic_params: vec![],
+                params: vec![param_node(11, "self")],
+                return_type: Some(Box::new(opt_int_ty)),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    12,
+                    vec![node(
+                        13,
+                        NodeKind::Return {
+                            value: Some(Box::new(node(
+                                14,
+                                NodeKind::Call {
+                                    callee: Box::new(id_node(15, "None")),
+                                    args: vec![],
+                                    type_args: vec![],
+                                },
+                            ))),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let imp = node(
+            5,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(node(
+                    6,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Counter"]),
+                        args: vec![],
+                    },
+                )),
+                where_clause: vec![],
+                methods: vec![next_method],
+            },
+        );
+        // fn drive(it: Counter) -> Int {
+        //   match it.next() { Some(x) => return x; None => return 0 }
+        // }
+        let scrutinee = node(
+            60,
+            NodeKind::MethodCall {
+                receiver: Box::new(id_node(61, "it")),
+                method: ident("next"),
+                type_args: vec![],
+                args: vec![],
+            },
+        );
+        let some_arm = node(
+            40,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    41,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Some"]),
+                        fields: vec![bind_pat(42, "x")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    43,
+                    vec![node(
+                        44,
+                        NodeKind::Return {
+                            value: Some(Box::new(id_node(45, "x"))),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let none_arm = node(
+            50,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    51,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["None"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    52,
+                    vec![node(
+                        53,
+                        NodeKind::Return {
+                            value: Some(Box::new(int_lit(54, "0"))),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let match_stmt = node(
+            70,
+            NodeKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![some_arm, none_arm],
+            },
+        );
+        let drive = node(
+            80,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("drive"),
+                generic_params: vec![],
+                params: vec![typed_param_node(81, "it", "Counter")],
+                return_type: Some(Box::new(node(
+                    82,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(83, vec![match_stmt], None)),
+            },
+        );
+        module(vec![], vec![imp, drive])
+    }
+
+    #[test]
+    fn optional_match_method_call_scrutinee_payload_resolved() {
+        // The scrutinee `it.next()` is a method call whose method returns
+        // `Int?`; the bound `Some` payload must be recovered as `int64` (via the
+        // widening helper), not left as bare `interface{}`. This is the
+        // `core.iter` `for x in <Iterable>` desugar shape — regression-locking
+        // the Go method-call-scrutinee defect.
+        let out = gen(&iterator_module_with_method_match());
+        assert!(
+            out.contains("x := __bockAsInt64(__opt.v);"),
+            "method-call-scrutinee Some payload should be resolved to int64, got: {out}"
+        );
+    }
+
+    /// Build a `loop { match it.next() { Some(x) => { ... } None => break } }`
+    /// driver — the exact statement-position desugar shape, where the 2-arm
+    /// Optional match lowers to `if/else` and a bare `break` already exits the
+    /// `for`. No loop label may be allocated (Go rejects an unused label).
+    fn loop_with_optional_match_break() -> AIRNode {
+        let scrutinee = node(
+            60,
+            NodeKind::MethodCall {
+                receiver: Box::new(id_node(61, "it")),
+                method: ident("next"),
+                type_args: vec![],
+                args: vec![],
+            },
+        );
+        let some_arm = node(
+            40,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    41,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Some"]),
+                        fields: vec![bind_pat(42, "x")],
+                    },
+                )),
+                guard: None,
+                // Some(x) => { sum = sum + x } — a statement-style arm body.
+                body: Box::new(block(
+                    43,
+                    vec![node(
+                        44,
+                        NodeKind::Assign {
+                            op: AssignOp::Assign,
+                            target: Box::new(id_node(45, "sum")),
+                            value: Box::new(node(
+                                46,
+                                NodeKind::BinaryOp {
+                                    op: BinOp::Add,
+                                    left: Box::new(id_node(47, "sum")),
+                                    right: Box::new(id_node(48, "x")),
+                                },
+                            )),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let none_arm = node(
+            50,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    51,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["None"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    52,
+                    vec![node(53, NodeKind::Break { value: None })],
+                    None,
+                )),
+            },
+        );
+        let match_stmt = node(
+            70,
+            NodeKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![some_arm, none_arm],
+            },
+        );
+        let loop_node = node(
+            71,
+            NodeKind::Loop {
+                body: Box::new(block(72, vec![match_stmt], None)),
+            },
+        );
+        let f = node(
+            80,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("run"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(81, vec![loop_node], None)),
+            },
+        );
+        module(vec![], vec![f])
+    }
+
+    #[test]
+    fn optional_match_break_loop_has_no_unused_label() {
+        // A 2-arm Some/None match lowers to `if __opt.tag == "Some" { ... } else
+        // { break }`; the bare `break` already exits the `for`, so no
+        // `__bockLoopN:` label must be emitted (Go errors on an unused label).
+        let out = gen(&loop_with_optional_match_break());
+        assert!(
+            !out.contains("__bockLoop"),
+            "Optional match-in-loop must not allocate an unused loop label, got: {out}"
+        );
+        // The bare `break` is still present and targets the enclosing `for`.
+        assert!(out.contains("break"), "expected a break, got: {out}");
+    }
+
+    #[test]
+    fn go_loop_label_skipped_for_optional_match_but_kept_for_switch_match() {
+        // An Optional match (`Some`/`None`) lowers to if/else: bare break ⇒ no
+        // label needed.
+        let opt_break = node(
+            1,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(2, "o")),
+                arms: vec![
+                    node(
+                        3,
+                        NodeKind::MatchArm {
+                            pattern: Box::new(node(
+                                4,
+                                NodeKind::ConstructorPat {
+                                    path: type_path(&["Some"]),
+                                    fields: vec![bind_pat(5, "x")],
+                                },
+                            )),
+                            guard: None,
+                            body: Box::new(block(6, vec![], Some(id_node(7, "x")))),
+                        },
+                    ),
+                    node(
+                        8,
+                        NodeKind::MatchArm {
+                            pattern: Box::new(node(
+                                9,
+                                NodeKind::ConstructorPat {
+                                    path: type_path(&["None"]),
+                                    fields: vec![],
+                                },
+                            )),
+                            guard: None,
+                            body: Box::new(block(
+                                10,
+                                vec![node(11, NodeKind::Break { value: None })],
+                                None,
+                            )),
+                        },
+                    ),
+                ],
+            },
+        );
+        assert!(
+            !go_loop_needs_label(&opt_break),
+            "Optional match-in-loop should not need a label"
+        );
+        // A non-Optional value-switch match with a `break` arm DOES need a label
+        // (bare break would exit the Go switch, not the loop).
+        let switch_break = node(
+            20,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(21, "i")),
+                arms: vec![
+                    node(
+                        22,
+                        NodeKind::MatchArm {
+                            pattern: Box::new(node(
+                                23,
+                                NodeKind::LiteralPat {
+                                    lit: Literal::Int("5".into()),
+                                },
+                            )),
+                            guard: None,
+                            body: Box::new(block(
+                                24,
+                                vec![node(25, NodeKind::Break { value: None })],
+                                None,
+                            )),
+                        },
+                    ),
+                    node(
+                        26,
+                        NodeKind::MatchArm {
+                            pattern: Box::new(node(27, NodeKind::WildcardPat)),
+                            guard: None,
+                            body: Box::new(block(28, vec![], None)),
+                        },
+                    ),
+                ],
+            },
+        );
+        assert!(
+            go_loop_needs_label(&switch_break),
+            "non-Optional switch match with break should need a label"
         );
     }
 

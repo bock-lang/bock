@@ -1,0 +1,38 @@
+// TEST: exec_optional_match_expr_position
+// EXPECT: output "11;0"
+// EXPECT: targets js, ts, python, rust, go
+//
+// An Optional `match` in *expression* position with *non-`return`* arms (each
+// arm yields a value, here arithmetic / a literal). This is the case the Python
+// secondary defect mis-compiled:
+//
+//   "${match o { Some(x) => x + 1 None => 0 }}"
+//
+// Before the fix Python's expression-position match emitted a hardcoded
+//   (lambda __v: (x + 1) if False else 0)(o)
+// which (a) always selected the *last* arm (`if False`), and (b) never bound
+// the `Some` payload (`x` undefined). So `Some(10)` yielded `0`, not `11`.
+// Fixed by emitting a real conditional over the bound scrutinee:
+//   (lambda __v: (lambda x: (x + 1))(__v._0) if isinstance(__v, _BockSome) else (0))(o)
+// The other four targets already lowered this correctly.
+//
+// The scrutinee is interpolated (`${...}`) rather than assigned to a typed
+// local. Go's expression-position Optional match lowers to a
+// `func() interface{} { ... }()` IIFE whose result is `interface{}`; assigning
+// that to a *typed* local (`let r: Int = match ...`) needs the match's result
+// type, which the Go emitter does not infer (see the FOUND note in the PR).
+// `fmt.Sprintf("%v", ...)` accepts `interface{}`, so the interpolation shape
+// exercises the expression-position lowering on all five targets without
+// tripping that separate, pre-existing Go limitation.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn pick(o: Int?) -> String {
+  return "${match o { Some(x) => x + 1 None => 0 }}"
+}
+
+fn main() -> Void {
+  println("${pick(Some(10))};${pick(None)}")
+}
