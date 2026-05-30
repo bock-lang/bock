@@ -62,11 +62,11 @@ status(open | resolved→link)`
   rust type errors; go `no field or method len`). Verified empirically + by source (no
   List-method dispatch anywhere in bock-codegen).
 - **Classification:** gap (List built-in method codegen unimplemented, all backends)
-- **Disposition:** fix-impl → `queue.md` Q-list-codegen (v1-BLOCKING; substantial workstream).
-  Gates core.iter (List-backed floor), core.collections, any List-using module. ESCALATED
-  (scope/roadmap) + DQ16 (floor). Surfaced by core.iter v3 (2026-05-30); latent because the
-  3 landed modules were List-free.
-- **Status:** open
+- **Disposition:** READ-ONLY methods LANDED #129 (len/get/is_empty/contains/first/last/concat/index_of/join,
+  all 5). MUTATING methods (push/etc.) deferred → DQ18 (→ Q-codegen-completeness P4). Folded into the
+  Q-codegen-completeness milestone. Surfaced by core.iter v3 (2026-05-30); latent because the 3 landed
+  modules were List-free.
+- **Status:** resolved-for-read-only → #129 (mutating residue pending DQ18)
 
 ### DV11 — Go native `for x in [list]` element typing
 - **§:** — (impl correctness) · **spec-says:** the loop var of `for x in [1,2,3]` has the
@@ -74,8 +74,42 @@ status(open | resolved→link)`
   so `x` is `interface{}` and typed use fails (`sum + x` mismatched types). js/python/rust ok.
 - **Classification:** impl-bug (Go list-literal element typing; `interface{}` family, cf. #127)
 - **Disposition:** fix-impl → `queue.md` Q-go-list-literal (emit a typed slice + typed range
-  var). Surfaced by core.iter v3's native-fast-path fixture.
+  var). Surfaced by core.iter v3's native-fast-path fixture. Folded into Q-codegen-completeness P3.
 - **Status:** open
+
+### DV12 — Generic-record codegen broken on 4/5 targets
+- **§:** general (a `record R[T]` with methods should compile on every target) · **impl-does:** only JS
+  compiles generic records/impls. Python: no `TypeVar`/`Generic[T]` ever emitted (py.rs RecordDecl/FnDecl) —
+  universal generic failure. Go: struct literal not instantiated (go.rs:~2445) + method receiver missing `[T]`
+  (go.rs:~1726) + int-literal `int` vs `int64`. TS: impl interface-merge drops `<T>` (ts.rs:~1041/1050). Rust:
+  bare `impl Box` not expanded to `impl<T> Box<T>` + trait-path drops args + missing `T: Clone`/`Display`.
+- **Classification:** gap (generic codegen, 4/5) · **Disposition:** fix-impl → Q-codegen-completeness P1. Gates
+  core.iter (generic ListIterator), core.collections, option/result. A MONOMORPHIC iterator is green on all 5,
+  so this is the bounded final gap for iter. · **Status:** open (audit 2026-05-30; agent a0564d1b)
+
+### DV13 — Cross-module `use` not wired into codegen (broken on ALL 5)
+- **§:** §12/§18 · **impl-does:** stdlib/user modules emit as separate files but `main` never wires them (js
+  comment-only; py `from core.x import` of nonexistent; rust `use core::x`; go `import`); the exec harness runs
+  a single file. → **no cross-module program runs on any target**; the 3 "landed" stdlib modules
+  (error/compare/convert) were `bock check` + `--source-only`-verified, never executed cross-module.
+- **Classification:** gap (foundational) · **Disposition:** fix-impl → Q-codegen-completeness **P0** (THE stdlib
+  foundation). · **Status:** open (audit 2026-05-30; agent a12c32cf)
+
+### DV14 — User-defined enum codegen broken on ALL 5
+- **§:** §-enum · **impl-does:** no enum-variant registry in codegen. Variant construction (`Red`→lowercased
+  `red`; `Circle{..}`→bare object, never `Shape_Circle`) and match dispatch (js/ts `is_adt` ignores `RecordPat`
+  → struct-payload→all `default:`; Rust unqualified paths; Python no union alias + no payload bind; Go one-line
+  value-switch on undefined types) all broken. Built-in `Optional` works (bespoke lowering — the model to
+  generalize).
+- **Classification:** gap (foundational) · **Disposition:** fix-impl → Q-codegen-completeness **P0** (gates
+  `Ordering`, error enums, Result-likes). · **Status:** open (audit 2026-05-30; agents a0564d1b/a12c32cf)
+
+### DV15 — Tail-position statement-`if` in loop bodies mis-lowered (4/5)
+- **§:** — (impl correctness) · **impl-does:** `generator.rs:~426 node_is_statement()` omits `If`, so a
+  tail-position `if (c){return/break/…}` (no else, statement branch) routes through expression emission →
+  `/* unsupported */` ternary (js/ts/python fail) or wrong `return` (Rust silent-wrong); Go fail.
+- **Classification:** impl-bug (localized, high-leverage) · **Disposition:** fix-impl → Q-codegen-completeness
+  **P0** (classify no-else/statement-branch `if` as a statement). · **Status:** open (audit 2026-05-30; agent ad927964)
 
 ---
 

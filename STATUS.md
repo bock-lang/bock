@@ -11,7 +11,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 - Blocked: 5
 - Deferred: 1
 
-## Build status (as of main 70f1b80, 2026-05-30)
+## Build status (as of main c9a241e, 2026-05-30)
 
 | What | State |
 |------|-------|
@@ -57,18 +57,22 @@ Live summary derived from `tracking/queue.md` (items per section):
 The embedded source-compiled loading mechanism is **live** (#103): `core.*`
 modules ship as Bock source bundled in the `bock` binary and resolve through
 the module registry (hermetic; works from any cwd). **3 of 11 v1 modules
-landed** — `core.error` (#103), `core.compare` (#104), `core.convert` (#110).
+landed** — `core.error` (#103), `core.compare` (#104), `core.convert` (#110) — though these are
+**check-only**: cross-module `use` codegen is broken on all 5 (DV13), so they have not executed
+cross-module on any target (the conformance for them was `no_errors`/`--source-only`, not run).
 The 2026-05-30 Design stdlib batch (DQ6–DQ9) is reconciled into the spec (#106);
 **Q-bridge (#108)** wired the trait-impl table + canonical primitive conformances
 (primitives satisfy bounds; `where`-bounds enforced; DV6 fixed); **#110** added
 parameterized-trait resolution (From/Into/TryFrom + blanket + primitive
-conversions). The Optional-payload codegen family is now **complete across all 5 targets**
-(#124 TS · #126 Python + Go-typed-payload · #127 Go match-in-loop) and the **for→Iterable
-desugar is proven** (core.iter T1 green ×5). But `core.iter` is **BLOCKED**: its DQ12
-List-backed floor needs **List built-in method codegen, which exists on no backend** (DV10 /
-Q-list-codegen, v1-blocking, ESCALATED) — also gating `core.collections` — plus a Design call
-on the R1 floor (DQ16: List-backed vs List-free). `effect` (R1) + R2/R3 follow; any List-using
-module inherits the List-codegen dependency.
+conversions). #129 landed read-only List method codegen (all 5). But `core.iter`'s pursuit (4
+attempts, each stopping at a deeper codegen layer) prompted a **3-agent codegen audit** that
+established the v1 codegen substrate is **materially incomplete** for the stdlib: **cross-module
+`use` and user-defined enums are broken on ALL 5** (DV13/DV14 — so the 3 "landed" modules are
+check-only, never executed cross-module), and Result/generics/closures/Optional-methods are broken
+on 3-4/5. Operator decided (2026-05-30) a **codegen-completeness MILESTONE** (`Q-codegen-completeness`,
+v1-blocking, phased P0-P4, ~10-15 PRs): fix comprehensively, THEN resume the stdlib. **Q-stdlib R1 is
+PAUSED** behind it. The for→Iterable desugar is proven (T1 ×5) and resumes after the milestone's P0/P1.
+Phase-0 (cross-module bundling · user-enum variant registry · tail-`if`) is designed; sequence C→A→B.
 **§18.2 prelude auto-import is live** (#120): the core-defined prelude symbols
 (`Ordering`/`Less`/`Equal`/`Greater`, `Comparable`/`Equatable`, `Into`/`From`/
 `TryFrom`/`Displayable`, `Error`) resolve without an explicit `use` (the membership

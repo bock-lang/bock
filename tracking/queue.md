@@ -12,8 +12,8 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-05-30 vs main 70f1b80 (post the core.iter codegen-residue
-block: #123-#127 merged; core.iter BLOCKED on Q-list-codegen + DQ16; repo wins). See audit.md._
+_Last reconciled: 2026-05-30 vs main c9a241e (post #129 + the codegen-completeness audit:
+#123-#129 merged; core.iter PAUSED behind the codegen-completeness milestone; repo wins). See audit.md._
 
 ---
 
@@ -73,19 +73,26 @@ block: #123-#127 merged; core.iter BLOCKED on Q-list-codegen + DQ16; repo wins).
 
 ## v1-blocking
 
-- **[Q-list-codegen] List built-in method codegen across all 5 backends** — impl ·
-  **v1-BLOCKING** · `compiler/crates/bock-codegen/` (js/ts/py/rs/go + generator) ·
-  ESCALATED (scope/roadmap — operator; escalations.md 2026-05-30 15:24) · links DV10, DQ16,
-  #127 · note: List built-in methods (`.len()`/`.get(i)`/`.push(x)`/`is_empty`/…) DO NOT
-  codegen on ANY target — emitted verbatim (`recv.len()`), no backend lowers them to native
-  ops (verified all 5 + by source: no List-method dispatch in bock-codegen). Gates core.iter's
-  List-backed `ListIterator`+combinators AND core.collections (R3) AND any List-using module.
-  Substantial workstream — plan-first. Surfaced by core.iter v3 (2026-05-30); latent because
-  the 3 landed modules (error/compare/convert) were List-free.
+- **[Q-codegen-completeness] Codegen completeness across all 5 backends** — impl ·
+  **v1-BLOCKING MILESTONE** (operator-decided 2026-05-30 "proceed comprehensive fix"; ~10-15 PRs, phased,
+  mostly `compiler/crates/bock-codegen/` → SEQUENTIAL per crate-granularity) · links DV12-DV15, DV10/DV11,
+  DQ14/DQ15/DQ18, #129, the 3-agent audit (audit.md 2026-05-30 18:00) · note: the audit established the v1
+  codegen substrate is materially incomplete for the stdlib's real needs (all-5-green slice is narrow).
+  PHASES: **P0 foundations** — cross-module `use` wiring (DV13, broken 5/5 — nothing stdlib runs
+  cross-module); user-enum codegen / variant registry (DV14, broken 5/5); tail-`if`-in-loop (DV15,
+  generator.rs:426). **P1 stdlib types** — Result runtime TS/Py/Go; Optional/Result methods (unwrap_or/…)
+  4/5; generics (DV12: Python TypeVar, Go instantiation+int64, TS interface-merge, Rust bounds/inheritance);
+  primitive-bridge dispatch codegen; Python lambdas. **P2 traits+match** — default methods, TS trait-self,
+  Self-subst (Q-self-subst), match guards/or/nested on js/ts/go, Go value-match binding. **P3 Go collection
+  typing** — `[]interface{}`→typed; Map/Set dispatch; `range()` helper; record-spread Go (Q-go-list-literal).
+  **P4 polish** — tuple `.N` parser; Optional-interp; Int/Int + Bool-interp harmonize; mutating-List guard
+  (DQ18). SUBSUMES prior codegen follow-ups (Q-match-exprpos, Q-go-list-literal, Q-ts-generic-impl,
+  Q-self-subst, Q-prim-assoc). Q-list-codegen READ-ONLY methods DONE (#129); mutating → P4. Phase-0 design
+  in flight (Plan agent a47fc03e). Then Q-stdlib R1 resumes.
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (3/11 landed; R1 `iter` BLOCKED on Q-list-codegen + DQ16 — the for→Iterable
-  desugar is PROVEN [T1 green on all 5 targets], but the DQ12 List-backed module surface needs
-  List-method codegen first) ·
+  **v1-BLOCKING** (3/11 landed — but those 3 are check-only, NOT executed cross-module [DV13]; R1 PAUSED
+  behind **Q-codegen-completeness**: the for→Iterable desugar is PROVEN [T1 green ×5], but the stdlib needs
+  cross-module wiring + user-enums + generics + List-backed iter codegen first) ·
   `stdlib/`, `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: v1 = **11 core modules** at minimum-useful surface (option, result,
   collections, string, iter, compare, convert, error, effect, time, test). Each =
@@ -132,25 +139,25 @@ block: #123-#127 merged; core.iter BLOCKED on Q-list-codegen + DQ16; repo wins).
 ## Dependency graph
 
 ```
-[LANDED: … #121 Q-codegen-fixes (DV9) · #123 vscode-CI-test (Q-ci-vscode-test) ·
- #124 Q-ts-codegen · #125 changelog-hygiene (Q-cl-dates/Q-cl-0515) ·
- #126 Q-py-optional + Go-typed-payload · #127 Go match-in-loop codegen]
-Q-list-codegen (List built-in method codegen ×5 — NEW v1-BLOCKING, ESCALATED) ──┐ gates ↓
-Q-stdlib R1 (iter ⟂ effect) → R2 (option/result/string/time) → R3 (collections/test) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
-  ⮑ iter: for→Iterable desugar PROVEN (T1 green ×5); BLOCKED on Q-list-codegen + DQ16 (floor: List-backed vs List-free)
-  ⮑ collections (R3) + any List-using module also depend on Q-list-codegen
+[LANDED: … #121 (DV9) · #123 vscode-CI · #124 TS codegen · #125 changelog ·
+ #126 Py-Optional+Go-typed-payload · #127 Go match-in-loop · #129 read-only List methods]
+Q-codegen-completeness (MILESTONE: cross-module + user-enums + generics + Result + traits + Go-typing + …
+  — v1-BLOCKING, phased P0→P4, mostly bock-codegen → SEQUENTIAL) ──┐ gates ↓
+Q-stdlib R1 (iter, effect) → R2 (option/result/string/time) → R3 (collections/test) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
+  ⮑ R1/R2/R3 ALL blocked behind Q-codegen-completeness (audit: cross-module + enums + generics broken; the 3 "landed" modules are check-only)
+  ⮑ iter: for→Iterable desugar PROVEN (T1 ×5); resumes after the milestone's P0/P1
 (decided-ready: Q-import-reject [DQ8])
-(bugs/follow-ups: Q-self-subst, Q-xmod-bounds, Q-xmod-impl, Q-prim-assoc, Q-interp-enum, Q-match-exprpos [+Go expr-pos #127], Q-go-list-literal, Q-ts-generic-impl)
+(subsumed by Q-codegen-completeness: Q-self-subst, Q-prim-assoc, Q-match-exprpos, Q-go-list-literal, Q-ts-generic-impl)
+(separate bugs: Q-xmod-bounds, Q-xmod-impl, Q-interp-enum)
 ```
 
-**Critical path to v1.0 (2026-05-30, updated):** the Optional-payload codegen family is now
-CLOSED across all 5 targets (#124 TS · #126 Python+Go-typed-payload · #127 Go match-in-loop)
-and the for→Iterable desugar is PROVEN (T1 green ×5) — but `core.iter` revealed a deeper gate:
-**List built-in methods don't codegen on any backend (Q-list-codegen, v1-BLOCKING, ESCALATED)**,
-which also gates `core.collections` and every List-using module. core.iter additionally awaits
-Design on **DQ16** (List-backed vs List-free R1 floor). Updated path: **resolve Q-list-codegen
-(+ DQ16) → Q-stdlib R1 (iter, effect) → R2 → R3 → D4 → D5 → ItemB**. The "5-target parity"
-#114-#121 restored was real for the constructs tested but rested on fixtures that never
-exercised realistic desugar shapes (method-call scrutinees, statement-position match-in-loop,
-mut-self iterators, List methods); conformance is now materially deeper (55+ exec pairs). Quality
-follow-ups (Q-xmod-*, Q-go-list-literal, Q-ts-generic-impl, Q-match-exprpos) land alongside.
+**Critical path to v1.0 (2026-05-30, updated):** the Optional-payload codegen family is CLOSED across all 5
+(#124/#126/#127) and the for→Iterable desugar is PROVEN — but `core.iter` (a sensitive probe) exposed that
+the v1 codegen substrate is materially incomplete: a **3-agent audit** found **cross-module `use` and
+user-defined enums broken on ALL 5**, and Result/generics/closures/Optional-methods broken on 3-4/5
+(audit.md 2026-05-30 18:00). The "5-target parity" #114-#121 restored was real only for a narrow slice; the
+3 "landed" stdlib modules are **check-only, never executed cross-module**. Operator decided (2026-05-30): a
+**codegen-completeness MILESTONE** (`Q-codegen-completeness`, v1-BLOCKING, ~10-15 PRs, phased P0-P4, mostly
+bock-codegen → sequential) — fix comprehensively, THEN resume the stdlib. Updated path:
+**Q-codegen-completeness (P0 cross-module+enums+tail-`if` → P1 stdlib-types → P2 traits+match → P3 Go-typing
+→ P4 polish) → Q-stdlib R1 (iter, effect) → R2 → R3 → D4 → D5 → ItemB**. Phase-0 design in flight.

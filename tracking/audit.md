@@ -1065,3 +1065,58 @@ Notes: core.iter is a sensitive probe — it peeled back 3 codegen layers (Optio
   for the constructs tested but leaned on fixtures that never exercised realistic desugar shapes; conformance
   coverage is now materially deeper (55+ exec pairs). The verify-and-STOP discipline (a session stopping at a
   real substrate gap rather than shipping a module that can't build) again prevented significant waste.
+
+[2026-05-30 18:00 UTC] CODEGEN-COMPLETENESS MILESTONE established (operator-decided); core.iter probe → full audit → comprehensive-fix approved
+  Input: continued autonomous work (operator away, "keep things going as you can") + 3 AskUserQuestion
+    decisions as core.iter repeatedly probed deeper codegen gaps. Model/effort floor held: Opus 4.8 @ xhigh.
+
+  ARC since #128 (main 41bf82a → c9a241e):
+    - #129 MERGED (read-only List built-in method codegen, all 5: len/length/count, get→Optional, is_empty,
+      contains, first, last, concat, index_of, join; caught+fixed a Go int-vs-int64 contains bug; extended the
+      Go Optional resolver). Mutating methods (push/etc.) deferred → DQ18.
+    - DECISION #1 (AskUserQuestion): "Build List codegen first" → DQ16 RESOLVED (keep core.iter's List-backed
+      floor; build the prerequisite, no spec change). Authorized the List-codegen workstream (→ #129).
+    - core.iter v4 (agent aad9a15b) STOPPED at a 4th codegen layer: **generic-record codegen broken on
+      Python/Go/TS/Rust** (only JS) → DV12. KEY bounding insight: a MONOMORPHIC IntListIterator + combinators
+      runs green on all 5 today, so generic-record codegen is the bounded FINAL gap for iter (no deeper layer).
+    - DECISION #2 (AskUserQuestion): "Systematic codegen-completeness push" — stop the reactive probe-and-fix
+      loop; stand up a dedicated codegen-completeness MILESTONE (audit all 5 backends vs the language surface +
+      fix comprehensively); THEN return to stdlib. → ROADMAP PIVOT: Q-stdlib R1 PAUSED behind the milestone.
+
+  THE AUDIT (3 read-only agents, all 5 targets, 280+ compile+run data points; a0564d1b generics, a12c32cf
+    match/enum/trait/dispatch, ad927964 collections/closures/effects/operators/control-flow/strings):
+    ALL-5-GREEN slice is NARROW — List literals + 9 read-only List methods; Set literals; records (non-generic);
+    Int/Float/comparison/logical ops; while/loop/break/continue; Optional Some/None match; stmt-position match
+    w/ literal/wildcard arms; primitive string interp; tuple construction.
+    FOUNDATIONAL GAPS: • Cross-module `use` broken ALL 5 — main never wires imported modules → **nothing in the
+    stdlib runs cross-module**; the 3 "landed" modules were check-only (DV13). • User-defined enums broken ALL 5
+    — no enum-variant registry in codegen (DV14). • Tail-position stmt-`if` in loops → unsupported on 4/5
+    (generator.rs:426 node_is_statement omits If) (DV15). • Result runtime broken TS/Py/Go; Optional/Result
+    methods (unwrap_or…) only Rust; primitive-bridge dispatch checker-only; trait default methods dropped
+    (js/ts/go); Python lambdas broken; Go collection elem typing ([]interface{}) pervasive; generics 4/5 (DV12).
+    Full matrix + root causes (file:line) in orchestrator working notes + the 3 agent reports.
+    HONEST READ: "5-target parity" was aspirational — the backends are genuinely incomplete for the stdlib's
+    real needs (generics, enums, cross-module, closures). A real milestone, not a cleanup.
+
+  DECISION #3 (AskUserQuestion): "Proceed — comprehensive fix" (over reduce-target-set / reduce-stdlib-scope)
+    → dispatch the phased codegen-completeness workstream, full 5-target parity + full v1 stdlib, ~10-15 PRs,
+    checkpointing between phases.
+  PHASED PLAN: P0 foundations (cross-module wiring · user-enum codegen · tail-`if`) → P1 stdlib types (Result
+    runtime · Optional/Result methods · generics · primitive-bridge · Python lambdas) → P2 traits+match → P3 Go
+    collection typing + Map/Set → P4 polish. Most of the milestone is in bock-codegen → SEQUENTIAL per
+    crate-granularity. Dispatched: Phase-0 design (Plan agent a47fc03e).
+
+  Tracking (this PR, chore/tracking-20260530-1612): #129 done; DECISIONS #1-#3 recorded; DQ16 decided, DQ18
+    filed; DV12-DV15 added, DV10 → resolved-for-read-only; Q-codegen-completeness (v1-blocking, phased) added +
+    Q-stdlib blocked-by it; milestones reframed; snapshot updated; STATUS/ROADMAP regenerated.
+  Follow-up: review the Phase-0 plan → dispatch P0 item 1, sequence the rest, checkpoint between phases; root
+    CHANGELOG regen still pending (separate chore PR, #114-#129). main c9a241e.
+
+═══ DAILY DIGEST — 2026-05-30 (addendum) ═══
+Merged this half: #123 (vscode CI), #124 (TS codegen), #125 (changelog hygiene), #126 (Py Optional + Go
+  typed-payload), #127 (Go match-in-loop), #128 (tracking), #129 (read-only List codegen). core.iter attempted
+  4×, STOPPED each at a deeper codegen layer. Operator made 3 AskUserQuestion decisions → a CODEGEN-COMPLETENESS
+  MILESTONE (audit-then-comprehensive-fix), approved comprehensive. 3-agent audit mapped the full gap surface
+  (cross-module + enums broken 5/5; Result/generics/closures 3-4/5). Phase-0 design dispatched. Q-stdlib R1
+  paused behind the milestone. Escalations: 3 (all operator-responded). Defining finding: the v1 codegen
+  substrate is materially more incomplete than the "parity" claim implied; the milestone is the planned response.
