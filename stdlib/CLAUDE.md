@@ -9,6 +9,15 @@ The **v1 core** standard library lives under `stdlib/core/` and is
 distinct from the broader `std.*` packages above. It is the minimal,
 always-available foundation (`core.error`, and siblings as they land).
 
+**The normative contract is spec §18.1:** `core` ships with the
+compiler, is small and stable, and works on every target. Everything
+in this section below — the embedded-source-compiled loading mechanism,
+the per-target shim layout, the `$BOCK_STDLIB` override — is an
+**implementation strategy** for satisfying that contract, not part of
+the contract itself. It may evolve (for example, toward distributing
+pre-compiled AIR alongside source per spec §16.4) without a spec
+change, provided §18.1 still holds.
+
 ### Layout
 
 ```
@@ -23,7 +32,7 @@ stdlib/
 One directory per core module; the module's public surface lives in
 `<module>/<module>.bock` and declares `module core.<module>` at the top.
 
-### Loading model
+### Loading model (current implementation strategy)
 
 **Core ships embedded in the compiler.** The `bock` binary embeds every
 `stdlib/core/**/*.bock` source at build time (via the crate build script
@@ -106,14 +115,14 @@ Each package directory contains:
    - Add `README.md`
 
 4. **Wire codegen.** Each codegen backend may need a runtime shim
-   for the new package. Add shims under
-   `compiler/crates/bock-codegen-<target>/runtime/std/<name>/`.
+   for the new package. Codegen lives in a **single** `bock-codegen`
+   crate (`compiler/crates/bock-codegen/`), not per-target crates, so
+   shims live there, organized by target.
 
-   > Note: this `bock-codegen-<target>` path is stale. Codegen now
-   > lives in a single `bock-codegen` crate (see
-   > `compiler/crates/bock-codegen/`), not per-target crates. Update
-   > this path when the shim layout is settled for the first core
-   > module that needs one.
+   > Note: the exact shim sub-path under `compiler/crates/bock-codegen/`
+   > is not yet settled — no shipping core module has needed a host
+   > primitive yet (`core.error` is pure Bock). Settle the layout when
+   > the first core module that needs a shim lands, and record it here.
 
 5. **Conformance.** Add fixtures under
    `compiler/tests/conformance/stdlib/<name>/` exercising the

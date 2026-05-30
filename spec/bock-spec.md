@@ -85,6 +85,8 @@ The v1.x list expresses target ambition and informs the design of the AIR and co
 | `development` | Inferred, warn  | Module-level  | Warn on broad  | Logged           |
 | `production`  | Fully resolved  | Full          | Explicit only  | Must be pinned   |
 
+**Strictness is per-package (normative).** Strictness is a property of a compilation unit (a package), declared by that package's author. The strictness configured in a package's `bock.project` governs **only that package's own source**. A package's **dependencies** — the bundled `core` standard library today, and third-party packages once the package manager ships (§19) — compile at **their own** declared strictness, not the consumer's. A dependency that compiles successfully is trusted by its consumer: the dependency's non-error diagnostics are **not** re-surfaced as the consumer's build errors. Consequently, a consumer's strict (`production`) build never fails because of a dependency's internals; raising a consumer to `production` tightens the rules applied to the consumer's own code, not to code it merely imports.
+
 ### 1.5 — Paradigm Configuration
 
 **Status:** v1 ships a single, fixed paradigm in which all language features are available simultaneously; bindings are immutable by default. Configurable paradigm *modes* and the `[paradigm]` project-configuration field that selects between them are **Reserved for v1.x** (see Appendix A.3). The mode descriptions below are the planned v1.x surface; they are informative for users tracking the roadmap, not normative for v1.
@@ -1207,6 +1209,8 @@ use app.services.*                 // wildcard (discouraged)
 
 All named imports use braced form. The braced form scales naturally to multiple names (`use core.collections.{List, Map, Set}`) without a separate single-name shorthand.
 
+A `use` of a module path with **neither a brace-list nor a wildcard** — a bare `use core.error` — is **not a v1 import form.** The type checker rejects it and points at the braced form (`use core.error.{Error}`). Module-qualified access (referring to imported symbols as `core.error.Error` rather than bringing them into scope) is deferred to v1.x alongside aliasing. The braced form and the wildcard (`*`, discouraged) are the only two import forms v1 accepts.
+
 **Planned for v1.x: aliased imports.** The `use module as alias` form is planned for v1.x as a syntactic convenience for resolving naming conflicts. v1 ships without aliasing because the first-party stdlib has no naming conflicts; aliasing becomes important once a third-party package ecosystem creates them:
 
 ```bock
@@ -1701,7 +1705,11 @@ Additional providers can be added as trait implementations without changes to th
 
 ### 18.2 — Prelude (Auto-Imported)
 
-Always available without import: `Int`, `Float`, `Bool`, `String`, `Char`, `Void`, `Never`, `Duration`, `Instant`, `Optional`/`Some`/`None`, `Result`/`Ok`/`Err`, `List`, `Map`, `Set`, `Fn`, core traits (`Comparable`, `Equatable`, `Hashable`, `Displayable`, `Serializable`, `Cloneable`, `Default`, `Into`, `From`, `Iterator`, `Iterable`), utility functions (`print`, `println`, `debug`, `assert`, `todo`, `unreachable`, `sleep`).
+Always available without import: `Int`, `Float`, `Bool`, `String`, `Char`, `Void`, `Never`, `Duration`, `Instant`, `Optional`/`Some`/`None`, `Result`/`Ok`/`Err`, `Ordering`/`Less`/`Equal`/`Greater`, `List`, `Map`, `Set`, `Fn`, core traits (`Comparable`, `Equatable`, `Hashable`, `Displayable`, `Serializable`, `Cloneable`, `Default`, `Into`, `From`, `Iterator`, `Iterable`), utility functions (`print`, `println`, `debug`, `assert`, `todo`, `unreachable`, `sleep`).
+
+`Ordering` and its variants (`Less`, `Equal`, `Greater`) are in the prelude because the prelude trait `Comparable` returns `Ordering` from its `compare` method (§18.3 `core.compare`): user code must be able to name `Ordering` and its variants without an import to write a `compare` implementation or to `match` the result of a `cmp()` call.
+
+The prelude is the authoritative **auto-imported subset, re-exported from the `core.*` modules where the symbols are defined.** §18.2 lists what is auto-imported; §18.3 records where each symbol is defined. The two are consistent, not contradictory: a prelude name (`Ordering`, `Comparable`, `Optional`, …) is the prelude-visible re-export of a definition that lives in some `core.*` module (`core.compare`, `core.option`, …).
 
 ### 18.3 — Core Modules
 
@@ -1716,7 +1724,7 @@ The 15 `core.*` modules are tiered: 11 ship in **v1**, 4 are **Reserved for v1.x
 `core.iter` (v1) — `Iterator` trait and combinators.
 `core.compare` (v1) — `Ordering`, `Comparable`, `Equatable`.
 `core.convert` (v1) — `Into`, `From`, `TryFrom`, `Displayable`.
-`core.error` (v1) — `Error` base trait.
+`core.error` (v1) — `Error` base trait. The v1 surface is `message(self) -> String` **only**. Error chaining (`cause`/`source`), an `Error: Displayable` supertrait, and context/wrapping helpers depend on trait objects (`Error` used as a type, not as a bound) — Reserved for v1.x — and ship together as the v1.x error-ergonomics bundle.
 `core.effect` (v1) — Effect system primitives.
 `core.time` (v1) — `Duration`, `Instant`, `sleep`, monotonic time primitives, `Clock` effect (see §18.3.1).
 `core.test` (v1) — Assertions, BDD grouping, mocking, benchmarking. Reserved for v1.x: property testing, snapshot testing.
@@ -1846,6 +1854,8 @@ Core traits opt types into language features. Implementing a trait on a user-def
 | `Mod` | `%` binary operator |
 
 The integration is bidirectional: a type's `impl` block declares trait conformance, and the compiler uses that conformance to permit the corresponding syntactic form for values of that type. A type without `impl Comparable for MyType` cannot use `<` on `MyType` values; the compiler rejects the code at type-check time with a "type does not implement Comparable" diagnostic.
+
+**Sealed primitive conformances (coherence).** The canonical trait conformances for the **primitive types** — e.g. `Int: Comparable`, `Int: Equatable`, `String: Displayable`, `Bool: Equatable` — are provided by `core` and are **sealed.** User code may **not** implement a core trait for a primitive type; the compiler rejects such an `impl` as a coherence (orphan-rule) violation. A user who needs different behavior for a primitive wraps it in a newtype and implements the trait on the wrapper — for example `record Descending { value: Int }` with its own `impl Comparable for Descending` to reverse the ordering. This rule pins down only the `(core trait, primitive type)` quadrant; the broader orphan/coherence model for the other quadrants — `(user trait, user type)`, `(core trait, user type)`, `(user trait, primitive type)` — is **not specified here.**
 
 Trait conformance is checked at every site where the syntactic form is used: arithmetic expressions, comparison in `if` conditions, comparison in `match` guards, ordering in sorts, equality in pattern matching, iteration in `for` loops, interpolation in string expressions. The integration is uniform: there are no "Comparable for if-conditions only" partial conformances; declaring `impl Comparable for MyType` enables `<` on `MyType` everywhere the operator is valid.
 
