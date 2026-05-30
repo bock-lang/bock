@@ -2079,6 +2079,19 @@ Target-specific scaffolding files (manifests, package descriptors, ecosystem-req
 
 Entry-point selection — which output file is invoked when running the build artifact — is a project-level concern documented in `bock.project`, not derived from the filename convention. By default, `src/main.bock` is the entry point if present.
 
+> **Implementation note (v1, OPEN — under Design review).** The v1 compiler does
+> not yet emit the per-module mirrored tree described above for *runnable* builds.
+> To make a cross-module program (one module `use`-ing another, including the
+> embedded `core.*` stdlib) actually run under the single-file run model — the
+> toolchain executes a single `main.<ext>` (`node main.js`, `python3 main.py`,
+> `rustc main.rs`, `go run main.go`) — `bock build` **bundles** every module the
+> entry program reaches through a `use` into the one entry file, in dependency
+> order, dropping the now-redundant import statements. A program that uses no
+> imported symbol emits only its own entry module. This diverges from the
+> one-file-per-module layout specified here; whether the per-module tree returns
+> as a future "library build" mode (with the bundle as the default "application
+> build") is an open question for Design. See `spec/changelogs/2026-05-30-single-file-bundling.md`.
+
 #### 20.6.2 — Output Modes
 
 `bock build --target T` produces output in one of three modes, selected by flag. (These are distinct from the AI involvement tiers in §17.2; "tier" is reserved for those, "mode" describes output completeness.)

@@ -1,10 +1,14 @@
 //! Cross-target compile verification for the embedded `core.convert` module.
 //!
 //! For each v1 target, `bock build --source-only` over a `core.convert`-using
-//! project must succeed and emit a `core.convert` output file alongside the
-//! user module — proving the embedded stdlib (four traits, an error record, a
-//! sample parameterized `From[Celsius] for Fahrenheit` impl, and a constructor)
-//! flows through codegen on every target.
+//! project must succeed and **bundle** `core.convert`'s declarations (four
+//! traits, an error record, a sample parameterized `From[Celsius] for
+//! Fahrenheit` impl, and a constructor) into the one entry file — proving the
+//! embedded stdlib flows through codegen on every target. Under single-file
+//! bundling (DV13; see spec §20.6.1 divergence), the imported module is
+//! concatenated into `main.<ext>` rather than emitted as a separate
+//! `core/convert/convert.<ext>` file, so this asserts the bundled entry file
+//! carries the module's emitted symbol (the `ConvertError` record).
 //!
 //! This is *compile* (source-emission) verification only. Full conformance
 //! *execution* across targets is the separate Q-fconf task and is NOT covered
@@ -67,27 +71,9 @@ fn make_project(tag: &str) -> PathBuf {
     root
 }
 
-/// Recursively check whether any file under `dir` ends with
-/// `core/convert/convert.<ext>`.
-fn emitted_core_convert(dir: &Path, ext: &str) -> bool {
-    let suffix = format!("core/convert/convert.{ext}");
-    fn walk(dir: &Path, suffix: &str) -> bool {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return false;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if walk(&path, suffix) {
-                    return true;
-                }
-            } else if path.to_string_lossy().replace('\\', "/").ends_with(suffix) {
-                return true;
-            }
-        }
-        false
-    }
-    walk(dir, &suffix)
+/// Read the bundled entry file `build/<target>/main.<ext>`, if present.
+fn read_entry_bundle(build_dir: &Path, target: &str, ext: &str) -> Option<String> {
+    fs::read_to_string(build_dir.join(target).join(format!("main.{ext}"))).ok()
 }
 
 #[test]
@@ -110,11 +96,16 @@ fn core_convert_compiles_on_every_target() {
             String::from_utf8_lossy(&output.stderr),
         );
 
+        // Under bundling the imported `core.convert` is concatenated into the
+        // entry file rather than emitted separately, so the `ConvertError`
+        // record must appear in `main.<ext>`.
         let build_dir = root.join("build");
+        let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
+            panic!("target {target}: no entry bundle build/{target}/main.{ext}")
+        });
         assert!(
-            emitted_core_convert(&build_dir, ext),
-            "target {target}: no core.convert output (core/convert/convert.{ext}) under {}",
-            build_dir.display(),
+            bundle.contains("ConvertError"),
+            "target {target}: core.convert not bundled into main.{ext} (no `ConvertError`)",
         );
     }
 }

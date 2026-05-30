@@ -21,7 +21,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use bock_air::{AIRNode, AirInterpolationPart, EnumVariantPayload, NodeKind, ResultVariant};
-use bock_ast::{AssignOp, BinOp, ImportItems, Literal, TypeExpr, UnaryOp, Visibility};
+use bock_ast::{AssignOp, BinOp, Literal, TypeExpr, UnaryOp, Visibility};
 use bock_types::AIRModule;
 
 use crate::error::CodegenError;
@@ -106,6 +106,56 @@ impl CodeGenerator for RsGenerator {
             }],
         })
     }
+
+    /// Bundle every module (stdlib + user, dependency-ordered) into one entry
+    /// file by FLATTENING all module items to the crate root (decision A1 —
+    /// matches today's single-module emission). `ImportDecl`s are dropped and
+    /// imported items resolve unqualified within the same crate root. The
+    /// crate-level `#![allow(...)]` attribute and `use std::{rc,sync}` imports
+    /// are emitted once by `finish` (a shared ctx accumulates the `needs_*`
+    /// flags across all modules). Rust uses a native `fn main`, so no entry
+    /// invocation is appended.
+    ///
+    /// Diverges from spec §20.6.1 (one output file per module); see the
+    /// `OPEN: §20.6.1` note in the bundling PR.
+    fn generate_project(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+    ) -> Result<GeneratedCode, CodegenError> {
+        // Bundle only modules the entry program actually `use`s (plus the entry
+        // itself) — never the prelude-only stdlib (see `reachable_modules`).
+        let reachable = crate::generator::reachable_modules(modules);
+        let modules = reachable.as_slice();
+        let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
+            return Ok(GeneratedCode { files: vec![] });
+        };
+
+        let mut ctx = RsEmitCtx::new();
+        for (i, (module, _)) in modules.iter().enumerate() {
+            if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
+                ctx.buf.push('\n');
+            }
+            ctx.emit_node(module)?;
+        }
+        let content = ctx.finish();
+
+        let derived_name = out_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let source_map = SourceMap {
+            generated_file: derived_name,
+            ..Default::default()
+        };
+        Ok(GeneratedCode {
+            files: vec![OutputFile {
+                path: out_path,
+                content,
+                source_map: Some(source_map),
+            }],
+        })
+    }
 }
 
 // ─── Emission context ────────────────────────────────────────────────────────
@@ -132,6 +182,11 @@ struct RsEmitCtx {
     fn_effects: HashMap<String, Vec<String>>,
     /// Maps composite effect name → component effect names.
     composite_effects: HashMap<String, Vec<String>>,
+    /// Set once the concurrency runtime prelude has been emitted, so a
+    /// single-file **bundle** of several modules (cross-module `use`, DV13)
+    /// emits it at most once (a duplicate `struct __BockChannel` is a Rust
+    /// redefinition error).
+    concurrency_runtime_emitted: bool,
 }
 
 impl RsEmitCtx {
@@ -146,6 +201,7 @@ impl RsEmitCtx {
             current_handler_vars: HashMap::new(),
             fn_effects: HashMap::new(),
             composite_effects: HashMap::new(),
+            concurrency_runtime_emitted: false,
         }
     }
 
@@ -601,16 +657,17 @@ impl RsEmitCtx {
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         match &node.kind {
-            NodeKind::Module { imports, items, .. } => {
-                if rs_module_uses_concurrency(items) {
+            NodeKind::Module { items, .. } => {
+                // Cross-module `use` (DV13) → single-file bundling: every
+                // module's items are FLATTENED to the crate root (decision A1)
+                // and `ImportDecl`s are dropped. The imported items live in the
+                // same crate root, so `key(...)` / `Key` resolve unqualified.
+                // The concurrency runtime is emitted at most once across the
+                // bundle (a duplicate `struct __BockChannel` would not compile).
+                if !self.concurrency_runtime_emitted && rs_module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_RS);
                     self.buf.push('\n');
-                }
-                for imp in imports {
-                    self.emit_node(imp)?;
-                }
-                if !imports.is_empty() && !items.is_empty() {
-                    self.buf.push('\n');
+                    self.concurrency_runtime_emitted = true;
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -620,29 +677,11 @@ impl RsEmitCtx {
                 }
                 Ok(())
             }
-            NodeKind::ImportDecl { path, items } => {
-                let path_str = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                match items {
-                    ImportItems::Module => {
-                        self.writeln(&format!("use {path_str};"));
-                    }
-                    ImportItems::Named(names) => {
-                        let names_str = names
-                            .iter()
-                            .map(|n| n.name.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        self.writeln(&format!("use {path_str}::{{{names_str}}};"));
-                    }
-                    ImportItems::Glob => {
-                        self.writeln(&format!("use {path_str}::*;"));
-                    }
-                }
+            NodeKind::ImportDecl { .. } => {
+                // Resolved by bundling — the imported module's items are
+                // flattened into this same crate root — so the `use` is a no-op
+                // (DV13). A real `use core::compare::{...}` would not resolve:
+                // there is no `core` crate in a single-file `rustc main.rs`.
                 Ok(())
             }
             NodeKind::FnDecl {
@@ -2593,7 +2632,9 @@ fn escape_format_string(s: &str) -> String {
 mod tests {
     use super::*;
     use bock_air::{AirArg, AirMapEntry, AirRecordField};
-    use bock_ast::{GenericParam, Ident, ImportedName, ModulePath, RecordDeclField, TypePath};
+    use bock_ast::{
+        GenericParam, Ident, ImportItems, ImportedName, ModulePath, RecordDeclField, TypePath,
+    };
     use bock_errors::{FileId, Span};
 
     fn span() -> Span {
@@ -3618,16 +3659,23 @@ mod tests {
     }
 
     #[test]
-    fn import_declaration() {
+    fn import_declaration_is_dropped() {
+        // Cross-module `use` is realized by single-file bundling (DV13): the
+        // imported module's items are flattened into the same crate root, so a
+        // Bock `ImportDecl` emits nothing — a real `use core::compare::{...}`
+        // would not resolve in a lone `rustc main.rs`.
         let imp = node(
             1,
             NodeKind::ImportDecl {
-                path: mod_path(&["std", "io"]),
-                items: ImportItems::Named(vec![imported_name("Read"), imported_name("Write")]),
+                path: mod_path(&["core", "compare"]),
+                items: ImportItems::Named(vec![imported_name("Key"), imported_name("key")]),
             },
         );
         let out = gen(&module(vec![imp], vec![]));
-        assert!(out.contains("use std::io::{Read, Write};"), "got: {out}");
+        assert!(
+            !out.contains("use core::compare"),
+            "ImportDecl must be a no-op under bundling; got: {out}"
+        );
     }
 
     #[test]
