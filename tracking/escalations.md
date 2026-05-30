@@ -220,4 +220,30 @@ for→Iterable desugar work is complete and proven on all 5 either way — no re
 **Also filed this block (non-blocking → Design):** DQ14 (`Iterable.iter()` return-type limit), DQ15
 (concrete vs generic-bound combinators), DQ17 (canonical Optional codegen representation — normative?).
 **Awaiting:** operator decision on Q-list-codegen scope/priority + Design decision on DQ16 (core.iter floor).
-**Status:** pending
+**Status:** responded
+
+**Response (2026-05-30):** Operator chose **"Build List codegen first"** (AskUserQuestion) — DQ16 resolved:
+keep core.iter's List-backed floor; build the codegen prerequisite (no spec change).
+**Authorized actions:** dispatched the read-only List-codegen workstream → **#129** merged (len/get/is_empty/
+contains/first/last/concat/index_of/join, all 5). Mutating methods deferred → DQ18. (Superseded in scope by the
+codegen-completeness milestone below.)
+
+## [2026-05-30 18:00 UTC] Codegen substrate materially incomplete → codegen-completeness milestone (operator-decided)
+
+**Type:** scope / roadmap (operator) + core-spec (Design, via DQ16)
+**Severity:** high — reframes the v1 critical path; ~10-15 PR milestone.
+**Trigger:** core.iter v4 stopped at a 4th codegen layer (generic-record codegen broken 4/5; DV12). A 3-agent
+codegen audit (all 5 targets, 280+ compile+run points) then established the v1 codegen substrate is materially
+incomplete for the stdlib's real needs: **cross-module `use` and user-defined enums broken on ALL 5** (DV13/DV14);
+Result/generics/closures/Optional-methods broken on 3-4/5. The 3 "landed" stdlib modules are check-only, never
+executed cross-module. "5-target parity" was aspirational.
+**Context — decisions made (AskUserQuestion ×2):**
+- **#2:** "Systematic codegen-completeness push" — stop the reactive probe-and-fix loop; a dedicated milestone
+  (audit + comprehensive fix), THEN resume stdlib.
+- **#3:** "Proceed — comprehensive fix" (over reduce-target-set / reduce-stdlib-scope) — full 5-target parity +
+  full v1 stdlib, phased P0-P4, ~10-15 PRs, checkpointing between phases.
+**Authorized actions:** established `Q-codegen-completeness` (v1-blocking milestone, phased), paused Q-stdlib R1
+behind it, dispatched the Phase-0 design (cross-module wiring + user-enum codegen + tail-`if`), and will dispatch
+the phased fixes (sequential per crate-granularity), checkpointing between phases. Reduce-target-set (§1.3) and
+reduce-stdlib-scope remain available if the magnitude warrants a later pivot.
+**Status:** responded (decisions #2 + #3 made; milestone underway)

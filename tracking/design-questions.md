@@ -120,7 +120,10 @@ decided→link)`
   codegen lands. The for→Iterable desugar itself is proven on all 5 targets.
 - **§:** §18.3 · **context:** surfaced by core.iter v3 (2026-05-30); the decision that unblocks
   core.iter. Pairs with the Q-list-codegen scope/roadmap escalation (operator).
-- **Status:** escalated → Design (escalations.md) — **blocks core.iter**
+- **Status:** DECIDED 2026-05-30 (operator) — **keep the List-backed floor**; build the codegen prerequisite
+  rather than redefine (no spec change). Decision #1 "build List codegen first" (→ #129 read-only); decision #2
+  escalated to the broader **codegen-completeness milestone** (Q-codegen-completeness). core.iter resumes
+  List-backed (and generic) after the milestone's P0/P1. No longer a floor question — gated by milestone progress.
 
 ### DQ17 — canonical Optional codegen representation (normative?)
 - **Question:** is the cross-target `Optional`/`Some`/`None` codegen representation normative, or
@@ -128,6 +131,16 @@ decided→link)`
   `__bockOption` Go, `_BockSome`/`_BockNone` Python, tagged object JS) on the defensible "mirror
   JS value representation" default; the spec doesn't pin it. Low priority / reversible.
 - **§:** §18 / codegen · **context:** surfaced by #126 (Python repr OPEN→Design). Non-blocking.
+- **Status:** escalated → Design (escalations.md)
+
+### DQ18 — List `push`/`append` mutability semantics
+- **Question:** the checker models `push`/`append` → `List[T]` (value-returning; checker.rs:~2563), which
+  conflicts with §5's "immutable by default, explicit `mut` to mutate" model. Decide: (a) value-returning
+  functional `push` (clean for GC targets + Go `append`; O(n) Rust clone), or (b) `mut self` void mutation
+  (clean Rust `Vec::push` on a `let mut`; needs a mutable receiver; requires changing the checker's return
+  type). Determines per-backend mutating-List codegen.
+- **§:** §5 / §18.3 · **context:** surfaced by #129 (read-only List methods landed; mutating deferred).
+  Non-blocking — core.iter builds result lists via `concat`, not `push`. → Q-codegen-completeness P4.
 - **Status:** escalated → Design (escalations.md)
 
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)

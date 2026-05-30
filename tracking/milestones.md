@@ -22,21 +22,21 @@ the Bock identity.
 - **Release actions (all escalate — external/irreversible):** CI live;
   VS Code extension → marketplace; `bock` → crates.io + GitHub
   Releases; docs site deploy; announcement post.
-- **Mapped items:** `Q-stdlib` (core stdlib — v1-blocking) + `Q-list-codegen` (List
-  built-in method codegen — NEW v1-blocking; gates iter/collections; ESCALATED); the
-  codegen-correctness gate **DONE** — `Q-fconf` (#114/#115) + `Q-codegen-fixes` (#121),
-  DV9 closed; `D4`, `D5`, `ItemB` (project-mode codegen). Done this cycle (#117-#127):
-  `Q-20.1-xref`, `Q-vscode-test`, `Q-fmt-bock`, `Q-prelude-inject`, `Q-ci-vscode-test`,
-  `Q-ts-codegen`, `Q-cl-dates`, `Q-cl-0515`, `Q-py-optional` (+ Go typed-payload). The
-  Optional-payload parity residue is CLOSED (#124/#126/#127); remaining parity follow-ups:
-  `Q-match-exprpos`, `Q-go-list-literal`, `Q-ts-generic-impl`.
+- **Mapped items:** `Q-codegen-completeness` (NEW v1-blocking MILESTONE — the audit showed the codegen
+  substrate is materially incomplete: cross-module/enums broken 5/5, generics/Result/closures 3-4/5; phased
+  P0-P4, ~10-15 PRs) gates `Q-stdlib` (core stdlib); `D4`, `D5`, `ItemB`. Codegen-correctness gate
+  (#114/#115/#121, DV9) DONE. Done this cycle (#117-#129): `Q-20.1-xref`, `Q-vscode-test`, `Q-fmt-bock`,
+  `Q-prelude-inject`, `Q-ci-vscode-test`, `Q-ts-codegen`, `Q-cl-dates`, `Q-cl-0515`, `Q-py-optional`,
+  read-only `Q-list-codegen` (#129). Optional-payload parity CLOSED (#124/#126/#127).
 - **Acceptance:** **execution** conformance passes per target (Q-fconf, live); all
   20 examples `check`/`build`/`test` clean on ≥ JS+Py+Rust; clippy clean. UPDATE
-  (2026-05-30): execution conformance (#114/#115) + the DV9 fixes (#121) + the
-  Optional-payload family closed across all 5 (#124/#126/#127, 55+ exec pairs) make the
-  tested-parity property solid for the constructs covered. BUT core.iter surfaced a deeper
-  gate — **List built-in method codegen exists on no backend** (DV10 / Q-list-codegen,
-  v1-blocking, ESCALATED) — which blocks core.iter (+ DQ16 floor) and core.collections.
+  (2026-05-30): execution conformance (#114/#115) + DV9 fixes (#121) + the Optional-payload family
+  closed across all 5 (#124/#126/#127) made tested-parity solid for the constructs covered — but a 3-agent
+  **codegen audit** (prompted by core.iter) showed that was a NARROW slice: **cross-module `use` + user
+  enums broken on ALL 5**, generics/Result/closures/Optional-methods on 3-4/5; the 3 "landed" stdlib modules
+  are check-only. → **Q-codegen-completeness** (v1-blocking milestone, phased) must land before the stdlib.
+  v1.0 acceptance now requires the codegen-completeness milestone + per-target EXECUTION (not check-only) of
+  the stdlib on every shipping target.
 
 ## v1.1 — Editor & Tooling Polish
 **Theme:** delight in the editor; close interpreter gaps.
@@ -69,8 +69,10 @@ tiering in #100):** v1 = **11 modules** at minimum-useful surface —
 effect, time, test`; **Reserved for v1.x** — `types, math, memory,
 concurrency`. Q-stdlib implements them over three rounds (R1
 effect/error/compare/convert/iter · R2 option/result/string/time · R3
-collections/test), pilot-first. **UPDATE (2026-05-30):** core.iter (R1) surfaced that List
-built-in methods don't codegen on any backend → `Q-list-codegen` (v1-blocking, ESCALATED) is a
-prerequisite for iter's List-backed floor AND collections (R3); the for→Iterable desugar itself
-is proven (T1 green ×5). core.iter floor pending Design DQ16 (List-backed vs List-free). Links:
-DV1, DV10, Q-stdlib, Q-list-codegen, DQ5, DQ16, #100.
+collections/test), pilot-first. **UPDATE (2026-05-30):** core.iter's pursuit (4 attempts) + a 3-agent
+codegen audit established the codegen substrate is materially incomplete for the stdlib (cross-module + enums
+broken 5/5; generics/Result/closures 3-4/5; the 3 "landed" modules are check-only, never executed
+cross-module). Operator decided a **codegen-completeness MILESTONE** (`Q-codegen-completeness`, v1-blocking,
+phased P0-P4) that must land before the stdlib resumes. Q-stdlib R1 PAUSED behind it; the for→Iterable desugar
+is proven (T1 ×5) and resumes after P0/P1. DQ16 resolved (keep List-backed floor; build the prerequisite).
+Links: DV1, DV10-DV15, Q-stdlib, Q-codegen-completeness, DQ5, DQ16, DQ18, #100, #129.
