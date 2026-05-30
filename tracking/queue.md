@@ -40,12 +40,14 @@ reconciliation; repo wins). See audit.md._
   `extensions/vscode/` · — · note: no `test` script and no test files;
   current gate is compile + lint only. Add a minimal test setup.
 - **[Q-fconf] Wire conformance execution + run-conformance.sh** —
-  impl · ready · `compiler/tests/`, `tools/scripts/`,
-  `.claude/commands/project/run-conformance.md` · — · note: the
-  harness only parses/discovers fixtures (no compiler-phase / per-target
-  execution); `tools/scripts/run-conformance.sh` is referenced by
-  CLAUDE.md + the `/project:run-conformance` skill but does NOT exist.
-  Create the runner + wire fixture execution + fix both references.
+  impl · **in-flight (PR1, feat/conformance-execution)** ·
+  `compiler/tests/`, `tools/scripts/`, `bock-build/` (toolchain run()),
+  `.claude/commands/project/run-conformance.md` · — · links Q-codegen-fixes,
+  DV9 · note: the harness parses/discovers but never EXECUTES (`Expectation::
+  Output` unconsumed); `run-conformance.sh` absent. Now ELEVATED — it's the
+  verification engine for the codegen workstream: compile fixtures to each target,
+  run the toolchain, diff stdout. Skip-if-absent + `BOCK_CONFORMANCE_REQUIRE`.
+  PR1 of the codegen-correctness workstream (turns the DV9 defects into red tests).
 - **[Q-fmt-bock] `bock fmt` emits invalid Bock** — bug · ready ·
   `compiler/crates/bock-cli/` (fmt path) · — · note: `bock fmt` strips `///`
   doc comments and rewrites `public`→`pub` (not valid Bock), mangling stdlib
@@ -115,13 +117,28 @@ reconciliation; repo wins). See audit.md._
   (#104, validating generics — `Self`-substitution caveat, Q-self-subst).
   Q-bridge landed (#108 — primitives conform, bounds enforced). `core.convert`
   landed (#110) **with parameterized-trait resolution** (From/Into/TryFrom +
-  blanket From⇒Into + canonical primitive conversions). **R1 remaining (each a
-  new infra unknown, de-risk one at a time):** `iter` needs trait conformances
-  for collection types (an analogous bridge for List/Map/Set); `effect` bridges
-  the built-in effect system. Then R2 (option/result/string/time), R3
-  (collections/test). Plans:
+  blanket From⇒Into + canonical primitive conversions). **R1 PAUSED on
+  Q-codegen-fixes:** the `iter` spike (the `for`→Iterable protocol desugar)
+  exposed pre-existing codegen defects (DV9) that block it on Rust/Go/Python — so
+  the codegen-correctness workstream comes first (operator-decided 2026-05-30),
+  then `iter` resumes (generic `Iterator[T]`/`Iterable[T]`, eager combinator
+  floor, for→protocol desugar in the CHECKER — not AIR lowering, since types
+  aren't known at lower-time; protocol shape escalated as DQ12). Then `effect`
+  (effect-system bridge), R2, R3. Plans:
   `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`,
   `plans/2026-05-30-primitive-conformance-bridge-plan.md`.
+
+- **[Q-codegen-fixes] Codegen correctness (the v1 5-target parity gate)** — impl ·
+  **v1-BLOCKING** (PR2, after Q-fconf PR1) · `compiler/crates/bock-codegen/`,
+  `bock-interp/` · blocked-by: Q-fconf (the verification engine) · links DV9,
+  Q-stdlib, Q-interp-enum · note: fix the DV9 defects, verified by Q-fconf
+  execution conformance — (1) statement-bodied `match` arms (all 5 backends,
+  statement-position); (2) Go match-as-statement-switch routing; (3) `self`-method
+  lowering on Rust/Go/Python; (4) Go `Optional`/`Result` runtime; (5) interpreter
+  method-body globals env. Restores credible 5-target parity + unblocks `iter`.
+  Plan: `plans/2026-05-30-codegen-correctness-conformance-plan.md`. Defer:
+  expression-position statement-arm lowering (temp-hoist); Python `Optional`
+  (fast-follow); Q-self-subst (separate).
 
 ## Blocked
 
@@ -155,19 +172,21 @@ reconciliation; repo wins). See audit.md._
 
 ```
 [#103 found+error, #104 compare, #106 spec batch, #108 Q-bridge, #110 param-traits+convert: LANDED]
-Q-stdlib R1 remaining (iter, effect) → R2 (option/result/string/time) → R3 (collections/test) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
-  ⮑ each remaining R1 module is an infra-then-module step (iter: collection conformances; effect: effect-system bridge)
+Q-fconf (PR1 in-flight) ──→ Q-codegen-fixes (PR2; v1 5-target parity gate) ──→ Q-stdlib R1 resumes (iter, effect) → R2 → R3 ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
+  ⮑ iter (for→Iterable desugar in CHECKER + collection conformances; DQ12); effect (effect-system bridge)
 (decided-ready: Q-prelude-inject [DQ9], Q-import-reject [DQ8])
-(independent / ready: Q-cl-dates, Q-cl-0515, Q-20.1-xref, Q-vscode-test, Q-fconf)
+(independent / ready: Q-cl-dates, Q-cl-0515, Q-20.1-xref, Q-vscode-test)
 (bugs, ready: Q-fmt-bock, Q-interp-enum, Q-self-subst, Q-xmod-bounds, Q-xmod-impl, Q-prim-assoc)
 ```
 
-**Critical path to v1.0:** foundation + `core.error` + `core.compare` (#103/#104),
-the stdlib Design batch reconciled (#106), and **Q-bridge LANDED (#108)** —
-primitives conform to the core traits, generic bounds are enforced (DV6 fixed).
-The module **fan-out now resumes**: R1's remaining modules (convert/iter/effect),
-each de-risked one at a time (each carries a new unknown — see Q-stdlib note) →
-R2 → R3 → D4 → D5 → ItemB. Prelude injection (Q-prelude-inject) + bare-import
-rejection (Q-import-reject) are decided and can land alongside. The "ship what's
-done" vs §18-full-stdlib tension stays resolved in favor of shipping the core
-stdlib in v1.
+**Critical path to v1.0 (reframed 2026-05-30):** 3/11 modules + the trait infra
+landed (#103/#104/#108/#110). The `core.iter` spike then exposed that **general
+Bock→Rust/Go/Python codegen is broken** (DV9) and was never tested (no execution
+conformance) — so the v1 "5-target parity" property is currently false. New gate,
+operator-decided: **Q-fconf (execution conformance, PR1) → Q-codegen-fixes (PR2) →
+then R1 resumes** (iter, effect) → R2 → R3 → D4 → D5 → ItemB. This codegen-
+correctness gate is v1-blocking independent of stdlib; the stdlib build merely
+surfaced it. Prelude injection (Q-prelude-inject) + bare-import rejection
+(Q-import-reject) can still land alongside. The "ship what's done" vs §18-full-
+stdlib tension stays resolved in favor of shipping the core stdlib in v1 — on
+codegen that actually works across targets.

@@ -53,6 +53,28 @@ status(open | resolved→link)`
   with use).
 - **Status:** open
 
+### DV9 — codegen incomplete on multiple targets (the v1 "parity" gap)
+- **§:** §20.4 (cross-target correctness) / the v1 "one language, five targets,
+  codegen parity" property · **spec-says:** identical observable behavior on
+  every shipping target · **impl-does:** general Bock constructs fail codegen on
+  Rust/Go/Python (NOT just iterators), empirically reproduced (core.iter spike):
+  (1) statement-bodied `match` arms (`break`/`continue`/`return`/assign) →
+  `/* unsupported */` on **all 5 backends**; (2) Go emits `match` as an
+  expression IIFE → any statement-arm broken; (3) `self`-methods broken on Rust,
+  Go, **and Python** (`def swap(self, self)` → SyntaxError); (4) Go (and Python)
+  have no `Optional[T]` runtime; (5) the interpreter runs method bodies in an
+  empty env (`Some`/`None`/top-level fns invisible).
+- **Classification:** impl-bug (codegen/interp incompleteness)
+- **Why it lurked:** the conformance suite parses but never **executes** per-target
+  (Q-fconf), so codegen output was never run + the "parity" property was never
+  tested. This is the most material divergence found this session.
+- **Disposition:** fix-impl → `queue.md` **Q-codegen-fixes** (PR2), gated on/
+  verified by **Q-fconf** execution conformance (PR1). v1-blocking. Plan:
+  `plans/2026-05-30-codegen-correctness-conformance-plan.md`. Blocks `core.iter`
+  (and credible v1 5-target parity). `Optional` per-target representation is
+  non-normative (implementer's-call).
+- **Status:** open (workstream in flight — PR1 Q-fconf dispatched)
+
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)
