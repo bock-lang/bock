@@ -1,0 +1,46 @@
+// TEST: exec_primitive_compare
+// EXPECT: output "less;equal;greater;str-less;str-greater"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Primitive-bridge method dispatch (codegen-completeness P1-d): a primitive's
+// canonical `Comparable.compare` resolves in the checker to `Ordering`, but the
+// receiver is an `Int`/`String` with no `.compare` method in any target
+// language. Codegen reads the checker's `recv_kind = "Primitive:<Ty>"`
+// annotation and lowers `a.compare(b)` to the target intrinsic, returning a
+// self-contained `Ordering` representation (Rust `std::cmp::Ordering`, a tagged
+// object in JS/TS, a runtime singleton/const in Python/Go) — the same value the
+// `Less`/`Equal`/`Greater` match arms recognise.
+//
+// The `Ordering` enum's decl (`core.compare`) is NOT bundled into the
+// single-file entry (the harness compiles only `main.<ext>`), so the bridge must
+// be self-contained. Match arms are in statement position (`return`), the
+// realistic shape for branching on a comparison.
+//
+// Covers all three orderings on `Int` and two on `String` (lexicographic), so
+// every variant of the `Ordering` representation is exercised on each target.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn describe(a: Int, b: Int) -> String {
+  match a.compare(b) {
+    Less => return "less"
+    Equal => return "equal"
+    Greater => return "greater"
+  }
+}
+
+fn describeStr(a: String, b: String) -> String {
+  match a.compare(b) {
+    Less => return "str-less"
+    Equal => return "str-equal"
+    Greater => return "str-greater"
+  }
+}
+
+fn main() -> Void {
+  let s1: String = describeStr("apple", "banana")
+  let s2: String = describeStr("pear", "melon")
+  println("${describe(1, 2)};${describe(5, 5)};${describe(9, 2)};${s1};${s2}")
+}

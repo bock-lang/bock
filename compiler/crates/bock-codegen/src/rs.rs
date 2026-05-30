@@ -511,6 +511,53 @@ impl RsEmitCtx {
         Ok(true)
     }
 
+    /// Lower a primitive trait-bridge method call (`compare`/`eq`/`to_string`/
+    /// `display` on a primitive receiver) to its Rust intrinsic.
+    ///
+    /// `(1).compare(2)` resolves in the checker to `Ordering`, but `i64` has no
+    /// `.compare` method; this maps it to `i64::cmp` (→ `std::cmp::Ordering`,
+    /// which the construction/match sides also use). `compare` on a float maps
+    /// to `partial_cmp(...).unwrap()` (floats are only `PartialOrd`). `eq`
+    /// becomes `==`; `to_string`/`display` become `.to_string()`.
+    fn try_emit_primitive_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, prim)) =
+            crate::generator::primitive_bridge_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let code = match method {
+            "compare" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                // Floats are only `PartialOrd` in Rust; everything else is `Ord`.
+                if prim.starts_with("Float") || prim == "BigFloat" || prim == "Decimal" {
+                    format!("({recv_str}).partial_cmp(&({other})).unwrap()")
+                } else {
+                    format!("({recv_str}).cmp(&({other}))")
+                }
+            }
+            "eq" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                format!("(({recv_str}) == ({other}))")
+            }
+            "to_string" | "display" => format!("({recv_str}).to_string()"),
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Recognise `Duration.xxx(...)` / `Instant.xxx(...)` associated-function
     /// calls and emit equivalent Rust `std::time` usage. Durations are i64
     /// nanoseconds; Instants are `std::time::Instant`.
@@ -1817,6 +1864,15 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::Identifier { name } => {
+                // The prelude `Ordering` variants map to Rust's native
+                // `std::cmp::Ordering`, so they are self-contained in the entry
+                // file (the `core.compare` enum decl is not bundled under the
+                // single-file run model). This mirrors how `Some`/`None` map to
+                // `std::option`.
+                if let Some(variant) = crate::generator::ordering_variant(&name.name) {
+                    let _ = write!(self.buf, "std::cmp::Ordering::{variant}");
+                    return Ok(());
+                }
                 // A bare identifier naming a registered unit variant is a
                 // construction (`Empty` → `Shape::Empty`); Rust requires the
                 // enum qualifier.
@@ -1921,6 +1977,9 @@ impl RsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
@@ -2455,6 +2514,18 @@ impl RsEmitCtx {
                 Literal::Unit => self.buf.push_str("()"),
             },
             NodeKind::ConstructorPat { path, fields } => {
+                // Prelude `Ordering` variant patterns match Rust's native
+                // `std::cmp::Ordering` (the construction side maps the same way).
+                if let Some(variant) = path
+                    .segments
+                    .last()
+                    .and_then(|s| crate::generator::ordering_variant(&s.name))
+                {
+                    if fields.is_empty() {
+                        let _ = write!(self.buf, "std::cmp::Ordering::{variant}");
+                        return Ok(());
+                    }
+                }
                 // Qualify a user enum-variant pattern `Enum::Variant`; built-in
                 // and non-variant paths keep their original `::`-joined form.
                 let variant_name = if let Some(enum_name) = self.variant_enum_qualifier(path) {
@@ -3455,6 +3526,157 @@ mod tests {
         let mut ctx = RsEmitCtx::new();
         ctx.emit_expr(&call).unwrap();
         assert_eq!(ctx.buf, "p.scale(4_i64)", "got: {}", ctx.buf);
+    }
+
+    /// Build a desugared `recv.method(extra)` call carrying the checker's
+    /// `recv_kind` annotation, as the primitive-bridge consumer sees it.
+    fn annotated_bridge_call(method: &str, tag: &str, extra: Vec<AIRNode>) -> AIRNode {
+        let recv = int_lit(20, "1");
+        let callee = node(
+            21,
+            NodeKind::FieldAccess {
+                object: Box::new(recv.clone()),
+                field: ident(method),
+            },
+        );
+        let mut args = vec![AirArg {
+            label: None,
+            value: recv,
+        }];
+        args.extend(extra.into_iter().map(|value| AirArg { label: None, value }));
+        let mut call = node(
+            22,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                args,
+                type_args: vec![],
+            },
+        );
+        call.metadata.insert(
+            bock_types::checker::RECV_KIND_META_KEY.to_string(),
+            bock_air::Value::String(tag.to_string()),
+        );
+        call
+    }
+
+    /// The Rust backend consumes the `recv_kind` annotation: `(1).compare(2)` on
+    /// an `Int` lowers to `i64::cmp` (not the failing `1_i64.compare(2_i64)`).
+    #[test]
+    fn primitive_bridge_compare_int_emits_cmp() {
+        let call = annotated_bridge_call("compare", "Primitive:Int", vec![int_lit(23, "2")]);
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&call).unwrap();
+        assert_eq!(ctx.buf, "(1_i64).cmp(&(2_i64))", "got: {}", ctx.buf);
+    }
+
+    /// A float `compare` uses `partial_cmp(...).unwrap()` (floats are `PartialOrd`).
+    #[test]
+    fn primitive_bridge_compare_float_uses_partial_cmp() {
+        let recv = node(
+            20,
+            NodeKind::Literal {
+                lit: Literal::Float("1.0".into()),
+            },
+        );
+        let callee = node(
+            21,
+            NodeKind::FieldAccess {
+                object: Box::new(recv.clone()),
+                field: ident("compare"),
+            },
+        );
+        let mut call = node(
+            22,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                args: vec![
+                    AirArg {
+                        label: None,
+                        value: recv,
+                    },
+                    AirArg {
+                        label: None,
+                        value: node(
+                            23,
+                            NodeKind::Literal {
+                                lit: Literal::Float("2.0".into()),
+                            },
+                        ),
+                    },
+                ],
+                type_args: vec![],
+            },
+        );
+        call.metadata.insert(
+            bock_types::checker::RECV_KIND_META_KEY.to_string(),
+            bock_air::Value::String("Primitive:Float".to_string()),
+        );
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&call).unwrap();
+        assert_eq!(
+            ctx.buf, "(1.0_f64).partial_cmp(&(2.0_f64)).unwrap()",
+            "got: {}",
+            ctx.buf
+        );
+    }
+
+    /// `eq` lowers to `==`; `to_string` to `.to_string()`.
+    #[test]
+    fn primitive_bridge_eq_and_to_string() {
+        let eq_call = annotated_bridge_call("eq", "Primitive:Int", vec![int_lit(23, "2")]);
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&eq_call).unwrap();
+        assert_eq!(ctx.buf, "((1_i64) == (2_i64))", "got: {}", ctx.buf);
+
+        let ts_call = annotated_bridge_call("to_string", "Primitive:Int", vec![]);
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&ts_call).unwrap();
+        assert_eq!(ctx.buf, "(1_i64).to_string()", "got: {}", ctx.buf);
+    }
+
+    /// Without the annotation, the call falls through to the generic
+    /// desugared-self-call lowering (no bridge) — so the annotation is what
+    /// drives the bridge.
+    #[test]
+    fn no_annotation_no_bridge() {
+        let recv = int_lit(20, "1");
+        let callee = node(
+            21,
+            NodeKind::FieldAccess {
+                object: Box::new(recv.clone()),
+                field: ident("compare"),
+            },
+        );
+        let call = node(
+            22,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                args: vec![
+                    AirArg {
+                        label: None,
+                        value: recv,
+                    },
+                    AirArg {
+                        label: None,
+                        value: int_lit(23, "2"),
+                    },
+                ],
+                type_args: vec![],
+            },
+        );
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&call).unwrap();
+        // Generic desugared-self path: `recv.compare(rest)`.
+        assert_eq!(ctx.buf, "1_i64.compare(2_i64)", "got: {}", ctx.buf);
+    }
+
+    /// Prelude `Ordering` variants lower to Rust's native `std::cmp::Ordering`,
+    /// self-contained without the `core.compare` enum decl.
+    #[test]
+    fn ordering_variant_emits_std_cmp_ordering() {
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&id_node(1, "Less")).unwrap();
+        assert_eq!(ctx.buf, "std::cmp::Ordering::Less", "got: {}", ctx.buf);
     }
 
     #[test]

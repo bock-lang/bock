@@ -48,6 +48,21 @@ fn py_module_uses_optional(items: &[AIRNode]) -> bool {
     })
 }
 
+/// True if the module references the prelude `Ordering` enum, any of its
+/// variants, or a `compare` method call (which the primitive bridge lowers to an
+/// `Ordering` runtime value). Gates emission of [`ORDERING_RUNTIME_PY`], mirroring
+/// [`py_module_uses_optional`].
+fn py_module_uses_ordering(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"Ordering\"")
+            || s.contains("\"Less\"")
+            || s.contains("\"Equal\"")
+            || s.contains("\"Greater\"")
+            || s.contains("\"compare\"")
+    })
+}
+
 /// Runtime for Bock `Optional[T]` in Python. The *value* representation mirrors
 /// JS/TS/Go: a tagged value with a `Some` payload or a `None` marker. Python's
 /// `None` is a keyword (and a distinct concept), so Bock's `None` must NOT
@@ -74,6 +89,55 @@ class _BockNone:
 
 _bock_none = _BockNone()
 ";
+
+/// The prelude `Ordering` runtime: the three variants of `core.compare.Ordering`
+/// as singleton instances of distinct classes, matchable by `case` and emitted
+/// for construction. Mirrors `OPTIONAL_RUNTIME_PY` — the `core.compare` enum
+/// declaration is not bundled into the single-file entry, so the primitive
+/// bridge (`(x).compare(y)`) and any bare `Less`/`Equal`/`Greater` need this
+/// self-contained representation. Each class is empty (no payload), so
+/// `case _BockOrderingLess():` matches the corresponding singleton.
+const ORDERING_RUNTIME_PY: &str = "\
+# ── Bock Ordering runtime ──
+class _BockOrderingLess:
+    __slots__ = ()
+    def __repr__(self):
+        return 'Less'
+
+class _BockOrderingEqual:
+    __slots__ = ()
+    def __repr__(self):
+        return 'Equal'
+
+class _BockOrderingGreater:
+    __slots__ = ()
+    def __repr__(self):
+        return 'Greater'
+
+_bock_less = _BockOrderingLess()
+_bock_equal = _BockOrderingEqual()
+_bock_greater = _BockOrderingGreater()
+";
+
+/// The Ordering-runtime *singleton* name for an `Ordering` variant
+/// (`Less`→`_bock_less`, …). Used at construction sites.
+fn ordering_singleton_py(variant: &str) -> &'static str {
+    match variant {
+        "Less" => "_bock_less",
+        "Equal" => "_bock_equal",
+        _ => "_bock_greater",
+    }
+}
+
+/// The Ordering-runtime *class* name for an `Ordering` variant
+/// (`Less`→`_BockOrderingLess`, …). Used as a `case` pattern.
+fn ordering_class_py(variant: &str) -> &'static str {
+    match variant {
+        "Less" => "_BockOrderingLess",
+        "Equal" => "_BockOrderingEqual",
+        _ => "_BockOrderingGreater",
+    }
+}
 
 const CONCURRENCY_RUNTIME_PY: &str = "\
 # ── Bock concurrency runtime ──
@@ -252,6 +316,9 @@ struct PyEmitCtx {
     /// once (redefining the `_BockSome`/`_BockNone` helpers is wasteful and
     /// risks shadowing surprises).
     optional_runtime_emitted: bool,
+    /// Set once the [`ORDERING_RUNTIME_PY`] prelude has been emitted; deduped
+    /// across a bundle exactly as [`Self::optional_runtime_emitted`].
+    ordering_runtime_emitted: bool,
     /// Set once the concurrency runtime prelude has been emitted; deduped across
     /// a bundle exactly as [`Self::optional_runtime_emitted`].
     concurrency_runtime_emitted: bool,
@@ -300,6 +367,7 @@ impl PyEmitCtx {
             handling_counter: 0,
             impls_by_target: HashMap::new(),
             optional_runtime_emitted: false,
+            ordering_runtime_emitted: false,
             concurrency_runtime_emitted: false,
             needs_union_import: false,
             needs_typing_callable: Cell::new(false),
@@ -561,6 +629,52 @@ impl PyEmitCtx {
         Ok(true)
     }
 
+    /// Lower a primitive trait-bridge method call (`compare`/`eq`/`to_string`/
+    /// `display` on a primitive receiver) to its Python form.
+    ///
+    /// `(1).compare(2)` resolves to `Ordering`; this produces the
+    /// Ordering-runtime singleton (`_bock_less` / `_bock_equal` /
+    /// `_bock_greater`) via a conditional expression, matching the
+    /// construction/`case` sides. `eq` → `==`; `to_string`/`display` → `str(x)`.
+    fn try_emit_primitive_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, _prim)) =
+            crate::generator::primitive_bridge_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        match method {
+            "compare" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                let _ = write!(
+                    self.buf,
+                    "(_bock_less if ({recv_str}) < ({other}) else \
+                     (_bock_equal if ({recv_str}) == ({other}) else _bock_greater))"
+                );
+            }
+            "eq" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                let _ = write!(self.buf, "(({recv_str}) == ({other}))");
+            }
+            "to_string" | "display" => {
+                let _ = write!(self.buf, "str({recv_str})");
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     /// Recognise `Duration.xxx(...)` / `Instant.xxx(...)` associated-function
     /// calls and emit inline arithmetic. Durations are ints (nanoseconds);
     /// Instants are ints representing `time.monotonic_ns()`.
@@ -713,6 +827,11 @@ impl PyEmitCtx {
                     self.buf.push_str(OPTIONAL_RUNTIME_PY);
                     self.buf.push('\n');
                     self.optional_runtime_emitted = true;
+                }
+                if !self.ordering_runtime_emitted && py_module_uses_ordering(items) {
+                    self.buf.push_str(ORDERING_RUNTIME_PY);
+                    self.buf.push('\n');
+                    self.ordering_runtime_emitted = true;
                 }
                 if !self.concurrency_runtime_emitted && py_module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_PY);
@@ -1712,6 +1831,12 @@ impl PyEmitCtx {
                 // not an identifier, so this rewrite is unambiguous.
                 if name.name == "None" {
                     self.buf.push_str("_bock_none");
+                } else if let Some(variant) = crate::generator::ordering_variant(&name.name) {
+                    // Prelude `Ordering` variant → the Ordering-runtime singleton
+                    // (`_bock_less` / `_bock_equal` / `_bock_greater`). The
+                    // `core.compare` enum decl is not bundled single-file, so the
+                    // runtime stands in (mirrors `_bock_none`).
+                    self.buf.push_str(ordering_singleton_py(variant));
                 } else if let Some(enum_name) = self
                     .user_variant_for_name(&name.name)
                     .map(|i| i.enum_name.clone())
@@ -1798,6 +1923,9 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
@@ -2311,6 +2439,13 @@ impl PyEmitCtx {
                     }
                     _ => {}
                 }
+                // Prelude `Ordering` variant pattern → its Ordering-runtime class
+                // (`case _BockOrderingLess():`), matching the singleton the
+                // construction/bridge side produces.
+                if let Some(variant) = crate::generator::ordering_variant(leaf) {
+                    let _ = write!(self.buf, "{}()", ordering_class_py(variant));
+                    return Ok(());
+                }
                 let variant_name = if let Some(info) = self.user_variant_for_path(path) {
                     let variant = path.segments.last().map_or("", |s| s.name.as_str());
                     format!("{}_{variant}", info.enum_name)
@@ -2446,10 +2581,17 @@ impl PyEmitCtx {
         match &pattern.kind {
             NodeKind::ConstructorPat { path, .. } => {
                 let leaf = path.segments.last().map_or("", |s| s.name.as_str());
-                let cls = match leaf {
+                let cls: &str = match leaf {
                     "Some" => "_BockSome",
                     "None" => "_BockNone",
-                    other => other,
+                    // Prelude `Ordering` variants test against the Ordering-runtime
+                    // class so an expression-position match (`lambda __v:
+                    // isinstance(__v, _BockOrderingLess) …`) recognises the
+                    // singleton the bridge/construction produces.
+                    other => match crate::generator::ordering_variant(other) {
+                        Some(v) => ordering_class_py(v),
+                        None => other,
+                    },
                 };
                 let _ = write!(self.buf, "isinstance(__v, {cls})");
             }

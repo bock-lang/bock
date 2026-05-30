@@ -676,6 +676,53 @@ impl EmitCtx {
         Ok(true)
     }
 
+    /// Lower a primitive trait-bridge method call (`compare`/`eq`/`to_string`/
+    /// `display` on a primitive receiver) to its JS form.
+    ///
+    /// `(1).compare(2)` resolves in the checker to `Ordering`, but a JS `number`
+    /// has no `.compare`; this lowers it to a ternary that produces the same
+    /// tagged-object `Ordering` value the construction/match sides use
+    /// (`{ _tag: "Less" }` / `…"Equal"` / `…"Greater"`). `eq` becomes `===`;
+    /// `to_string`/`display` become `String(x)`.
+    fn try_emit_primitive_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, _prim)) =
+            crate::generator::primitive_bridge_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        match method {
+            "compare" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                let _ = write!(
+                    self.buf,
+                    "(({recv_str}) < ({other}) ? {{ _tag: \"Less\" }} : \
+                     (({recv_str}) === ({other}) ? {{ _tag: \"Equal\" }} : {{ _tag: \"Greater\" }}))"
+                );
+            }
+            "eq" => {
+                let Some(other) = rest.first() else {
+                    return Ok(false);
+                };
+                let other = self.expr_to_string(&other.value)?;
+                let _ = write!(self.buf, "(({recv_str}) === ({other}))");
+            }
+            "to_string" | "display" => {
+                let _ = write!(self.buf, "String({recv_str})");
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     // ── Top-level dispatch ──────────────────────────────────────────────────
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
@@ -1449,6 +1496,12 @@ impl EmitCtx {
             NodeKind::Identifier { name } => {
                 if name.name == "None" {
                     self.buf.push_str("{ _tag: \"None\" }");
+                } else if let Some(variant) = crate::generator::ordering_variant(&name.name) {
+                    // Prelude `Ordering` variant → an inline tagged object, the
+                    // same self-contained representation the primitive-bridge
+                    // `compare` and the `_tag`-switch match use (the
+                    // `core.compare` enum decl is not bundled single-file).
+                    let _ = write!(self.buf, "{{ _tag: \"{variant}\" }}");
                 } else if let Some(enum_name) = self
                     .user_variant_for_name(&name.name)
                     .map(|i| i.enum_name.clone())
@@ -1518,6 +1571,9 @@ impl EmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
                 // Rewrite bare effect operation calls: log(...) → handler.log(...)
