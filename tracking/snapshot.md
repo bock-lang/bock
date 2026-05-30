@@ -15,7 +15,7 @@ changes.
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (~2241 tests, 0 failed — per #79) |
+| `cargo test --workspace` | passing (~2275 tests, 0 failed — per #104) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `mdbook build docs` | clean |
@@ -44,9 +44,14 @@ changes.
 
 ## Standard library
 
-`stdlib/` is **empty** (0 modules; prelude ≈ 9 builtins + a few
-type-checker intrinsics). The §18 core library is not yet implemented
-— see `divergences.md` DV1 and `milestones.md` MS-stdlib.
+The embedded source-compiled loading mechanism is **live** (#103): `core.*`
+modules ship as Bock source bundled in the `bock` binary and resolve through
+the module registry (hermetic; works from any cwd). **2 of 11 v1 modules
+landed** — `core.error` (#103), `core.compare` (#104). Known limitation:
+stdlib trait impls cannot yet cover primitive types (Int/String) — the
+checker↔bock-core bridge is unbuilt (`divergences.md` DV4 / `queue.md`
+Q-bridge), so the module fan-out is paused on it + Design's DQ6. The prelude
+(≈9 builtins + type-checker intrinsics) is unchanged. See DV1, MS-stdlib.
 
 ## Phase history
 

@@ -102,3 +102,16 @@ changelog) and, for DQ8, schedules the type-checker change if required.
 highest-leverage — it makes the implementation model normative for all 11 modules.
 **Awaiting:** Design Chat (with the operator) decisions, routed back here.
 **Status:** pending
+
+**Update (2026-05-30 00:31 UTC) — `core.compare` (#104) added evidence + a 4th question:**
+- **DQ6 gained its crux:** #104 proved stdlib trait impls cannot cover primitive
+  types until a checker↔bock-core bridge exists (`impl Comparable for Int` →
+  E4001). Building it raises a **precedence/coherence** ruling Design must make
+  (stdlib trait impl vs primitive intrinsic; may user code impl core traits for
+  primitives?). This is the part of the impl model that gates a *useful* stdlib
+  (→ `queue.md` Q-bridge, `divergences.md` DV4). The interim #103 stdlib-strictness
+  policy also wants ratification here.
+- **DQ9 added:** §18.2 (prelude) vs §18.3 (import-required) for `Comparable`/
+  `Equatable` — an internal spec inconsistency (DV5). The impl matches named-import.
+- **Highest leverage now:** DQ6 — the module fan-out is paused on it. DQ7/DQ8/DQ9
+  remain non-blocking (pilot/modules proceed on safe defaults).

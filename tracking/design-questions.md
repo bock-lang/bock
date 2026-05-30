@@ -46,6 +46,17 @@ core-spec rule; the pilot proceeds on safe defaults meanwhile (not blocked).
   and `stdlib/CLAUDE.md`'s shim path is already wrong.
 - **§:** §18.1/§18.3 · **context:** all 11 modules build against this contract;
   worth a normative statement + changelog so the model is the source of truth.
+- **#104 evidence + sub-question (the crux):** `core.compare` proved stdlib
+  trait impls **cannot cover primitive types** until the checker↔bock-core
+  bridge exists (`impl Comparable for Int` + call site → E4001; primitive
+  receivers consult only the intrinsic table — see `divergences.md` DV4,
+  `queue.md` Q-bridge). Building that bridge raises a **precedence/coherence
+  question Design must rule:** when a stdlib trait impl and a primitive
+  intrinsic both apply to `Int`, which wins, and may user code impl core traits
+  for primitives? This is the part of the impl model that gates a *useful*
+  stdlib; the interim stdlib-strictness policy (#103: stdlib compiled at
+  development strictness, non-error diagnostics suppressed) also wants
+  ratification here.
 - **Status:** escalated → Design (escalations.md)
 
 ### DQ7 — canonical v1 `core.error` surface
@@ -63,6 +74,16 @@ core-spec rule; the pilot proceeds on safe defaults meanwhile (not blocked).
   qualified access is a type-checker change affecting all 11 modules.
 - **§:** §12 (imports) / §18 · **context:** the pilot relies on named imports
   (supported). Whether qualified access is a v1 requirement is a Design call.
+- **Status:** escalated → Design (escalations.md)
+
+### DQ9 — prelude vs import for the fundamental traits
+- **Question:** are `Comparable`/`Equatable` (and similar fundamental traits)
+  **prelude** (always available without `use`, per §18.2) or **import-required**
+  `core.compare` members (per §18.3)? The spec says both — an internal
+  inconsistency (`divergences.md` DV5).
+- **§:** §18.2 / §18.3 · **context:** surfaced by `core.compare` (#104); the impl
+  matches named-import (no prelude injection; bare `Ordering` → E1001). Interacts
+  with DQ6/DQ8 (the import + impl model). Reconcile §18.2/§18.3 once decided.
 - **Status:** escalated → Design (escalations.md)
 
 ## Decided by Design (core spec — 2026-05-29; reconciled in #100)

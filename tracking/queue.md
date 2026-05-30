@@ -46,11 +46,29 @@ reconciliation; repo wins). See audit.md._
   execution); `tools/scripts/run-conformance.sh` is referenced by
   CLAUDE.md + the `/project:run-conformance` skill but does NOT exist.
   Create the runner + wire fixture execution + fix both references.
+- **[Q-fmt-bock] `bock fmt` emits invalid Bock** — bug · ready ·
+  `compiler/crates/bock-cli/` (fmt path) · — · note: `bock fmt` strips `///`
+  doc comments and rewrites `public`→`pub` (not valid Bock), mangling stdlib
+  `.bock` sources (error.bock/compare.bock are hand-authored to avoid it). A
+  formatter producing invalid output is a real CLI bug. Found #104.
+- **[Q-interp-enum] interpreter: cross-module enum variant in stdlib impl body**
+  — bug · ready · interpreter crate (`bock run` path) · — · note: `bock run` of
+  a `main` calling a stdlib impl method whose body constructs an imported enum
+  variant (e.g. `Ordering.Less`) → "undefined variable: Less"; the interpreter
+  lacks the imported enum's variants in scope inside a cross-module stdlib impl
+  body. Type-check + codegen handle it; execution doesn't. Found #104; relates to
+  the execution story (Q-fconf).
+- **[Q-self-subst] checker: `Self` not substituted in impl method sigs** — bug ·
+  ready · `compiler/crates/bock-types/` · — · note: an impl writing
+  `fn compare(self, other: Self)` → E4001 at call sites (`Point vs Self`); the
+  checker doesn't substitute `Self`→concrete in impl method signatures. Workaround
+  (used by core.compare): write the concrete operand type in impls, declare `Self`
+  in the trait. Narrow gap; low urgency. Found #104.
 
 ## v1-blocking
 
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (pilot in-flight) · `stdlib/`,
+  **v1-BLOCKING** (2/11 landed; fan-out paused on Q-bridge/DQ6) · `stdlib/`,
   `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: **DECIDED a v1 deliverable** (operator, 2026-05-29) and
   **SCOPE decided by Design 2026-05-29** (DQ5; §18.3 tiering reconciled in
@@ -62,10 +80,23 @@ reconciliation; repo wins). See audit.md._
   option/result/string/time · **R3** collections/test. Start with a
   **one-module pilot** to validate the per-module pattern AND the
   conformance-harness execution gap (Q-fconf) before fanning out.
-  `core.types/math/memory/concurrency` are Reserved for v1.x. **Pilot
-  in-flight:** `core.error` + the stdlib loading mechanism, branch
-  `feat/stdlib-error-pilot`, per `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`;
-  surfaced DQ6–DQ8 (core-spec, escalated — pilot on safe defaults).
+  `core.types/math/memory/concurrency` are Reserved for v1.x. **Progress:**
+  the loading mechanism + `core.error` landed (#103); `core.compare` landed
+  (#104, validating generics — work with a `Self`-substitution caveat, see
+  Q-self-subst). **Fan-out PAUSED** pending **Q-bridge** + Design's DQ6: #104
+  confirmed stdlib trait impls cannot cover primitive types until the checker↔
+  bock-core bridge exists, so further trait modules (convert/iter/effect) have
+  low value until then. Plan: `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`.
+
+- **[Q-bridge] checker↔bock-core trait-impl bridge for primitives** — impl ·
+  **v1-BLOCKING** · `compiler/crates/bock-types/` · blocked-by: DQ6 · links DV4,
+  Q-stdlib · note: primitive receivers resolve methods via the hardcoded
+  intrinsic table in `checker.rs::resolve_method_return_type` and never consult
+  the user/stdlib trait-impl table, so `impl Comparable for Int` + a call site →
+  E4001 (#104). Stdlib traits can't cover primitives until this lands — a
+  near-universal prerequisite for a USEFUL core stdlib. Carries a coherence/
+  precedence question (stdlib impl vs intrinsic) folded into DQ6; implement once
+  Design rules the impl model.
 
 ## Blocked
 
@@ -98,12 +129,17 @@ reconciliation; repo wins). See audit.md._
 ## Dependency graph
 
 ```
-Q-stdlib (R1→R2→R3) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 fan-out → P6) ──→ ItemD
+[#103 foundation+error, #104 compare: LANDED]
+DQ6 ──→ Q-bridge ──→ Q-stdlib fan-out (convert/iter/effect → R2 → R3) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
 (independent / ready: Q-cl-dates, Q-cl-0515, Q-20.1-xref, Q-vscode-test, Q-fconf)
+(bugs, ready: Q-fmt-bock, Q-interp-enum, Q-self-subst)
 ```
 
-**Critical path to v1.0:** Q-stdlib (v1-blocking, SCOPE now decided — 11 v1
-modules per DQ5, §18.3 reconciled in #100) → D4 → D5 → ItemB. The "ship
-what's done" vs §18-full-stdlib tension is resolved in favor of shipping the
-core stdlib in v1; scope is set, so Q-stdlib is ready to implement — pilot
-one module first (see DV1, MS-stdlib).
+**Critical path to v1.0:** Q-stdlib foundation + `core.error` + `core.compare`
+have LANDED (#103/#104). The next gate is **Q-bridge** (← Design's **DQ6**):
+#104 proved stdlib traits can't cover primitive types until the checker↔
+bock-core bridge exists, so a *useful* stdlib runs through the bridge, not
+around it. Module fan-out is PAUSED on it (more primitive-incapable trait
+modules add little until then). After the bridge: fan out R1's remaining
+modules → R2 → R3 → D4 → D5 → ItemB. The "ship what's done" vs §18-full-stdlib
+tension stays resolved in favor of shipping the core stdlib in v1.

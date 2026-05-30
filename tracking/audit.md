@@ -702,3 +702,55 @@ vscode test-infra, conformance execution Q-fconf), @performance example (pending
     the escalation entry; marked Q-stdlib pilot in-flight. main a1a8074; pilot running.
   Follow-up: on pilot PR — verify gate + CI green, review the loading mechanism, merge;
     record DQ6-DQ8 outcomes when Design returns; then fan out R1 (the other 4 modules).
+
+[2026-05-30 00:31 UTC] STDLIB: foundation + 2 modules landed (#103/#104); fan-out PAUSED on the bridge
+  Input: continuing autonomous stdlib per operator authorization. The error pilot
+    (#103) proved the loading mechanism; I then ran ONE more module (core.compare, #104)
+    as a deliberate validation of the two unknowns #103 didn't exercise — generic traits
+    and impl-on-builtins — before fanning out the rest of R1.
+  #103 (foundation + core.error) — MERGED main e418c1a. Loading mechanism: core modules
+    ship as Bock source EMBEDDED in the binary (build.rs + include_str!, $BOCK_STDLIB dev
+    override), prepended to the parse set in check/build/run so they flow through the
+    existing dep-graph→compile→register pipeline. Hermetic (verified from a non-repo cwd).
+    All 5 targets --source-only; 12 CI green. Reviewed the diff before merging.
+    Behavioral decision (engineer, sound): stdlib compiles at development strictness
+    regardless of the user's --strict, non-error diagnostics suppressed — so bundled
+    stdlib can't fail a user's --strict; user-code strictness unchanged. Folded into DQ6
+    for Design ratification.
+  #104 (core.compare) — MERGED main 8adbbe1. Ordering enum + Comparable/Equatable +
+    max/min; 12 CI green; 2275 tests. THE VALIDATION PAID OFF:
+    - Generic traits WORK, with a caveat: impls must write the concrete operand type, not
+      `Self` (`other: Self` → E4001; the checker doesn't substitute Self→concrete in impl
+      sigs). Narrow gap, workaround in hand → queue Q-self-subst.
+    - CONFIRMED the bridge gap (the big one): primitive receivers resolve methods via the
+      hardcoded intrinsic table in checker.rs::resolve_method_return_type and NEVER consult
+      the user/stdlib trait-impl table, so `impl Comparable for Int` + a call site → E4001.
+      Stdlib traits can't cover primitives until a checker↔bock-core bridge lands — a
+      near-universal prerequisite for a USEFUL stdlib. → DV4, queue Q-bridge (v1-blocking,
+      ← DQ6). compare impls only stdlib-defined types accordingly.
+    - Generic-bounded helpers (max[T: Comparable]) work.
+    - Two real bugs found: `bock fmt` MANGLES stdlib .bock (strips ///, public→pub = invalid
+      Bock) → Q-fmt-bock; interpreter can't resolve a cross-module imported enum variant in
+      a stdlib impl body (Ordering.Less → "undefined variable") → Q-interp-enum.
+    - Spec divergence: §18.2 (prelude) vs §18.3 (import-required) for Comparable/Equatable
+      → DV5 + new escalation DQ9.
+  DECISION — PAUSE the module fan-out at this inflection, do NOT keep adding modules solo:
+    Reasoning — the bridge (Q-bridge) gates a *useful* stdlib (traits that can't cover
+    primitives aren't useful), it is non-trivial, and it carries a precedence/coherence
+    ruling (stdlib impl vs primitive intrinsic) that is squarely the impl-model territory
+    of DQ6 — already escalated and pending Design. Building it solo while DQ6 is explicitly
+    Design's call would over-reach the Design-authority process. More pure-trait modules
+    (convert/iter/effect) would re-hit the same wall with low marginal value. So the
+    high-value path runs THROUGH Design's DQ6 ruling. The de-risking (one module before
+    fan-out) did its job: it surfaced the gate before I built 4 modules into it.
+  Escalations updated (escalations.md / design-questions.md): DQ6 gained its crux (the
+    bridge + precedence question + the interim strictness policy); DQ9 filed (prelude vs
+    import). DQ7/DQ8 unchanged. All non-blocking except that DQ6 now gates the fan-out.
+  This tracking PR (chore/tracking-20260530-0031): consolidated #103/#104; filed Q-bridge
+    (v1-blocking) + Q-fmt-bock/Q-interp-enum/Q-self-subst (bugs, ready) + DV4/DV5 + DQ9;
+    refreshed snapshot/queue + critical path. main 8adbbe1; 0 in-flight engineer sessions.
+  Checkpoint for the operator: foundation + 2/11 modules proven; the bridge is the gating
+    prerequisite (escalated as DQ6's crux); two real bugs + a prelude divergence surfaced.
+    Holding further module fan-out pending Design's DQ6/DQ9 ruling. Ready, non-contested
+    work available meanwhile if desired: the bug fixes (Q-fmt-bock notable) + the ready
+    chores (Q-cl-dates/Q-cl-0515/Q-20.1-xref/Q-vscode-test/Q-fconf).
