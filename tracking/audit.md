@@ -1120,3 +1120,30 @@ Merged this half: #123 (vscode CI), #124 (TS codegen), #125 (changelog hygiene),
   (cross-module + enums broken 5/5; Result/generics/closures 3-4/5). Phase-0 design dispatched. Q-stdlib R1
   paused behind the milestone. Escalations: 3 (all operator-responded). Defining finding: the v1 codegen
   substrate is materially more incomplete than the "parity" claim implied; the milestone is the planned response.
+
+[2026-05-30 19:41 UTC] PHASE 0 of the codegen-completeness milestone COMPLETE (#131/#132/#133)
+  Input: continued autonomous execution of the operator-approved codegen-completeness milestone (Phase-0 plan
+    tracking/plans/2026-05-30-codegen-completeness-phase0-plan.md). Sequenced C→A→B (all bock-codegen → serial).
+  MERGED (main 11c16c3 → 144f879; each gate-clean, full-matrix CI incl. Windows, worktree-removed-first, re-synced):
+    - #131 P0-C tail-`if`-in-loop (DV15) — one-function `node_is_statement` fix (no-else/all-statement `If` →
+      statement); no backend edits needed; 2 fixtures, all 5; 90 exec pairs.
+    - #132 P0-A cross-module `use` via single-file BUNDLING (DV13) — concatenate the transitive closure of
+      `use`-reachable modules into the entry file; per-target (Go: one package + deduped imports + runtime-once).
+      KEY correction: naive "bundle all topo modules" dragged the not-yet-clean embedded stdlib into every
+      program → added `reachable_modules` (bundle only real `use` edges). Added `// FILE:` multi-file harness
+      support. 95 exec pairs; cross_module_use on all 5; single-module fixtures + `bock run` unaffected.
+    - #133 P0-B user-defined enum codegen (DV14) — shared enum-variant REGISTRY in generator.rs (pre-seeds
+      Some/None/Ok/Err); per-target construction + match (js/ts is_adt/RecordPat fix, Rust Enum::Variant
+      qualification, Python Union alias + keyword binding, Go type-switch + field extraction). 3 payload-kind
+      fixtures, all 5; T1 both-directions (15/15); 110 exec pairs; Optional/Result stay green.
+  RESOLVED: DV13 (#132), DV14 (#133), DV15 (#131). Subsumed P0 follow-ups closed.
+  ESCALATED: DQ19 — single-file bundling diverges from spec §20.6.1 (one-file-per-module output); #132 surfaced
+    it OPEN (non-normative §20.6.1 note + changelog added). → Design (non-blocking; per-module tree could be a
+    future "library build" mode).
+  FOUND (recorded, non-blocking): Go switch-arm body indentation accumulates (cosmetic, harmless to `go run`,
+    pre-existing — #133); → P4 polish. The #132 FOUND (embedded core.* not codegen-clean on typed targets) is
+    exactly P1 (generics/Result/traits) + the rest of B — a `use core.*` program runs on typed targets once P1 lands.
+  NEXT: Phase 1 (stdlib types) — design dispatched (Plan agent abc7ea8e): Result runtime TS/Py/Go; Optional/
+    Result methods (4/5); generics (DV12: Python TypeVar, Go instantiation+int64, TS interface-merge, Rust
+    bounds); primitive-bridge dispatch codegen; Python lambdas. Sequential (bock-codegen). Checkpoint with the
+    operator at the P0/P1 boundary (this report). main 144f879.

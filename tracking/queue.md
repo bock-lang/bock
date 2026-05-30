@@ -78,17 +78,19 @@ _Last reconciled: 2026-05-30 vs main c9a241e (post #129 + the codegen-completene
   mostly `compiler/crates/bock-codegen/` → SEQUENTIAL per crate-granularity) · links DV12-DV15, DV10/DV11,
   DQ14/DQ15/DQ18, #129, the 3-agent audit (audit.md 2026-05-30 18:00) · note: the audit established the v1
   codegen substrate is materially incomplete for the stdlib's real needs (all-5-green slice is narrow).
-  PHASES: **P0 foundations** — cross-module `use` wiring (DV13, broken 5/5 — nothing stdlib runs
-  cross-module); user-enum codegen / variant registry (DV14, broken 5/5); tail-`if`-in-loop (DV15,
-  generator.rs:426). **P1 stdlib types** — Result runtime TS/Py/Go; Optional/Result methods (unwrap_or/…)
+  PHASES: **P0 foundations DONE** — tail-`if`-in-loop (#131, DV15); cross-module `use` via single-file
+  bundling of reachable modules (#132, DV13); user-enum codegen / variant registry (#133, DV14). [§20.6.1
+  bundling-divergence → DQ19/Design.] **P1 stdlib types** — Result runtime TS/Py/Go; Optional/Result methods (unwrap_or/…)
   4/5; generics (DV12: Python TypeVar, Go instantiation+int64, TS interface-merge, Rust bounds/inheritance);
   primitive-bridge dispatch codegen; Python lambdas. **P2 traits+match** — default methods, TS trait-self,
   Self-subst (Q-self-subst), match guards/or/nested on js/ts/go, Go value-match binding. **P3 Go collection
   typing** — `[]interface{}`→typed; Map/Set dispatch; `range()` helper; record-spread Go (Q-go-list-literal).
   **P4 polish** — tuple `.N` parser; Optional-interp; Int/Int + Bool-interp harmonize; mutating-List guard
   (DQ18). SUBSUMES prior codegen follow-ups (Q-match-exprpos, Q-go-list-literal, Q-ts-generic-impl,
-  Q-self-subst, Q-prim-assoc). Q-list-codegen READ-ONLY methods DONE (#129); mutating → P4. Phase-0 design
-  in flight (Plan agent a47fc03e). Then Q-stdlib R1 resumes.
+  Q-self-subst, Q-prim-assoc). Q-list-codegen READ-ONLY methods DONE (#129); mutating → P4. **Phase 0 DONE
+  (#131/#132/#133); Phase 1 (stdlib types) design in flight (Plan agent abc7ea8e)** — Result runtime,
+  Optional/Result methods, generics (DV12), primitive-bridge dispatch, Python lambdas. Then P2/P3/P4, then
+  Q-stdlib R1 resumes.
 - **[Q-stdlib] Implement the core standard library** — impl ·
   **v1-BLOCKING** (3/11 landed — but those 3 are check-only, NOT executed cross-module [DV13]; R1 PAUSED
   behind **Q-codegen-completeness**: the for→Iterable desugar is PROVEN [T1 green ×5], but the stdlib needs

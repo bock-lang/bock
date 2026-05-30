@@ -92,8 +92,9 @@ status(open | resolved→link)`
   comment-only; py `from core.x import` of nonexistent; rust `use core::x`; go `import`); the exec harness runs
   a single file. → **no cross-module program runs on any target**; the 3 "landed" stdlib modules
   (error/compare/convert) were `bock check` + `--source-only`-verified, never executed cross-module.
-- **Classification:** gap (foundational) · **Disposition:** fix-impl → Q-codegen-completeness **P0** (THE stdlib
-  foundation). · **Status:** open (audit 2026-05-30; agent a12c32cf)
+- **Classification:** gap (foundational) · **Disposition:** RESOLVED — single-file bundling of `use`-reachable
+  modules (#132); per-target (Go one-package + deduped imports). §20.6.1 divergence → DQ19/Design. · **Status:**
+  resolved → #132
 
 ### DV14 — User-defined enum codegen broken on ALL 5
 - **§:** §-enum · **impl-does:** no enum-variant registry in codegen. Variant construction (`Red`→lowercased
@@ -101,15 +102,17 @@ status(open | resolved→link)`
   → struct-payload→all `default:`; Rust unqualified paths; Python no union alias + no payload bind; Go one-line
   value-switch on undefined types) all broken. Built-in `Optional` works (bespoke lowering — the model to
   generalize).
-- **Classification:** gap (foundational) · **Disposition:** fix-impl → Q-codegen-completeness **P0** (gates
-  `Ordering`, error enums, Result-likes). · **Status:** open (audit 2026-05-30; agents a0564d1b/a12c32cf)
+- **Classification:** gap (foundational) · **Disposition:** RESOLVED — enum-variant registry in generator.rs
+  (pre-seeds Some/None/Ok/Err) + per-target construction/match (#133). MONOMORPHIC user enums; generic enums →
+  DV12/P1. · **Status:** resolved → #133
 
 ### DV15 — Tail-position statement-`if` in loop bodies mis-lowered (4/5)
 - **§:** — (impl correctness) · **impl-does:** `generator.rs:~426 node_is_statement()` omits `If`, so a
   tail-position `if (c){return/break/…}` (no else, statement branch) routes through expression emission →
   `/* unsupported */` ternary (js/ts/python fail) or wrong `return` (Rust silent-wrong); Go fail.
-- **Classification:** impl-bug (localized, high-leverage) · **Disposition:** fix-impl → Q-codegen-completeness
-  **P0** (classify no-else/statement-branch `if` as a statement). · **Status:** open (audit 2026-05-30; agent ad927964)
+- **Classification:** impl-bug (localized, high-leverage) · **Disposition:** RESOLVED — `node_is_statement`
+  now classifies no-else/all-statement-branch `If` as a statement (#131); no backend edits needed. · **Status:**
+  resolved → #131
 
 ---
 
