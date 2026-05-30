@@ -413,6 +413,10 @@ impl CodeGenerator for GoGenerator {
         ctx.collect_methods(module);
         ctx.collect_optional_returns(module);
         ctx.collect_method_optional_returns(module);
+        ctx.collect_fn_and_type_names(module);
+        ctx.trait_decls =
+            crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
+        ctx.derive_self_param_traits();
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -483,11 +487,14 @@ impl CodeGenerator for GoGenerator {
         // Pre-scan method / Optional-return metadata across every module so a
         // match whose scrutinee calls a function/method defined in another
         // bundled module still type-asserts its payload correctly.
+        ctx.trait_decls = crate::generator::collect_trait_decls(modules);
+        ctx.derive_self_param_traits();
         for (module, _) in modules {
             ctx.collect_methods(module);
             ctx.collect_optional_returns(module);
             ctx.collect_method_optional_returns(module);
             ctx.collect_record_param_fields(module);
+            ctx.collect_fn_and_type_names(module);
         }
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
@@ -683,6 +690,43 @@ struct GoEmitCtx {
     /// composite-literal field values). `None` for a param not directly named by
     /// any field's type (then the arg falls back to `any`). Pre-scanned.
     record_param_fields: HashMap<String, Vec<Option<String>>>,
+    /// Trait-declaration registry. Used at each `impl Trait for Type` site to
+    /// recover the trait's *default* methods (those carrying a body) so a
+    /// receiver method is synthesized on the target — the Go interface declares
+    /// only the signature, so a type relying on an inherited default would
+    /// otherwise fail to satisfy the interface and have no such method. Pre-
+    /// scanned across the bundle (mirrors [`Self::enum_variants`]).
+    trait_decls: crate::generator::TraitDeclRegistry,
+    /// Names of all top-level types (records, enums, traits, classes). A public
+    /// Bock function whose PascalCased Go name collides with one of these (e.g.
+    /// `public fn key` → `Key`, colliding with `record Key`) is renamed via
+    /// [`Self::go_fn_name`] — Go has one namespace for types and functions, and
+    /// PascalCasing erases the `key`/`Key` case distinction Bock relies on.
+    type_names: HashSet<String>,
+    /// When `Some(target)`, a `Self` type (`TypeSelf`) renders as `target`
+    /// rather than the `/* Self */` placeholder. Set while emitting a trait-impl
+    /// method on a concrete target — most relevant for a *synthesized default
+    /// method* whose source uses `Self` (e.g. `other: Self`), which must become
+    /// the concrete receiver type so the Go method signature is valid. Cleared
+    /// everywhere else.
+    go_self_subst: Option<String>,
+    /// Trait names whose methods take a `Self`-typed operand (e.g.
+    /// `Comparable`/`Equatable`, whose `compare`/`eq` take `other: Self`). Such
+    /// traits are encoded as F-bounded *generic* interfaces in Go (`type
+    /// Comparable[T any] interface { Compare(T) Ordering }`) and a bound `[T:
+    /// Comparable]` lowers to `[T Comparable[T]]` — a plain Go interface cannot
+    /// name the implementing type. Derived from [`Self::trait_decls`].
+    self_param_traits: HashSet<String>,
+    /// The Go return type of the function/method whose body is currently being
+    /// emitted in *return position*. An `if`/`match` in expression position
+    /// lowers to an IIFE; typing that IIFE with this concrete return type
+    /// (`func() Ordering { … }`) rather than `func() interface{}` makes its
+    /// result assignable where the concrete type is required (e.g. a user-enum
+    /// `Ordering` return — `interface{}` does not satisfy a named interface).
+    /// `None` outside a typed return body. The match/if IIFE also emits a
+    /// trailing `panic("unreachable")` instead of `return nil` when typed, since
+    /// a concrete (non-interface) return type has no `nil`.
+    current_fn_ret_type: Option<String>,
 }
 
 impl GoEmitCtx {
@@ -720,6 +764,69 @@ impl GoEmitCtx {
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             var_go_type: HashMap::new(),
             record_param_fields: HashMap::new(),
+            trait_decls: crate::generator::TraitDeclRegistry::new(),
+            type_names: HashSet::new(),
+            go_self_subst: None,
+            self_param_traits: HashSet::new(),
+            current_fn_ret_type: None,
+        }
+    }
+
+    /// Populate [`Self::self_param_traits`] from the already-built
+    /// [`Self::trait_decls`] registry. Call after `trait_decls` is set.
+    fn derive_self_param_traits(&mut self) {
+        for (name, info) in &self.trait_decls {
+            if crate::generator::trait_uses_self_operand(info) {
+                self.self_param_traits.insert(name.clone());
+            }
+        }
+    }
+
+    /// The Go identifier for a top-level Bock function reference, applying the
+    /// public/private PascalCase/camelCase rule and then disambiguating a public
+    /// name that collides with a top-level type. Go has a single namespace for
+    /// types and functions, and PascalCasing collapses Bock's `key`/`Key` case
+    /// distinction onto one identifier; when a public function's Go name equals a
+    /// declared type name (`func Key` vs `type Key`), the function is suffixed
+    /// with `Fn` (`KeyFn`). The same rule is applied at the declaration site and
+    /// every call/reference site so they always agree.
+    fn go_fn_name(&self, name: &str) -> String {
+        if self.public_fns.contains(name) {
+            let pascal = to_pascal_case(name);
+            if self.type_names.contains(&pascal) {
+                format!("{pascal}Fn")
+            } else {
+                pascal
+            }
+        } else {
+            to_camel_case(name)
+        }
+    }
+
+    /// Pre-scan every module's top-level type declarations (records, enums,
+    /// traits, classes) into [`Self::type_names`], and every `public` top-level
+    /// function name into [`Self::public_fns`], so [`Self::go_fn_name`] can
+    /// detect a function-name/type-name collision at *any* call site — including
+    /// a call that precedes the function's declaration in emission order.
+    /// Mirrors the other pre-scans.
+    fn collect_fn_and_type_names(&mut self, module: &AIRNode) {
+        if let NodeKind::Module { items, .. } = &module.kind {
+            for item in items {
+                match &item.kind {
+                    NodeKind::RecordDecl { name, .. }
+                    | NodeKind::EnumDecl { name, .. }
+                    | NodeKind::TraitDecl { name, .. }
+                    | NodeKind::ClassDecl { name, .. } => {
+                        self.type_names.insert(name.name.clone());
+                    }
+                    NodeKind::FnDecl {
+                        visibility, name, ..
+                    } if matches!(visibility, Visibility::Public) && name.name != "main" => {
+                        self.public_fns.insert(name.name.clone());
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -796,6 +903,19 @@ impl GoEmitCtx {
         Some(info)
     }
 
+    /// True when the real `core.compare.Ordering` enum is bundled into this
+    /// program (its `Less` variant is a registered user enum variant). Under
+    /// DV13 bundling, `use core.compare` concatenates the actual `enum Ordering`
+    /// decl into the entry file; its `Less`/`Equal`/`Greater` references and
+    /// matches then use the user-enum representation (sealed-interface variant
+    /// structs `OrderingLess{}`), not the prelude `__bockOrdering` value runtime
+    /// used when the enum is *not* bundled (e.g. a bare primitive `compare`).
+    fn ordering_enum_bundled(&self) -> bool {
+        self.enum_variants
+            .get("Less")
+            .is_some_and(|info| info.enum_name == "Ordering")
+    }
+
     /// True if every arm of a `match` is a registered user enum variant pattern
     /// (constructor / record / unit), so the match lowers to a Go *type-switch*
     /// over the sealed-interface concrete types with field extraction.
@@ -843,13 +963,27 @@ impl GoEmitCtx {
     /// Pre-scan all impl/class/trait blocks for `public` method names so call
     /// sites can match the Go method casing (PascalCase public, camelCase
     /// private).
+    ///
+    /// Trait methods — both those declared in a `TraitDecl` and those of an
+    /// `impl Trait for Type` block — are recorded *regardless of Bock
+    /// visibility*: Go interface methods are always emitted exported
+    /// (PascalCase, see the `TraitDecl` emission), so the method must be
+    /// PascalCased everywhere (interface signature, receiver method, and call
+    /// site) for the type to satisfy the interface. A `private` trait default
+    /// method would otherwise be PascalCased in the interface but camelCased at
+    /// the call site, and the call would not resolve. Inherent (`impl Type`)
+    /// and class methods keep the public-only rule.
     fn collect_methods(&mut self, module: &AIRNode) {
         if let NodeKind::Module { items, .. } = &module.kind {
             for item in items {
-                let methods = match &item.kind {
-                    NodeKind::ImplBlock { methods, .. }
-                    | NodeKind::ClassDecl { methods, .. }
-                    | NodeKind::TraitDecl { methods, .. } => methods,
+                let (methods, always_export) = match &item.kind {
+                    NodeKind::ImplBlock {
+                        methods,
+                        trait_path,
+                        ..
+                    } => (methods, trait_path.is_some()),
+                    NodeKind::TraitDecl { methods, .. } => (methods, true),
+                    NodeKind::ClassDecl { methods, .. } => (methods, false),
                     _ => continue,
                 };
                 for m in methods {
@@ -857,7 +991,7 @@ impl GoEmitCtx {
                         visibility, name, ..
                     } = &m.kind
                     {
-                        if matches!(visibility, Visibility::Public) {
+                        if always_export || matches!(visibility, Visibility::Public) {
                             self.public_methods.insert(name.name.clone());
                         }
                     }
@@ -1946,7 +2080,16 @@ impl GoEmitCtx {
                     self.buf.push('\n');
                     self.numeric_runtime_emitted = true;
                 }
-                if !self.ordering_runtime_emitted && go_module_uses_ordering(items) {
+                // The bespoke `__bockOrdering` value runtime is emitted only when
+                // the real `core.compare.Ordering` enum is NOT bundled — when it
+                // is, that user enum is authoritative (its variants are the
+                // sealed-interface structs `OrderingLess{}`, and `compare`
+                // returns it), so the int runtime would be dead and its `Less`
+                // constants would shadow nothing the program uses.
+                if !self.ordering_runtime_emitted
+                    && go_module_uses_ordering(items)
+                    && !self.ordering_enum_bundled()
+                {
                     self.buf.push_str(ORDERING_RUNTIME_GO);
                     self.buf.push('\n');
                     self.ordering_runtime_emitted = true;
@@ -2087,8 +2230,22 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::TraitDecl { name, methods, .. } => {
-                // Traits → Go interfaces.
-                self.writeln(&format!("type {} interface {{", name.name));
+                // Traits → Go interfaces. A trait whose methods take a
+                // `Self`-typed operand is encoded as an F-bounded *generic*
+                // interface — `type Comparable[__Self any] interface {
+                // Compare(__Self) Ordering }` — so an impl `func (Key)
+                // Compare(Key)` satisfies `Comparable[Key]` and a bound `[T:
+                // Comparable]` lowers to `[T Comparable[T]]`. `Self` in the
+                // method signatures then renders as the interface's type param.
+                let uses_self = self.self_param_traits.contains(&name.name);
+                let prev_self_subst = self.go_self_subst.take();
+                let head = if uses_self {
+                    self.go_self_subst = Some("__Self".to_string());
+                    format!("{}[__Self any]", name.name)
+                } else {
+                    name.name.clone()
+                };
+                self.writeln(&format!("type {head} interface {{"));
                 self.indent += 1;
                 for method in methods {
                     if let NodeKind::FnDecl {
@@ -2098,7 +2255,15 @@ impl GoEmitCtx {
                         ..
                     } = &method.kind
                     {
-                        let param_strs = self.collect_param_type_strs(params);
+                        // Drop the leading `self` receiver — a Go interface
+                        // method's receiver is implicit, so only the remaining
+                        // operands form the signature (the AIR keeps `self` as a
+                        // real leading param, as for impl methods).
+                        let rest = match params.first().map(crate::generator::param_binds_self) {
+                            Some(Some(_)) => &params[1..],
+                            _ => &params[..],
+                        };
+                        let param_strs = self.collect_param_type_strs(rest);
                         let is_void = return_type.as_deref().is_some_and(Self::is_void_type);
                         let ret = if is_void {
                             String::new()
@@ -2117,6 +2282,7 @@ impl GoEmitCtx {
                 }
                 self.indent -= 1;
                 self.writeln("}");
+                self.go_self_subst = prev_self_subst;
                 Ok(())
             }
             NodeKind::ImplBlock {
@@ -2136,7 +2302,19 @@ impl GoEmitCtx {
                 // Value receivers for trait/effect impls so `Handler{}` satisfies
                 // the interface; pointer receivers for inherent `impl T { ... }`.
                 let use_value_receiver = trait_path.is_some();
-                for (i, method) in methods.iter().enumerate() {
+                // Trait default methods (codegen-completeness P2): synthesize a
+                // receiver method on the target for every default method this
+                // impl does not override, so the type satisfies the interface
+                // (which declares the default's signature) and a call resolves.
+                // A default body calling another trait method (`self.other(..)`)
+                // resolves through the same receiver methods.
+                let default_methods: Vec<AIRNode> = trait_path
+                    .as_ref()
+                    .map(|tp| {
+                        crate::generator::inherited_default_methods(&self.trait_decls, tp, methods)
+                    })
+                    .unwrap_or_default();
+                for (i, method) in methods.iter().chain(default_methods.iter()).enumerate() {
                     if i > 0 {
                         self.buf.push('\n');
                     }
@@ -2325,11 +2503,19 @@ impl GoEmitCtx {
                         .bounds
                         .iter()
                         .map(|b| {
-                            b.segments
+                            let bound_name = b
+                                .segments
                                 .iter()
                                 .map(|s| s.name.as_str())
                                 .collect::<Vec<_>>()
-                                .join(".")
+                                .join(".");
+                            // An F-bounded self-param trait constraint is applied
+                            // to the type var itself: `[T Comparable[T]]`.
+                            if self.self_param_traits.contains(&bound_name) {
+                                format!("{bound_name}[{}]", p.name.name)
+                            } else {
+                                bound_name
+                            }
                         })
                         .collect();
                     format!("{} {}", p.name.name, bound_strs.join(" | "))
@@ -2366,14 +2552,18 @@ impl GoEmitCtx {
         // exported `func Main()` that PascalCasing a `public fn main` would
         // produce (Go would then report "function main is undeclared").
         let is_entry_point = name == "main";
-        let fn_name = if is_public && !is_entry_point {
-            to_pascal_case(name)
-        } else {
-            to_camel_case(name)
-        };
         if is_public && !is_entry_point {
             self.public_fns.insert(name.to_string());
         }
+        // `main` stays Go's bare `func main`; every other function goes through
+        // `go_fn_name`, which applies the public/private casing rule and renames
+        // a public name colliding with a top-level type (`key` → `KeyFn` when a
+        // `record Key` exists).
+        let fn_name = if is_entry_point {
+            to_camel_case(name)
+        } else {
+            self.go_fn_name(name)
+        };
         let type_params = self.format_generic_params(generic_params);
         let param_strs = self.collect_param_strs(params);
         let effects = self.effects_params(effect_clause);
@@ -2407,7 +2597,10 @@ impl GoEmitCtx {
         if name == "main" || is_void {
             self.emit_block_body(body)?;
         } else {
+            let prev_ret = self.current_fn_ret_type.take();
+            self.current_fn_ret_type = return_type.map(|t| self.type_to_go(t));
             self.emit_block_body_return(body)?;
+            self.current_fn_ret_type = prev_ret;
         }
         self.var_optional_elem = saved_opt_scope;
         self.var_list_elem = saved_list_scope;
@@ -2506,6 +2699,27 @@ impl GoEmitCtx {
         method: &AIRNode,
         use_value_receiver: bool,
     ) -> Result<(), CodegenError> {
+        // In a trait-impl method, a `Self` type resolves to the concrete target
+        // (the receiver type) — most relevant for a synthesized default method
+        // whose source uses `Self` (e.g. `other: Self`). Saved/restored so the
+        // bundle-wide default of `/* Self */` is unchanged outside trait impls.
+        let prev_self_subst = self.go_self_subst.take();
+        if use_value_receiver {
+            self.go_self_subst = Some(receiver_type.to_string());
+        }
+        let result =
+            self.emit_method_body(receiver_type, target_generics, method, use_value_receiver);
+        self.go_self_subst = prev_self_subst;
+        result
+    }
+
+    fn emit_method_body(
+        &mut self,
+        receiver_type: &str,
+        target_generics: &[bock_ast::GenericParam],
+        method: &AIRNode,
+        use_value_receiver: bool,
+    ) -> Result<(), CodegenError> {
         if let NodeKind::FnDecl {
             visibility,
             name,
@@ -2516,7 +2730,14 @@ impl GoEmitCtx {
             ..
         } = &method.kind
         {
-            let method_name = if matches!(visibility, Visibility::Public) {
+            // A trait-impl method (`use_value_receiver`) is PascalCased
+            // regardless of Bock visibility: Go interface methods are always
+            // exported (the `TraitDecl` emission PascalCases them), so the
+            // receiver method and the call site must match. A `private` trait
+            // default method (e.g. `not_equals`) would otherwise be camelCased
+            // here while the interface declares it PascalCased. Inherent (`impl
+            // Type`) methods keep the public/private casing rule.
+            let method_name = if use_value_receiver || matches!(visibility, Visibility::Public) {
                 to_pascal_case(&name.name)
             } else {
                 to_camel_case(&name.name)
@@ -2572,7 +2793,10 @@ impl GoEmitCtx {
             let (saved_opt_scope, saved_list_scope, saved_result_scope) =
                 self.enter_param_optional_scope(rest);
             if return_type.is_some() && !is_void {
+                let prev_ret = self.current_fn_ret_type.take();
+                self.current_fn_ret_type = return_type.as_deref().map(|t| self.type_to_go(t));
                 self.emit_block_body_return(body)?;
+                self.current_fn_ret_type = prev_ret;
             } else {
                 self.emit_block_body(body)?;
             }
@@ -3031,9 +3255,14 @@ impl GoEmitCtx {
                 }
                 // Prelude `Ordering` variant → the bare `__bockOrdering` constant
                 // (`Less`/`Equal`/`Greater`) of the Ordering runtime, which a
-                // value-switch `case Less:` and the `compare` bridge also use.
-                if let Some(variant) = crate::generator::ordering_variant(&name.name) {
-                    self.buf.push_str(variant);
+                // value-switch `case Less:` and the `compare` bridge also use —
+                // UNLESS the real `core.compare.Ordering` enum is bundled (DV13),
+                // in which case the reference is a user-enum variant-struct
+                // construction (`OrderingLess{}`), handled by the path below.
+                if crate::generator::ordering_variant(&name.name).is_some()
+                    && !self.ordering_enum_bundled()
+                {
+                    self.buf.push_str(&name.name);
                     return Ok(());
                 }
                 // A unit-variant reference (`Empty`) → an empty variant-struct
@@ -3047,10 +3276,11 @@ impl GoEmitCtx {
                 }
                 let emitted = if is_prelude_ctor(&name.name) {
                     name.name.clone()
-                } else if self.public_fns.contains(&name.name) {
-                    to_pascal_case(&name.name)
                 } else {
-                    to_camel_case(&name.name)
+                    // Routes a public name colliding with a type through the
+                    // `Fn`-suffix rename (`key` → `KeyFn`); a private name is
+                    // camelCased.
+                    self.go_fn_name(&name.name)
                 };
                 self.buf.push_str(&emitted);
                 Ok(())
@@ -3195,11 +3425,7 @@ impl GoEmitCtx {
                 // body is only invoked from inside its own wrapper.
                 if let NodeKind::Identifier { name } = &callee.kind {
                     if self.async_fns.contains(&name.name) {
-                        let go_name = if self.public_fns.contains(&name.name) {
-                            to_pascal_case(&name.name)
-                        } else {
-                            to_camel_case(&name.name)
-                        };
+                        let go_name = self.go_fn_name(&name.name);
                         self.buf.push_str(&format!("{go_name}Async"));
                     } else {
                         self.emit_expr(callee)?;
@@ -3484,9 +3710,17 @@ impl GoEmitCtx {
                 else_block,
                 ..
             } => {
-                // If in expression position: Go doesn't have ternary;
-                // emit as IIFE.
-                self.buf.push_str("func() interface{} { if ");
+                // If in expression position: Go doesn't have ternary; emit as
+                // IIFE. Type it with the enclosing function's return type when
+                // known (`func() Ordering { … }`) so a named/concrete result is
+                // assignable; the `else` falls back to a typed zero only for the
+                // untyped form (a concrete return type always has both branches
+                // in a Bock `if`-expression).
+                let iife_ty = self
+                    .current_fn_ret_type
+                    .clone()
+                    .unwrap_or_else(|| "interface{}".to_string());
+                let _ = write!(self.buf, "func() {iife_ty} {{ if ");
                 self.emit_expr(condition)?;
                 self.buf.push_str(" { return ");
                 self.emit_block_as_expr(then_block)?;
@@ -3523,10 +3757,41 @@ impl GoEmitCtx {
                 if go_match_is_result(arms) {
                     return self.emit_result_match_expr(scrutinee, arms);
                 }
-                // Match in expression position: emit as IIFE with switch.
-                self.buf.push_str("func() interface{} { switch ");
-                self.emit_expr(scrutinee)?;
-                self.buf.push_str(" { ");
+                // A user-enum match (including the bundled `core.compare.Ordering`
+                // enum) dispatches on the dynamic concrete-variant *type*
+                // (`OrderingGreater`), so the IIFE must be a *type-switch* — the
+                // variant names are Go struct types, not values, so a value-switch
+                // (`case OrderingGreater:`) is a compile error. (The prelude
+                // `__bockOrdering` value-enum, used when the real enum is NOT
+                // bundled, stays a value-switch via the path below.)
+                let is_user_enum = self.go_match_is_user_enum(arms);
+                // Type the IIFE with the enclosing function's return type when
+                // known (`func() Ordering { … }`), so its result is assignable
+                // where a concrete/named type is required — `interface{}` does
+                // not satisfy a named interface like the user `Ordering`. A typed
+                // IIFE closes with `panic("unreachable")` (a Bock match is
+                // exhaustive) rather than `return nil`, which has no value for a
+                // concrete return type.
+                let iife_ret = self.current_fn_ret_type.clone();
+                let iife_ty = iife_ret.as_deref().unwrap_or("interface{}");
+                let _ = write!(self.buf, "func() {iife_ty} {{ switch ");
+                if is_user_enum {
+                    // Non-binding type-switch (`switch x.(type)`): the
+                    // `core.compare.Ordering` variants are unit (no payload), so
+                    // no `__m` binding is needed, which also avoids Go's
+                    // "declared and not used" on a payload-less match.
+                    self.emit_expr(scrutinee)?;
+                    self.buf.push_str(".(type) { ");
+                } else {
+                    self.emit_expr(scrutinee)?;
+                    self.buf.push_str(" { ");
+                }
+                // Match in expression position: emit as IIFE with switch. Each
+                // arm body is terminated with `;` so consecutive single-line
+                // `case`/`default` clauses are separated — Go requires a
+                // statement terminator between a `case` body's trailing `return`
+                // and the next `case`/`default` keyword (a bare space is a
+                // "unexpected keyword case" syntax error).
                 for arm in arms {
                     if let NodeKind::MatchArm { pattern, body, .. } = &arm.kind {
                         if matches!(pattern.kind, NodeKind::WildcardPat) {
@@ -3537,10 +3802,20 @@ impl GoEmitCtx {
                             self.buf.push_str(": return ");
                         }
                         self.emit_block_as_expr(body)?;
-                        self.buf.push(' ');
+                        self.buf.push_str("; ");
                     }
                 }
-                self.buf.push_str("} return nil }()");
+                // `}; <fallthrough>` — the switch's closing brace and the IIFE's
+                // fallthrough are two statements on one line, so they need an
+                // explicit separator (a bare `} return` is a Go syntax error:
+                // "unexpected keyword return at end of statement"). A typed IIFE
+                // uses `panic` (no `nil` for a concrete type); the untyped form
+                // keeps `return nil`.
+                if iife_ret.is_some() {
+                    self.buf.push_str("}; panic(\"unreachable\") }()");
+                } else {
+                    self.buf.push_str("}; return nil }()");
+                }
                 Ok(())
             }
             // Ownership nodes: erase in Go.
@@ -4198,7 +4473,10 @@ impl GoEmitCtx {
                 let _ = inner;
                 "__bockOption".to_string()
             }
-            NodeKind::TypeSelf => "/* Self */".into(),
+            NodeKind::TypeSelf => self
+                .go_self_subst
+                .clone()
+                .unwrap_or_else(|| "/* Self */".into()),
             _ => "interface{}".into(),
         }
     }
@@ -4841,6 +5119,74 @@ mod tests {
         let out = gen(&module(vec![], vec![t]));
         assert!(out.contains("type Drawable interface {"), "got: {out}");
         assert!(out.contains("Draw()"), "got: {out}");
+    }
+
+    #[test]
+    fn self_operand_trait_becomes_f_bounded_generic_interface() {
+        // P2 item 4: a trait whose method takes a `Self` operand
+        // (`compare(self, other: Self)`) is encoded as an F-bounded generic
+        // interface so an impl `func (Key) Compare(Key)` can satisfy it and a
+        // bound `[T: Comparable]` lowers to `[T Comparable[T]]`. The leading
+        // `self` receiver is dropped (implicit in a Go interface method); `Self`
+        // renders as the interface's `__Self` type param.
+        let self_param = node(
+            10,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(11, "self")),
+                ty: None,
+                default: None,
+            },
+        );
+        let other_param = node(
+            12,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(13, "other")),
+                ty: Some(Box::new(node(14, NodeKind::TypeSelf))),
+                default: None,
+            },
+        );
+        let method = node(
+            2,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("compare"),
+                generic_params: vec![],
+                params: vec![self_param, other_param],
+                return_type: Some(Box::new(node(
+                    20,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Bool"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(3, vec![], None)),
+            },
+        );
+        let t = node(
+            1,
+            NodeKind::TraitDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_platform: false,
+                name: ident("Comparable"),
+                generic_params: vec![],
+                associated_types: vec![],
+                methods: vec![method],
+            },
+        );
+        let out = gen(&module(vec![], vec![t]));
+        assert!(
+            out.contains("type Comparable[__Self any] interface {"),
+            "self-operand trait should be an F-bounded generic interface, got: {out}"
+        );
+        assert!(
+            out.contains("Compare(__Self)"),
+            "the `self` receiver is dropped and `Self` renders as `__Self`, got: {out}"
+        );
     }
 
     #[test]

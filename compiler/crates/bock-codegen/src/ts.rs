@@ -150,6 +150,10 @@ impl CodeGenerator for TsGenerator {
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
         ctx.generic_decls =
             crate::generator::collect_generic_decls(&[(module, std::path::Path::new(""))]);
+        ctx.trait_decls =
+            crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
+        ctx.exported_types =
+            crate::generator::collect_exported_type_names(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let (content, mappings) = ctx.finish();
         let source_map = SourceMap {
@@ -196,6 +200,8 @@ impl CodeGenerator for TsGenerator {
         let mut ctx = TsEmitCtx::new();
         ctx.enum_variants = crate::generator::collect_enum_variants(modules);
         ctx.generic_decls = crate::generator::collect_generic_decls(modules);
+        ctx.trait_decls = crate::generator::collect_trait_decls(modules);
+        ctx.exported_types = crate::generator::collect_exported_type_names(modules);
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
                 ctx.buf.push('\n');
@@ -298,6 +304,27 @@ struct TsEmitCtx {
     /// recover them so the merge lands on the generic class. Pre-scanned across
     /// the bundle (mirrors [`Self::enum_variants`]).
     generic_decls: crate::generator::GenericDeclRegistry,
+    /// Trait-declaration registry: a trait name → its declared generic params
+    /// and methods. Used at each `impl Trait for Type` site to recover the
+    /// trait's *default* methods (those carrying a body) so they can be
+    /// synthesized onto the implementing type's prototype — the trait interface
+    /// alone declares only signatures, so a type relying on an inherited default
+    /// would otherwise have no such method. Pre-scanned across the bundle.
+    trait_decls: crate::generator::TraitDeclRegistry,
+    /// When `Some(target)`, a `Self` type (`TypeSelf`) renders as `target`
+    /// rather than the default `this`. Set while emitting a *synthesized trait
+    /// default method* onto a concrete target: the default method's source uses
+    /// `Self` (e.g. `other: Self`), but it is emitted as a free prototype
+    /// function (`Target.prototype.m = function(...)`) where `this` is not a
+    /// legal type. Substituting the concrete target name keeps the signature
+    /// well-typed. Cleared (None) everywhere else, so trait-interface methods
+    /// keep rendering `Self` as `this`.
+    trait_self_subst: Option<String>,
+    /// Names of `public` (exported) top-level types. The declaration-merging
+    /// `interface Target { ... }` an `impl` emits must be `export`ed exactly
+    /// when the `Target` class is — TS requires all declarations in a merged
+    /// declaration to agree on export-ness. Pre-scanned across the bundle.
+    exported_types: std::collections::HashSet<String>,
 }
 
 impl TsEmitCtx {
@@ -325,6 +352,9 @@ impl TsEmitCtx {
             concurrency_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
+            trait_decls: crate::generator::TraitDeclRegistry::new(),
+            trait_self_subst: None,
+            exported_types: std::collections::HashSet::new(),
         }
     }
 
@@ -951,7 +981,10 @@ impl TsEmitCtx {
                 // `OPTIONAL_RUNTIME_TS`.
                 format!("BockOption<{}>", self.type_to_ts(inner))
             }
-            NodeKind::TypeSelf => "this".into(),
+            NodeKind::TypeSelf => self
+                .trait_self_subst
+                .clone()
+                .unwrap_or_else(|| "this".into()),
             _ => "unknown".into(),
         }
     }
@@ -1295,6 +1328,15 @@ impl TsEmitCtx {
                     ""
                 };
                 let generics = self.generic_params_to_ts(generic_params);
+                // The trait-self type: the interface name applied to its own
+                // generic params, e.g. `Comparable<T>` for `trait Comparable[T]`.
+                // The leading `self` param of every trait method is typed to
+                // this (it is the receiver), and a bare `other: Self` resolves to
+                // it too — without a type, `tsc --strict` flags `self` as an
+                // implicit `any` (Q-ts-codegen). Mirrors how an `ImplBlock` types
+                // `self` as the impl target.
+                let trait_self_ty =
+                    format!("{}{}", name.name, self.generic_param_args(generic_params));
                 self.writeln(&format!("{export}interface {}{generics} {{", name.name));
                 self.indent += 1;
                 for (i, method) in methods.iter().enumerate() {
@@ -1310,7 +1352,7 @@ impl TsEmitCtx {
                     } = &method.kind
                     {
                         let m_generics = self.generic_params_to_ts(method_generics);
-                        let param_list = self.collect_typed_params(params);
+                        let param_list = self.collect_trait_typed_params(params, &trait_self_ty);
                         let ret = return_type
                             .as_ref()
                             .map(|r| self.type_to_ts(r))
@@ -1345,6 +1387,29 @@ impl TsEmitCtx {
                 let target_params = self.impl_target_generics(generic_params, &target_base);
                 let target_name =
                     format!("{target_base}{}", self.generic_param_args(&target_params));
+                // Trait default methods (codegen-completeness P2): for an
+                // `impl Trait for Type` block, the trait's default methods that
+                // this impl does not override must also be attached to the
+                // target's prototype — the trait interface declares only their
+                // signatures. We synthesize them exactly like the impl's own
+                // methods (same interface sig + prototype function); a default
+                // body that calls another trait method via `self.other()`
+                // resolves through the same merged interface.
+                let default_methods: Vec<AIRNode> = trait_path
+                    .as_ref()
+                    .map(|tp| {
+                        crate::generator::inherited_default_methods(&self.trait_decls, tp, methods)
+                    })
+                    .unwrap_or_default();
+                // Each entry carries whether it is a *synthesized default*
+                // method (`true`): such methods' source uses `Self`, which must
+                // render as the concrete target (`trait_self_subst`) rather than
+                // `this` since they emit as free prototype functions.
+                let all_methods: Vec<(&AIRNode, bool)> = methods
+                    .iter()
+                    .map(|m| (m, false))
+                    .chain(default_methods.iter().map(|m| (m, true)))
+                    .collect();
                 // Methods are attached via `Target.prototype.m = function(...)`.
                 // For `tsc` to accept `p.m(...)` at call sites, the class type
                 // must declare those members. We emit a declaration-merging
@@ -1356,7 +1421,7 @@ impl TsEmitCtx {
                 // as the impl target, which also removes the implicit-`any`
                 // error inside each method body.
                 let mut iface_sigs: Vec<String> = Vec::new();
-                for method in methods {
+                for (method, is_default) in &all_methods {
                     if let NodeKind::FnDecl {
                         is_async,
                         name,
@@ -1367,6 +1432,10 @@ impl TsEmitCtx {
                         ..
                     } = &method.kind
                     {
+                        let prev_subst = self.trait_self_subst.take();
+                        if *is_default {
+                            self.trait_self_subst = Some(target_name.clone());
+                        }
                         let generics = self.generic_params_to_ts(generic_params);
                         let mut all_params = self.collect_impl_typed_params(params, &target_name);
                         if let Some(ep) = self.effects_param(effect_clause) {
@@ -1376,6 +1445,7 @@ impl TsEmitCtx {
                             *is_async,
                             return_type.as_deref().map(|r| self.type_to_ts(r)),
                         );
+                        self.trait_self_subst = prev_subst;
                         iface_sigs.push(format!(
                             "{}{generics}({}){ret_str};",
                             name.name,
@@ -1383,6 +1453,14 @@ impl TsEmitCtx {
                         ));
                     }
                 }
+                // The declaration-merging `interface` must be `export`ed exactly
+                // when the target `class` is — TS rejects a merged declaration
+                // whose members disagree on export-ness (TS2395).
+                let iface_export = if self.exported_types.contains(&target_base) {
+                    "export "
+                } else {
+                    ""
+                };
                 if let Some(tp) = trait_path {
                     let trait_name = tp
                         .segments
@@ -1393,7 +1471,9 @@ impl TsEmitCtx {
                     // Declaration merging: `extends Trait` keeps `new Target()`
                     // assignable to the trait's interface type, while the
                     // concrete signatures (with `self`) make `p.m(p)` resolve.
-                    self.writeln(&format!("interface {target_name} extends {trait_name} {{"));
+                    self.writeln(&format!(
+                        "{iface_export}interface {target_name} extends {trait_name} {{"
+                    ));
                     self.indent += 1;
                     for sig in &iface_sigs {
                         self.writeln(sig);
@@ -1402,7 +1482,7 @@ impl TsEmitCtx {
                     self.writeln("}");
                     self.writeln(&format!("// impl {trait_name} for {target_name}"));
                 } else {
-                    self.writeln(&format!("interface {target_name} {{"));
+                    self.writeln(&format!("{iface_export}interface {target_name} {{"));
                     self.indent += 1;
                     for sig in &iface_sigs {
                         self.writeln(sig);
@@ -1411,7 +1491,7 @@ impl TsEmitCtx {
                     self.writeln("}");
                     self.writeln(&format!("// impl {target_name}"));
                 }
-                for method in methods {
+                for (method, is_default) in &all_methods {
                     if let NodeKind::FnDecl {
                         is_async,
                         name,
@@ -1423,6 +1503,13 @@ impl TsEmitCtx {
                         ..
                     } = &method.kind
                     {
+                        // A synthesized default method's `Self` types render as
+                        // the concrete target (it emits as a free prototype
+                        // function, where `this` is not a valid type).
+                        let prev_subst = self.trait_self_subst.take();
+                        if *is_default {
+                            self.trait_self_subst = Some(target_name.clone());
+                        }
                         let async_kw = if *is_async { "async " } else { "" };
                         // The prototype assignment lives outside the class scope,
                         // so the function itself must re-declare the target's
@@ -1459,6 +1546,10 @@ impl TsEmitCtx {
                         self.current_handler_vars = old_handler_vars;
                         self.indent -= 1;
                         self.writeln("};");
+                        // Restore after the whole method (signature + body) is
+                        // emitted, so any `Self` annotation in the body also
+                        // resolves to the concrete target.
+                        self.trait_self_subst = prev_subst;
                     }
                 }
                 Ok(())
@@ -1764,6 +1855,52 @@ impl TsEmitCtx {
                 let ty_str = match ty {
                     Some(t) => format!(": {}", self.type_to_ts(t)),
                     None if name == "self" => format!(": {target_name}"),
+                    None => String::new(),
+                };
+                if let Some(def) = default {
+                    let mut ctx = TsEmitCtx::new();
+                    ctx.indent = self.indent;
+                    ctx.enum_variants = self.enum_variants.clone();
+                    if ctx.emit_expr_to_string(def).is_ok() {
+                        let (def_str, _) = ctx.finish();
+                        return Some(format!("{name}{ty_str} = {def_str}"));
+                    }
+                }
+                Some(format!("{name}{ty_str}"))
+            })
+            .collect()
+    }
+
+    /// Collect typed parameters for a **trait declaration** method, typing an
+    /// untyped receiver (`self`) as the trait's own interface type
+    /// (`trait_self_ty`, e.g. `Comparable<T>`).
+    ///
+    /// A trait method declares `self` with no annotation (`fn compare(self,
+    /// other: Self)`); the AIR lowerer keeps it as a real leading parameter. In
+    /// the emitted interface the untyped `self` would otherwise be `tsc
+    /// --strict`'s implicit `any`. Typing it to the trait-self type makes the
+    /// interface method signature well-typed and keeps it compatible (via
+    /// declaration-merging method bivariance) with the concrete `self: Target`
+    /// the `ImplBlock` arm emits. A `self` that already carries an explicit type,
+    /// and all non-`self` params, are handled exactly as
+    /// [`Self::collect_typed_params`] (where a `Self` annotation maps to `this`,
+    /// the implementing type — correct for `other: Self`).
+    fn collect_trait_typed_params(&self, params: &[AIRNode], trait_self_ty: &str) -> Vec<String> {
+        params
+            .iter()
+            .filter_map(|p| {
+                let NodeKind::Param {
+                    pattern,
+                    ty,
+                    default,
+                } = &p.kind
+                else {
+                    return None;
+                };
+                let name = self.pattern_to_binding_name(pattern);
+                let ty_str = match ty {
+                    Some(t) => format!(": {}", self.type_to_ts(t)),
+                    None if name == "self" => format!(": {trait_self_ty}"),
                     None => String::new(),
                 };
                 if let Some(def) = default {
@@ -3473,6 +3610,45 @@ mod tests {
         let out = gen(&module(vec![], vec![trait_decl]));
         assert!(out.contains("interface Comparable<T>"), "got: {out}");
         assert!(out.contains("compare(other: T): number"), "got: {out}");
+    }
+
+    #[test]
+    fn trait_decl_self_param_typed_as_trait_interface() {
+        // P2 item 2: a trait method whose leading `self` is untyped must be
+        // typed as the trait's own interface type (here `Eq`) — otherwise `tsc
+        // --strict` flags `self` as an implicit `any`.
+        let method = node(
+            2,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("equals"),
+                generic_params: vec![],
+                params: vec![untyped_param_node(3, "self")],
+                return_type: Some(Box::new(type_node(4, "Bool"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(5, vec![], None)),
+            },
+        );
+        let trait_decl = node(
+            1,
+            NodeKind::TraitDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_platform: false,
+                name: ident("Eq"),
+                generic_params: vec![],
+                associated_types: vec![],
+                methods: vec![method],
+            },
+        );
+        let out = gen(&module(vec![], vec![trait_decl]));
+        assert!(
+            out.contains("equals(self: Eq): boolean"),
+            "trait `self` should be typed as the trait interface, got: {out}"
+        );
     }
 
     // ── Records → Interfaces ────────────────────────────────────────────────

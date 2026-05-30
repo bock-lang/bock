@@ -1,0 +1,63 @@
+// TEST: exec_bounded_dispatch
+// EXPECT: output "hi_beats_lo=yes"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Generic-bounded dispatch (codegen-completeness P2, item 4). A generic
+// function `outranks[T: Ranked](a, b)` calls `a.beats(b)` on a value whose type
+// is the bounded type variable `T`. The checker resolves `beats` through the
+// `Ranked` trait bound, but `recv_kind_tag` returned `None` for a
+// `Type::TypeVar` receiver, so codegen got no hint that `a.beats(b)` dispatches
+// through a trait.
+//
+// The fix stamps a new `recv_kind = "TraitBound:Ranked"` annotation at the
+// bounded-TypeVar method-resolution path in the checker. Per backend:
+//   * TS emits `<T extends Ranked>` (the bound is preserved in the signature)
+//     and — via item 2 — the trait-self typing that makes `a.beats(a, b)`
+//     callable on `T`.
+//   * Go emits a `[T Ranked]` constraint, the method-name casing `a.Beats(b)`,
+//     and `Self` -> `T` in the interface signature.
+//   * Python emits a plain `a.beats(b)`.
+//   * js and rust already worked.
+//
+// `outranks` is the bounded generic: it dispatches `a.beats(b)` through the
+// `Ranked` bound and returns the boolean. The fixture returns a value *derived*
+// from the dispatched call (a String), rather than returning one of the two
+// operands — Bock's value semantics permit reusing an operand after the call,
+// but a generic Rust function returning a moved-and-reused `T` is a separate
+// (pre-existing) Rust ownership-model gap, orthogonal to bounded dispatch. See
+// the OPEN note in the session PR.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+trait Ranked {
+  fn beats(self, other: Self) -> Bool
+}
+
+record Card {
+  rank: Int
+}
+
+impl Ranked for Card {
+  public fn beats(self, other: Card) -> Bool {
+    self.rank > other.rank
+  }
+}
+
+fn outranks[T: Ranked](a: T, b: T) -> Bool {
+  a.beats(b)
+}
+
+fn yesno(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn main() -> Void {
+  let lo: Card = Card { rank: 1 }
+  let hi: Card = Card { rank: 2 }
+  println("hi_beats_lo=${yesno(outranks(hi, lo))}")
+}

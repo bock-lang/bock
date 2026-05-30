@@ -1,0 +1,57 @@
+// TEST: exec_trait_default_method
+// EXPECT: output "ne:yes;eq:no"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Trait default methods (codegen-completeness P2, item 1). A trait with one
+// required method (`equals`, no body) and one default method (`not_equals`,
+// with a body that calls the required `equals` via `self`). An impl overrides
+// ONLY the required method; the default is inherited.
+//
+// Before the fix, js/ts/go attached only the impl's OWN methods to the target
+// (prototype / receiver methods), so a call to the inherited default
+// `not_equals` was a missing-method error at runtime/compile. The fix builds a
+// trait registry (`generator::collect_trait_decls`) and, for each `impl` with a
+// `trait_path`, synthesizes every trait default method NOT overridden by the
+// impl onto the target. The default body's `self.equals(...)` resolves through
+// the same prototype/interface as a real impl method. Rust and Python already
+// supported this (Rust via native `trait`/`impl`; Python via the trait base
+// class), so this fixture also guards them against regression.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+trait Eq {
+  fn equals(self, other: Self) -> Bool
+
+  fn not_equals(self, other: Self) -> Bool {
+    if (self.equals(other)) {
+      return false
+    }
+    return true
+  }
+}
+
+record Tag {
+  id: Int
+}
+
+impl Eq for Tag {
+  public fn equals(self, other: Tag) -> Bool {
+    self.id == other.id
+  }
+}
+
+fn yesno(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn main() -> Void {
+  let a: Tag = Tag { id: 1 }
+  let b: Tag = Tag { id: 2 }
+  let c: Tag = Tag { id: 1 }
+  println("ne:${yesno(a.not_equals(b))};eq:${yesno(a.not_equals(c))}")
+}

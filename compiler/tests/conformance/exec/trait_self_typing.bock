@@ -1,0 +1,50 @@
+// TEST: exec_trait_self_typing
+// EXPECT: output "eq:yes;ne:no"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Trait-decl `self` typing (codegen-completeness P2, item 2). A user trait
+// whose method takes `self` plus a second operand of the trait-self type
+// (`other: Self`), an impl on a record, and a call through the impl.
+//
+// Before the fix, the TS backend emitted the trait interface method with a bare
+// untyped `self` parameter, so `tsc --strict` rejected it with
+// "Parameter 'self' implicitly has an 'any' type". The fix types the leading
+// `self` in a `TraitDecl` method as the trait's own interface type (here
+// `Eq`), mirroring how an `ImplBlock` types `self` as the impl target, and
+// resolves `other: Self` to that same trait-self type.
+//
+// The boolean results are routed through an explicit `if` (rather than
+// interpolating a `Bool`, whose textual form differs across targets) so the
+// expected output is target-independent.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+trait Eq {
+  fn equals(self, other: Self) -> Bool
+}
+
+record Tag {
+  id: Int
+}
+
+impl Eq for Tag {
+  public fn equals(self, other: Tag) -> Bool {
+    self.id == other.id
+  }
+}
+
+fn yesno(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn main() -> Void {
+  let a: Tag = Tag { id: 7 }
+  let b: Tag = Tag { id: 7 }
+  let c: Tag = Tag { id: 9 }
+  println("eq:${yesno(a.equals(b))};ne:${yesno(a.equals(c))}")
+}

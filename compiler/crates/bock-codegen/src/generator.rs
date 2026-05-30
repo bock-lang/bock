@@ -1207,6 +1207,235 @@ fn collect_generic_decls_from_item(item: &AIRNode, registry: &mut GenericDeclReg
     registry.insert(name.name.clone(), generic_params.clone());
 }
 
+/// Pre-scan every module's top-level type declarations and collect the names of
+/// those declared `public` (records, enums, traits, classes). A backend that
+/// emits a declaration-merging companion (TS's `interface Target` that mirrors
+/// an `impl`'s prototype methods) needs this: TS requires every declaration in
+/// a merged declaration to agree on export-ness, so the companion `interface`
+/// must be `export`ed exactly when the target type is. Mirrors
+/// [`collect_generic_decls`].
+#[must_use]
+pub fn collect_exported_type_names(
+    modules: &[(&AIRModule, &Path)],
+) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for (module, _) in modules {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            let (visibility, name) = match &item.kind {
+                NodeKind::RecordDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::EnumDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::TraitDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::ClassDecl {
+                    visibility, name, ..
+                } => (visibility, name),
+                _ => continue,
+            };
+            if matches!(visibility, bock_ast::Visibility::Public) {
+                names.insert(name.name.clone());
+            }
+        }
+    }
+    names
+}
+
+// ─── Trait-declaration registry (default methods) ────────────────────────────
+
+/// What the registry knows about one trait declaration: its declared generic
+/// parameters and its methods (each an `AIRNode::FnDecl`), partitioned by the
+/// caller via [`is_default_method`].
+#[derive(Debug, Clone)]
+pub struct TraitDeclInfo {
+    /// Generic parameters declared on the trait (`trait Comparable[T]`).
+    pub generic_params: Vec<bock_ast::GenericParam>,
+    /// Every method declared in the trait body, in source order. A method whose
+    /// AIR body block is non-empty is a *default* method (see
+    /// [`is_default_method`]); an empty body marks a *required* method.
+    pub methods: Vec<AIRNode>,
+}
+
+/// Maps a trait's declared name to its [`TraitDeclInfo`]. Trait names are
+/// globally unique within a Bock program, so a flat map keyed by the bare name
+/// resolves every `impl Trait for Type` block to its trait.
+pub type TraitDeclRegistry = HashMap<String, TraitDeclInfo>;
+
+/// True when `fn_decl` is a trait **default** method — one that carries a body.
+///
+/// A required (signature-only) trait method has no body in source
+/// (`fn compare(self, other: Self) -> Ordering`); the AIR lowerer represents
+/// that absence as an *empty* `Block` (`stmts` empty, no tail expression). A
+/// default method (`fn not_eq(self, other: Self) -> Bool { ... }`) lowers to a
+/// non-empty block. We therefore detect "has a default body" structurally as
+/// "the body block is non-empty".
+///
+/// HEURISTIC NOTE: this is the empty-block heuristic. It is exact for code
+/// produced by the current AIR lowerer (`bock-air::lower::lower_fn` synthesizes
+/// `Block { stmts: vec![], tail: None }` for a bodyless method and only for a
+/// bodyless method). A user *default* method whose body is literally `{}` (an
+/// empty block) would be misclassified as required — but an empty-bodied method
+/// returning a non-`Void` type does not type-check, and a `Void` default with an
+/// empty body is behaviorally identical to no default, so the misclassification
+/// is harmless. A robust, unambiguous fix would be an explicit `has_body` flag
+/// on the AIR `FnDecl` (carried from the AST's `Option<Block>`); that is a
+/// possible follow-up (a `bock-air` change, out of scope here).
+#[must_use]
+pub fn is_default_method(fn_decl: &AIRNode) -> bool {
+    let NodeKind::FnDecl { body, .. } = &fn_decl.kind else {
+        return false;
+    };
+    match &body.kind {
+        NodeKind::Block { stmts, tail } => !stmts.is_empty() || tail.is_some(),
+        // A non-Block body is unusual but, if present, counts as a real body.
+        _ => true,
+    }
+}
+
+/// The method name of a `FnDecl` node, or `None` for a non-`FnDecl`.
+#[must_use]
+pub fn fn_decl_name(fn_decl: &AIRNode) -> Option<&str> {
+    if let NodeKind::FnDecl { name, .. } = &fn_decl.kind {
+        Some(name.name.as_str())
+    } else {
+        None
+    }
+}
+
+/// True if a type-expression node mentions `Self` anywhere (directly or nested
+/// inside an optional / tuple / function / generic-arg position).
+#[must_use]
+fn type_node_mentions_self(node: &AIRNode) -> bool {
+    match &node.kind {
+        NodeKind::TypeSelf => true,
+        NodeKind::TypeOptional { inner } => type_node_mentions_self(inner),
+        NodeKind::TypeTuple { elems } => elems.iter().any(type_node_mentions_self),
+        NodeKind::TypeFunction { params, ret, .. } => {
+            params.iter().any(type_node_mentions_self) || type_node_mentions_self(ret)
+        }
+        NodeKind::TypeNamed { args, .. } => args.iter().any(type_node_mentions_self),
+        _ => false,
+    }
+}
+
+/// True if any of `trait_info`'s methods reference `Self` in a (non-receiver)
+/// parameter type or in the return type.
+///
+/// A trait with a `Self`-typed operand — `fn compare(self, other: Self) ->
+/// Ordering` — cannot be encoded as a plain Go interface used as a generic
+/// bound: the interface method would have to be `Compare(Self)`, but a Go
+/// interface cannot name the implementing type. The Go backend instead encodes
+/// such a trait as an *F-bounded* generic interface (`type Comparable[T any]
+/// interface { Compare(T) Ordering }`), satisfied by `func (Key) Compare(Key)`,
+/// and lowers a bound `[T: Comparable]` to `[T Comparable[T]]`. This predicate
+/// selects the traits that need that treatment; a trait with no `Self` operand
+/// (only `self`) stays a plain interface.
+#[must_use]
+pub fn trait_uses_self_operand(trait_info: &TraitDeclInfo) -> bool {
+    trait_info.methods.iter().any(|m| {
+        let NodeKind::FnDecl {
+            params,
+            return_type,
+            ..
+        } = &m.kind
+        else {
+            return false;
+        };
+        // Skip the leading `self` receiver; inspect the remaining param types
+        // and the return type for a `Self` mention.
+        let param_self = params
+            .iter()
+            .skip(1)
+            .filter_map(|p| {
+                if let NodeKind::Param { ty: Some(t), .. } = &p.kind {
+                    Some(t.as_ref())
+                } else {
+                    None
+                }
+            })
+            .any(type_node_mentions_self);
+        let ret_self = return_type.as_deref().is_some_and(type_node_mentions_self);
+        param_self || ret_self
+    })
+}
+
+/// Pre-scan every module in the bundle and build the [`TraitDeclRegistry`].
+///
+/// Walks each module's top-level `TraitDecl`s and records the trait's generic
+/// params and the full method list. Backends use this at each `impl Trait for
+/// Type` site to recover the trait's *default* methods (those carrying a body)
+/// so they can be synthesized onto the implementing type — the trait interface
+/// alone carries only signatures, so a type that relies on an inherited default
+/// would otherwise have no such method at runtime (js/ts/go). A *pre-scan*
+/// (rather than recording traits as their decls are emitted) is required because
+/// an `impl` may precede its trait's declaration in source order, and because
+/// bundling concatenates modules so a `use`d trait's decl can live in a
+/// different module than its `impl`. Mirrors [`collect_generic_decls`].
+#[must_use]
+pub fn collect_trait_decls(modules: &[(&AIRModule, &Path)]) -> TraitDeclRegistry {
+    let mut registry = TraitDeclRegistry::new();
+    for (module, _) in modules {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            if let NodeKind::TraitDecl {
+                name,
+                generic_params,
+                methods,
+                ..
+            } = &item.kind
+            {
+                registry.insert(
+                    name.name.clone(),
+                    TraitDeclInfo {
+                        generic_params: generic_params.clone(),
+                        methods: methods.clone(),
+                    },
+                );
+            }
+        }
+    }
+    registry
+}
+
+/// Resolve, for an `impl Trait for Type` block, the trait default methods that
+/// the impl does **not** override and that must therefore be synthesized onto
+/// the target. `trait_path` is the `ImplBlock`'s `trait_path`; `impl_methods`
+/// its own methods. Returns *cloned* default-method `FnDecl` nodes, in
+/// trait-declaration order. Empty when the impl has no trait, the trait is
+/// unknown, or every default is overridden. Returns owned clones (rather than
+/// registry borrows) so a backend can iterate them while mutating its own
+/// emission buffer, without holding a borrow of the registry across the
+/// `&mut self` writes.
+#[must_use]
+pub fn inherited_default_methods(
+    registry: &TraitDeclRegistry,
+    trait_path: &bock_ast::TypePath,
+    impl_methods: &[AIRNode],
+) -> Vec<AIRNode> {
+    let Some(trait_name) = trait_path.segments.last().map(|s| s.name.as_str()) else {
+        return Vec::new();
+    };
+    let Some(info) = registry.get(trait_name) else {
+        return Vec::new();
+    };
+    let overridden: std::collections::HashSet<&str> =
+        impl_methods.iter().filter_map(fn_decl_name).collect();
+    info.methods
+        .iter()
+        .filter(|m| is_default_method(m))
+        .filter(|m| fn_decl_name(m).is_some_and(|n| !overridden.contains(n)))
+        .cloned()
+        .collect()
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2307,5 +2536,187 @@ mod tests {
         assert_eq!(reg.get("Plain").map(Vec::len), Some(0));
         // Unknown type is absent.
         assert!(!reg.contains_key("Nope"));
+    }
+
+    // ── Trait-declaration registry ─────────────────────────────────────────
+
+    /// A trait method `FnDecl`. `default_body` controls the body block: when
+    /// true a non-empty block (a default method), else an empty block (a
+    /// required method). `self_operand` adds a second `other: Self` param.
+    fn trait_method(name: &str, default_body: bool, self_operand: bool) -> AIRNode {
+        let tail = if default_body {
+            Some(Box::new(n(
+                50,
+                NodeKind::Literal {
+                    lit: bock_ast::Literal::Unit,
+                },
+            )))
+        } else {
+            None
+        };
+        let body = n(
+            40,
+            NodeKind::Block {
+                stmts: vec![],
+                tail,
+            },
+        );
+        let mut params = vec![n(
+            41,
+            NodeKind::Param {
+                pattern: Box::new(n(
+                    42,
+                    NodeKind::BindPat {
+                        name: ident("self"),
+                        is_mut: false,
+                    },
+                )),
+                ty: None,
+                default: None,
+            },
+        )];
+        if self_operand {
+            params.push(n(
+                43,
+                NodeKind::Param {
+                    pattern: Box::new(n(
+                        44,
+                        NodeKind::BindPat {
+                            name: ident("other"),
+                            is_mut: false,
+                        },
+                    )),
+                    ty: Some(Box::new(n(45, NodeKind::TypeSelf))),
+                    default: None,
+                },
+            ));
+        }
+        n(
+            10,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params,
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
+    }
+
+    fn trait_decl(name: &str, methods: Vec<AIRNode>) -> AIRNode {
+        n(
+            5,
+            NodeKind::TraitDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_platform: false,
+                name: ident(name),
+                generic_params: vec![],
+                associated_types: vec![],
+                methods,
+            },
+        )
+    }
+
+    #[test]
+    fn is_default_method_uses_empty_block_heuristic() {
+        // A non-empty body block (tail expr) → default method.
+        assert!(is_default_method(&trait_method("dflt", true, false)));
+        // An empty body block → required method.
+        assert!(!is_default_method(&trait_method("req", false, false)));
+    }
+
+    #[test]
+    fn collect_trait_decls_records_methods_and_spans_modules() {
+        let eq = trait_decl(
+            "Eq",
+            vec![
+                trait_method("equals", false, true),
+                trait_method("not_equals", true, true),
+            ],
+        );
+        let other = trait_decl("Show", vec![trait_method("show", false, false)]);
+        let lib = module_named("lib", &[], vec![other]);
+        let main_m = module_named("main", &["lib"], vec![eq]);
+        let p = std::path::Path::new("x.bock");
+        let reg = collect_trait_decls(&[(&lib, p), (&main_m, p)]);
+
+        let eq_info = reg.get("Eq").expect("Eq registered");
+        assert_eq!(eq_info.methods.len(), 2);
+        // `Show` from the other module is also registered.
+        assert!(reg.contains_key("Show"));
+    }
+
+    #[test]
+    fn inherited_default_methods_excludes_overridden_and_required() {
+        // trait Eq { equals (required); not_equals (default) }
+        let eq = trait_decl(
+            "Eq",
+            vec![
+                trait_method("equals", false, true),
+                trait_method("not_equals", true, true),
+            ],
+        );
+        let m = module_named("main", &[], vec![eq]);
+        let p = std::path::Path::new("x.bock");
+        let reg = collect_trait_decls(&[(&m, p)]);
+        let trait_path = variant_path("Eq");
+
+        // An impl overriding only `equals` inherits the `not_equals` default.
+        let impl_methods = vec![fn_decl("equals")];
+        let inherited = inherited_default_methods(&reg, &trait_path, &impl_methods);
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(fn_decl_name(&inherited[0]), Some("not_equals"));
+
+        // An impl overriding the default too inherits nothing.
+        let impl_methods = vec![fn_decl("equals"), fn_decl("not_equals")];
+        assert!(inherited_default_methods(&reg, &trait_path, &impl_methods).is_empty());
+
+        // The required method is never synthesized even when not overridden.
+        let inherited = inherited_default_methods(&reg, &trait_path, &[]);
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(fn_decl_name(&inherited[0]), Some("not_equals"));
+    }
+
+    #[test]
+    fn trait_uses_self_operand_detects_self_typed_params() {
+        // `equals(self, other: Self)` references `Self` in a non-receiver param.
+        let with_self = TraitDeclInfo {
+            generic_params: vec![],
+            methods: vec![trait_method("equals", false, true)],
+        };
+        assert!(trait_uses_self_operand(&with_self));
+
+        // `show(self)` has only the receiver — no `Self` operand.
+        let without_self = TraitDeclInfo {
+            generic_params: vec![],
+            methods: vec![trait_method("show", false, false)],
+        };
+        assert!(!trait_uses_self_operand(&without_self));
+    }
+
+    #[test]
+    fn collect_exported_type_names_records_only_public_types() {
+        let pub_rec = generic_record_decl("Key", &[]); // public by helper
+        let priv_rec = n(
+            70,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                name: ident("Hidden"),
+                generic_params: vec![],
+                fields: vec![],
+            },
+        );
+        let m = module_named("main", &[], vec![pub_rec, priv_rec]);
+        let p = std::path::Path::new("x.bock");
+        let names = collect_exported_type_names(&[(&m, p)]);
+        assert!(names.contains("Key"));
+        assert!(!names.contains("Hidden"));
     }
 }

@@ -108,6 +108,12 @@ pub const RECV_KIND_META_KEY: &str = "recv_kind";
 /// receivers a backend never needs to special-case — leaving the call to its
 /// existing structural lowering.
 ///
+/// One further tag exists that this function cannot produce because it needs
+/// the bounds table: a *bounded type variable* receiver (`a.compare(b)` where
+/// `a: T` and `T: Comparable`) is stamped `"TraitBound:<Trait>"` by the
+/// checker's `stamp_recv_kind`, signalling that the method dispatches through a
+/// trait bound rather than a concrete type.
+///
 /// The primitive variant carries the specific [`PrimitiveType`] (via its
 /// `Debug` name, e.g. `Int`, `Float`, `String`) because the lowering of e.g.
 /// `compare` differs by primitive (Rust `i64::cmp` vs `f64::partial_cmp`).
@@ -338,9 +344,27 @@ impl TypeChecker {
     /// to no tag (inference var, function type, …), leaving the call to its
     /// existing structural lowering. The receiver type is run through the
     /// current substitution first so a late-unified type var resolves.
+    ///
+    /// Bounded type variables get a bespoke tag the plain [`recv_kind_tag`]
+    /// cannot produce (it has no access to the bounds table): when the resolved
+    /// receiver is a `Type::TypeVar` carrying a trait bound — the receiver of
+    /// `a.compare(b)` inside `max[T: Comparable](a, b)` — the tag is
+    /// `"TraitBound:<Trait>"` (the first bound). This tells codegen the method
+    /// dispatches through that trait rather than a concrete type. A new *value*
+    /// of the existing `recv_kind` metadata key (same mechanism as
+    /// `Primitive:…`/`User:…`/`Optional`), so it does not touch the AIR shape,
+    /// the export ABI, or any visitor.
     fn stamp_recv_kind(&self, node: &mut AIRNode, receiver_ty: &Type) {
         let resolved = self.subst.apply(receiver_ty);
-        if let Some(tag) = recv_kind_tag(&resolved) {
+        let tag = match &resolved {
+            Type::TypeVar(id) => self
+                .type_var_bounds
+                .get(id)
+                .and_then(|bounds| bounds.first())
+                .map(|trait_name| format!("TraitBound:{trait_name}")),
+            _ => recv_kind_tag(&resolved),
+        };
+        if let Some(tag) = tag {
             node.metadata
                 .insert(RECV_KIND_META_KEY.to_string(), Value::String(tag));
         }
