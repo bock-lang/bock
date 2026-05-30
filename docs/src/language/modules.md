@@ -183,6 +183,56 @@ every module, and resolve cross-file `use` statements against
 it. There is no separate manifest of modules — the directory
 structure is the manifest.
 
+## The Prelude
+
+A curated set of symbols is **auto-imported** into every module —
+they resolve without any `use`. This is the *prelude* (spec
+§18.2). It covers the primitive types (`Int`, `Float`, `Bool`,
+`String`, `Char`, `Void`, `Never`), the builtin generic types and
+their constructors (`Optional`/`Some`/`None`, `Result`/`Ok`/`Err`,
+`List`, `Map`, `Set`, `Fn`), the comparison vocabulary
+(`Ordering`/`Less`/`Equal`/`Greater`), the core traits
+(`Comparable`, `Equatable`, `Hashable`, `Displayable`,
+`Serializable`, `Cloneable`, `Default`, `Into`, `From`, `TryFrom`,
+`Iterator`, `Iterable`, `Error`), and the utility functions
+(`print`, `println`, `debug`, `assert`, `todo`, `unreachable`,
+`sleep`).
+
+```bock
+module userapp
+
+// No `use` needed — `Ordering`, `Less`/`Equal`/`Greater`, and
+// the `Comparable` trait come from the prelude.
+record Money { cents: Int }
+
+impl Comparable for Money {
+  fn compare(self, other: Money) -> Ordering {
+    if (self.cents < other.cents) { Less }
+    else if (self.cents == other.cents) { Equal }
+    else { Greater }
+  }
+}
+
+fn rank(a: Money, b: Money) -> String {
+  match a.compare(b) {
+    Less => "less"
+    Equal => "equal"
+    Greater => "greater"
+  }
+}
+```
+
+The prelude symbols that are *defined* in a `core.*` module
+(`Ordering`, `Comparable`, `Equatable` from `core.compare`;
+`Into`, `From`, `TryFrom`, `Displayable` from `core.convert`;
+`Error` from `core.error`) are re-exports of those definitions:
+naming `Ordering` bare and `use core.compare.{Ordering}` refer to
+the exact same type, so an explicit import remains valid and never
+conflicts with the prelude. Write an explicit `use` only when you
+want the name documented at the top of the file, or to import a
+non-prelude symbol from the same module (e.g. `Key` from
+`core.compare`).
+
 ## What Currently Works
 
 This page describes the working surface. A few module-system

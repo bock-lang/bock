@@ -32,7 +32,8 @@ use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
 use bock_types::{
-    collect_exports, seed_imports, FnType, PrimitiveType, Strictness, Type, TypeChecker,
+    collect_exports, seed_imports, seed_prelude, FnType, PrimitiveType, Strictness, Type,
+    TypeChecker,
 };
 
 /// A v1 aspect of analysis that `bock check --only=<aspect>` can select.
@@ -297,9 +298,27 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
     let mut dep_graph = DepGraph::new();
     let mut id_to_index: HashMap<String, usize> = HashMap::new();
 
+    // The embedded core (`is_stdlib`) module ids. Every user module implicitly
+    // depends on them so the §18.2 prelude can seed core-defined symbols
+    // (`Ordering`, `Comparable`, `Into`, …) even when a user module does not
+    // `use` them: the implicit edges force the core modules to register before
+    // any user module in topo order, so `seed_prelude` always finds them.
+    let core_module_ids: Vec<String> = parsed_files
+        .iter()
+        .enumerate()
+        .filter(|(_, pf)| pf.is_stdlib)
+        .map(|(i, pf)| dep_graph::module_id_from_module(&pf.module, i))
+        .collect();
+
     for (i, pf) in parsed_files.iter().enumerate() {
         let module_id = dep_graph::module_id_from_module(&pf.module, i);
-        let deps = dep_graph::extract_dependencies(&pf.module.imports);
+        let mut deps = dep_graph::extract_dependencies(&pf.module.imports);
+        // User modules implicitly depend on every embedded core module (the
+        // prelude). Core modules themselves keep only their own edges so they
+        // cannot form a prelude self-cycle.
+        if !pf.is_stdlib {
+            dep_graph::add_prelude_deps(&mut deps, &module_id, &core_module_ids);
+        }
         dep_graph.add_module_with_deps(module_id.clone(), deps);
         id_to_index.insert(module_id, i);
     }
@@ -359,6 +378,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
         // type checking itself is skipped.
         let mut checker = TypeChecker::new();
         register_type_builtins(&mut checker);
+        seed_prelude(&mut checker, &registry);
         seed_imports(&mut checker, &pf.module.imports, &registry);
         if options.aspects.runs(Aspect::Types) {
             checker.check_module(&mut air_module);

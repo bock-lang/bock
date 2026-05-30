@@ -1,0 +1,21 @@
+// TEST: stdlib_prelude_ordering_value
+// EXPECT: no_errors
+//
+// `Ordering` is nameable as a return type and `Less`/`Equal`/`Greater` are
+// usable as bare value expressions WITHOUT an import — the §18.2 prelude
+// re-exports the `core.compare` definitions. (Regression: bare `Less` as a
+// value previously raised E1001 in resolution and E4002 in type-checking
+// without `use core.compare`.)
+module userapp
+
+public fn least() -> Ordering {
+  Less
+}
+
+public fn most() -> Ordering {
+  Greater
+}
+
+public fn mid() -> Ordering {
+  Equal
+}

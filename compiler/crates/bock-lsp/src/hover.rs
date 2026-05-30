@@ -20,7 +20,7 @@ use bock_errors::{FileId, Span};
 use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
-use bock_types::{seed_imports, FnType, PrimitiveType, Type, TypeChecker};
+use bock_types::{seed_imports, seed_prelude, FnType, PrimitiveType, Type, TypeChecker};
 
 use crate::goto_definition::position_to_offset;
 use crate::type_display::format_type;
@@ -68,6 +68,7 @@ pub fn hover(path: PathBuf, content: String, line: u32, character: u32) -> Optio
 
     let mut checker = TypeChecker::new();
     register_builtins(&mut checker);
+    seed_prelude(&mut checker, &registry);
     seed_imports(&mut checker, &module.imports, &registry);
     checker.check_module(&mut air_module);
 

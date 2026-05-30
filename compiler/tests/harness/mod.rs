@@ -318,6 +318,47 @@ mod tests {
     }
 
     #[test]
+    fn stdlib_prelude_fixtures_parse_directives() {
+        // The §18.2 prelude conformance fixtures must load cleanly and expose
+        // their directives. Every fixture is `no_errors`: each names prelude
+        // symbols (`Ordering`/`Less`/`Comparable`/`From`/`Into`/`Error`/…)
+        // WITHOUT a `use`, proving the auto-import.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dir = manifest.join("conformance/stdlib/prelude");
+        let results = discover_tests(&dir);
+        assert!(
+            results.len() >= 7,
+            "expected at least 7 stdlib/prelude fixtures, got {}",
+            results.len()
+        );
+        let mut cases = Vec::new();
+        for result in &results {
+            match result {
+                Ok(tc) => cases.push(tc),
+                Err(e) => panic!("stdlib/prelude fixture failed to load: {e}"),
+            }
+        }
+        let by_name = |n: &str| cases.iter().find(|c| c.name == n);
+
+        for name in [
+            "stdlib_prelude_ordering_match",
+            "stdlib_prelude_ordering_value",
+            "stdlib_prelude_equatable",
+            "stdlib_prelude_convert_from_into",
+            "stdlib_prelude_displayable",
+            "stdlib_prelude_error",
+            "stdlib_prelude_builtins_no_use",
+        ] {
+            let case = by_name(name).unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(
+                case.expectations,
+                vec![Expectation::NoErrors],
+                "{name} should expect no_errors",
+            );
+        }
+    }
+
+    #[test]
     fn blank_lines_between_directives() {
         let src = "// TEST: spaced\n\n// EXPECT: no_errors\n\nfn foo() {}\n";
         let tc = parse_test_file(&fake_path(), src).unwrap();

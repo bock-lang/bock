@@ -1,0 +1,26 @@
+// TEST: stdlib_prelude_builtins_no_use
+// EXPECT: no_errors
+//
+// The §18.2 prelude builtin generic types and constructors — `Optional`/`Some`/
+// `None`, `Result`/`Ok`/`Err`, `List` — are usable without any import.
+module userapp
+
+public fn pick(flag: Bool) -> Optional[Int] {
+  if (flag) {
+    Some(1)
+  } else {
+    None
+  }
+}
+
+public fn divide(a: Int, b: Int) -> Result[Int, String] {
+  if (b == 0) {
+    Err("div by zero")
+  } else {
+    Ok(a / b)
+  }
+}
+
+public fn nums() -> List[Int] {
+  [1, 2, 3]
+}
