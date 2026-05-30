@@ -1,0 +1,16 @@
+// TEST: exec_arithmetic_sum
+// EXPECT: output "sum=5"
+//
+// Known-good execution fixture exercising integer arithmetic plus string
+// interpolation. Verified to compile and run identically on all v1 targets
+// (js, ts, python, rust, go).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let x: Int = 2
+  let y: Int = 3
+  println("sum=${x + y}")
+}

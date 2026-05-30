@@ -10,5 +10,17 @@ publish = false
 [lib]
 path = "harness/mod.rs"
 
+[[test]]
+name = "execution"
+path = "execution.rs"
+
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+bock-build = { workspace = true }
+tempfile = "3"
+
+# The execution harness shells out to the `bock` CLI binary to compile fixtures
+# per target. `bock` is a binary-only crate (no lib target), so it cannot be a
+# normal dependency; instead the test locates the already-built binary next to
+# the test runner (cargo builds all workspace bins under `cargo test --workspace`)
+# and falls back to `cargo build -p bock` when run in isolation.

@@ -1,0 +1,16 @@
+// TEST: exec_hello_world
+// EXPECT: output "hello world"
+//
+// Known-good execution fixture for the cross-target conformance runner.
+// Codegen for this program is verified to compile and run on all v1 targets
+// (js, ts, python, rust, go), printing exactly `hello world` to stdout.
+//
+// `main` is intentionally NOT `public`: a `public fn main` lowers to Go's
+// exported `func Main`, which is not Go's entry point — that is a separate
+// codegen defect tracked for the codegen-correctness follow-up, not this
+// pure-infrastructure PR.
+module main
+
+fn main() -> Void {
+  println("hello world")
+}
