@@ -64,6 +64,17 @@ reconciliation; repo wins). See audit.md._
   checker doesn't substitute `Self`→concrete in impl method signatures. Workaround
   (used by core.compare): write the concrete operand type in impls, declare `Self`
   in the trait. Narrow gap; low urgency. Found #104.
+- **[Q-prelude-inject] Implement §18.2 prelude auto-import** — impl · ready ·
+  `compiler/crates/bock-types/` (+ seed path) · — · links DQ9, DV5 · note: §18.2
+  says the listed traits/types (Comparable, Equatable, Ordering, Some/None, etc.)
+  are auto-imported, but the impl requires an explicit `use` (bare `Ordering` →
+  E1001). Inject the §18.2 prelude subset (incl. `Ordering`/`Less`/`Equal`/`Greater`
+  added in #106) so they resolve without `use`. Decided by DQ9.
+- **[Q-import-reject] Reject bare module-qualified import** — bug · ready ·
+  `compiler/crates/bock-parser|bock-types/` · — · links DQ8 · note: a `use` of a
+  module path with neither a brace-list nor a wildcard (bare `use core.error`) is
+  not a v1 form; reject with a diagnostic pointing at the braced form. Decided by
+  DQ8; module-qualified access deferred to v1.x.
 
 ## v1-blocking
 
@@ -88,15 +99,17 @@ reconciliation; repo wins). See audit.md._
   bock-core bridge exists, so further trait modules (convert/iter/effect) have
   low value until then. Plan: `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`.
 
-- **[Q-bridge] checker↔bock-core trait-impl bridge for primitives** — impl ·
-  **v1-BLOCKING** · `compiler/crates/bock-types/` · blocked-by: DQ6 · links DV4,
-  Q-stdlib · note: primitive receivers resolve methods via the hardcoded
-  intrinsic table in `checker.rs::resolve_method_return_type` and never consult
-  the user/stdlib trait-impl table, so `impl Comparable for Int` + a call site →
-  E4001 (#104). Stdlib traits can't cover primitives until this lands — a
-  near-universal prerequisite for a USEFUL core stdlib. Carries a coherence/
-  precedence question (stdlib impl vs intrinsic) folded into DQ6; implement once
-  Design rules the impl model.
+- **[Q-bridge] canonical primitive trait conformances** — impl · **v1-BLOCKING**
+  (in-flight) · `compiler/crates/bock-types/`, `bock-errors/` · — · links DV4, DV6,
+  Q-stdlib, DQ6, DQ10 · note: Design **DQ6 ruled the model** — the compiler
+  registers canonical primitive conformances into the trait-impl table (sealed;
+  user impl of a core trait for a primitive rejected). ALSO wires the table into
+  the production pipeline (**DV6**: `impl_table` is `None` today, so `where`-bounds
+  are silently unenforced). Plan:
+  `plans/2026-05-30-primitive-conformance-bridge-plan.md`; branch
+  `feat/stdlib-primitive-bridge` (front-loaded STOP gate). Proposed conformance
+  matrix; the *normative* matrix → DQ10 (escalated, non-blocking). Unblocks the
+  R1 module fan-out.
 
 ## Blocked
 
@@ -129,17 +142,19 @@ reconciliation; repo wins). See audit.md._
 ## Dependency graph
 
 ```
-[#103 foundation+error, #104 compare: LANDED]
-DQ6 ──→ Q-bridge ──→ Q-stdlib fan-out (convert/iter/effect → R2 → R3) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
+[#103 foundation+error, #104 compare, #106 spec batch: LANDED]
+Q-bridge (DQ6, in-flight) ──→ Q-stdlib fan-out (convert/iter/effect → R2 → R3) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
+(decided-ready: Q-prelude-inject [DQ9], Q-import-reject [DQ8])
 (independent / ready: Q-cl-dates, Q-cl-0515, Q-20.1-xref, Q-vscode-test, Q-fconf)
 (bugs, ready: Q-fmt-bock, Q-interp-enum, Q-self-subst)
 ```
 
-**Critical path to v1.0:** Q-stdlib foundation + `core.error` + `core.compare`
-have LANDED (#103/#104). The next gate is **Q-bridge** (← Design's **DQ6**):
-#104 proved stdlib traits can't cover primitive types until the checker↔
-bock-core bridge exists, so a *useful* stdlib runs through the bridge, not
-around it. Module fan-out is PAUSED on it (more primitive-incapable trait
-modules add little until then). After the bridge: fan out R1's remaining
-modules → R2 → R3 → D4 → D5 → ItemB. The "ship what's done" vs §18-full-stdlib
-tension stays resolved in favor of shipping the core stdlib in v1.
+**Critical path to v1.0:** foundation + `core.error` + `core.compare` LANDED
+(#103/#104); the stdlib Design batch (Q1–Q4 = DQ6–DQ9) is reconciled into the spec
+(#106). **Q-bridge is now in-flight** (DQ6 ruled the model): it registers canonical
+primitive conformances + wires the trait-impl table into the pipeline (fixing DV6).
+When it lands, the module fan-out resumes — R1's remaining modules (convert/iter/
+effect) → R2 → R3 → D4 → D5 → ItemB. Prelude injection (Q-prelude-inject) + the
+bare-import rejection (Q-import-reject) are decided and can land alongside. The
+"ship what's done" vs §18-full-stdlib tension stays resolved in favor of shipping
+the core stdlib in v1.

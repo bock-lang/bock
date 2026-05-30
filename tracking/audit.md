@@ -754,3 +754,47 @@ vscode test-infra, conformance execution Q-fconf), @performance example (pending
     Holding further module fan-out pending Design's DQ6/DQ9 ruling. Ready, non-contested
     work available meanwhile if desired: the bug fixes (Q-fmt-bock notable) + the ready
     chores (Q-cl-dates/Q-cl-0515/Q-20.1-xref/Q-vscode-test/Q-fconf).
+
+[2026-05-30 02:13 UTC] DESIGN BATCH (DQ6-DQ9) reconciled (#106); Q-bridge dispatched
+  Input: operator routed the four pending stdlib questions to Design and returned the
+    decisions (2026-05-30 01:53 UTC) for reconciliation. Authoritative core-spec; I
+    reconcile + unblock, don't re-decide. (Also produced the focused Design prompt the
+    operator requested, grounded in the exact §18.1/§18.2/§18.3/§18.5 text — which
+    sharpened DQ6: §18.2 prelude traits + §18.5 trait-enables-operators already IMPLY
+    primitives conform, so the bridge isn't "should we" but "the spec requires it".)
+  DECISIONS (full text in design-questions.md DQ6-DQ9):
+    - DQ6: (a) compiler-provided canonical primitive conformances in the trait-impl
+      table (the bridge); (b) sealed — no user impl of a core trait for a primitive
+      (orphan rule); (c) source+shims mechanism stays NON-normative (contract §18.1);
+      (d) strictness is per-package (a dependency's diagnostics never fail the consumer).
+    - DQ7: core.error v1 = message() ONLY. cause/source/Displayable/context → v1.x
+      error-ergonomics bundle (trait-object dependency). SUPERSEDES the May-29 source lean.
+    - DQ8: named imports sufficient for v1; module-qualified deferred to v1.x; bare
+      `use core.error` rejected.
+    - DQ9: prelude = "defined in core.*, re-exported"; §18.2/§18.3 consistent; implement
+      prelude injection; §18.2 amended to add Ordering/Less/Equal/Greater (omission).
+  Spec reconciliation (#106 → main b56d953): spec session applied all six as PROSE only
+    (§18.2 +Ordering, §18.5 sealing, §1.4 per-package strictness, §18.3 core.error
+    minimal, §12.2 bare-import note, stdlib/CLAUDE.md corrected) + changelog
+    20260530-0208 + corrected the 20260529-2251 core.error source lean. .md-only (no CI
+    matrix); merged.
+  Bridge planning (Plan agent → plans/2026-05-30-primitive-conformance-bridge-plan.md):
+    confirmed the model + located the fix (resolve_method_return_type), and surfaced a
+    MATERIAL finding the framing didn't anticipate — the impl_table is NEVER wired into
+    the production pipeline (None), so `where`-bound enforcement is currently DEAD in
+    bock check/build/run (→ DV6). Q-bridge therefore also wires the table in (a latent
+    correctness fix). Also surfaced DQ10 (the normative primitive-conformance matrix:
+    Bool:Comparable? Float:Equatable/Hashable given NaN?) — escalated; bridge proceeds
+    on a proposed matrix (non-blocking). §18.5 operator-gating for USER types noted as a
+    separate unimplemented follow-up.
+  Dispatched: feat/stdlib-primitive-bridge (Opus 4.8 @ xhigh) per the plan, with the
+    front-loaded STOP gate (T1: wiring impl_table may surface latent bound failures —
+    surface, don't paper over). Owns bock-types/bock-errors + conformance/stdlib/compare.
+  Tracking reconciliation (this PR, chore/tracking-20260530-0213): DQ6-DQ9 → decided
+    (#106); DQ10 filed; DV5 → resolved (#106); DV4 disposition decided (resolves on
+    Q-bridge); DV6 added (bounds-unenforced latent bug); Q-bridge → in-flight + scope
+    expanded; new Q-prelude-inject (DQ9) + Q-import-reject (DQ8) queued; landed the
+    bridge plan; cause()/source supersession recorded; audit. main b56d953.
+  Follow-up: on the bridge PR — handle the T1 STOP outcome, review, gate+CI green, merge;
+    then fan out R1 (convert/iter/effect) + land Q-prelude-inject/Q-import-reject; route
+    DQ10 to Design at leisure (non-blocking).

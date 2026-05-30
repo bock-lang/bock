@@ -34,9 +34,26 @@ decided→link)`
 
 ## Escalated to Design (core spec — pending)
 
-Surfaced by the stdlib loading + `core.error` pilot plan (2026-05-29,
-`plans/2026-05-29-stdlib-loading-error-pilot-plan.md`). Filed per the
-core-spec rule; the pilot proceeds on safe defaults meanwhile (not blocked).
+### DQ10 — normative primitive-conformance matrix
+- **Question:** which (primitive × core-trait) conformances are **normative** for
+  v1? §18.2/§18.5 name the traits but never pin the matrix. Specifically: is
+  `Bool: Comparable` normative (Rust yes, Swift no)? May `Float` conform to
+  `Equatable`/`Hashable` given `NaN != NaN` breaks their laws (Rust: `f64` is
+  `PartialEq` not `Eq`/`Hash`)?
+- **§:** §18.2 / §18.5 · **context:** surfaced by the Q-bridge plan
+  (`plans/2026-05-30-primitive-conformance-bridge-plan.md`). The bridge implements
+  a **proposed** matrix (Equatable: Int/Float/String/Bool/Char; Comparable: same
+  minus Bool; Displayable: all; Hashable: all minus Float) and proceeds on it;
+  Design ratifies/refines (additive, low-cost). Also flags: §18.5 operator-gating
+  for *user* types is unimplemented (separate follow-up).
+- **Status:** escalated → Design (escalations.md)
+
+## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
+
+Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and
+reconciled into the spec in #106 (changelog `20260530-0208-specs-changes.md`).
+Q1a (the primitive-conformance bridge — DQ6's crux) lands as a separate impl PR
+(`Q-bridge`).
 
 ### DQ6 — §18: normative implementation model for core modules
 - **Question:** should §18 normatively state that `core.*` modules are **Bock
@@ -57,7 +74,14 @@ core-spec rule; the pilot proceeds on safe defaults meanwhile (not blocked).
   stdlib; the interim stdlib-strictness policy (#103: stdlib compiled at
   development strictness, non-error diagnostics suppressed) also wants
   ratification here.
-- **Status:** escalated → Design (escalations.md)
+- **Decision:** (a) compiler provides canonical primitive conformances registered
+  into the trait-impl table (the bridge → `queue.md` Q-bridge); (b) **sealed** —
+  user code may not impl a core trait for a primitive (orphan rule, §18.5);
+  (c) the source+shims mechanism stays **non-normative** (contract is §18.1;
+  `stdlib/CLAUDE.md` corrected); (d) strictness is **per-package** — a dependency's
+  diagnostics never fail the consumer's strict build (§1.4). The bridge's normative
+  conformance matrix → DQ10.
+- **Status:** decided → Design 2026-05-30; reconciled #106 (impl: Q-bridge).
 
 ### DQ7 — canonical v1 `core.error` surface
 - **Question:** does `Error` carry `cause(self) -> Optional[Error]`, and does it
@@ -65,7 +89,12 @@ core-spec rule; the pilot proceeds on safe defaults meanwhile (not blocked).
   only "base trait."
 - **§:** §18.3 · **context:** the pilot ships the minimal surface (`message`
   accessor, `SimpleError`, `error()`); Design ratifies/extends the canonical one.
-- **Status:** escalated → Design (escalations.md)
+- **Decision:** v1 = `message(self) -> String` **only**. `cause()`/`source`, an
+  `Error: Displayable` supertrait, and context helpers depend on trait objects
+  (Reserved v1.x) and ship together as a v1.x error-ergonomics bundle.
+  **Supersedes** the 2026-05-29 lean that carried `source` (corrected in the
+  20260529-2251 changelog). Pilot already matches — no impl change.
+- **Status:** decided → Design 2026-05-30; reconciled #106.
 
 ### DQ8 — module-qualified stdlib imports for v1
 - **Question:** does v1 require module-qualified `use core.error` (then
@@ -74,7 +103,11 @@ core-spec rule; the pilot proceeds on safe defaults meanwhile (not blocked).
   qualified access is a type-checker change affecting all 11 modules.
 - **§:** §12 (imports) / §18 · **context:** the pilot relies on named imports
   (supported). Whether qualified access is a v1 requirement is a Design call.
-- **Status:** escalated → Design (escalations.md)
+- **Decision:** named (braced) imports are **sufficient for v1**; module-qualified
+  access deferred to v1.x (with aliasing). Bare `use core.error` (no brace-list/
+  wildcard) is **not** a v1 form — rejected, pointing at the braced form (→ queue
+  Q-import-reject). §12.2 noted in #106.
+- **Status:** decided → Design 2026-05-30; reconciled #106 (impl: Q-import-reject).
 
 ### DQ9 — prelude vs import for the fundamental traits
 - **Question:** are `Comparable`/`Equatable` (and similar fundamental traits)
@@ -84,7 +117,11 @@ core-spec rule; the pilot proceeds on safe defaults meanwhile (not blocked).
 - **§:** §18.2 / §18.3 · **context:** surfaced by `core.compare` (#104); the impl
   matches named-import (no prelude injection; bare `Ordering` → E1001). Interacts
   with DQ6/DQ8 (the import + impl model). Reconcile §18.2/§18.3 once decided.
-- **Status:** escalated → Design (escalations.md)
+- **Decision:** model is "defined in core.*, **re-exported into the prelude**" —
+  §18.2 and §18.3 are consistent. Implement prelude injection to match §18.2
+  (→ queue Q-prelude-inject). §18.2 amended to add `Ordering`/`Less`/`Equal`/
+  `Greater` (was an omission). Resolves `divergences.md` DV5.
+- **Status:** decided → Design 2026-05-30; reconciled #106 (impl: Q-prelude-inject).
 
 ## Decided by Design (core spec — 2026-05-29; reconciled in #100)
 

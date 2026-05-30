@@ -6,7 +6,7 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 8
+- Ready: 10
 - v1-blocking: 2
 - Blocked: 5
 - Deferred: 1
@@ -47,11 +47,14 @@ Live summary derived from `tracking/queue.md` (items per section):
 The embedded source-compiled loading mechanism is **live** (#103): `core.*`
 modules ship as Bock source bundled in the `bock` binary and resolve through
 the module registry (hermetic; works from any cwd). **2 of 11 v1 modules
-landed** — `core.error` (#103), `core.compare` (#104). Known limitation:
-stdlib trait impls cannot yet cover primitive types (Int/String) — the
-checker↔bock-core bridge is unbuilt (`divergences.md` DV4 / `queue.md`
-Q-bridge), so the module fan-out is paused on it + Design's DQ6. The prelude
-(≈9 builtins + type-checker intrinsics) is unchanged. See DV1, MS-stdlib.
+landed** — `core.error` (#103), `core.compare` (#104). The 2026-05-30 Design
+stdlib batch (DQ6–DQ9) is reconciled into the spec (#106). Current limitation:
+stdlib trait impls don't yet cover primitive types (Int/String) — the
+checker↔bock-core bridge is **in-flight** (`feat/stdlib-primitive-bridge`; DQ6
+decided), which also fixes a latent bug where `where`-bound enforcement was never
+wired into the production pipeline (`divergences.md` DV6). Module fan-out resumes
+when the bridge lands. The prelude (≈9 builtins + type-checker intrinsics) is
+unchanged pending prelude injection (Q-prelude-inject). See DV1, DV4, MS-stdlib.
 
 ## Phase history
 
