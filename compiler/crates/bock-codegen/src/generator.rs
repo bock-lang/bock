@@ -374,6 +374,154 @@ pub trait CodeGenerator {
     }
 }
 
+/// Restrict `modules` to those **reachable** from the entry module via real
+/// `use` edges, preserving the input (dependency) order.
+///
+/// `bock build` prepends the entire embedded `core.*` stdlib and makes every
+/// user module implicitly depend on all of it (the §18.2 prelude, so core
+/// symbols resolve without an explicit `use`). That implicit dependency is
+/// correct for *name resolution* but wrong for *bundling*: concatenating a core
+/// module a program never references both bloats the output and — until the
+/// stdlib is codegen-clean on every target — drags its latent codegen defects
+/// into the entry file. Bundling must therefore include only modules the entry
+/// program actually reaches through a real `use`.
+///
+/// Reachability is the transitive closure of each module's `ImportDecl` paths
+/// (the explicit `use`s) matched against other modules' declared `module`
+/// path — never the synthetic prelude edges, which are not represented as
+/// `ImportDecl`s in the AIR. A program with no `use` (e.g. `hello_world`) thus
+/// bundles to its entry module alone, exactly matching the pre-bundling
+/// single-file run (no regression).
+///
+/// The entry module is the one declaring `main`; absent that (a library), the
+/// last module in dependency order. The returned vec borrows from `modules`.
+#[must_use]
+pub fn reachable_modules<'a>(
+    modules: &'a [(&'a AIRModule, &'a Path)],
+) -> Vec<(&'a AIRModule, &'a Path)> {
+    // Map declared module-path string → index, for resolving `use` targets.
+    let path_of = |m: &AIRModule| -> Option<String> {
+        if let NodeKind::Module { path: Some(p), .. } = &m.kind {
+            Some(
+                p.segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("."),
+            )
+        } else {
+            None
+        }
+    };
+    let mut by_path: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, (m, _)) in modules.iter().enumerate() {
+        if let Some(p) = path_of(m) {
+            by_path.entry(p).or_insert(i);
+        }
+    }
+
+    // The explicit `use` targets of one module, as path strings.
+    let use_targets = |m: &AIRModule| -> Vec<String> {
+        let NodeKind::Module { imports, .. } = &m.kind else {
+            return vec![];
+        };
+        imports
+            .iter()
+            .filter_map(|imp| {
+                if let NodeKind::ImportDecl { path, .. } = &imp.kind {
+                    Some(
+                        path.segments
+                            .iter()
+                            .map(|s| s.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join("."),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    // Entry = the module declaring `main`, else the last (top of dep order).
+    let Some(entry_idx) = modules
+        .iter()
+        .position(|(m, _)| module_declares_main_fn(m))
+        .or_else(|| modules.len().checked_sub(1))
+    else {
+        return vec![];
+    };
+
+    // BFS the explicit-`use` graph from the entry module.
+    let mut reachable = vec![false; modules.len()];
+    let mut stack = vec![entry_idx];
+    reachable[entry_idx] = true;
+    while let Some(idx) = stack.pop() {
+        for target in use_targets(modules[idx].0) {
+            if let Some(&t) = by_path.get(&target) {
+                if !reachable[t] {
+                    reachable[t] = true;
+                    stack.push(t);
+                }
+            }
+        }
+    }
+
+    modules
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| reachable[*i])
+        .map(|(_, &pair)| pair)
+        .collect()
+}
+
+/// Choose the output path for a **single-file bundle** of `modules`.
+///
+/// Cross-module programs are emitted as one entry file (see §20.6.1 OPEN
+/// divergence: the per-module tree is collapsed into a single runnable file so
+/// the single-file run model — `node main.js`, `python3 main.py`, … — can run
+/// an importing program). The bundle is named after the module that declares
+/// `main` (the entry point); if none does (e.g. a library), the last module in
+/// dependency order names the file. Modules arrive dependency-ordered, so the
+/// last one is the top of the dependency graph — the natural entry.
+///
+/// Returns the source-mirrored output path (e.g. `main.<ext>`) for the chosen
+/// module, or `None` when `modules` is empty.
+#[must_use]
+pub fn bundle_output_path(
+    modules: &[(&AIRModule, &Path)],
+    target: &TargetProfile,
+) -> Option<PathBuf> {
+    let entry = modules
+        .iter()
+        .find(|(m, _)| module_declares_main_fn(m))
+        .or_else(|| modules.last())?;
+    Some(derive_output_path(entry.1, target))
+}
+
+/// Append the entry-point invocation (e.g. `main();`) to a bundled file's
+/// content exactly once, when any bundled module declares a top-level `main`.
+///
+/// Backends with a synthetic entry call (JS/TS/Python) supply `invocation` via
+/// [`CodeGenerator::entry_invocation`]; native-entry targets (Rust `fn main`,
+/// Go `func main`) pass `None` and this is a no-op. Bundling concatenates every
+/// module body into one file, so the invocation must be appended once at the
+/// end — never per module.
+pub fn append_entry_invocation(
+    content: &mut String,
+    modules: &[(&AIRModule, &Path)],
+    invocation: Option<&String>,
+) {
+    let Some(invoc) = invocation else { return };
+    if !modules.iter().any(|(m, _)| module_declares_main_fn(m)) {
+        return;
+    }
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(invoc);
+}
+
 /// Returns true if the given AIR module declares a top-level function named
 /// `main`. Used by the build pipeline to decide whether to append an
 /// entry-point invocation to the generated output of targets without a
@@ -883,6 +1031,94 @@ mod tests {
                 items,
             },
         )
+    }
+
+    /// A `module <path.segments>` whose `imports` are `use <dep>` of each name
+    /// in `uses`, carrying the given top-level `items`.
+    fn module_named(path: &str, uses: &[&str], items: Vec<AIRNode>) -> AIRNode {
+        use bock_ast::ModulePath;
+        let module_path = ModulePath {
+            segments: path.split('.').map(ident).collect(),
+            span: dummy_span(),
+        };
+        let imports = uses
+            .iter()
+            .enumerate()
+            .map(|(i, dep)| {
+                AIRNode::new(
+                    100 + i as u32,
+                    dummy_span(),
+                    NodeKind::ImportDecl {
+                        path: bock_ast::ModulePath {
+                            segments: dep.split('.').map(ident).collect(),
+                            span: dummy_span(),
+                        },
+                        items: bock_ast::ImportItems::Glob,
+                    },
+                )
+            })
+            .collect();
+        AIRNode::new(
+            0,
+            dummy_span(),
+            NodeKind::Module {
+                path: Some(module_path),
+                annotations: vec![],
+                imports,
+                items,
+            },
+        )
+    }
+
+    #[test]
+    fn reachable_modules_prunes_unused_prelude_modules() {
+        // Mirrors a `bock build`: the embedded `core.*` stdlib is prepended in
+        // dependency order, then the user `main`. `main` uses NOTHING, so only
+        // `main` should be bundled — never the prelude-only stdlib (no
+        // regression vs the pre-bundling single-file run).
+        let core_a = module_named("core.compare", &[], vec![]);
+        let core_b = module_named("core.convert", &["core.compare"], vec![]);
+        let main_m = module_named("main", &[], vec![fn_decl("main")]);
+        let p = std::path::Path::new("x.bock");
+        let modules = [(&core_a, p), (&core_b, p), (&main_m, p)];
+        let got = reachable_modules(&modules);
+        assert_eq!(got.len(), 1, "only the entry module should be reachable");
+        assert!(module_declares_main_fn(got[0].0));
+    }
+
+    #[test]
+    fn reachable_modules_includes_transitive_use_targets() {
+        // `main` uses `util`, `util` uses `helper`; an unrelated `unused`
+        // module is excluded. Bundling must include the transitive `use`
+        // closure (main, util, helper) but drop `unused`.
+        let helper = module_named("helper", &[], vec![fn_decl("h")]);
+        let util = module_named("util", &["helper"], vec![fn_decl("u")]);
+        let unused = module_named("unused", &[], vec![fn_decl("x")]);
+        let main_m = module_named("main", &["util"], vec![fn_decl("main")]);
+        let p = std::path::Path::new("x.bock");
+        let modules = [(&helper, p), (&util, p), (&unused, p), (&main_m, p)];
+        let got = reachable_modules(&modules);
+        let paths: Vec<String> = got
+            .iter()
+            .map(|(m, _)| {
+                let NodeKind::Module { path: Some(pp), .. } = &m.kind else {
+                    return String::new();
+                };
+                pp.segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })
+            .collect();
+        assert!(paths.contains(&"main".to_string()));
+        assert!(paths.contains(&"util".to_string()));
+        assert!(paths.contains(&"helper".to_string()));
+        assert!(!paths.contains(&"unused".to_string()), "got: {paths:?}");
+        // Dependency order is preserved (helper before util before main).
+        let pos = |name: &str| paths.iter().position(|x| x == name).unwrap();
+        assert!(pos("helper") < pos("util"));
+        assert!(pos("util") < pos("main"));
     }
 
     #[test]

@@ -41,6 +41,15 @@ points) is generated at the `build/<target>/` root per the target's
 conventions. By default `src/main.bock` is the entry point if present.
 See §20.6.1.
 
+> **v1 note.** For runnable builds the v1 compiler currently **bundles**
+> every module the entry program reaches through a `use` (in dependency
+> order, including imported `core.*` stdlib modules) into the single
+> entry file `build/<target>/main.<ext>`, dropping the import statements,
+> rather than emitting the per-module tree above. A program that imports
+> nothing emits only its own entry module. This is how a cross-module
+> program runs under the single-file run model; the per-module layout is
+> an open question for a future library-build mode (§20.6.1 note).
+
 ### Output Modes
 
 `bock build` produces output in one of three **modes**, selected by

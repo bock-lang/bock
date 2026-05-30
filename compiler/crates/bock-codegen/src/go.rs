@@ -17,7 +17,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use bock_air::{AIRNode, AirInterpolationPart, EnumVariantPayload, NodeKind, ResultVariant};
-use bock_ast::{AssignOp, BinOp, ImportItems, Literal, TypeExpr, UnaryOp, Visibility};
+use bock_ast::{AssignOp, BinOp, Literal, TypeExpr, UnaryOp, Visibility};
 use bock_types::AIRModule;
 
 use crate::error::CodegenError;
@@ -288,12 +288,34 @@ impl CodeGenerator for GoGenerator {
         })
     }
 
+    /// Bundle every module (stdlib + user, dependency-ordered) into one entry
+    /// file. Go has no single top-level scope across files, so a cross-module
+    /// `use` (DV13) cannot be a real `import "core/compare"` for a lone
+    /// `go run main.go`. Instead all module bodies are concatenated into one
+    /// `package main` file with a **single merged, deduped `import (...)` block**
+    /// (the union of each module's `fmt`/`sync`/`time` needs) and each runtime
+    /// prelude (Optional / concurrency) emitted **at most once**. `ImportDecl`s
+    /// are dropped. Go uses a native `func main`, so no entry invocation is
+    /// appended.
+    ///
+    /// Diverges from spec §20.6.1 (one output file per module); see the
+    /// `OPEN: §20.6.1` note in the bundling PR.
     fn generate_project(
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
-        // Pre-scan async fns across all modules so cross-module calls
-        // between async functions route through the Async-suffix wrappers.
+        // Bundle only modules the entry program actually `use`s (plus the entry
+        // itself) — never the prelude-only stdlib (see `reachable_modules`).
+        let reachable = crate::generator::reachable_modules(modules);
+        let modules = reachable.as_slice();
+        let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
+            return Ok(GeneratedCode { files: vec![] });
+        };
+
+        // Pre-scan async fns across ALL modules so cross-module calls between
+        // async functions route through the Async-suffix wrappers, then seed a
+        // SINGLE shared ctx. Emitting every module through one ctx makes the
+        // runtime-once flags and the `needs_*` import flags dedup/merge for free.
         let mut global_async_fns: HashSet<String> = HashSet::new();
         for (module, _) in modules {
             if let NodeKind::Module { items, .. } = &module.kind {
@@ -310,77 +332,66 @@ impl CodeGenerator for GoGenerator {
             }
         }
 
-        let main_is_async = modules
-            .iter()
-            .any(|(m, _)| crate::generator::module_main_fn_is_async(m));
-        let invocation = self.entry_invocation(main_is_async);
-        let mut all_files: Vec<OutputFile> = Vec::with_capacity(modules.len());
-
-        for (module, source_path) in modules {
-            let mut ctx = GoEmitCtx::new();
-            ctx.async_fns = global_async_fns.clone();
+        let mut ctx = GoEmitCtx::new();
+        ctx.async_fns = global_async_fns;
+        // Pre-scan method / Optional-return metadata across every module so a
+        // match whose scrutinee calls a function/method defined in another
+        // bundled module still type-asserts its payload correctly.
+        for (module, _) in modules {
             ctx.collect_methods(module);
             ctx.collect_optional_returns(module);
             ctx.collect_method_optional_returns(module);
+        }
+        for (i, (module, _)) in modules.iter().enumerate() {
+            if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
+                ctx.buf.push('\n');
+            }
             ctx.emit_node(module)?;
-            let (body, needs_fmt, needs_sync, needs_time) = ctx.into_parts();
+        }
+        let (body, needs_fmt, needs_sync, needs_time) = ctx.into_parts();
 
-            // Each generated .go file declares `package main` and its own
-            // imports. Per-file preambles avoid one-large-file collisions
-            // when sources mirror project structure.
-            let mut content = "package main\n".to_string();
-            let mut imports = Vec::new();
-            if needs_fmt {
-                imports.push("\"fmt\"");
-            }
-            if needs_sync {
-                imports.push("\"sync\"");
-            }
-            if needs_time {
-                imports.push("\"time\"");
-            }
-            if !imports.is_empty() {
-                if imports.len() == 1 {
-                    content.push_str(&format!("\nimport {}\n", imports[0]));
-                } else {
-                    content.push_str("\nimport (\n");
-                    for imp in &imports {
-                        content.push_str(&format!("\t{imp}\n"));
-                    }
-                    content.push_str(")\n");
+        // One `package main`, one merged/deduped `import (...)` block.
+        let mut content = "package main\n".to_string();
+        let mut imports = Vec::new();
+        if needs_fmt {
+            imports.push("\"fmt\"");
+        }
+        if needs_sync {
+            imports.push("\"sync\"");
+        }
+        if needs_time {
+            imports.push("\"time\"");
+        }
+        if !imports.is_empty() {
+            if imports.len() == 1 {
+                content.push_str(&format!("\nimport {}\n", imports[0]));
+            } else {
+                content.push_str("\nimport (\n");
+                for imp in &imports {
+                    content.push_str(&format!("\t{imp}\n"));
                 }
+                content.push_str(")\n");
             }
-            content.push('\n');
-            content.push_str(&body);
+        }
+        content.push('\n');
+        content.push_str(&body);
 
-            if let (Some(invoc), true) = (
-                invocation.as_ref(),
-                crate::generator::module_declares_main_fn(module),
-            ) {
-                if !content.is_empty() && !content.ends_with('\n') {
-                    content.push('\n');
-                }
-                content.push_str(invoc);
-            }
-
-            let derived = crate::generator::derive_output_path(source_path, self.target());
-            let derived_name = derived
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let source_map = SourceMap {
-                generated_file: derived_name,
-                ..Default::default()
-            };
-            all_files.push(OutputFile {
-                path: derived,
+        let derived_name = out_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let source_map = SourceMap {
+            generated_file: derived_name,
+            ..Default::default()
+        };
+        Ok(GeneratedCode {
+            files: vec![OutputFile {
+                path: out_path,
                 content,
                 source_map: Some(source_map),
-            });
-        }
-
-        Ok(GeneratedCode { files: all_files })
+            }],
+        })
     }
 }
 
@@ -465,6 +476,14 @@ struct GoEmitCtx {
     /// type, the same way [`Self::var_optional_elem`] handles direct
     /// `Optional[T]` bindings. Scoped per function body and restored on exit.
     var_list_elem: HashMap<String, String>,
+    /// Set once the concurrency runtime prelude has been emitted into `buf`, so
+    /// a single-file **bundle** of several modules (cross-module `use`, DV13)
+    /// emits it at most once (a duplicate `type __bockChannel` would not
+    /// compile). A lone-module build sets it on first use exactly as before.
+    concurrency_runtime_emitted: bool,
+    /// Set once the Optional runtime prelude has been emitted into `buf`;
+    /// deduped across a bundle exactly as [`Self::concurrency_runtime_emitted`].
+    optional_runtime_emitted: bool,
 }
 
 impl GoEmitCtx {
@@ -491,6 +510,8 @@ impl GoEmitCtx {
             var_optional_elem: HashMap::new(),
             method_optional_ret_elem: HashMap::new(),
             var_list_elem: HashMap::new(),
+            concurrency_runtime_emitted: false,
+            optional_runtime_emitted: false,
         }
     }
 
@@ -1131,20 +1152,23 @@ impl GoEmitCtx {
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         match &node.kind {
-            NodeKind::Module { imports, items, .. } => {
-                if go_module_uses_concurrency(items) {
+            NodeKind::Module { items, .. } => {
+                // Cross-module `use` (DV13) → single-file bundling: every
+                // module's items are concatenated into the one entry file (one
+                // `package main`, one merged `import (...)` block built by the
+                // caller) and `ImportDecl`s are dropped. Each runtime prelude is
+                // emitted at most once across the bundle, gated on a ctx flag
+                // (a duplicate `type __bockChannel`/`__bockOption` would not
+                // compile).
+                if !self.concurrency_runtime_emitted && go_module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_GO);
                     self.buf.push('\n');
+                    self.concurrency_runtime_emitted = true;
                 }
-                if go_module_uses_optional(items) {
+                if !self.optional_runtime_emitted && go_module_uses_optional(items) {
                     self.buf.push_str(OPTIONAL_RUNTIME_GO);
                     self.buf.push('\n');
-                }
-                for imp in imports {
-                    self.emit_node(imp)?;
-                }
-                if !imports.is_empty() && !items.is_empty() {
-                    self.buf.push('\n');
+                    self.optional_runtime_emitted = true;
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -1154,26 +1178,11 @@ impl GoEmitCtx {
                 }
                 Ok(())
             }
-            NodeKind::ImportDecl { path, items } => {
-                let path_str = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                match items {
-                    ImportItems::Module => {
-                        self.writeln(&format!("import \"{path_str}\""));
-                    }
-                    ImportItems::Named(names) => {
-                        // Go imports are module-level; named imports are expressed as qualified access.
-                        let _ = names;
-                        self.writeln(&format!("import \"{path_str}\""));
-                    }
-                    ImportItems::Glob => {
-                        self.writeln(&format!("import . \"{path_str}\""));
-                    }
-                }
+            NodeKind::ImportDecl { .. } => {
+                // Resolved by bundling — the imported module's items are
+                // concatenated into this same `package main` file — so the
+                // import is a no-op (DV13). A real `import "core/compare"` would
+                // not resolve: there is no such package for a `go run main.go`.
                 Ok(())
             }
             NodeKind::FnDecl {

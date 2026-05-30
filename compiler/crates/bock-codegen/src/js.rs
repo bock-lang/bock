@@ -13,7 +13,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use bock_air::{AIRNode, AirInterpolationPart, EnumVariantPayload, NodeKind, ResultVariant};
-use bock_ast::{AssignOp, BinOp, ImportItems, Literal, UnaryOp, Visibility};
+use bock_ast::{AssignOp, BinOp, Literal, UnaryOp, Visibility};
 use bock_errors::Span;
 use bock_types::AIRModule;
 
@@ -100,6 +100,60 @@ impl CodeGenerator for JsGenerator {
             Some("main();\n".to_string())
         }
     }
+
+    /// Bundle every module (stdlib + user, dependency-ordered) into one entry
+    /// file. JS has no module wrapper — top-level declarations live in one
+    /// scope — so concatenating each module's declarations is valid and makes a
+    /// cross-module `use` (DV13) resolve against the same file. `ImportDecl`s
+    /// are dropped during emission; the concurrency runtime is emitted once.
+    ///
+    /// This diverges from spec §20.6.1 (one output file per module). See the
+    /// `OPEN: §20.6.1` note in the bundling PR.
+    fn generate_project(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+    ) -> Result<GeneratedCode, CodegenError> {
+        // Bundle only modules the entry program actually `use`s (plus the entry
+        // itself) — never the prelude-only stdlib (see `reachable_modules`).
+        let reachable = crate::generator::reachable_modules(modules);
+        let modules = reachable.as_slice();
+        let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
+            return Ok(GeneratedCode { files: vec![] });
+        };
+
+        let mut ctx = EmitCtx::new();
+        for (i, (module, _)) in modules.iter().enumerate() {
+            if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
+                ctx.buf.push('\n');
+            }
+            ctx.emit_node(module)?;
+        }
+        let (mut content, mappings) = ctx.finish();
+
+        let main_is_async = modules
+            .iter()
+            .any(|(m, _)| crate::generator::module_main_fn_is_async(m));
+        let invocation = self.entry_invocation(main_is_async);
+        crate::generator::append_entry_invocation(&mut content, modules, invocation.as_ref());
+
+        let derived_name = out_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let source_map = SourceMap {
+            generated_file: derived_name,
+            mappings,
+            ..Default::default()
+        };
+        Ok(GeneratedCode {
+            files: vec![OutputFile {
+                path: out_path,
+                content,
+                source_map: Some(source_map),
+            }],
+        })
+    }
 }
 
 // ─── Emission context ────────────────────────────────────────────────────────
@@ -146,6 +200,11 @@ struct EmitCtx {
     /// in every arm (the prior behavior) double-evaluated it — a real bug for a
     /// scrutinee with side effects, e.g. a stateful iterator's `match next(it)`.
     match_temp_counter: usize,
+    /// Set once the concurrency runtime prelude has been emitted, so a
+    /// single-file **bundle** of several modules (cross-module `use`, DV13)
+    /// emits the runtime at most once. A lone-module build sets it on first use
+    /// exactly as before.
+    concurrency_runtime_emitted: bool,
 }
 
 impl EmitCtx {
@@ -167,6 +226,7 @@ impl EmitCtx {
             switch_label_depth: 0,
             loop_label_counter: 0,
             match_temp_counter: 0,
+            concurrency_runtime_emitted: false,
         }
     }
 
@@ -585,16 +645,16 @@ impl EmitCtx {
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         self.mark_span(node.span);
         match &node.kind {
-            NodeKind::Module { imports, items, .. } => {
-                if self.module_uses_concurrency(items) {
+            NodeKind::Module { items, .. } => {
+                // Cross-module `use` (DV13) is realized by single-file bundling:
+                // every module body is concatenated into the one entry file and
+                // `ImportDecl`s are dropped (the imported symbols are present in
+                // the same file). The concurrency runtime is emitted at most once
+                // across the bundle, gated on a ctx flag.
+                if !self.concurrency_runtime_emitted && self.module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_JS);
                     self.buf.push('\n');
-                }
-                for imp in imports {
-                    self.emit_node(imp)?;
-                }
-                if !imports.is_empty() && !items.is_empty() {
-                    self.buf.push('\n');
+                    self.concurrency_runtime_emitted = true;
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -604,30 +664,10 @@ impl EmitCtx {
                 }
                 Ok(())
             }
-            NodeKind::ImportDecl { path, items } => {
-                // JS doesn't have native Bock imports; emit a comment.
-                let path_str = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(".");
-                match items {
-                    ImportItems::Module => {
-                        self.writeln(&format!("// import {path_str}"));
-                    }
-                    ImportItems::Named(names) => {
-                        let names_str = names
-                            .iter()
-                            .map(|n| n.name.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        self.writeln(&format!("// import {{ {names_str} }} from {path_str}"));
-                    }
-                    ImportItems::Glob => {
-                        self.writeln(&format!("// import * from {path_str}"));
-                    }
-                }
+            NodeKind::ImportDecl { .. } => {
+                // Bock `use` is resolved by bundling — every imported module's
+                // top-level declarations are concatenated into this same file —
+                // so the import statement itself is a no-op (DV13).
                 Ok(())
             }
             NodeKind::FnDecl {

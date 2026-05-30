@@ -1,8 +1,12 @@
 //! Cross-target compile verification for the embedded `core.error` module.
 //!
 //! For each v1 target, `bock build --source-only` over a `core.error`-importing
-//! project must succeed and emit a `core.error` output file alongside the user
-//! module — proving the embedded stdlib flows through codegen on every target.
+//! project must succeed and **bundle** `core.error`'s declarations into the one
+//! entry file — proving the embedded stdlib flows through codegen on every
+//! target. Under single-file bundling (DV13; see spec §20.6.1 divergence), the
+//! imported module is concatenated into `main.<ext>` rather than emitted as a
+//! separate `core/error/error.<ext>` file, so this asserts the bundled entry
+//! file carries the module's emitted symbol (the `SimpleError` record).
 //!
 //! This is *compile* (source-emission) verification only. Full conformance
 //! *execution* across targets (running the emitted code through each target's
@@ -55,26 +59,9 @@ fn make_project(tag: &str) -> PathBuf {
     root
 }
 
-/// Recursively check whether any file under `dir` ends with `core/error/error.<ext>`.
-fn emitted_core_error(dir: &Path, ext: &str) -> bool {
-    let suffix = format!("core/error/error.{ext}");
-    fn walk(dir: &Path, suffix: &str) -> bool {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return false;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if walk(&path, suffix) {
-                    return true;
-                }
-            } else if path.to_string_lossy().replace('\\', "/").ends_with(suffix) {
-                return true;
-            }
-        }
-        false
-    }
-    walk(dir, &suffix)
+/// Read the bundled entry file `build/<target>/main.<ext>`, if present.
+fn read_entry_bundle(build_dir: &Path, target: &str, ext: &str) -> Option<String> {
+    fs::read_to_string(build_dir.join(target).join(format!("main.{ext}"))).ok()
 }
 
 #[test]
@@ -97,11 +84,16 @@ fn core_error_compiles_on_every_target() {
             String::from_utf8_lossy(&output.stderr),
         );
 
+        // Under bundling the imported `core.error` is concatenated into the
+        // entry file rather than emitted separately, so the `SimpleError`
+        // record (core.error's sole record) must appear in `main.<ext>`.
         let build_dir = root.join("build");
+        let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
+            panic!("target {target}: no entry bundle build/{target}/main.{ext}")
+        });
         assert!(
-            emitted_core_error(&build_dir, ext),
-            "target {target}: no core.error output (core/error/error.{ext}) under {}",
-            build_dir.display(),
+            bundle.contains("SimpleError"),
+            "target {target}: core.error not bundled into main.{ext} (no `SimpleError`)",
         );
     }
 }

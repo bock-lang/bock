@@ -1,0 +1,48 @@
+// TEST: exec_cross_module_use
+// EXPECT: output "result=21"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression fixture for the codegen-completeness milestone (DV13): a user
+// `module main` that `use`s symbols from a *second* user module, compiling and
+// running on all five targets. This is a MULTI-FILE fixture — the `// FILE:`
+// marker below declares the imported module `mathutil`; the harness writes it
+// into the temp project alongside this entry module so the build's recursive
+// `.bock` discovery compiles both, exercising the real cross-module `use` path.
+//
+// Before the fix, the five backends emitted a non-functional import for the
+// `use` (js/ts a `// import` comment, python `from mathutil import ...`, rust
+// `use mathutil::{...}`, go `import "mathutil"`) while each module was emitted
+// as a *separate* file. The conformance harness and the build toolchain both
+// compile + run a single `main.<ext>`, so the imported symbols were undefined
+// / unresolved at run time on every target.
+//
+// The fix bundles every module the entry program actually `use`s (here:
+// `mathutil` + `main`, in dependency order) into the one entry file and drops
+// the `ImportDecl`s, so `add_one` and `triple` resolve against declarations
+// concatenated into the same file. Modules reachable only via the implicit
+// §18.2 prelude (the embedded `core.*` stdlib) are NOT bundled, so a program
+// that uses no core symbol — like this one — emits exactly its own modules.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale). `mathutil`'s functions ARE `public`: cross-module
+// `use` only resolves exported items.
+module main
+
+use mathutil.{add_one, triple}
+
+fn main() -> Void {
+  let a: Int = add_one(6)
+  let b: Int = triple(a)
+  println("result=${b}")
+}
+
+// FILE: mathutil.bock
+module mathutil
+
+public fn add_one(n: Int) -> Int {
+  n + 1
+}
+
+public fn triple(n: Int) -> Int {
+  n * 3
+}

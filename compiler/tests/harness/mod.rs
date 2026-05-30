@@ -41,8 +41,17 @@ pub struct TestCase {
     pub name: String,
     /// All `// EXPECT: …` directives, in order.
     pub expectations: Vec<Expectation>,
-    /// The Bock source text (everything after the directives).
+    /// The Bock source text for the **entry** module (everything after the
+    /// directives, up to the first `// FILE:` marker).
     pub source: String,
+    /// Auxiliary source files for a **multi-file** fixture, as
+    /// `(relative-path, content)` pairs. A fixture declares an extra module
+    /// with a `// FILE: <relpath>` marker line; everything until the next
+    /// `// FILE:` marker (or EOF) is that file's content. Empty for ordinary
+    /// single-file fixtures. The harness writes each pair into the temp project
+    /// alongside the entry `main.bock`, so the build's recursive `.bock`
+    /// discovery picks them up — exercising the real cross-module `use` path.
+    pub aux_files: Vec<(PathBuf, String)>,
 }
 
 /// Error produced when a `.bock` file cannot be loaded or its directives are invalid.
@@ -117,14 +126,53 @@ pub fn parse_test_file(path: &Path, content: &str) -> Result<TestCase, LoadError
 
     let name = test_name.ok_or_else(|| LoadError::MissingTestDirective(path.to_path_buf()))?;
 
-    let source = content[source_start.min(content.len())..].to_string();
+    let body = &content[source_start.min(content.len())..];
+    let (source, aux_files) = split_file_sections(body);
 
     Ok(TestCase {
         path: path.to_path_buf(),
         name,
         expectations,
         source,
+        aux_files,
     })
+}
+
+/// Split a fixture body into the entry-module source and any auxiliary files.
+///
+/// A `// FILE: <relpath>` marker line begins an auxiliary source file; its
+/// content runs until the next `// FILE:` marker or end of input. Everything
+/// before the first marker is the entry module's source. This lets one fixture
+/// describe a multi-file project (e.g. a `main` module that `use`s a sibling
+/// user module) so the cross-module `use` path can be exercised end to end.
+fn split_file_sections(body: &str) -> (String, Vec<(PathBuf, String)>) {
+    let mut entry = String::new();
+    let mut aux: Vec<(PathBuf, String)> = Vec::new();
+    let mut current: Option<(PathBuf, String)> = None;
+
+    for line in body.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("// FILE:") {
+            if let Some(pair) = current.take() {
+                aux.push(pair);
+            }
+            current = Some((PathBuf::from(rest.trim()), String::new()));
+            continue;
+        }
+        match current.as_mut() {
+            Some((_, buf)) => {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+            None => {
+                entry.push_str(line);
+                entry.push('\n');
+            }
+        }
+    }
+    if let Some(pair) = current.take() {
+        aux.push(pair);
+    }
+    (entry, aux)
 }
 
 /// Discover all `.bock` test files under `dir` (recursively).
@@ -371,5 +419,31 @@ mod tests {
         let tc = parse_test_file(&fake_path(), src).unwrap();
         assert_eq!(tc.name, "spaced");
         assert_eq!(tc.expectations, vec![Expectation::NoErrors]);
+        assert!(tc.aux_files.is_empty());
+    }
+
+    #[test]
+    fn single_file_fixture_has_no_aux_files() {
+        let src = "// TEST: solo\nmodule main\nfn main() {}\n";
+        let tc = parse_test_file(&fake_path(), src).unwrap();
+        assert!(tc.source.contains("module main"));
+        assert!(tc.aux_files.is_empty());
+    }
+
+    #[test]
+    fn file_marker_splits_multi_file_fixture() {
+        let src = "// TEST: multi_file\n// EXPECT: output \"ok\"\n\
+            module main\nuse util.{f}\n\
+            // FILE: util.bock\nmodule util\npublic fn f() {}\n";
+        let tc = parse_test_file(&fake_path(), src).unwrap();
+        // Entry source is everything before the first `// FILE:` marker.
+        assert!(tc.source.contains("module main"));
+        assert!(tc.source.contains("use util.{f}"));
+        assert!(!tc.source.contains("module util"));
+        // The aux file carries the marker's path and the section's content.
+        assert_eq!(tc.aux_files.len(), 1);
+        assert_eq!(tc.aux_files[0].0, PathBuf::from("util.bock"));
+        assert!(tc.aux_files[0].1.contains("module util"));
+        assert!(tc.aux_files[0].1.contains("public fn f()"));
     }
 }

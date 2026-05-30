@@ -129,6 +129,17 @@ fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
     let main_path = project_dir.join("main.bock");
     std::fs::write(&main_path, &case.source).expect("write fixture source");
 
+    // Multi-file fixtures: write each auxiliary module so `bock build`'s
+    // recursive `.bock` discovery compiles it alongside the entry module,
+    // exercising the real cross-module `use` path (DV13).
+    for (rel, content) in &case.aux_files {
+        let dest = project_dir.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).expect("create aux module dir");
+        }
+        std::fs::write(&dest, content).expect("write aux fixture source");
+    }
+
     let output = Command::new(bock_binary())
         .current_dir(project_dir)
         .args(["build", "-t", target, "--source-only"])

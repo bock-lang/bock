@@ -14,7 +14,7 @@ use std::fmt::Write;
 use std::path::PathBuf;
 
 use bock_air::{AIRNode, AirInterpolationPart, EnumVariantPayload, NodeKind, ResultVariant};
-use bock_ast::{AssignOp, BinOp, ImportItems, Literal, TypeExpr, UnaryOp, Visibility};
+use bock_ast::{AssignOp, BinOp, Literal, TypeExpr, UnaryOp, Visibility};
 use bock_types::AIRModule;
 
 use crate::error::CodegenError;
@@ -151,6 +151,60 @@ impl CodeGenerator for PyGenerator {
             Some("if __name__ == \"__main__\":\n    main()\n".to_string())
         }
     }
+
+    /// Bundle every module (stdlib + user, dependency-ordered) into one entry
+    /// file. Python module top-level defs share one namespace, so concatenating
+    /// each module's defs is valid and resolves cross-module `use` (DV13).
+    /// `ImportDecl`s are dropped; `import` preamble lines and runtime preludes
+    /// are emitted once. `finish` prepends the merged `import …` preamble after
+    /// all module bodies are emitted (so accumulated `needs_*` flags are seen).
+    ///
+    /// Diverges from spec §20.6.1 (one output file per module); see the
+    /// `OPEN: §20.6.1` note in the bundling PR.
+    fn generate_project(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+    ) -> Result<GeneratedCode, CodegenError> {
+        // Bundle only modules the entry program actually `use`s (plus the entry
+        // itself) — never the prelude-only stdlib (see `reachable_modules`).
+        let reachable = crate::generator::reachable_modules(modules);
+        let modules = reachable.as_slice();
+        let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
+            return Ok(GeneratedCode { files: vec![] });
+        };
+
+        let mut ctx = PyEmitCtx::new();
+        for (i, (module, _)) in modules.iter().enumerate() {
+            if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
+                ctx.buf.push('\n');
+            }
+            ctx.emit_node(module)?;
+        }
+        let mut content = ctx.finish();
+
+        let main_is_async = modules
+            .iter()
+            .any(|(m, _)| crate::generator::module_main_fn_is_async(m));
+        let invocation = self.entry_invocation(main_is_async);
+        crate::generator::append_entry_invocation(&mut content, modules, invocation.as_ref());
+
+        let derived_name = out_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let source_map = SourceMap {
+            generated_file: derived_name,
+            ..Default::default()
+        };
+        Ok(GeneratedCode {
+            files: vec![OutputFile {
+                path: out_path,
+                content,
+                source_map: Some(source_map),
+            }],
+        })
+    }
 }
 
 // ─── Emission context ────────────────────────────────────────────────────────
@@ -189,6 +243,14 @@ struct PyEmitCtx {
     /// methods as class members instead of leaving orphan module-level
     /// functions that never get bound to the handler instance.
     impls_by_target: HashMap<String, Vec<AIRNode>>,
+    /// Set once the Optional runtime prelude has been emitted, so a single-file
+    /// **bundle** of several modules (cross-module `use`, DV13) emits it at most
+    /// once (redefining the `_BockSome`/`_BockNone` helpers is wasteful and
+    /// risks shadowing surprises).
+    optional_runtime_emitted: bool,
+    /// Set once the concurrency runtime prelude has been emitted; deduped across
+    /// a bundle exactly as [`Self::optional_runtime_emitted`].
+    concurrency_runtime_emitted: bool,
 }
 
 impl PyEmitCtx {
@@ -207,6 +269,8 @@ impl PyEmitCtx {
             composite_effects: HashMap::new(),
             handling_counter: 0,
             impls_by_target: HashMap::new(),
+            optional_runtime_emitted: false,
+            concurrency_runtime_emitted: false,
         }
     }
 
@@ -548,20 +612,20 @@ impl PyEmitCtx {
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         match &node.kind {
-            NodeKind::Module { imports, items, .. } => {
-                if py_module_uses_optional(items) {
+            NodeKind::Module { items, .. } => {
+                // Cross-module `use` (DV13) → single-file bundling: every
+                // module's top-level declarations are concatenated into the one
+                // entry file and `ImportDecl`s are dropped. Each runtime prelude
+                // is emitted at most once across the bundle, gated on a ctx flag.
+                if !self.optional_runtime_emitted && py_module_uses_optional(items) {
                     self.buf.push_str(OPTIONAL_RUNTIME_PY);
                     self.buf.push('\n');
+                    self.optional_runtime_emitted = true;
                 }
-                if py_module_uses_concurrency(items) {
+                if !self.concurrency_runtime_emitted && py_module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_PY);
                     self.buf.push('\n');
-                }
-                for imp in imports {
-                    self.emit_node(imp)?;
-                }
-                if !imports.is_empty() && !items.is_empty() {
-                    self.buf.push('\n');
+                    self.concurrency_runtime_emitted = true;
                 }
                 // Pre-scan impl blocks so we can attach their methods to the
                 // target record/class body instead of leaving them as orphan
@@ -605,29 +669,12 @@ impl PyEmitCtx {
                 }
                 Ok(())
             }
-            NodeKind::ImportDecl { path, items } => {
-                let path_str = path
-                    .segments
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(".");
-                match items {
-                    ImportItems::Module => {
-                        self.writeln(&format!("import {path_str}"));
-                    }
-                    ImportItems::Named(names) => {
-                        let names_str = names
-                            .iter()
-                            .map(|n| to_snake_case(&n.name.name))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        self.writeln(&format!("from {path_str} import {names_str}"));
-                    }
-                    ImportItems::Glob => {
-                        self.writeln(&format!("from {path_str} import *"));
-                    }
-                }
+            NodeKind::ImportDecl { .. } => {
+                // Resolved by bundling — the imported module's declarations are
+                // concatenated into this same file — so the import is a no-op
+                // (DV13). A real `from core.compare import ...` would fail at
+                // run time: that module is not on `sys.path` for a lone
+                // `main.py`, which is exactly the defect bundling fixes.
                 Ok(())
             }
             NodeKind::FnDecl {
