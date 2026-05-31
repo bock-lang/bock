@@ -3110,21 +3110,32 @@ impl PyEmitCtx {
         match &pattern.kind {
             NodeKind::ConstructorPat { path, .. } => {
                 let leaf = path.segments.last().map_or("", |s| s.name.as_str());
-                let cls: &str = match leaf {
-                    "Some" => "_BockSome",
-                    "None" => "_BockNone",
+                let cls: String = match leaf {
+                    "Some" => "_BockSome".to_string(),
+                    "None" => "_BockNone".to_string(),
                     // Result `Ok`/`Err` test against the Result-runtime classes,
                     // mirroring `Some`/`None`.
-                    "Ok" => "_BockOk",
-                    "Err" => "_BockErr",
-                    // Prelude `Ordering` variants test against the Ordering-runtime
-                    // class so an expression-position match (`lambda __v:
-                    // isinstance(__v, _BockOrderingLess) …`) recognises the
-                    // singleton the bridge/construction produces.
-                    other => match crate::generator::ordering_variant(other) {
-                        Some(v) => ordering_class_py(v),
-                        None => other,
-                    },
+                    "Ok" => "_BockOk".to_string(),
+                    "Err" => "_BockErr".to_string(),
+                    other => {
+                        // Prelude `Ordering` variants test against the
+                        // Ordering-runtime class so an expression-position match
+                        // (`lambda __v: isinstance(__v, _BockOrderingLess) …`)
+                        // recognises the singleton the bridge/construction
+                        // produces.
+                        if let Some(v) = crate::generator::ordering_variant(other) {
+                            ordering_class_py(v).to_string()
+                        } else if let Some(info) = self.user_variant_for_path(path) {
+                            // A user-enum variant tests against its dataclass
+                            // `{enum}_{variant}` — the same class the statement
+                            // `emit_pattern` and the construction side produce.
+                            // Without this the test used the bare variant leaf
+                            // (`isinstance(__v, Red)`), an undefined name.
+                            format!("{}_{other}", info.enum_name)
+                        } else {
+                            other.to_string()
+                        }
+                    }
                 };
                 let _ = write!(self.buf, "isinstance(__v, {cls})");
             }
@@ -4166,6 +4177,111 @@ mod tests {
         assert!(out.contains("match shape:"), "got: {out}");
         assert!(out.contains("case Shape_Circle(_0=r):"), "got: {out}");
         assert!(out.contains("case _:"), "got: {out}");
+    }
+
+    /// An EXPRESSION-position user-enum `match` (a `match` consumed as a value,
+    /// here bound into a `let`) lowers to a `(lambda __v: …)(scrutinee)` whose
+    /// per-arm test is `isinstance(__v, <cls>)`. The variant class must be
+    /// resolved through the registry to its `{enum}_{variant}` dataclass
+    /// (`isinstance(__v, Light_Red)`), NOT the bare variant leaf name
+    /// (`isinstance(__v, Red)`, an undefined name → `NameError`). Mirrors the
+    /// statement-position `emit_pattern` resolution (Q-match-exprpos P4).
+    #[test]
+    fn expr_position_user_enum_match_test_resolves_variant_class() {
+        let enum_decl = node(
+            1,
+            NodeKind::EnumDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Light"),
+                generic_params: vec![],
+                variants: vec![
+                    node(
+                        2,
+                        NodeKind::EnumVariant {
+                            name: ident("Red"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                    node(
+                        3,
+                        NodeKind::EnumVariant {
+                            name: ident("Green"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                ],
+            },
+        );
+        // let n: Int = match l { Red => 1; _ => 0 }   (a value-position match)
+        let red_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Red"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(22, vec![], Some(int_lit(23, "1")))),
+            },
+        );
+        let default_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(31, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(block(32, vec![], Some(int_lit(33, "0")))),
+            },
+        );
+        let m = node(
+            40,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(41, "l")),
+                arms: vec![red_arm, default_arm],
+            },
+        );
+        let let_n = node(
+            50,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(51, "n")),
+                ty: Some(Box::new(node(
+                    52,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                ))),
+                value: Box::new(m),
+            },
+        );
+        let f = node(
+            5,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("rank"),
+                generic_params: vec![],
+                params: vec![param_node(6, "l")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(7, vec![let_n], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![enum_decl, f]));
+        assert!(
+            out.contains("isinstance(__v, Light_Red)"),
+            "expr-position variant test must resolve to the dataclass Light_Red, got: {out}"
+        );
+        assert!(
+            !out.contains("isinstance(__v, Red)"),
+            "must not test against the bare variant leaf name (undefined), got: {out}"
+        );
     }
 
     #[test]

@@ -337,19 +337,35 @@ struct TsEmitCtx {
     /// would otherwise have no such method. Pre-scanned across the bundle.
     trait_decls: crate::generator::TraitDeclRegistry,
     /// When `Some(target)`, a `Self` type (`TypeSelf`) renders as `target`
-    /// rather than the default `this`. Set while emitting a *synthesized trait
-    /// default method* onto a concrete target: the default method's source uses
-    /// `Self` (e.g. `other: Self`), but it is emitted as a free prototype
-    /// function (`Target.prototype.m = function(...)`) where `this` is not a
-    /// legal type. Substituting the concrete target name keeps the signature
-    /// well-typed. Cleared (None) everywhere else, so trait-interface methods
-    /// keep rendering `Self` as `this`.
+    /// rather than the default `this`. Set while emitting ANY `impl` method onto
+    /// a concrete target — a synthesized trait default (`other: Self`) AND the
+    /// impl's own inherent methods (`fn combine(self, ...) -> Self`) alike. Each
+    /// emits as a free prototype function (`Target.prototype.m = function(...)`)
+    /// where `this` is not a legal type annotation (`tsc` rejects it with
+    /// TS2526), so the concrete target name must be substituted in both the
+    /// prototype function and the matching merged-interface signature. Cleared
+    /// (None) everywhere else, so trait-*interface* methods keep rendering `Self`
+    /// as `this` (valid inside an interface member).
     trait_self_subst: Option<String>,
     /// Names of `public` (exported) top-level types. The declaration-merging
     /// `interface Target { ... }` an `impl` emits must be `export`ed exactly
     /// when the `Target` class is — TS requires all declarations in a merged
     /// declaration to agree on export-ness. Pre-scanned across the bundle.
     exported_types: std::collections::HashSet<String>,
+    /// The TS type a value-position expression is being assigned *into* (the
+    /// declared type of a `let x: T = <value>`), when known. Set around the
+    /// `LetBinding` value emit. An expression-position `match` lowers to an IIFE
+    /// (`(() => { switch (s) { … } })()`); when the value is consumed into a
+    /// typed binding this annotates the IIFE arrow's return type (`(() : T =>
+    /// {…})()`) and — crucially — signals that a value-`switch` over a bare
+    /// identifier scrutinee must be hoisted into a temp (`const __matchN = s;
+    /// switch (__matchN) …`). Without the hoist, `switch (s)` narrows `s` to the
+    /// case's literal type inside each arm, so an arm body re-referencing `s`
+    /// (`s === <other-literal>`) trips TS2367 ("no overlap"). Hoisting means the
+    /// switch narrows the temp while arm bodies still see the original (un-
+    /// narrowed) `s`. `None` outside a typed value-binding context; restored
+    /// after the value so it never leaks to a sibling/outer expression.
+    current_expected_type: Option<String>,
 }
 
 impl TsEmitCtx {
@@ -381,6 +397,7 @@ impl TsEmitCtx {
             trait_decls: crate::generator::TraitDeclRegistry::new(),
             trait_self_subst: None,
             exported_types: std::collections::HashSet::new(),
+            current_expected_type: None,
         }
     }
 
@@ -1750,9 +1767,13 @@ impl TsEmitCtx {
                     })
                     .unwrap_or_default();
                 // Each entry carries whether it is a *synthesized default*
-                // method (`true`): such methods' source uses `Self`, which must
-                // render as the concrete target (`trait_self_subst`) rather than
-                // `this` since they emit as free prototype functions.
+                // method (`true`). The `Self` type renders as the concrete
+                // target (`trait_self_subst`) rather than `this` for ALL impl
+                // methods — synthesized trait defaults AND the impl's own
+                // inherent methods alike — since each emits as a free prototype
+                // function (`Target.prototype.m = function(...): Self`) where
+                // `this` is not a valid type annotation (TS2526). The boolean is
+                // still threaded for clarity / future per-kind handling.
                 let all_methods: Vec<(&AIRNode, bool)> = methods
                     .iter()
                     .map(|m| (m, false))
@@ -1769,7 +1790,7 @@ impl TsEmitCtx {
                 // as the impl target, which also removes the implicit-`any`
                 // error inside each method body.
                 let mut iface_sigs: Vec<String> = Vec::new();
-                for (method, is_default) in &all_methods {
+                for (method, _is_default) in &all_methods {
                     if let NodeKind::FnDecl {
                         is_async,
                         name,
@@ -1780,10 +1801,14 @@ impl TsEmitCtx {
                         ..
                     } = &method.kind
                     {
+                        // `Self` → the concrete target for every impl method (see
+                        // `all_methods`). The merged-interface signature MUST
+                        // match the prototype function's signature exactly, so the
+                        // same substitution is applied in both loops; a mismatch
+                        // (e.g. `this` here, `Target` there) is a declaration-merge
+                        // error.
                         let prev_subst = self.trait_self_subst.take();
-                        if *is_default {
-                            self.trait_self_subst = Some(target_name.clone());
-                        }
+                        self.trait_self_subst = Some(target_name.clone());
                         let generics = self.generic_params_to_ts(generic_params);
                         let mut all_params = self.collect_impl_typed_params(params, &target_name);
                         if let Some(ep) = self.effects_param(effect_clause) {
@@ -1839,7 +1864,7 @@ impl TsEmitCtx {
                     self.writeln("}");
                     self.writeln(&format!("// impl {target_name}"));
                 }
-                for (method, is_default) in &all_methods {
+                for (method, _is_default) in &all_methods {
                     if let NodeKind::FnDecl {
                         is_async,
                         name,
@@ -1851,13 +1876,15 @@ impl TsEmitCtx {
                         ..
                     } = &method.kind
                     {
-                        // A synthesized default method's `Self` types render as
-                        // the concrete target (it emits as a free prototype
-                        // function, where `this` is not a valid type).
+                        // Every impl method emits as a free prototype function
+                        // (`Target.prototype.m = function(...)`), where `this` is
+                        // not a valid type. So a `Self` type — whether in a
+                        // synthesized trait default (`other: Self`) or the impl's
+                        // own inherent method (`fn combine(self, ...) -> Self`) —
+                        // must render as the concrete target. This matches the
+                        // merged-interface signature emitted above.
                         let prev_subst = self.trait_self_subst.take();
-                        if *is_default {
-                            self.trait_self_subst = Some(target_name.clone());
-                        }
+                        self.trait_self_subst = Some(target_name.clone());
                         let async_kw = if *is_async { "async " } else { "" };
                         // The prototype assignment lives outside the class scope,
                         // so the function itself must re-declare the target's
@@ -2431,13 +2458,19 @@ impl TsEmitCtx {
             } => {
                 let kw = if *is_mut { "let" } else { "const" };
                 let binding = self.pattern_to_ts_destructure(pattern);
-                let ty_str = ty
-                    .as_ref()
-                    .map(|t| format!(": {}", self.type_to_ts(t)))
-                    .unwrap_or_default();
+                let ty_ts = ty.as_ref().map(|t| self.type_to_ts(t));
+                let ty_str = ty_ts.as_ref().map(|t| format!(": {t}")).unwrap_or_default();
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}{kw} {binding}{ty_str} = ");
+                // Record the binding's declared type as the expected type for the
+                // value, so a value-position `match`/`if` IIFE annotates its arrow
+                // return and hoists a bare-identifier scrutinee (avoids the TS2367
+                // narrowing — see `current_expected_type`). Restored after so it
+                // never leaks to a nested/sibling expression.
+                let prev_expected = self.current_expected_type.take();
+                self.current_expected_type = ty_ts;
                 self.emit_expr(value)?;
+                self.current_expected_type = prev_expected;
                 self.buf.push_str(";\n");
                 Ok(())
             }
@@ -2574,7 +2607,7 @@ impl TsEmitCtx {
                 self.writeln("}");
                 Ok(())
             }
-            NodeKind::Match { scrutinee, arms } => self.emit_match(scrutinee, arms),
+            NodeKind::Match { scrutinee, arms } => self.emit_match(scrutinee, arms, false),
             NodeKind::Block { stmts, tail } => {
                 self.writeln("{");
                 self.indent += 1;
@@ -3109,13 +3142,28 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => {
-                // IIFE
-                self.buf.push_str("(() => {\n");
+                // Expression-position match → IIFE. When the value is consumed
+                // into a typed binding (`let x: T = match …`), annotate the
+                // arrow's return type (`(() : T => {…})()`) so a `T` distinct
+                // from the enclosing function's inferred return is respected, and
+                // force-hoist a bare-identifier scrutinee so `switch (s)` does not
+                // narrow `s` to the case literal inside arm bodies (TS2367). The
+                // expected type is taken here so it scopes to this IIFE only and
+                // does not leak into the (separately typed) arm-body expressions.
+                let expected = self.current_expected_type.take();
+                let arrow_ret = expected
+                    .as_deref()
+                    .map(|t| format!(" : {t}"))
+                    .unwrap_or_default();
+                let force_hoist = expected.is_some();
+                let _ = write!(self.buf, "((){arrow_ret} => {{");
+                self.buf.push('\n');
                 self.indent += 1;
-                self.emit_match(scrutinee, arms)?;
+                self.emit_match(scrutinee, arms, force_hoist)?;
                 self.indent -= 1;
                 self.write_indent();
                 self.buf.push_str("})()");
+                self.current_expected_type = expected;
                 Ok(())
             }
             // Ownership: erase
@@ -3178,12 +3226,25 @@ impl TsEmitCtx {
 
     // ── Match → switch ──────────────────────────────────────────────────────
 
-    fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
+    /// Lower a `match`. `force_hoist` requests that even a bare-identifier
+    /// scrutinee be hoisted into a single `const __matchN = …;` temp before the
+    /// `switch` — set for an expression-position match consumed into a typed
+    /// binding, so the `switch` narrows the temp (not the original binding) and
+    /// arm bodies re-referencing the scrutinee do not trip TS2367. Statement-
+    /// position calls pass `false`, preserving the inline `switch (s)` fast-path.
+    fn emit_match(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+        force_hoist: bool,
+    ) -> Result<(), CodegenError> {
         // Guards, or-patterns, tuple patterns, and nested constructor/record
         // patterns cannot be expressed by the flat `switch` below. Lower those
         // to an if/else-if chain. Additive: the proven Optional / Result /
         // user-enum / value `switch` fast-path is kept for everything else (see
-        // `match_needs_ifchain`).
+        // `match_needs_ifchain`). The if-chain already casts the scrutinee root
+        // to `as any`, which itself defeats the TS2367 narrowing, so `force_hoist`
+        // is irrelevant there.
         if crate::generator::match_needs_ifchain(arms) {
             return self.emit_match_ifchain(scrutinee, arms);
         }
@@ -3206,8 +3267,11 @@ impl TsEmitCtx {
         // Hoist a non-trivial scrutinee into a single `const __matchN = …;` so it
         // is evaluated once and TS narrowing on `__matchN._tag` reaches the
         // payload access `__matchN._0` in the arm bodies. A bare identifier is
-        // already a stable reference — leave it inline.
-        let temp = if matches!(scrutinee.kind, NodeKind::Identifier { .. }) {
+        // already a stable reference — normally left inline. But `force_hoist`
+        // (an expression-position value match) hoists it too, so `switch
+        // (__matchN)` narrows the temp rather than the original binding, keeping
+        // arm bodies that re-reference the scrutinee free of TS2367.
+        let temp = if matches!(scrutinee.kind, NodeKind::Identifier { .. }) && !force_hoist {
             None
         } else {
             self.match_temp_counter += 1;
@@ -3678,7 +3742,7 @@ impl TsEmitCtx {
                 }
                 if let NodeKind::Match { scrutinee, arms } = &t.kind {
                     if crate::generator::match_has_statement_arm(arms) {
-                        self.emit_match(scrutinee, arms)?;
+                        self.emit_match(scrutinee, arms, false)?;
                         return Ok(());
                     }
                 }
@@ -3691,7 +3755,7 @@ impl TsEmitCtx {
             self.emit_node(node)?;
         } else if let NodeKind::Match { scrutinee, arms } = &node.kind {
             if crate::generator::match_has_statement_arm(arms) {
-                self.emit_match(scrutinee, arms)?;
+                self.emit_match(scrutinee, arms, false)?;
             } else {
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}return ");
@@ -5495,6 +5559,78 @@ mod tests {
         );
     }
 
+    /// A plain inherent `impl` method that names `Self` in its return AND its
+    /// parameter type must render `Self` as the concrete target (`Counter`), not
+    /// the `this` type. Each impl method emits as a free prototype function
+    /// (`Counter.prototype.m = function(...): this`), and `tsc` rejects a `this`
+    /// type outside a class/interface member (TS2526). Before the P4 fix
+    /// `trait_self_subst` was set only for synthesized trait *default* methods;
+    /// an inherent-impl `Self` lowered to `this`. Both the merged-interface
+    /// signature and the prototype function must agree, or declaration merging
+    /// breaks.
+    #[test]
+    fn self_in_plain_impl_resolves_to_target_not_this() {
+        let rec = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Counter"),
+                generic_params: vec![],
+                fields: vec![make_record_field("value", "Int")],
+            },
+        );
+        let other_param = node(
+            30,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(31, "other")),
+                ty: Some(Box::new(node(32, NodeKind::TypeSelf))),
+                default: None,
+            },
+        );
+        let impl_block = node(
+            10,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(type_node(11, "Counter")),
+                generic_params: vec![],
+                methods: vec![node(
+                    12,
+                    NodeKind::FnDecl {
+                        annotations: vec![],
+                        visibility: Visibility::Public,
+                        is_async: false,
+                        name: ident("combine"),
+                        generic_params: vec![],
+                        params: vec![untyped_param_node(13, "self"), other_param],
+                        return_type: Some(Box::new(node(14, NodeKind::TypeSelf))),
+                        effect_clause: vec![],
+                        where_clause: vec![],
+                        body: Box::new(block(15, vec![], None)),
+                    },
+                )],
+                where_clause: vec![],
+            },
+        );
+        let out = gen(&module(vec![], vec![rec, impl_block]));
+        assert!(
+            !out.contains(": this"),
+            "Self must not lower to the `this` type (TS2526), got: {out}"
+        );
+        assert!(
+            out.contains("combine(self: Counter, other: Counter): Counter;"),
+            "merged interface should render Self as the target in param & return, got: {out}"
+        );
+        assert!(
+            out.contains(
+                "Counter.prototype.combine = function(self: Counter, other: Counter): Counter {"
+            ),
+            "prototype function should render Self as the target in param & return, got: {out}"
+        );
+    }
+
     #[test]
     fn optional_runtime_prelude_and_value_type_agree() {
         // Q-ts-codegen defect 2: the Optional *type* and *value* must agree.
@@ -5635,6 +5771,92 @@ mod tests {
         assert!(
             !out.contains("f()._tag") && !out.contains("f()._0"),
             "call scrutinee must not be re-emitted inline, got: {out}"
+        );
+    }
+
+    /// Q-match-exprpos (P4): an expression-position value `match` over a bare
+    /// identifier, bound into a typed `let`. The IIFE arrow is annotated with the
+    /// binding type (`(() : boolean => …)()`), and the bare scrutinee is hoisted
+    /// into a temp (`const __matchN = n; switch (__matchN) …`) so the `switch`
+    /// narrows the temp — not the original `n`. Without the hoist, `switch (n)`
+    /// narrows `n` to the case literal inside each arm, so an arm body
+    /// re-referencing `n` (`n === <other-literal>`) trips TS2367.
+    #[test]
+    fn expr_position_value_match_hoists_scrutinee_and_annotates_iife() {
+        // let flag: Bool = match n { 0 => n; _ => n }   (in a fn returning Int)
+        let zero_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::LiteralPat {
+                        lit: Literal::Int("0".into()),
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(22, vec![], Some(id_node(23, "n")))),
+            },
+        );
+        let default_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(31, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(block(32, vec![], Some(id_node(33, "n")))),
+            },
+        );
+        let m = node(
+            40,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(41, "n")),
+                arms: vec![zero_arm, default_arm],
+            },
+        );
+        let let_flag = node(
+            50,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(51, "flag")),
+                ty: Some(Box::new(type_node(52, "Int"))),
+                value: Box::new(m),
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("classify"),
+                generic_params: vec![],
+                params: vec![{
+                    node(
+                        2,
+                        NodeKind::Param {
+                            pattern: Box::new(bind_pat(3, "n")),
+                            ty: Some(Box::new(type_node(4, "Int"))),
+                            default: None,
+                        },
+                    )
+                }],
+                return_type: Some(Box::new(type_node(5, "Int"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(6, vec![let_flag], Some(id_node(7, "flag")))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("(() : number => {"),
+            "value-position match IIFE arrow should be annotated with the binding type, got: {out}"
+        );
+        assert!(
+            out.contains("const __match1 = n;"),
+            "bare-identifier scrutinee must be hoisted in expression position, got: {out}"
+        );
+        assert!(
+            out.contains("switch (__match1)"),
+            "switch should dispatch on the hoisted temp, not the original binding, got: {out}"
         );
     }
 

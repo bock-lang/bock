@@ -1,0 +1,46 @@
+// TEST: exec_match_exprpos_literal_compare
+// EXPECT: output "lt;eq;gt"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Expression-position `match` over a literal scrutinee whose arm bodies
+// RE-REFERENCE the scrutinee in a comparison, bound into a typed `let`
+// (Q-match-exprpos, codegen-completeness P4). This is the TS2367 case.
+//
+// `let rel: Bool = match n { 0 => n == 0; _ => n < 0 }` lowers (on JS/TS/Go) to
+// a `switch`-IIFE. On TS, `switch (n)` narrows `n` to the case's literal type
+// (`0`) inside the arm body, so the body's `n == 0` becomes a comparison of the
+// literal types `0` and `0`/another literal — `tsc` rejects an apparently
+// non-overlapping comparison with TS2367 ("This comparison appears to be
+// unintentional…"). The fix hoists the bare-identifier scrutinee into a temp
+// (`const __matchN = n; switch (__matchN) …`), so the `switch` narrows the temp
+// while the arm body still sees `n` at its declared (un-narrowed) type. The
+// IIFE arrow is also annotated with the binding type (`(() : boolean => …)()`).
+//
+// Go (P4): the IIFE return type prefers the binding's declared type
+// (`current_expected_type`) over the function return type, so the `let rel:
+// Bool = match …` IIFE is `func() bool { … }()` rather than `func() string`.
+//
+// The fixture exercises three distinct branches (less-than, equal,
+// greater-than) so the arm selection itself is verified, not just compilation.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn classify(n: Int) -> String {
+  let is_zero: Bool = match n {
+    0 => n == 0
+    _ => n == 1000
+  }
+  if (is_zero) {
+    return "eq"
+  }
+  if (n < 0) {
+    return "lt"
+  }
+  return "gt"
+}
+
+fn main() -> Void {
+  println("${classify(-3)};${classify(0)};${classify(7)}")
+}
