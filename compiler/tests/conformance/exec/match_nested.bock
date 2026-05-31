@@ -1,0 +1,36 @@
+// TEST: exec_match_nested
+// EXPECT: output "ok:7;err:bad;none"
+// EXPECT: targets js, ts, python, rust, go
+//
+// NESTED constructor patterns: `Some(Ok(v))` / `Some(Err(e))` — an Optional of
+// a Result, matched two levels deep (codegen-completeness P2).
+//
+// Every value backend dropped the *inner* binding before this work. js/ts/go
+// extracted constructor fields with a flat `pattern_to_binding_name` that did
+// not recurse, so `v`/`e` were never bound (a `ReferenceError` / undefined-name
+// / `go build` failure). Python's `emit_pattern` flattened the inner pattern to
+// `case _BockSome(_)`, also losing `v`/`e`.
+//
+// All five now test and bind recursively: js/ts walk `s._tag==="Some" &&
+// s._0._tag==="Ok"` and bind `v = s._0._0`; Go re-asserts the inner
+// `interface{}` payload to `__bockResult` and reads `.v`; Python emits the
+// native nested `case _BockSome(_BockOk(v)):`; Rust uses native `Some(Ok(v))`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn dig(o: Result[Int, String]?) -> String {
+  match o {
+    Some(Ok(v)) => return "ok:${v}"
+    Some(Err(e)) => return "err:${e}"
+    None => return "none"
+  }
+}
+
+fn main() -> Void {
+  let a: Result[Int, String]? = Some(Ok(7))
+  let b: Result[Int, String]? = Some(Err("bad"))
+  let c: Result[Int, String]? = None
+  println("${dig(a)};${dig(b)};${dig(c)}")
+}

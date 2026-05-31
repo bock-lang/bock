@@ -540,6 +540,19 @@ impl PyEmitCtx {
         Ok(s)
     }
 
+    /// Render a pattern node to a Python `case` sub-pattern string by running
+    /// [`Self::emit_pattern`] against a scratch slice of the buffer. Lets a
+    /// constructor / record field embed a *nested* sub-pattern (`_BockSome(x)`,
+    /// `_BockOk(v)`, a nested tuple) instead of a flat binding name — the fix for
+    /// `Some(Ok(v))` losing its inner bindings.
+    fn pattern_to_py(&mut self, pat: &AIRNode) -> Result<String, CodegenError> {
+        let start = self.buf.len();
+        self.emit_pattern(pat)?;
+        let s = self.buf[start..].to_string();
+        self.buf.truncate(start);
+        Ok(s)
+    }
+
     /// Map Bock prelude functions to Python equivalents.
     fn map_prelude_call(
         &mut self,
@@ -2624,8 +2637,11 @@ impl PyEmitCtx {
                 match leaf {
                     "Some" => {
                         if let Some(f) = fields.first() {
-                            let name = self.pattern_to_binding_name(f);
-                            let _ = write!(self.buf, "_BockSome({name})");
+                            // Recurse so a *nested* payload pattern (`Some(Ok(v))`)
+                            // keeps its inner bindings, instead of flattening to a
+                            // bare name / `_` (which dropped `v`).
+                            let sub = self.pattern_to_py(f)?;
+                            let _ = write!(self.buf, "_BockSome({sub})");
                         } else {
                             self.buf.push_str("_BockSome(_)");
                         }
@@ -2642,8 +2658,8 @@ impl PyEmitCtx {
                     "Ok" | "Err" => {
                         let cls = if leaf == "Ok" { "_BockOk" } else { "_BockErr" };
                         if let Some(f) = fields.first() {
-                            let name = self.pattern_to_binding_name(f);
-                            let _ = write!(self.buf, "{cls}({name})");
+                            let sub = self.pattern_to_py(f)?;
+                            let _ = write!(self.buf, "{cls}({sub})");
                         } else {
                             let _ = write!(self.buf, "{cls}(_)");
                         }
@@ -2671,14 +2687,12 @@ impl PyEmitCtx {
                 if fields.is_empty() {
                     let _ = write!(self.buf, "{variant_name}()");
                 } else {
-                    let field_pats: Vec<String> = fields
-                        .iter()
-                        .enumerate()
-                        .map(|(i, f)| {
-                            let name = self.pattern_to_binding_name(f);
-                            format!("_{i}={name}")
-                        })
-                        .collect();
+                    let mut field_pats: Vec<String> = Vec::with_capacity(fields.len());
+                    for (i, f) in fields.iter().enumerate() {
+                        // Recurse so a nested sub-pattern keeps its inner bindings.
+                        let sub = self.pattern_to_py(f)?;
+                        field_pats.push(format!("_{i}={sub}"));
+                    }
                     let _ = write!(self.buf, "{variant_name}({})", field_pats.join(", "));
                 }
             }
@@ -2693,24 +2707,24 @@ impl PyEmitCtx {
                         .collect::<Vec<_>>()
                         .join("_")
                 };
-                let field_pats: Vec<String> = fields
-                    .iter()
-                    .map(|f| {
-                        let field_name = to_snake_case(&f.name.name);
-                        if let Some(pat) = &f.pattern {
-                            let binding = self.pattern_to_binding_name(pat);
-                            format!("{field_name}={binding}")
-                        } else {
-                            // Shorthand `{ radius }` ≡ `{ radius: radius }`. Emit
-                            // the keyword form `radius=radius` so the bind is by
-                            // field name, not by `__match_args__` position (a
-                            // dataclass's positional order is field-decl order
-                            // *plus* the trailing `_tag`, so a bare positional
-                            // sub-pattern would mis-bind multi-field variants).
-                            format!("{field_name}={field_name}")
-                        }
-                    })
-                    .collect();
+                let mut field_pats: Vec<String> = Vec::with_capacity(fields.len());
+                for f in fields {
+                    let field_name = to_snake_case(&f.name.name);
+                    if let Some(pat) = &f.pattern {
+                        // Recurse so a nested record/constructor/tuple sub-pattern
+                        // keeps its inner bindings.
+                        let sub = self.pattern_to_py(pat)?;
+                        field_pats.push(format!("{field_name}={sub}"));
+                    } else {
+                        // Shorthand `{ radius }` ≡ `{ radius: radius }`. Emit the
+                        // keyword form `radius=radius` so the bind is by field
+                        // name, not by `__match_args__` position (a dataclass's
+                        // positional order is field-decl order *plus* the trailing
+                        // `_tag`, so a bare positional sub-pattern would mis-bind
+                        // multi-field variants).
+                        field_pats.push(format!("{field_name}={field_name}"));
+                    }
+                }
                 let _ = write!(self.buf, "{type_name}({})", field_pats.join(", "));
             }
             NodeKind::TuplePat { elems } => {
@@ -2725,6 +2739,18 @@ impl PyEmitCtx {
                     self.buf.push(',');
                 }
                 self.buf.push(')');
+            }
+            // Python `match`/`case` supports native or-patterns: `case 1 | 2 | 3:`.
+            // Without this, an `OrPat` fell through to the `_` catch-all, so
+            // `1 | 2 | 3 => …` collapsed to `case _:` — shadowing every later arm
+            // ("wildcard makes remaining patterns unreachable").
+            NodeKind::OrPat { alternatives } => {
+                for (i, alt) in alternatives.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push_str(" | ");
+                    }
+                    self.emit_pattern(alt)?;
+                }
             }
             _ => {
                 self.buf.push('_');

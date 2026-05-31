@@ -1,0 +1,35 @@
+// TEST: exec_match_guard
+// EXPECT: output "big;small;nonpos"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Match arm GUARDS with fall-through (codegen-completeness P2). A guard `x if
+// (cond) => …` must, when the guard is FALSE, fall through to the *next* arm.
+//
+// js/ts lowered a guarded arm inside a value `switch` as `if (!(g)) break;`,
+// but `break` exits the whole `switch` — so a failed guard skipped every later
+// arm instead of falling through (wrong semantics). Go had the same flaw and
+// additionally referenced the (undiscarded) bind name in a `default:` it never
+// bound, so the emitted Go did not compile. The two guarded arms here also bind
+// the same name `x` and have a *third* `_` catch-all reached only when both
+// guards fail — exactly the fall-through path the `switch` lowering dropped.
+//
+// All five now lower a guard-bearing match to a shared if/else-if chain (js/ts/
+// go) or a native `case … if …` (python/rust): a failed guard's `else if`
+// reaches the next arm. The guard binding is re-introduced inside the condition
+// (an IIFE on js/ts/go) so `x` resolves where the guard reads it.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn classify(n: Int) -> String {
+  match n {
+    x if (x > 10) => return "big"
+    x if (x > 0) => return "small"
+    _ => return "nonpos"
+  }
+}
+
+fn main() -> Void {
+  println("${classify(50)};${classify(5)};${classify(-1)}")
+}

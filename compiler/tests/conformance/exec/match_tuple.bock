@@ -1,0 +1,31 @@
+// TEST: exec_match_tuple
+// EXPECT: output "origin;pt:3,4"
+// EXPECT: targets js, ts, python, rust, go
+//
+// TUPLE patterns: `(0, 0) => …` (a literal tuple arm) and `(a, b) => …` (a
+// binding tuple arm) over a `(Int, Int)` scrutinee (codegen-completeness P2).
+//
+// js/ts/go routed a tuple-pattern arm to a single `default:` / `case
+// interface{}:`, losing both the element tests and the element bindings. Go
+// additionally mis-constructed the tuple *value*: a `(0, 0)` literal emitted a
+// `[...]interface{}` array, which did not match the `struct{ Field0 int64;
+// Field1 int64 }` parameter type a tuple lowers to — so the tuple argument
+// failed `go build`. Both are fixed: the match if-chain tests `Array.isArray(p)
+// && p[0]===0 && …` (js/ts) / `p.Field0 == 0 && …` (go) and binds `a`/`b`; the
+// tuple literal now emits the matching `struct{…}{…}`. python/rust use native
+// tuple patterns.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn describe(p: (Int, Int)) -> String {
+  match p {
+    (0, 0) => return "origin"
+    (a, b) => return "pt:${a},${b}"
+  }
+}
+
+fn main() -> Void {
+  println("${describe((0, 0))};${describe((3, 4))}")
+}

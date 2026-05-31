@@ -2168,6 +2168,18 @@ impl EmitCtx {
     }
 
     fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
+        // Guards, or-patterns, tuple patterns, and nested constructor/record
+        // patterns cannot be expressed by the flat `switch` below (a failed
+        // guard's `break` exits the switch instead of falling through; an
+        // or-pattern collapses to a single `default:`; a tuple has no single
+        // discriminant; a nested sub-pattern's bindings are lost). Lower those
+        // to an if/else-if chain instead. Additive: the proven Optional /
+        // Result / user-enum / value `switch` fast-path is kept for everything
+        // else (see `match_needs_ifchain`).
+        if crate::generator::match_needs_ifchain(arms) {
+            return self.emit_match_ifchain(scrutinee, arms);
+        }
+
         // A tag-based (ADT) match dispatches on `._tag`. This is true when any
         // arm is a constructor pattern (`Some(x)`, `Rect(w, h)`) *or* a record
         // pattern whose path is a registered enum variant (`Circle { radius }`).
@@ -2346,6 +2358,284 @@ impl EmitCtx {
             self.writeln("}");
         }
         Ok(())
+    }
+
+    // ── Match → if/else-if chain (guards, or-/tuple/nested patterns) ──────────
+
+    /// Lower a `match` whose arms cannot be expressed by a flat `switch` (see
+    /// [`crate::generator::match_needs_ifchain`]) to an `if (<test>) { <binds>;
+    /// <body> } else if …` chain.
+    ///
+    /// The scrutinee is evaluated once into `__matchN` (a non-identifier
+    /// scrutinee would otherwise be re-evaluated in every arm's test). Each arm
+    /// contributes one `if`/`else if`; a catch-all pattern (wildcard or bare
+    /// bind) with no guard becomes a plain `else`. Failed guards therefore fall
+    /// through to the next `else if`, which is the semantics a `switch` could
+    /// not express. Bock matches are exhaustive, so a chain with no `else` is
+    /// safe.
+    fn emit_match_ifchain(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<(), CodegenError> {
+        // Single-evaluation: a bare identifier is already stable, so reuse it as
+        // the access root; anything else is hoisted into `__matchN`.
+        let root: String = if let NodeKind::Identifier { name } = &scrutinee.kind {
+            name.name.clone()
+        } else {
+            self.match_temp_counter += 1;
+            let name = format!("__match{}", self.match_temp_counter);
+            let ind = self.indent_str();
+            let _ = write!(self.buf, "{ind}const {name} = ");
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str(";\n");
+            name
+        };
+
+        let mut first = true;
+        let mut closed = false; // an unconditional `else` (or bare block) ended the chain
+        let arm_count = arms.len();
+        for (idx, arm) in arms.iter().enumerate() {
+            let NodeKind::MatchArm {
+                pattern,
+                guard,
+                body,
+            } = &arm.kind
+            else {
+                continue;
+            };
+            let test = self.pattern_test_js(pattern, &root);
+            let is_catch_all = matches!(
+                pattern.kind,
+                NodeKind::WildcardPat | NodeKind::BindPat { .. }
+            );
+            let is_last = idx + 1 == arm_count;
+            // An unconditional `else` is emitted when the arm cannot fail to
+            // match at its position: a catch-all (wildcard / bare bind) with no
+            // guard, or the final arm with no guard (Bock matches are
+            // exhaustive, so the last unguarded arm is guaranteed reached). This
+            // also closes the chain so a value-returning function typechecks.
+            let unconditional = guard.is_none() && (is_catch_all || is_last);
+            let ind = self.indent_str();
+            if unconditional {
+                if first {
+                    // No preceding `if`: emit a bare block so bindings/body run.
+                    let _ = writeln!(self.buf, "{ind}{{");
+                } else {
+                    let _ = writeln!(self.buf, "{ind}else {{");
+                }
+                closed = true;
+            } else {
+                let mut cond = if test.is_empty() {
+                    "true".to_string()
+                } else {
+                    test
+                };
+                if let Some(g) = guard {
+                    // The guard may reference the arm's pattern bindings (`x if
+                    // (x > 0)`). Those bindings are introduced *inside* the arm
+                    // body, so they are not in scope in the surrounding `else
+                    // if` condition. Evaluate the guard in an arrow-IIFE that
+                    // first re-introduces the bindings, so a failed guard still
+                    // falls through to the next `else if` (the fall-through a
+                    // `switch` could not express).
+                    let g_str = self.expr_to_string(g)?;
+                    let binds = self.pattern_binds_to_string_js(pattern, &root);
+                    let guard_test = if binds.is_empty() {
+                        format!("({g_str})")
+                    } else {
+                        format!("(() => {{ {binds}return ({g_str}); }})()")
+                    };
+                    if cond == "true" {
+                        cond = guard_test;
+                    } else {
+                        cond = format!("{cond} && {guard_test}");
+                    }
+                }
+                if first {
+                    let _ = writeln!(self.buf, "{ind}if ({cond}) {{");
+                } else {
+                    let _ = writeln!(self.buf, "{ind}else if ({cond}) {{");
+                }
+            }
+            first = false;
+            self.indent += 1;
+            self.pattern_binds_js(pattern, &root)?;
+            self.emit_block_body(body)?;
+            self.indent -= 1;
+            self.writeln("}");
+        }
+        // If every arm was conditional (all guarded, or no catch-all), close the
+        // chain with a throw so a value-returning function still typechecks and
+        // a genuinely unmatched scrutinee fails loudly rather than silently.
+        if !closed && !first {
+            self.writeln("else { throw new Error(\"non-exhaustive match\"); }");
+        }
+        Ok(())
+    }
+
+    /// Build the boolean test that selects `pat` against the JS expression
+    /// `access`. Returns the empty string for a pattern that always matches (a
+    /// wildcard or bare bind), so the caller can render it as an `else`.
+    fn pattern_test_js(&self, pat: &AIRNode, access: &str) -> String {
+        match &pat.kind {
+            NodeKind::WildcardPat | NodeKind::BindPat { .. } => String::new(),
+            NodeKind::LiteralPat { lit } => {
+                format!("{access} === {}", js_literal(lit))
+            }
+            NodeKind::ConstructorPat { path, fields } => {
+                let variant = path.segments.last().map_or("_", |s| s.name.as_str());
+                let mut tests = vec![format!("{access}._tag === \"{variant}\"")];
+                for (i, field) in fields.iter().enumerate() {
+                    let sub = self.pattern_test_js(field, &format!("{access}._{i}"));
+                    if !sub.is_empty() {
+                        tests.push(sub);
+                    }
+                }
+                tests.join(" && ")
+            }
+            NodeKind::RecordPat { path, fields, .. } => {
+                let variant = path.segments.last().map_or("_", |s| s.name.as_str());
+                // A registered enum variant dispatches on `._tag`; a plain record
+                // (not an enum variant) has no tag, so only its field sub-tests
+                // apply.
+                let mut tests = Vec::new();
+                if self.user_variant_for_path(path).is_some() {
+                    tests.push(format!("{access}._tag === \"{variant}\""));
+                }
+                for f in fields {
+                    if let Some(p) = &f.pattern {
+                        let sub = self.pattern_test_js(p, &format!("{access}.{}", f.name.name));
+                        if !sub.is_empty() {
+                            tests.push(sub);
+                        }
+                    }
+                }
+                if tests.is_empty() {
+                    String::new()
+                } else {
+                    tests.join(" && ")
+                }
+            }
+            NodeKind::TuplePat { elems } => {
+                let mut tests = vec![format!("Array.isArray({access})")];
+                for (i, e) in elems.iter().enumerate() {
+                    let sub = self.pattern_test_js(e, &format!("{access}[{i}]"));
+                    if !sub.is_empty() {
+                        tests.push(sub);
+                    }
+                }
+                tests.join(" && ")
+            }
+            NodeKind::OrPat { alternatives } => {
+                let alts: Vec<String> = alternatives
+                    .iter()
+                    .map(|a| {
+                        let t = self.pattern_test_js(a, access);
+                        if t.is_empty() {
+                            "true".to_string()
+                        } else {
+                            format!("({t})")
+                        }
+                    })
+                    .collect();
+                alts.join(" || ")
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Emit the `const <name> = <access…>;` bindings introduced by `pat`,
+    /// recursing into nested constructor / record / tuple sub-patterns. An
+    /// or-pattern binds against its first alternative (all alternatives bind the
+    /// same names by Bock's rules).
+    fn pattern_binds_js(&mut self, pat: &AIRNode, access: &str) -> Result<(), CodegenError> {
+        match &pat.kind {
+            NodeKind::BindPat { name, .. } => {
+                let ind = self.indent_str();
+                let _ = writeln!(
+                    self.buf,
+                    "{ind}const {} = {access};",
+                    to_camel_case(&name.name)
+                );
+            }
+            NodeKind::ConstructorPat { fields, .. } => {
+                for (i, field) in fields.iter().enumerate() {
+                    self.pattern_binds_js(field, &format!("{access}._{i}"))?;
+                }
+            }
+            NodeKind::RecordPat { fields, .. } => {
+                for f in fields {
+                    let field_access = format!("{access}.{}", f.name.name);
+                    match &f.pattern {
+                        Some(p) => self.pattern_binds_js(p, &field_access)?,
+                        // Shorthand `{ radius }` binds `radius` to `<access>.radius`.
+                        None => {
+                            let ind = self.indent_str();
+                            let _ =
+                                writeln!(self.buf, "{ind}const {} = {field_access};", f.name.name);
+                        }
+                    }
+                }
+            }
+            NodeKind::TuplePat { elems } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.pattern_binds_js(e, &format!("{access}[{i}]"))?;
+                }
+            }
+            NodeKind::OrPat { alternatives } => {
+                if let Some(first) = alternatives.first() {
+                    self.pattern_binds_js(first, access)?;
+                }
+            }
+            // Wildcard / literal: nothing to bind.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Collect the bindings introduced by `pat` as a single-line string of
+    /// `const … = …; ` statements (used to re-introduce them inside the
+    /// guard-evaluating IIFE — see [`Self::emit_match_ifchain`]).
+    fn pattern_binds_to_string_js(&self, pat: &AIRNode, access: &str) -> String {
+        let mut out = String::new();
+        self.collect_binds_js(pat, access, &mut out);
+        out
+    }
+
+    fn collect_binds_js(&self, pat: &AIRNode, access: &str, out: &mut String) {
+        match &pat.kind {
+            NodeKind::BindPat { name, .. } => {
+                let _ = write!(out, "const {} = {access}; ", to_camel_case(&name.name));
+            }
+            NodeKind::ConstructorPat { fields, .. } => {
+                for (i, field) in fields.iter().enumerate() {
+                    self.collect_binds_js(field, &format!("{access}._{i}"), out);
+                }
+            }
+            NodeKind::RecordPat { fields, .. } => {
+                for f in fields {
+                    let field_access = format!("{access}.{}", f.name.name);
+                    match &f.pattern {
+                        Some(p) => self.collect_binds_js(p, &field_access, out),
+                        None => {
+                            let _ = write!(out, "const {} = {field_access}; ", f.name.name);
+                        }
+                    }
+                }
+            }
+            NodeKind::TuplePat { elems } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.collect_binds_js(e, &format!("{access}[{i}]"), out);
+                }
+            }
+            NodeKind::OrPat { alternatives } => {
+                if let Some(first) = alternatives.first() {
+                    self.collect_binds_js(first, access, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     // ── Pipe operator ───────────────────────────────────────────────────────
@@ -2558,6 +2848,24 @@ fn escape_js_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// Render a literal as a JS value expression — used by the if-chain match
+/// lowering to compare a scrutinee against a literal pattern (`<access> === …`).
+fn js_literal(lit: &Literal) -> String {
+    match lit {
+        Literal::Int(s) | Literal::Float(s) => s.clone(),
+        Literal::Bool(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        Literal::Char(s) => format!("'{s}'"),
+        Literal::String(s) => format!("\"{}\"", escape_js_string(s)),
+        Literal::Unit => "undefined".to_string(),
+    }
 }
 
 /// Escape special characters in a JS template literal.
@@ -3978,6 +4286,152 @@ mod tests {
         assert!(output.contains("one"));
         assert!(output.contains("two"));
         assert!(output.contains("other"));
+    }
+
+    /// A literal + bind value match keeps the `switch` fast-path (no if-chain).
+    #[test]
+    fn match_literal_bind_stays_switch() {
+        let arms = vec![
+            node(
+                5,
+                NodeKind::MatchArm {
+                    pattern: Box::new(node(
+                        6,
+                        NodeKind::LiteralPat {
+                            lit: Literal::Int("0".into()),
+                        },
+                    )),
+                    guard: None,
+                    body: Box::new(block(7, vec![], Some(str_lit(8, "zero")))),
+                },
+            ),
+            node(
+                9,
+                NodeKind::MatchArm {
+                    pattern: Box::new(node(
+                        10,
+                        NodeKind::BindPat {
+                            name: ident("x"),
+                            is_mut: false,
+                        },
+                    )),
+                    guard: None,
+                    body: Box::new(block(11, vec![], Some(id_node(12, "x")))),
+                },
+            ),
+        ];
+        let m = node(
+            3,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(4, "n")),
+                arms,
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("label"),
+                generic_params: vec![],
+                params: vec![param_node(2, "n")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(13, vec![m], None)),
+            },
+        );
+        let code = gen(&module(vec![], vec![f]));
+        assert!(
+            code.contains("switch (n)"),
+            "expected switch fast-path, got:\n{code}"
+        );
+        assert!(
+            !code.contains("else if"),
+            "should not use if-chain, got:\n{code}"
+        );
+    }
+
+    /// A guarded arm lowers to an if/else-if chain whose failed guard falls
+    /// through to the next arm (the value-`switch` could not express this).
+    #[test]
+    fn match_guard_lowers_to_ifchain() {
+        let guarded = |id: u32, label: &str| {
+            node(
+                id,
+                NodeKind::MatchArm {
+                    pattern: Box::new(node(
+                        id + 1,
+                        NodeKind::BindPat {
+                            name: ident("x"),
+                            is_mut: false,
+                        },
+                    )),
+                    guard: Some(Box::new(node(
+                        id + 2,
+                        NodeKind::BinaryOp {
+                            op: BinOp::Gt,
+                            left: Box::new(id_node(id + 3, "x")),
+                            right: Box::new(node(
+                                id + 4,
+                                NodeKind::Literal {
+                                    lit: Literal::Int("0".into()),
+                                },
+                            )),
+                        },
+                    ))),
+                    body: Box::new(block(id + 5, vec![], Some(str_lit(id + 6, label)))),
+                },
+            )
+        };
+        let arms = vec![
+            guarded(5, "pos"),
+            node(
+                20,
+                NodeKind::MatchArm {
+                    pattern: Box::new(node(21, NodeKind::WildcardPat)),
+                    guard: None,
+                    body: Box::new(block(22, vec![], Some(str_lit(23, "other")))),
+                },
+            ),
+        ];
+        let m = node(
+            3,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(4, "n")),
+                arms,
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("classify"),
+                generic_params: vec![],
+                params: vec![param_node(2, "n")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(30, vec![m], None)),
+            },
+        );
+        let code = gen(&module(vec![], vec![f]));
+        assert!(
+            !code.contains("switch"),
+            "guard match must not use switch, got:\n{code}"
+        );
+        assert!(
+            code.contains("else"),
+            "guard match must chain to a fallthrough, got:\n{code}"
+        );
+        // The guard binding is re-introduced inside the condition's IIFE.
+        assert!(
+            code.contains("const x = n;"),
+            "guard must bind x, got:\n{code}"
+        );
     }
 
     #[test]

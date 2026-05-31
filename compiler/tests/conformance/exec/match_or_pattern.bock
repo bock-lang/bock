@@ -1,0 +1,38 @@
+// TEST: exec_match_or_pattern
+// EXPECT: output "low;low;mid;high"
+// EXPECT: targets js, ts, python, rust, go
+//
+// OR-PATTERNS (`1 | 2 | 3 => …`) — one arm matching several alternatives
+// (codegen-completeness P2).
+//
+// js/ts collapsed an or-pattern arm to a single `default:` in the value
+// `switch`, so two or-pattern arms produced *two* `default:` clauses (a JS/TS
+// `SyntaxError`) and matched the wrong arm. Go emitted `case interface{}:`
+// (a type, not an expression). Python flattened the or-pattern to `case _:`,
+// which made every later arm unreachable (`wildcard makes remaining patterns
+// unreachable`).
+//
+// All five now emit a real disjunction: js/ts/go test `(s===1)||(s===2)||…`
+// in the if-chain; python/rust use the native `case 1 | 2 | 3:`. The fixture
+// covers a 3-alternative arm, a 2-alternative arm, and a `_` catch-all so the
+// ordering between or-pattern arms is exercised.
+//
+// The reducer is named `bucket` (not `name`) because `name` collides with a
+// DOM/global in TS's default lib (`tsc` error TS2451) — a fixture-naming
+// concern unrelated to or-pattern codegen.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn bucket(n: Int) -> String {
+  match n {
+    1 | 2 | 3 => return "low"
+    4 | 5 => return "mid"
+    _ => return "high"
+  }
+}
+
+fn main() -> Void {
+  println("${bucket(1)};${bucket(3)};${bucket(5)};${bucket(9)}")
+}
