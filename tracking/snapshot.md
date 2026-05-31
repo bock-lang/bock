@@ -79,11 +79,15 @@ match guards/or/nested/tuple) — **the stdlib's trait-using modules now EXECUTE
 `use_core_compare.bock`). Generics/Result/Optional/traits/match/primitive-bridge all work ×5 (~195 exec pairs).
 **Phase 3 DONE** (#144 Go collection element typing + record-spread + Self-in-plain-impl · #145 Map/Set method
 dispatch + literals + range()). **Collections work ×5** — the codegen substrate is essentially built (cross-module,
-enums, generics, Optional/Result, primitive-bridge, traits, match, collections; ~247 exec pairs). **Phase 4 (polish)
-NEXT** — codegen-only (tuple `.N` parser, expr-position match, Go nested-payload, TS Self-in-plain-impl, Int/Int +
-Bool-interp harmonize) + design-gated (DQ18 mutating collections, DQ20 `expr?`, DQ22 bare `m.contains`). Likely none
-of P4 gates R1, so **Q-stdlib R1 (iter, effect) can resume after/alongside P4**. (DQ19 §20.6.1 bundling; DQ20 `expr?`;
-DQ21 has_body flag; DQ22 m.contains — all → Design, non-blocking.)
+enums, generics, Optional/Result, primitive-bridge, traits, match, collections). **P4-codegen DONE** (#147 tuple-`.N`
+diagnostic · #148 TS Self-in-plain-impl + expr-position match · #149 generic-container/trait residue — the 4 gaps
+core.iter's v5 STOP exposed; the audit had under-covered them). The codegen substrate is now COMPLETE; ~275 exec
+pairs ×5. **PAUSED for the night at main b59b42e (2026-05-31; operator request).** On resume: (1) re-resume
+**core.iter** (UNBLOCKED — module written/preserved at /tmp/bock-iter-module-preserved.bock → 4/11, R1 iter); (2)
+P4-hygiene (mutating-collection + `m.contains` guarding diagnostics, bock-types); (3) **core.effect**, then R2
+(option/result/string/time), R3 (collections/test). Design-gated (non-blocking, → Design): DQ23 (Int/Int §3.6 NEW),
+DQ18/20/21/22, DQ10-DQ15/DQ19, Bool-interp spelling; + Go nested-runtime-payload arith (#142) & Rust by-value-reuse
+(#149) codegen follow-ups.
 **§18.2 prelude auto-import is live** (#120): the core-defined prelude symbols
 (`Ordering`/`Less`/`Equal`/`Greater`, `Comparable`/`Equatable`, `Into`/`From`/
 `TryFrom`/`Displayable`, `Error`) resolve without an explicit `use` (the membership

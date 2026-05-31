@@ -87,16 +87,20 @@ _Last reconciled: 2026-05-30 vs main c9a241e (post #129 + the codegen-completene
   dispatch + literals + range()). Collections work ×5.
   **P4 polish** — tuple `.N` parser; Optional-interp; Int/Int + Bool-interp harmonize; mutating-List guard
   (DQ18). SUBSUMES prior codegen follow-ups (Q-match-exprpos, Q-go-list-literal, Q-ts-generic-impl,
-  Q-self-subst, Q-prim-assoc). Q-list-codegen READ-ONLY methods DONE (#129); mutating → P4. **Phases 0-3 DONE (#131-#145); collections work ×5;
-  the codegen substrate is essentially built. Phase 4 (polish) NEXT** (design in flight, Plan agent a0f6b8f2):
-  codegen-only = tuple `.N` parser, expr-position match (Q-match-exprpos), Go nested-payload typed-arith [#142],
-  TS Self-in-plain-impl [#141], Int/Int + Bool-interp harmonize; design-gated = DQ18 (mutating List/Map/Set),
-  DQ20 (`expr?`), DQ22 (bare `m.contains`). **Likely NONE of P4 gates R1** (iter uses concat not push; no expr?),
-  so Q-stdlib R1 (iter, effect) can resume after/alongside P4. Operator chose "continue P3→P4" (P2/P3 checkpoint).
+  Q-self-subst, Q-prim-assoc). Q-list-codegen READ-ONLY methods DONE (#129); mutating → P4. **Phases 0-3 + P4-codegen DONE (#131-#149); the codegen
+  substrate is essentially built (cross-module, enums, generics incl. container/trait, Optional/Result, traits,
+  match, collections, primitive-bridge; ~275 exec ×5).** P4-codegen landed: #147 tuple-`.N` diagnostic, #148 TS
+  Self-in-plain-impl + expr-position match, #149 generic-container/trait residue (GAP-A/B/C/D — the 4 gaps
+  core.iter's v5 STOP exposed; the systematic audit under-covered them). **REMAINING:** (a) re-resume core.iter
+  (module written/preserved at /tmp/bock-iter-module-preserved.bock; UNBLOCKED); (b) **Q-codegen-completeness
+  P4-hygiene** (bock-types: mutating-collection guarding diagnostic [DQ18 v1-floor] + bare-`m.contains` [DQ22] —
+  sequence around core.iter, both checker.rs); (c) design-gated → Design: DQ23 (Int/Int §3.6 NEW), DQ18 (mutating
+  lowering), DQ20 (`expr?`), DQ22, DQ21, Bool-interp spelling; (d) Go nested-runtime-payload arith [#142 residual]
+  + Rust by-value-reuse [#149 OPEN]. NONE of these gate the R1 iter/effect floor.
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (3/11 landed — but those 3 are check-only, NOT executed cross-module [DV13]; R1 PAUSED
-  behind **Q-codegen-completeness**: the for→Iterable desugar is PROVEN [T1 green ×5], but the stdlib needs
-  cross-module wiring + user-enums + generics + List-backed iter codegen first) ·
+  **v1-BLOCKING** (3/11 landed; the codegen substrate is now COMPLETE [#131-#149] and the 3 landed modules
+  execute cross-module on all 5. **R1 `iter` UNBLOCKED — re-resume is the next action** [module written/preserved
+  at /tmp/bock-iter-module-preserved.bock; #149 closed the last generic gaps]; then `effect`, then R2/R3) ·
   `stdlib/`, `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: v1 = **11 core modules** at minimum-useful surface (option, result,
   collections, string, iter, compare, convert, error, effect, time, test). Each =

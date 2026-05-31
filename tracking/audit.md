@@ -1232,3 +1232,46 @@ Merged this half: #123 (vscode CI), #124 (TS codegen), #125 (changelog hygiene),
     (Q-match-exprpos), Go nested-payload, TS Self-in-plain-impl, Int/Int + Bool-interp harmonize; design-gated
     DQ18 (mutating collections) + DQ20 (`expr?`) routed to Design. Then Q-stdlib R1 (iter, effect) resumes —
     likely NONE of P4 gates R1 (iter uses concat not push; no expr?). main 11887ba.
+
+[2026-05-31 06:44 UTC] NIGHT PAUSE — P4 codegen done; core.iter UNBLOCKED (re-resume next); operator paused for the night
+  Input: at the P3/P4 boundary, operator chose (AskUserQuestion) **"R1 + P4 polish in parallel"** (the P4 design
+    confirmed NO P4 item gates the R1 iter/effect floor). Then, mid-flight: "Pause for the night when [#149] lands."
+    #149 landed → pausing cleanly.
+  MERGED since #146 (main 0630a97 → b59b42e; each gate-clean, full-matrix CI, worktree-removed-first, re-synced):
+    - #147 P4-parser — tuple `.N` v1-floor diagnostic (E2092 "destructure instead"; the feature is spec-deferred
+      to v1.x per §7.6 / changelog 20260513-0540).
+    - #148 P4-codegen — TS Self-in-plain-impl (TS2526; dropped the is_default guard, mirrors #144's Go fix) +
+      expr-position match typing (Go current_expected_type; TS typed-IIFE + scrutinee force-hoist; Python
+      registry-resolved expr-position variant). 260 exec.
+    - #149 generic-container/trait codegen residue — the 4 gaps core.iter's v5 STOP exposed: GAP-A (TS `extends<T>`
+      + `Optional` named-type), GAP-B (Rust `T:Clone` detection extended to concat/get-clone), GAP-C (Go generic
+      list-literal return `[]T`), GAP-D (Go concrete-instantiation Optional-payload assert). 275 exec, 0 failed.
+      `generic_iter_concrete_match.bock` (the EXACT core.iter desugar shape) green ×5 → core.iter is unblocked.
+  THE core.iter v5 STOP (5th): a candid finding — the systematic audit UNDER-covered the deeper generic cases
+    (generic container + concat-over-generic-elements + generic-trait impl + concrete instantiation); the DV12
+    "residue → non-blocking" classification was WRONG for R1 iter. #149 closed those 4 gaps. The written 202-line
+    `core.iter` module (type-checks ×5; ran on js+python) is PRESERVED at /tmp/bock-iter-module-preserved.bock
+    for the re-resume.
+  MILESTONE STATUS at pause: codegen-completeness P0-P4(codegen) essentially DONE — cross-module, enums, generics
+    (incl. container/trait), Optional/Result+methods, primitive-bridge, traits (self/defaults/bounded), match
+    completeness, collections (List/Map/Set + range), expr-position match, tuple-`.N` diagnostic. ~275 exec pairs
+    (from 32 at block start). 27 PRs merged this block (#123-#149).
+  REMAINING (next session, in priority order): (1) **RE-RESUME core.iter** (module written/preserved; gaps fixed;
+    should build ×5 → 4/11 stdlib, R1 iter done). (2) **P4-hygiene** (bock-types): mutating-collection guarding
+    diagnostic [DQ18 v1-floor] + bare-`m.contains` [DQ22] — sequence around core.iter (both checker.rs).
+    (3) **core.effect** (R1). (4) Then R2 (option/result/string/time), R3 (collections/test). (5) The
+    NON-codegen-blocking design-gated items await Design: **DQ23 (Int/Int division §3.6 — NEW)**, DQ18 (mutating
+    lowering), DQ20 (`expr?`), DQ22 (m.contains), DQ21 (has_body flag), DQ14/DQ15 (iter floor), DQ10/DQ11/DQ12/DQ13;
+    Bool-interp spelling (small spec). + the Rust by-value-reuse ownership gap (#149 OPEN, pre-existing).
+  Pause state: main b59b42e, origin-synced, 0 open PRs, 0 in-flight sessions, worktrees == main only. CLEAN.
+
+═══ DAILY DIGEST — 2026-05-31 ═══
+Merged: #144/#145 (P3 Go collections + Map/Set + range), #146 (tracking P3), #147 (tuple-`.N` diagnostic),
+  #148 (P4 TS-Self + expr-pos match), #149 (generic-container/trait residue — unblocks core.iter). (Plus the
+  2026-05-30 half: #123-#143.) The codegen-completeness milestone is essentially complete (P0-P4 codegen).
+Decisions (AskUserQuestion): P2/P3 "continue P3→P4"; P3/P4 "R1 + P4 in parallel"; then "pause for the night."
+Blocked→Unblocked: core.iter (5th STOP exposed 4 generic-codegen gaps; #149 fixed them; re-resume is the next action).
+Escalations/Design queue (non-blocking): DQ23 (Int/Int §3.6, NEW), DQ18/20/21/22, DQ10-DQ15, Bool-interp spelling.
+Notes: core.iter remained a sensitive probe to the very end — its v5 STOP surfaced that the "systematic audit"
+  had a blind spot for deeper generic-container/trait codegen. All gaps now closed; the stdlib build resumes next
+  session on a genuinely complete substrate. Paused clean per operator request. main b59b42e.
