@@ -251,6 +251,35 @@ func __bockOk(v interface{}) __bockResult { return __bockResult{tag: \"Ok\", v: 
 func __bockErr(v interface{}) __bockResult { return __bockResult{tag: \"Err\", v: v} }
 ";
 
+/// Runtime helper for Bock range expressions (`0..n` / `0..=n`) in Go. Go has
+/// no native range *value*, so `for i in 0..n` lowers to
+/// `for _, i := range __bockRange(0, n, false)`; this builds the `[]int64`
+/// slice with half-open (`inclusive=false`) or inclusive (`inclusive=true`)
+/// bounds, matching Python's `range(lo, hi)` / `range(lo, hi + 1)` and Rust's
+/// `lo..hi` / `lo..=hi`. Emitted at most once per bundle, gated on a ctx flag
+/// (mirrors `OPTIONAL_RUNTIME_GO`).
+const RANGE_RUNTIME_GO: &str = "// ── Bock range runtime ──
+func __bockRange(lo int64, hi int64, inclusive bool) []int64 {
+	end := hi
+	if inclusive {
+		end = hi + 1
+	}
+	r := make([]int64, 0)
+	for i := lo; i < end; i++ {
+		r = append(r, i)
+	}
+	return r
+}
+";
+
+/// True if the module references a `Range` node anywhere (so the range runtime
+/// helper must be emitted). Mirrors [`go_module_uses_optional`]. `RangePat`
+/// (a match-arm range pattern) does not contain the `Range {` substring, so it
+/// is not matched — the helper is only needed for range *values*.
+fn go_module_uses_range(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| format!("{n:?}").contains("Range {"))
+}
+
 /// True if the module references `Optional`, `Some`, or `None` anywhere (so the
 /// Optional runtime prelude must be emitted). A cheap structural scan over the
 /// debug rendering, mirroring `go_module_uses_concurrency`.
@@ -630,6 +659,21 @@ struct GoEmitCtx {
     /// type, the same way [`Self::var_optional_elem`] handles direct
     /// `Optional[T]` bindings. Scoped per function body and restored on exit.
     var_list_elem: HashMap<String, String>,
+    /// Maps an in-scope variable name → `(key_go_type, val_go_type)` of its
+    /// `Map[K, V]` (e.g. a `let m: Map[String, Int] = ...` binding maps to
+    /// `("string", "int64")`). The built-in `Map` methods lower to inline
+    /// `func(__m map[K]V, …) …` closures whose parameter type must match the
+    /// concretely-typed receiver `map[K]V`; this records the declared key/value
+    /// Go types so the closure is well-typed (Go does not pass a `map[string]
+    /// int64` where a `map[interface{}]interface{}` is expected). Scoped per
+    /// function body and restored on exit (mirrors [`Self::var_list_elem`]).
+    var_map_kv: HashMap<String, (String, String)>,
+    /// Maps an in-scope variable name → the Go element type of its `Set[E]`
+    /// (e.g. a `let s: Set[Int] = ...` binding maps to `int64`). The Set
+    /// analogue of [`Self::var_map_kv`]: the built-in `Set` methods lower to
+    /// inline closures over `map[E]struct{}`, so the element type must match the
+    /// concretely-typed receiver. Scoped per function body and restored on exit.
+    var_set_elem: HashMap<String, String>,
     /// Maps an in-scope variable name → `(ok_go_type, err_go_type)` of its
     /// `Result[T, E]` (e.g. an `r: Result[Int, String]` param maps to
     /// `("int64", "string")`). The Result analogue of [`Self::var_optional_elem`]:
@@ -660,6 +704,10 @@ struct GoEmitCtx {
     /// Set once the [`ORDERING_RUNTIME_GO`] prelude has been emitted; deduped
     /// across a bundle exactly as [`Self::optional_runtime_emitted`].
     ordering_runtime_emitted: bool,
+    /// Set once the [`RANGE_RUNTIME_GO`] helper has been emitted; deduped across
+    /// a bundle exactly as [`Self::optional_runtime_emitted`] (a duplicate
+    /// `func __bockRange` would not compile).
+    range_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Go has no sum type, so a user enum is
     /// a sealed interface + per-variant structs named `{enum}{variant}`
     /// (e.g. `ShapeCircle`). The registry lets a construction emit the variant
@@ -763,6 +811,8 @@ impl GoEmitCtx {
             var_optional_elem: HashMap::new(),
             method_optional_ret_elem: HashMap::new(),
             var_list_elem: HashMap::new(),
+            var_map_kv: HashMap::new(),
+            var_set_elem: HashMap::new(),
             var_result_elem: HashMap::new(),
             fn_result_ret_elem: HashMap::new(),
             concurrency_runtime_emitted: false,
@@ -770,6 +820,7 @@ impl GoEmitCtx {
             result_runtime_emitted: false,
             numeric_runtime_emitted: false,
             ordering_runtime_emitted: false,
+            range_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             var_go_type: HashMap::new(),
@@ -1152,6 +1203,126 @@ impl GoEmitCtx {
         None
     }
 
+    /// If `node` is a `Map[K, V]` type expression, return the Go types of its
+    /// key and value `(K, V)`; otherwise `None`. The `Map` analogue of
+    /// [`Self::list_elem_go_type`]: the built-in `Map` methods lower to inline
+    /// closures over the concretely-typed receiver `map[K]V`, so a typed `let m:
+    /// Map[K, V]` binding records these into [`Self::var_map_kv`]. A missing arg
+    /// defaults to `interface{}`.
+    fn map_kv_go_types(&self, node: &AIRNode) -> Option<(String, String)> {
+        if let NodeKind::TypeNamed { path, args } = &node.kind {
+            if path.segments.last().is_some_and(|s| s.name == "Map") {
+                let k = args
+                    .first()
+                    .map_or_else(|| "interface{}".to_string(), |a| self.type_to_go(a));
+                let v = args
+                    .get(1)
+                    .map_or_else(|| "interface{}".to_string(), |a| self.type_to_go(a));
+                return Some((k, v));
+            }
+        }
+        None
+    }
+
+    /// If `node` is a `Set[E]` type expression, return the Go type of its
+    /// element `E`; otherwise `None`. The `Set` analogue of
+    /// [`Self::list_elem_go_type`], recorded into [`Self::var_set_elem`].
+    fn set_elem_go_type(&self, node: &AIRNode) -> Option<String> {
+        if let NodeKind::TypeNamed { path, args } = &node.kind {
+            if path.segments.last().is_some_and(|s| s.name == "Set") {
+                return Some(
+                    args.first()
+                        .map_or_else(|| "interface{}".to_string(), |a| self.type_to_go(a)),
+                );
+            }
+        }
+        None
+    }
+
+    /// The `(K, V)` Go types of a `Map` *value* expression used as the receiver
+    /// of a built-in map method. Recovered from a declared `Map[K, V]`
+    /// identifier (via [`Self::var_map_kv`]) or a homogeneously-typed map
+    /// literal. `None` ⇒ the caller falls back to `interface{}` (never a wrong
+    /// type).
+    fn map_receiver_kv_go_types(&self, recv: &AIRNode) -> Option<(String, String)> {
+        match &recv.kind {
+            NodeKind::Identifier { name } => {
+                self.var_map_kv.get(&to_camel_case(&name.name)).cloned()
+            }
+            NodeKind::MapLiteral { entries } => {
+                let keys: Vec<&AIRNode> = entries.iter().map(|e| &e.key).collect();
+                let vals: Vec<&AIRNode> = entries.iter().map(|e| &e.value).collect();
+                match (
+                    self.infer_homogeneous_elem_type_refs(&keys),
+                    self.infer_homogeneous_elem_type_refs(&vals),
+                ) {
+                    (Some(k), Some(v)) => Some((k, v)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The element Go type of a `Set` *value* expression used as the receiver of
+    /// a built-in set method. Recovered from a declared `Set[E]` identifier (via
+    /// [`Self::var_set_elem`]) or a homogeneously-typed set literal. `None` ⇒
+    /// `interface{}` fallback.
+    fn set_receiver_elem_go_type(&self, recv: &AIRNode) -> Option<String> {
+        match &recv.kind {
+            NodeKind::Identifier { name } => {
+                self.var_set_elem.get(&to_camel_case(&name.name)).cloned()
+            }
+            NodeKind::SetLiteral { elems } => self.infer_homogeneous_elem_type(elems),
+            _ => None,
+        }
+    }
+
+    /// Infer the `(K, V)` Go types of a `Map`-typed *value* expression — a map
+    /// literal, a known `Map` identifier, or a `Map` built-in method that
+    /// returns the receiver map (`set`/`delete`/`merge`/`filter`). Lets an
+    /// untyped `let m2 = base.set(k, v)` propagate `base`'s key/value types onto
+    /// `m2` so a subsequent `m2.get(k)` closure is well-typed. `None` ⇒
+    /// `interface{}` fallback.
+    fn value_map_kv_go_types(&self, value: &AIRNode) -> Option<(String, String)> {
+        if let Some(kv) = self.map_receiver_kv_go_types(value) {
+            return Some(kv);
+        }
+        if let NodeKind::Call { callee, args, .. } = &value.kind {
+            if let Some((recv, method, _)) =
+                crate::generator::desugared_map_method(value, callee, args)
+            {
+                if matches!(method, "set" | "delete" | "merge" | "filter") {
+                    return self.value_map_kv_go_types(recv);
+                }
+            }
+        }
+        None
+    }
+
+    /// Infer the element Go type of a `Set`-typed *value* expression — a set
+    /// literal, a known `Set` identifier, or a `Set` built-in returning the
+    /// receiver set (`add`/`remove`/`union`/`intersection`/`difference`/
+    /// `filter`/`map`). The `Set` analogue of [`Self::value_map_kv_go_types`].
+    fn value_set_elem_go_type(&self, value: &AIRNode) -> Option<String> {
+        if let Some(elem) = self.set_receiver_elem_go_type(value) {
+            return Some(elem);
+        }
+        if let NodeKind::Call { callee, args, .. } = &value.kind {
+            if let Some((recv, method, _)) =
+                crate::generator::desugared_set_method(value, callee, args)
+            {
+                if matches!(
+                    method,
+                    "add" | "remove" | "union" | "intersection" | "difference" | "filter" | "map"
+                ) {
+                    return self.value_set_elem_go_type(recv);
+                }
+            }
+        }
+        None
+    }
+
     /// For a `List[T]` / `Set[T]` / `Map[K, V]` type expression, the declared
     /// Go element types as `(elem_or_key, value)`: `List`/`Set` yield
     /// `(T, None)`; `Map` yields `(K, Some(V))`. A missing type arg defaults to
@@ -1375,13 +1546,14 @@ impl GoEmitCtx {
         format!("[{}]", args.join(", "))
     }
 
-    /// Record the `Optional[T]` and `List[T]` element Go types of a
-    /// function/lambda's parameters into the variable scopes, so a `match param
-    /// { Some(x) => ... }` (direct Optional) or `match param.get(i) { Some(x) =>
-    /// ... }` (List built-in) inside the body can type-assert the payload.
-    /// Returns the previous `(var_optional_elem, var_list_elem, var_result_elem)`
-    /// scopes so the caller can restore them on exit (Go has no block-scoped reset
-    /// here).
+    /// Record the `Optional[T]`, `List[T]`, `Map[K, V]`, `Set[E]`, and
+    /// `Result[T, E]` element Go types of a function/lambda's parameters into the
+    /// variable scopes, so a `match param { Some(x) => ... }` (direct Optional),
+    /// `match param.get(i) { Some(x) => ... }` (List/Map built-in), or a `Set`
+    /// membership test inside the body type-checks against the concrete element
+    /// type. Returns the previous `(var_optional_elem, var_list_elem,
+    /// var_result_elem, var_map_kv, var_set_elem)` scopes so the caller can
+    /// restore them on exit (Go has no block-scoped reset here).
     #[allow(clippy::type_complexity)]
     fn enter_param_optional_scope(
         &mut self,
@@ -1390,10 +1562,14 @@ impl GoEmitCtx {
         HashMap<String, String>,
         HashMap<String, String>,
         HashMap<String, (String, String)>,
+        HashMap<String, (String, String)>,
+        HashMap<String, String>,
     ) {
         let saved_opt = self.var_optional_elem.clone();
         let saved_list = self.var_list_elem.clone();
         let saved_result = self.var_result_elem.clone();
+        let saved_map = self.var_map_kv.clone();
+        let saved_set = self.var_set_elem.clone();
         for p in params {
             if let NodeKind::Param {
                 pattern,
@@ -1408,12 +1584,18 @@ impl GoEmitCtx {
                 if let Some(elem) = self.list_elem_go_type(t) {
                     self.var_list_elem.insert(name.clone(), elem);
                 }
+                if let Some(kv) = self.map_kv_go_types(t) {
+                    self.var_map_kv.insert(name.clone(), kv);
+                }
+                if let Some(elem) = self.set_elem_go_type(t) {
+                    self.var_set_elem.insert(name.clone(), elem);
+                }
                 if let Some(elems) = self.result_elem_go_types(t) {
                     self.var_result_elem.insert(name, elems);
                 }
             }
         }
-        (saved_opt, saved_list, saved_result)
+        (saved_opt, saved_list, saved_result, saved_map, saved_set)
     }
 
     /// Record each typed param's Go type into [`Self::var_go_type`] so the
@@ -1472,6 +1654,16 @@ impl GoEmitCtx {
                                 return Some(elem.clone());
                             }
                         }
+                    }
+                }
+                // `Map.get(k)` returns `Optional[V]`; resolve the payload to the
+                // map's value Go type so `match m.get(k) { Some(x) => … }`
+                // type-asserts `x` to `V` rather than `interface{}`.
+                if let Some((recv, "get", _)) =
+                    crate::generator::desugared_map_method(scrutinee, callee, args)
+                {
+                    if let Some((_k, v)) = self.map_receiver_kv_go_types(recv) {
+                        return Some(v);
                     }
                 }
                 match &callee.kind {
@@ -1989,6 +2181,313 @@ impl GoEmitCtx {
         Ok(true)
     }
 
+    /// Emit a built-in `Map[K, V]` method call to its Go form (native
+    /// `map[K]V`, building on P3-α's typed map literals/decls).
+    ///
+    /// Recognised via [`crate::generator::desugared_map_method`] (gated on
+    /// `recv_kind = "Map"`) and wired *before* [`Self::try_emit_list_method`],
+    /// so a `Map` receiver's `get`/`contains_key`/`len` no longer route through
+    /// the `List` path (which passed the `map[K]V` where a `[]interface{}` slice
+    /// closure expected, and cast the key to `int64`). `get` uses the Go
+    /// comma-ok form (`__v, __ok := __m[__k]`) → the `__bockSome`/`__bockNone`
+    /// Optional runtime. Mutating methods (`set`/`delete`/`merge`) copy then
+    /// mutate and return the new map (Bock map value semantics). The inline
+    /// closures are typed `map[K]V` from the receiver's declared element types
+    /// (recovered from [`Self::map_receiver_kv_go_types`]; `interface{}`
+    /// fallback when unknown). Returns `true` if handled.
+    fn try_emit_map_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_map_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let (k_ty, v_ty) = self
+            .map_receiver_kv_go_types(recv)
+            .unwrap_or_else(|| ("interface{}".to_string(), "interface{}".to_string()));
+        let map_ty = format!("map[{k_ty}]{v_ty}");
+        let code = match method {
+            "len" | "length" | "count" => format!("int64(len({recv_str}))"),
+            "is_empty" => format!("(len({recv_str}) == 0)"),
+            "contains_key" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                let k = self.expr_to_string(&k.value)?;
+                format!(
+                    "func(__m {map_ty}, __k {k_ty}) bool {{ _, __ok := __m[__k]; return __ok }}\
+                     ({recv_str}, {k})"
+                )
+            }
+            "get" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                let k = self.expr_to_string(&k.value)?;
+                format!(
+                    "func(__m {map_ty}, __k {k_ty}) __bockOption {{ \
+                     if __v, __ok := __m[__k]; __ok {{ return __bockSome(__v) }}; \
+                     return __bockNone }}({recv_str}, {k})"
+                )
+            }
+            "set" => {
+                let (Some(k), Some(v)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                let k = self.expr_to_string(&k.value)?;
+                let v = self.expr_to_string(&v.value)?;
+                format!(
+                    "func(__m {map_ty}, __k {k_ty}, __v {v_ty}) {map_ty} {{ \
+                     __r := make({map_ty}, len(__m)+1); \
+                     for __mk, __mv := range __m {{ __r[__mk] = __mv }}; \
+                     __r[__k] = __v; return __r }}({recv_str}, {k}, {v})"
+                )
+            }
+            "delete" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                let k = self.expr_to_string(&k.value)?;
+                format!(
+                    "func(__m {map_ty}, __k {k_ty}) {map_ty} {{ \
+                     __r := make({map_ty}, len(__m)); \
+                     for __mk, __mv := range __m {{ __r[__mk] = __mv }}; \
+                     delete(__r, __k); return __r }}({recv_str}, {k})"
+                )
+            }
+            "merge" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "func(__m {map_ty}, __o {map_ty}) {map_ty} {{ \
+                     __r := make({map_ty}, len(__m)+len(__o)); \
+                     for __mk, __mv := range __m {{ __r[__mk] = __mv }}; \
+                     for __ok, __ov := range __o {{ __r[__ok] = __ov }}; \
+                     return __r }}({recv_str}, {o})"
+                )
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!(
+                    "func(__m {map_ty}, __f func({k_ty}, {v_ty}) bool) {map_ty} {{ \
+                     __r := make({map_ty}); \
+                     for __mk, __mv := range __m {{ if __f(__mk, __mv) {{ __r[__mk] = __mv }} }}; \
+                     return __r }}({recv_str}, {f})"
+                )
+            }
+            "keys" => format!(
+                "func(__m {map_ty}) []{k_ty} {{ \
+                 __r := make([]{k_ty}, 0, len(__m)); \
+                 for __mk := range __m {{ __r = append(__r, __mk) }}; \
+                 return __r }}({recv_str})"
+            ),
+            "values" => format!(
+                "func(__m {map_ty}) []{v_ty} {{ \
+                 __r := make([]{v_ty}, 0, len(__m)); \
+                 for _, __mv := range __m {{ __r = append(__r, __mv) }}; \
+                 return __r }}({recv_str})"
+            ),
+            "entries" | "to_list" => format!(
+                "func(__m {map_ty}) [][2]interface{{}} {{ \
+                 __r := make([][2]interface{{}}, 0, len(__m)); \
+                 for __mk, __mv := range __m {{ __r = append(__r, [2]interface{{}}{{__mk, __mv}}) }}; \
+                 return __r }}({recv_str})"
+            ),
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!(
+                    "func(__m {map_ty}, __f func({k_ty}, {v_ty})) {{ \
+                     for __mk, __mv := range __m {{ __f(__mk, __mv) }} }}({recv_str}, {f})"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
+    /// Emit a built-in `Set[E]` method call to its Go form (native
+    /// `map[E]struct{}`, building on P3-α's typed set literals/decls).
+    ///
+    /// Recognised via [`crate::generator::desugared_set_method`] (gated on
+    /// `recv_kind = "Set"`) and wired *before* [`Self::try_emit_list_method`].
+    /// `contains` is a comma-ok membership test; the set algebra builds new
+    /// `map[E]struct{}` values. Mutating methods (`add`/`remove`) copy then
+    /// mutate and return the new set. The inline closures are typed `map[E]
+    /// struct{}` from the receiver's declared element type
+    /// ([`Self::set_receiver_elem_go_type`]; `interface{}` fallback). Returns
+    /// `true` if handled.
+    fn try_emit_set_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_set_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let e_ty = self
+            .set_receiver_elem_go_type(recv)
+            .unwrap_or_else(|| "interface{}".to_string());
+        let set_ty = format!("map[{e_ty}]struct{{}}");
+        let code = match method {
+            "len" | "length" | "count" => format!("int64(len({recv_str}))"),
+            "is_empty" => format!("(len({recv_str}) == 0)"),
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                let x = self.expr_to_string(&x.value)?;
+                format!(
+                    "func(__s {set_ty}, __x {e_ty}) bool {{ _, __ok := __s[__x]; return __ok }}\
+                     ({recv_str}, {x})"
+                )
+            }
+            "add" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                let x = self.expr_to_string(&x.value)?;
+                format!(
+                    "func(__s {set_ty}, __x {e_ty}) {set_ty} {{ \
+                     __r := make({set_ty}, len(__s)+1); \
+                     for __sk := range __s {{ __r[__sk] = struct{{}}{{}} }}; \
+                     __r[__x] = struct{{}}{{}}; return __r }}({recv_str}, {x})"
+                )
+            }
+            "remove" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                let x = self.expr_to_string(&x.value)?;
+                format!(
+                    "func(__s {set_ty}, __x {e_ty}) {set_ty} {{ \
+                     __r := make({set_ty}, len(__s)); \
+                     for __sk := range __s {{ __r[__sk] = struct{{}}{{}} }}; \
+                     delete(__r, __x); return __r }}({recv_str}, {x})"
+                )
+            }
+            "union" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "func(__a {set_ty}, __b {set_ty}) {set_ty} {{ \
+                     __r := make({set_ty}, len(__a)+len(__b)); \
+                     for __k := range __a {{ __r[__k] = struct{{}}{{}} }}; \
+                     for __k := range __b {{ __r[__k] = struct{{}}{{}} }}; \
+                     return __r }}({recv_str}, {o})"
+                )
+            }
+            "intersection" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "func(__a {set_ty}, __b {set_ty}) {set_ty} {{ \
+                     __r := make({set_ty}); \
+                     for __k := range __a {{ if _, __ok := __b[__k]; __ok {{ \
+                     __r[__k] = struct{{}}{{}} }} }}; \
+                     return __r }}({recv_str}, {o})"
+                )
+            }
+            "difference" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "func(__a {set_ty}, __b {set_ty}) {set_ty} {{ \
+                     __r := make({set_ty}); \
+                     for __k := range __a {{ if _, __ok := __b[__k]; !__ok {{ \
+                     __r[__k] = struct{{}}{{}} }} }}; \
+                     return __r }}({recv_str}, {o})"
+                )
+            }
+            "is_subset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "func(__a {set_ty}, __b {set_ty}) bool {{ \
+                     for __k := range __a {{ if _, __ok := __b[__k]; !__ok {{ return false }} }}; \
+                     return true }}({recv_str}, {o})"
+                )
+            }
+            "is_superset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "func(__a {set_ty}, __b {set_ty}) bool {{ \
+                     for __k := range __b {{ if _, __ok := __a[__k]; !__ok {{ return false }} }}; \
+                     return true }}({recv_str}, {o})"
+                )
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!(
+                    "func(__s {set_ty}, __f func({e_ty}) bool) {set_ty} {{ \
+                     __r := make({set_ty}); \
+                     for __k := range __s {{ if __f(__k) {{ __r[__k] = struct{{}}{{}} }} }}; \
+                     return __r }}({recv_str}, {f})"
+                )
+            }
+            "map" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!(
+                    "func(__s {set_ty}, __f func({e_ty}) {e_ty}) {set_ty} {{ \
+                     __r := make({set_ty}); \
+                     for __k := range __s {{ __r[__f(__k)] = struct{{}}{{}} }}; \
+                     return __r }}({recv_str}, {f})"
+                )
+            }
+            "to_list" => format!(
+                "func(__s {set_ty}) []{e_ty} {{ \
+                 __r := make([]{e_ty}, 0, len(__s)); \
+                 for __k := range __s {{ __r = append(__r, __k) }}; \
+                 return __r }}({recv_str})"
+            ),
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!(
+                    "func(__s {set_ty}, __f func({e_ty})) {{ \
+                     for __k := range __s {{ __f(__k) }} }}({recv_str}, {f})"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Recognise `Duration.xxx(...)` / `Instant.xxx(...)` associated-function
     /// calls and emit inline Go code. Duration values are `int64` nanoseconds
     /// (matching `time.Duration`); Instants are `time.Time` (monotonic via
@@ -2223,6 +2722,11 @@ impl GoEmitCtx {
                     self.buf.push_str(ORDERING_RUNTIME_GO);
                     self.buf.push('\n');
                     self.ordering_runtime_emitted = true;
+                }
+                if !self.range_runtime_emitted && go_module_uses_range(items) {
+                    self.buf.push_str(RANGE_RUNTIME_GO);
+                    self.buf.push('\n');
+                    self.range_runtime_emitted = true;
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -2722,8 +3226,13 @@ impl GoEmitCtx {
             self.current_handler_vars
                 .insert(ename.clone(), to_camel_case(ename));
         }
-        let (saved_opt_scope, saved_list_scope, saved_result_scope) =
-            self.enter_param_optional_scope(params);
+        let (
+            saved_opt_scope,
+            saved_list_scope,
+            saved_result_scope,
+            saved_map_scope,
+            saved_set_scope,
+        ) = self.enter_param_optional_scope(params);
         if name == "main" || is_void {
             self.emit_block_body(body)?;
         } else {
@@ -2735,6 +3244,8 @@ impl GoEmitCtx {
         self.var_optional_elem = saved_opt_scope;
         self.var_list_elem = saved_list_scope;
         self.var_result_elem = saved_result_scope;
+        self.var_map_kv = saved_map_scope;
+        self.var_set_elem = saved_set_scope;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         self.writeln("}");
@@ -2923,8 +3434,13 @@ impl GoEmitCtx {
                 self.current_handler_vars
                     .insert(ename.clone(), to_camel_case(ename));
             }
-            let (saved_opt_scope, saved_list_scope, saved_result_scope) =
-                self.enter_param_optional_scope(rest);
+            let (
+                saved_opt_scope,
+                saved_list_scope,
+                saved_result_scope,
+                saved_map_scope,
+                saved_set_scope,
+            ) = self.enter_param_optional_scope(rest);
             if return_type.is_some() && !is_void {
                 let prev_ret = self.current_fn_ret_type.take();
                 self.current_fn_ret_type = return_type.as_deref().map(|t| self.type_to_go(t));
@@ -2936,6 +3452,8 @@ impl GoEmitCtx {
             self.var_optional_elem = saved_opt_scope;
             self.var_list_elem = saved_list_scope;
             self.var_result_elem = saved_result_scope;
+            self.var_map_kv = saved_map_scope;
+            self.var_set_elem = saved_set_scope;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
             self.writeln("}");
@@ -3087,6 +3605,18 @@ impl GoEmitCtx {
                         self.var_list_elem
                             .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
                     }
+                    // Record a `Map[K, V]` / `Set[E]` binding's element Go types
+                    // so a later built-in method (`m.get(k)`, `s.contains(x)`,
+                    // …) lowers its inline closures over the concretely-typed
+                    // receiver `map[K]V` / `map[E]struct{}`.
+                    if let Some(kv) = self.map_kv_go_types(t) {
+                        self.var_map_kv
+                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), kv);
+                    }
+                    if let Some(elem) = self.set_elem_go_type(t) {
+                        self.var_set_elem
+                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
+                    }
                     // Record a `Result[T, E]` binding's Ok/Err types so a later
                     // `match binding { Ok(v) => ...; Err(e) => ... }` can
                     // type-assert the bound payload.
@@ -3117,6 +3647,19 @@ impl GoEmitCtx {
                     self.expected_collection_elem = prev_expected;
                     self.buf.push('\n');
                 } else {
+                    // Propagate a `Map`/`Set` element type onto an untyped
+                    // binding whose value returns a map/set (`let m2 =
+                    // base.set(k, v)`, `let s2 = s.add(x)`), so a later built-in
+                    // on `m2`/`s2` lowers its inline closure over the concrete
+                    // `map[K]V` / `map[E]struct{}` rather than `interface{}`.
+                    if let Some(kv) = self.value_map_kv_go_types(value) {
+                        self.var_map_kv
+                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), kv);
+                    }
+                    if let Some(elem) = self.value_set_elem_go_type(value) {
+                        self.var_set_elem
+                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
+                    }
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}{binding} := ");
                     self.emit_expr(value)?;
@@ -3548,6 +4091,14 @@ impl GoEmitCtx {
                 if self.try_emit_concurrency_call(callee, args)? {
                     return Ok(());
                 }
+                // Map/Set dispatch precedes the List recogniser so the
+                // overlapping method names route by `recv_kind`, not by name.
+                if self.try_emit_map_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_set_method(node, callee, args)? {
+                    return Ok(());
+                }
                 if self.try_emit_list_method(callee, args)? {
                     return Ok(());
                 }
@@ -3693,11 +4244,16 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::Range { lo, hi, inclusive } => {
-                // Go doesn't have range expressions as values;
-                // emit as a comment-annotated slice or helper call.
-                self.needs_fmt_import = true;
-                self.buf.push_str("/* range */ nil");
-                let _ = (lo, hi, inclusive);
+                // Go has no native range *value*; lower to the injected
+                // `__bockRange(lo, hi, inclusive)` helper (a `[]int64`), so
+                // `for _, i := range <range>` iterates the materialised slice.
+                // The runtime is emitted once at the Module arm
+                // (`go_module_uses_range`).
+                self.buf.push_str("__bockRange(");
+                self.emit_expr(lo)?;
+                self.buf.push_str(", ");
+                self.emit_expr(hi)?;
+                let _ = write!(self.buf, ", {inclusive})");
                 Ok(())
             }
             NodeKind::RecordConstruct {

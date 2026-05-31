@@ -609,6 +609,231 @@ impl RsEmitCtx {
         Ok(true)
     }
 
+    /// Emit a built-in `Map[K, V]` method call to its Rust form (native
+    /// `std::collections::HashMap`).
+    ///
+    /// Recognised via [`crate::generator::desugared_map_method`] (gated on
+    /// `recv_kind = "Map"`) and wired *before* [`Self::try_emit_list_method`],
+    /// so a `Map` receiver's `get`/`contains_key`/`len` no longer route through
+    /// the `List` path (where `get` cast the *key* to `usize` and indexed the
+    /// map as a slice). `get` returns Rust's native `Option<V>` (`.get(&k)
+    /// .cloned()`), the same rep the Rust `match` / Optional lowering expects.
+    /// Mutating methods (`set`/`delete`/`merge`) clone-then-mutate and return
+    /// the new map (Bock map value semantics; the receiver var need not be
+    /// `mut`). `K: Hash + Eq` and `K, V: Clone` hold for the v1 element types.
+    /// Returns `true` if handled.
+    fn try_emit_map_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_map_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let code = match method {
+            "len" | "length" | "count" => format!("(({recv_str}).len() as i64)"),
+            "is_empty" => format!("({recv_str}).is_empty()"),
+            "contains_key" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                let k = self.expr_to_string(&k.value)?;
+                format!("({recv_str}).contains_key(&({k}))")
+            }
+            "get" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                let k = self.expr_to_string(&k.value)?;
+                format!("({recv_str}).get(&({k})).cloned()")
+            }
+            "set" => {
+                let (Some(k), Some(v)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                let k = self.expr_to_string(&k.value)?;
+                let v = self.expr_to_string(&v.value)?;
+                format!("{{ let mut __m = ({recv_str}).clone(); __m.insert({k}, {v}); __m }}")
+            }
+            "delete" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                let k = self.expr_to_string(&k.value)?;
+                format!("{{ let mut __m = ({recv_str}).clone(); __m.remove(&({k})); __m }}")
+            }
+            "merge" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!("{{ let mut __m = ({recv_str}).clone(); __m.extend(({o}).clone()); __m }}")
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!(
+                    "({recv_str}).iter().filter(|(__k, __v)| ({f})((*__k).clone(), (*__v).clone()))\
+                     .map(|(__k, __v)| (__k.clone(), __v.clone()))\
+                     .collect::<std::collections::HashMap<_, _>>()"
+                )
+            }
+            "keys" => {
+                format!("({recv_str}).keys().cloned().collect::<Vec<_>>()")
+            }
+            "values" => {
+                format!("({recv_str}).values().cloned().collect::<Vec<_>>()")
+            }
+            "entries" | "to_list" => {
+                format!(
+                    "({recv_str}).iter().map(|(__k, __v)| (__k.clone(), __v.clone()))\
+                     .collect::<Vec<_>>()"
+                )
+            }
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!(
+                    "{{ for (__k, __v) in ({recv_str}).iter() {{ \
+                     ({f})(__k.clone(), __v.clone()); }} }}"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
+    /// Emit a built-in `Set[E]` method call to its Rust form (native
+    /// `std::collections::HashSet`).
+    ///
+    /// Recognised via [`crate::generator::desugared_set_method`] (gated on
+    /// `recv_kind = "Set"`) and wired *before* [`Self::try_emit_list_method`].
+    /// Set algebra maps to the native `HashSet` combinators; `contains` is the
+    /// native membership test (not the `List` linear scan). Mutating methods
+    /// (`add`/`remove`) clone-then-mutate and return the new set. `E: Hash + Eq
+    /// + Clone` holds for the v1 element types.
+    fn try_emit_set_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_set_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let code = match method {
+            "len" | "length" | "count" => format!("(({recv_str}).len() as i64)"),
+            "is_empty" => format!("({recv_str}).is_empty()"),
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                let x = self.expr_to_string(&x.value)?;
+                format!("({recv_str}).contains(&({x}))")
+            }
+            "add" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                let x = self.expr_to_string(&x.value)?;
+                format!("{{ let mut __s = ({recv_str}).clone(); __s.insert({x}); __s }}")
+            }
+            "remove" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                let x = self.expr_to_string(&x.value)?;
+                format!("{{ let mut __s = ({recv_str}).clone(); __s.remove(&({x})); __s }}")
+            }
+            "union" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "({recv_str}).union(&({o})).cloned().collect::<std::collections::HashSet<_>>()"
+                )
+            }
+            "intersection" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "({recv_str}).intersection(&({o})).cloned()\
+                     .collect::<std::collections::HashSet<_>>()"
+                )
+            }
+            "difference" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!(
+                    "({recv_str}).difference(&({o})).cloned()\
+                     .collect::<std::collections::HashSet<_>>()"
+                )
+            }
+            "is_subset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!("({recv_str}).is_subset(&({o}))")
+            }
+            "is_superset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                let o = self.expr_to_string(&o.value)?;
+                format!("({recv_str}).is_superset(&({o}))")
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!(
+                    "({recv_str}).iter().filter(|__x| ({f})((*__x).clone())).cloned()\
+                     .collect::<std::collections::HashSet<_>>()"
+                )
+            }
+            "map" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!(
+                    "({recv_str}).iter().map(|__x| ({f})(__x.clone()))\
+                     .collect::<std::collections::HashSet<_>>()"
+                )
+            }
+            "to_list" => {
+                format!("({recv_str}).iter().cloned().collect::<Vec<_>>()")
+            }
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&f.value)?;
+                format!("{{ for __x in ({recv_str}).iter() {{ ({f})(__x.clone()); }} }}")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Lower a primitive trait-bridge method call (`compare`/`eq`/`to_string`/
     /// `display` on a primitive receiver) to its Rust intrinsic.
     ///
@@ -2109,6 +2334,14 @@ impl RsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                // Map/Set dispatch precedes the List recogniser so the
+                // overlapping method names route by `recv_kind`, not by name.
+                if self.try_emit_map_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_set_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {

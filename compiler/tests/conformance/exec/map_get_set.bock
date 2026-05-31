@@ -1,0 +1,43 @@
+// TEST: exec_map_get_set
+// EXPECT: output "3;1;yes;no"
+// EXPECT: targets js, ts, python, rust, go
+//
+// T1 spike for `Map[K, V]` built-in method dispatch (codegen-completeness P3,
+// item 2). `m.set(k, v)` (returns the map), `m.get(k)` (an `Optional[V]`,
+// matched and the payload used in a typed `${...}` position), `m.len()` (Int),
+// and `m.contains_key(k)` (Bool). Proves the Map recogniser + per-backend
+// lowering work on all five targets: without them a Map receiver's
+// `get`/`contains_key`/`len` mis-routed through the *List* path (`(m).length`,
+// an index-bounds `Optional`, a key→usize cast) and `set` fell through to the
+// generic desugared-self-call, emitting `m.set(m, k, v)` — undefined on every
+// target. The Map `recv_kind` tag reaching codegen (#137/#138) is the crux.
+//
+// `fmtGet` reads `m` (a non-`Copy` HashMap in Rust / value-typed map elsewhere)
+// only inside the one function, so Rust ownership is respected — the value
+// semantics of passing-then-reusing a map is the DQ18 family (→ P4), which this
+// fixture deliberately does not couple to.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn yn(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn fmtGet(m: Map[String, Int]) -> String {
+  let n = m.len()
+  match m.get("a") {
+    Some(x) => return "${n};${x};${yn(m.contains_key("b"))};${yn(m.contains_key("z"))}"
+    None => return "${n};none"
+  }
+}
+
+fn main() -> Void {
+  let base: Map[String, Int] = {"a": 1, "b": 2}
+  let m2 = base.set("c", 3)
+  println(fmtGet(m2))
+}

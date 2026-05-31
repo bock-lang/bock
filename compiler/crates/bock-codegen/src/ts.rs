@@ -117,6 +117,26 @@ const __bockChannelNew = <T>(): [__BockChannel<T>, __BockChannel<T>] => {
 const __bockSpawn = <T>(x: Promise<T>): Promise<T> => x;
 ";
 
+/// Runtime helpers for Bock range expressions (`0..n` / `0..=n`) in TypeScript.
+/// TS has no native range value, so `for i in 0..n` lowers to
+/// `for (const i of range(0, n))`. `range` is half-open, `rangeInclusive`
+/// inclusive — matching Python's `range(lo, hi)` / `range(lo, hi + 1)` and
+/// Rust's `lo..hi` / `lo..=hi`. Emitted once per bundle, gated on a ctx flag
+/// (mirrors [`OPTIONAL_RUNTIME_TS`]).
+const RANGE_RUNTIME_TS: &str = "\
+// ── Bock range runtime ──
+const range = (lo: number, hi: number): number[] => { const r: number[] = []; for (let i = lo; i < hi; i++) r.push(i); return r; };
+const rangeInclusive = (lo: number, hi: number): number[] => { const r: number[] = []; for (let i = lo; i <= hi; i++) r.push(i); return r; };
+";
+
+/// True if the module references a `Range` node anywhere (so the range runtime
+/// prelude must be emitted). Mirrors [`module_uses_optional`]. `RangePat` does
+/// not contain the `Range {` substring, so match-arm range patterns do not
+/// trigger the (value-only) helpers.
+fn module_uses_range(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| format!("{n:?}").contains("Range {"))
+}
+
 /// TypeScript code generator implementing the `CodeGenerator` trait.
 #[derive(Debug)]
 pub struct TsGenerator {
@@ -291,6 +311,11 @@ struct TsEmitCtx {
     /// Set once the concurrency runtime prelude has been emitted; deduped across
     /// a bundle exactly as [`Self::optional_runtime_emitted`].
     concurrency_runtime_emitted: bool,
+    /// Set once the range runtime prelude ([`RANGE_RUNTIME_TS`]) has been
+    /// emitted; deduped across a bundle exactly as
+    /// [`Self::optional_runtime_emitted`] (a duplicate `const range` is a
+    /// redeclaration error).
+    range_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Same role as the JS backend's: route
     /// a unit-variant reference to the `{enum}_{variant}` const, a struct/tuple
     /// construction to the factory, and recognise `RecordPat` arms as ADT.
@@ -350,6 +375,7 @@ impl TsEmitCtx {
             optional_runtime_emitted: false,
             result_runtime_emitted: false,
             concurrency_runtime_emitted: false,
+            range_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
@@ -896,6 +922,323 @@ impl TsEmitCtx {
         Ok(true)
     }
 
+    /// Emit a built-in `Map[K, V]` method call to its TS form (native `Map`).
+    ///
+    /// Recognised via [`crate::generator::desugared_map_method`] (gated on
+    /// `recv_kind = "Map"`) and wired *before* [`Self::try_emit_list_method`].
+    /// Mirrors the JS lowering but types the generic IIFEs (`<K, V>` params,
+    /// `BockOption<V>` return for `get`) so `tsc --strict` narrows correctly.
+    /// `get` returns the tagged `Optional` rep (`{ _tag: "Some" as const, _0: v
+    /// }` / `{ _tag: "None" as const }`); mutating methods (`set`/`delete`/
+    /// `merge`) mutate in place and return the receiver. Returns `true` if
+    /// handled.
+    fn try_emit_map_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_map_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "len" | "length" | "count" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").size");
+            }
+            "is_empty" => {
+                self.buf.push_str("((");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").size === 0)");
+            }
+            "contains_key" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").has(");
+                self.emit_expr(&k.value)?;
+                self.buf.push(')');
+            }
+            "get" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<K, V>(__m: Map<K, V>, __k: K): BockOption<V> => __m.has(__k) ? \
+                     { _tag: \"Some\" as const, _0: __m.get(__k)! } : { _tag: \"None\" as const })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&k.value)?;
+                self.buf.push(')');
+            }
+            "set" => {
+                let (Some(k), Some(v)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<K, V>(__m: Map<K, V>, __k: K, __v: V): Map<K, V> => \
+                     { __m.set(__k, __v); return __m; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&k.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&v.value)?;
+                self.buf.push(')');
+            }
+            "delete" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<K, V>(__m: Map<K, V>, __k: K): Map<K, V> => \
+                     { __m.delete(__k); return __m; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&k.value)?;
+                self.buf.push(')');
+            }
+            "merge" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<K, V>(__m: Map<K, V>, __o: Map<K, V>): Map<K, V> => \
+                     { for (const [__k, __v] of __o) __m.set(__k, __v); return __m; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<K, V>(__m: Map<K, V>, __f: (k: K, v: V) => boolean): Map<K, V> => \
+                     { const __r = new Map<K, V>(); \
+                     for (const [__k, __v] of __m) if (__f(__k, __v)) __r.set(__k, __v); \
+                     return __r; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            "keys" => {
+                self.buf.push_str("[...(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").keys()]");
+            }
+            "values" => {
+                self.buf.push_str("[...(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").values()]");
+            }
+            "entries" | "to_list" => {
+                self.buf.push_str("[...(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").entries()]");
+            }
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<K, V>(__m: Map<K, V>, __f: (k: K, v: V) => void): void => \
+                     { for (const [__k, __v] of __m) __f(__k, __v); })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Emit a built-in `Set[E]` method call to its TS form (native `Set`).
+    ///
+    /// Recognised via [`crate::generator::desugared_set_method`] (gated on
+    /// `recv_kind = "Set"`) and wired *before* [`Self::try_emit_list_method`].
+    /// Generic-typed IIFEs (`<E>` params) keep `tsc --strict` happy. Mutating
+    /// methods (`add`/`remove`) mutate in place and return the receiver.
+    fn try_emit_set_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_set_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "len" | "length" | "count" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").size");
+            }
+            "is_empty" => {
+                self.buf.push_str("((");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").size === 0)");
+            }
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").has(");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "add" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__s: Set<E>, __x: E): Set<E> => { __s.add(__x); return __s; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "remove" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__s: Set<E>, __x: E): Set<E> => { __s.delete(__x); return __s; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "union" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__a: Set<E>, __b: Set<E>): Set<E> => new Set<E>([...__a, ...__b]))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "intersection" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__a: Set<E>, __b: Set<E>): Set<E> => \
+                     new Set<E>([...__a].filter((__x) => __b.has(__x))))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "difference" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__a: Set<E>, __b: Set<E>): Set<E> => \
+                     new Set<E>([...__a].filter((__x) => !__b.has(__x))))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "is_subset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__a: Set<E>, __b: Set<E>): boolean => \
+                     [...__a].every((__x) => __b.has(__x)))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "is_superset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__a: Set<E>, __b: Set<E>): boolean => \
+                     [...__b].every((__x) => __a.has(__x)))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__s: Set<E>, __f: (x: E) => boolean): Set<E> => \
+                     new Set<E>([...__s].filter(__f)))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            "map" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__s: Set<E>, __f: (x: E) => E): Set<E> => \
+                     new Set<E>([...__s].map(__f)))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            "to_list" => {
+                self.buf.push_str("[...(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(")]");
+            }
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<E>(__s: Set<E>, __f: (x: E) => void): void => \
+                     { for (const __x of __s) __f(__x); })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     /// Lower a primitive trait-bridge method call (`compare`/`eq`/`to_string`/
     /// `display` on a primitive receiver) to its TS form.
     ///
@@ -1150,6 +1493,11 @@ impl TsEmitCtx {
                     self.buf.push_str(CONCURRENCY_RUNTIME_TS);
                     self.buf.push('\n');
                     self.concurrency_runtime_emitted = true;
+                }
+                if !self.range_runtime_emitted && module_uses_range(items) {
+                    self.buf.push_str(RANGE_RUNTIME_TS);
+                    self.buf.push('\n');
+                    self.range_runtime_emitted = true;
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -2403,6 +2751,14 @@ impl TsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                // Map/Set dispatch precedes the List recogniser so the
+                // overlapping method names route by `recv_kind`, not by name.
+                if self.try_emit_map_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_set_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {

@@ -973,12 +973,14 @@ pub const OPTIONAL_METHODS: &[&str] = &[
 pub const RESULT_METHODS: &[&str] = &["is_ok", "is_err", "unwrap", "unwrap_or", "map", "map_err"];
 
 /// The receiver-kind annotation value, when it is one of the built-in container
-/// categories `Optional` or `Result`.
+/// categories `Optional`, `Result`, `Map`, or `Set`.
 ///
-/// Returns the tag (`"Optional"` / `"Result"`) when the node carries a
-/// `recv_kind` stamp with that exact value, else `None`. This is the
-/// codegen-side reader of the checker→codegen annotation, the disambiguation
-/// crux for the overloaded `unwrap`/`unwrap_or`/`map` method names.
+/// Returns the tag (`"Optional"` / `"Result"` / `"Map"` / `"Set"`) when the
+/// node carries a `recv_kind` stamp with that exact value, else `None`. This is
+/// the codegen-side reader of the checker→codegen annotation, the
+/// disambiguation crux for the overloaded method names that appear on several
+/// built-in containers (`unwrap`/`unwrap_or`/`map` on `Optional`/`Result`;
+/// `filter`/`map`/`len`/`contains`/`to_list` across `List`/`Map`/`Set`).
 #[must_use]
 pub fn container_recv_kind(node: &AIRNode) -> Option<&str> {
     let bock_air::Value::String(tag) =
@@ -989,6 +991,8 @@ pub fn container_recv_kind(node: &AIRNode) -> Option<&str> {
     match tag.as_str() {
         "Optional" => Some("Optional"),
         "Result" => Some("Result"),
+        "Map" => Some("Map"),
+        "Set" => Some("Set"),
         _ => None,
     }
 }
@@ -1045,6 +1049,134 @@ pub fn desugared_result_method<'a>(
     let (recv, field, rest) = desugared_self_call(callee, args)?;
     let method = field.name.as_str();
     if RESULT_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
+// ─── Map / Set built-in method dispatch ──────────────────────────────────────
+//
+// `Map[K, V]` and `Set[E]` expose built-in methods (`get`/`set`/`keys`/…,
+// `add`/`contains`/`union`/…) that the checker resolves to a concrete return
+// type. Codegen sees only the desugared `Call(FieldAccess(recv, m), [recv, …])`,
+// and several method names overlap with `List` (`len`/`length`/`count`,
+// `filter`, `map`, `to_list`, plus `contains` on `Set`/`List`): without
+// disambiguation a `Map`/`Set` receiver's `get`/`len`/`contains_key` is routed
+// through the `List` path (`(m).length`, an index-bounds `Optional`), and the
+// `Map`/`Set`-only methods (`set`/`add`/`keys`/`values`) fall through to the
+// generic desugared-self-call, emitting `m.set(m, k, v)` — undefined on every
+// target. The checker's `recv_kind` annotation (`RECV_KIND_META_KEY`, value
+// `"Map"` / `"Set"`) records the resolved receiver category on the call node,
+// so each backend reads it here to pick the right lowering and — crucially —
+// runs the recognisers *before* `desugared_list_method` so the overlapping
+// names dispatch by receiver kind, not by method name alone.
+
+/// The built-in `Map[K, V]` methods this codegen lowers natively per target.
+///
+/// Mirrors the checker's `Map` method resolution (`checker.rs`): `get` returns
+/// `Optional[V]`; `set`/`delete`/`merge`/`filter` return the (receiver) map;
+/// `keys`/`values`/`entries`/`to_list` return a `List`; `len`/`length`/`count`
+/// an `Int`; `contains_key`/`is_empty` a `Bool`; `for_each` `Void`. Membership
+/// is spelled `contains_key` (the checker's name); a bare `contains` on a `Map`
+/// does not resolve to a built-in (see the PR's Q-map-contains-name note).
+pub const MAP_METHODS: &[&str] = &[
+    "get",
+    "set",
+    "delete",
+    "merge",
+    "filter",
+    "keys",
+    "values",
+    "entries",
+    "to_list",
+    "len",
+    "length",
+    "count",
+    "contains_key",
+    "is_empty",
+    "for_each",
+];
+
+/// The built-in `Set[E]` methods this codegen lowers natively per target.
+///
+/// Mirrors the checker's `Set` method resolution (`checker.rs`): `add`/`remove`/
+/// `union`/`intersection`/`difference`/`filter`/`map` return the (receiver) set;
+/// `contains`/`is_subset`/`is_superset`/`is_empty` a `Bool`; `len`/`length`/
+/// `count` an `Int`; `to_list` a `List`; `for_each` `Void`. `contains` here is
+/// the *set-membership* test — distinct from `List.contains`, disambiguated by
+/// the `recv_kind = "Set"` annotation.
+pub const SET_METHODS: &[&str] = &[
+    "add",
+    "remove",
+    "union",
+    "intersection",
+    "difference",
+    "filter",
+    "map",
+    "contains",
+    "is_subset",
+    "is_superset",
+    "len",
+    "length",
+    "count",
+    "is_empty",
+    "to_list",
+    "for_each",
+];
+
+/// Recognise a *desugared `Map[K, V]` built-in method call*.
+///
+/// Building on [`desugared_self_call`], this additionally requires that (a) the
+/// `call_node` carries the checker's `recv_kind = "Map"` annotation and (b) the
+/// method is one of [`MAP_METHODS`]. Returns the receiver node, the method name,
+/// and the remaining (non-self) arguments — everything a backend needs to lower
+/// the call on the native map representation (`new Map`/`dict`/`HashMap`/
+/// `map[K]V`). Each backend wires this into its `Call` arm *before*
+/// [`desugared_list_method`] so a `Map` receiver's `get`/`len`/`contains_key`
+/// no longer hits the `List` path.
+///
+/// `call_node` is the full `Call` AIR node (it holds the annotation); `callee`
+/// and `args` are its `callee`/`args` fields, passed separately so a backend can
+/// call this from inside its `NodeKind::Call { callee, args, .. }` arm.
+#[must_use]
+pub fn desugared_map_method<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    if container_recv_kind(call_node) != Some("Map") {
+        return None;
+    }
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if MAP_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
+/// Recognise a *desugared `Set[E]` built-in method call*.
+///
+/// The `Set` counterpart of [`desugared_map_method`]: requires the
+/// `recv_kind = "Set"` annotation and a method in [`SET_METHODS`]. Returns the
+/// receiver node, the method name, and the remaining (non-self) arguments. The
+/// `recv_kind` disambiguation is what lets a backend distinguish `s.contains(x)`
+/// on a `Set` (native membership) from the same call on a `List` (a linear
+/// scan), and `s.len()`/`s.filter(..)`/`s.map(..)` from their `List` forms.
+#[must_use]
+pub fn desugared_set_method<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    if container_recv_kind(call_node) != Some("Set") {
+        return None;
+    }
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if SET_METHODS.contains(&method) {
         Some((recv, method, rest))
     } else {
         None
@@ -2452,6 +2584,71 @@ mod tests {
         // Annotated container, but a method outside the recognised set.
         let (call, callee, args) = annotated_call("frobnicate", "Optional", vec![]);
         assert!(desugared_optional_method(&call, &callee, &args).is_none());
+    }
+
+    #[test]
+    fn container_recv_kind_reads_map_and_set() {
+        let (call, _, _) = annotated_call("get", "Map", vec![]);
+        assert_eq!(container_recv_kind(&call), Some("Map"));
+        let (call, _, _) = annotated_call("add", "Set", vec![]);
+        assert_eq!(container_recv_kind(&call), Some("Set"));
+    }
+
+    #[test]
+    fn desugared_map_method_matches_map_methods() {
+        for &m in MAP_METHODS {
+            // `set` takes two args; the others either take one or none — arity is
+            // not validated by the recogniser, so pass none and assert it matches.
+            let (call, callee, args) = annotated_call(m, "Map", vec![]);
+            let (recv, got, _rest) =
+                desugared_map_method(&call, &callee, &args).expect("should match");
+            assert_eq!(got, m);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+            // A `Set`-tagged call must NOT match the Map recogniser (overlapping
+            // names `filter`/`len`/`length`/`count`/`is_empty`/`to_list`/`for_each`).
+            let (call_s, callee_s, args_s) = annotated_call(m, "Set", vec![]);
+            if SET_METHODS.contains(&m) {
+                assert!(desugared_map_method(&call_s, &callee_s, &args_s).is_none());
+            }
+        }
+        // The Map-only membership spelling is `contains_key`, not `contains`
+        // (the checker resolves a bare `contains` on a Map to a fresh var).
+        let (call, callee, args) = annotated_call("contains", "Map", vec![]);
+        assert!(desugared_map_method(&call, &callee, &args).is_none());
+    }
+
+    #[test]
+    fn desugared_set_method_matches_set_methods() {
+        for &m in SET_METHODS {
+            let (call, callee, args) = annotated_call(m, "Set", vec![]);
+            let (recv, got, _rest) =
+                desugared_set_method(&call, &callee, &args).expect("should match");
+            assert_eq!(got, m);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+            // A `Map`-tagged call must NOT match the Set recogniser.
+            let (call_m, callee_m, args_m) = annotated_call(m, "Map", vec![]);
+            if MAP_METHODS.contains(&m) {
+                assert!(desugared_set_method(&call_m, &callee_m, &args_m).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn map_set_methods_require_the_annotation() {
+        // The right method name + receiver shape, but no `recv_kind` annotation
+        // → not matched. A bare `m.get(k)` without the annotation must fall
+        // through to the List recogniser, not the Map one.
+        let (callee, args) = desugared_call("get", vec![]);
+        let bare = n(
+            104,
+            NodeKind::Call {
+                callee: Box::new(callee.clone()),
+                args: args.clone(),
+                type_args: vec![],
+            },
+        );
+        assert!(desugared_map_method(&bare, &callee, &args).is_none());
+        assert!(desugared_set_method(&bare, &callee, &args).is_none());
     }
 
     #[test]
