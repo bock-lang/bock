@@ -727,6 +727,16 @@ struct GoEmitCtx {
     /// trailing `panic("unreachable")` instead of `return nil` when typed, since
     /// a concrete (non-interface) return type has no `nil`.
     current_fn_ret_type: Option<String>,
+    /// Expected collection element Go types for a collection literal emitted in
+    /// a *typed context* (a `let x: List[T] = [...]`). A collection literal
+    /// infers its element type from its elements, but an EMPTY literal (`[]`)
+    /// or one whose elements infer looser than the declaration cannot — and the
+    /// `interface{}` fallback then mismatches the declared `[]T`. When set, a
+    /// `List`/`Set` literal uses `.0` as its element type and a `Map` literal
+    /// uses `(.0, .1)` as `(key, value)`, so the literal matches the declared
+    /// container. `None` outside a typed-collection binding context. Consumed
+    /// (taken) at the literal so it never leaks to a nested/sibling literal.
+    expected_collection_elem: Option<(String, Option<String>)>,
 }
 
 impl GoEmitCtx {
@@ -769,6 +779,7 @@ impl GoEmitCtx {
             go_self_subst: None,
             self_param_traits: HashSet::new(),
             current_fn_ret_type: None,
+            expected_collection_elem: None,
         }
     }
 
@@ -1141,6 +1152,65 @@ impl GoEmitCtx {
         None
     }
 
+    /// For a `List[T]` / `Set[T]` / `Map[K, V]` type expression, the declared
+    /// Go element types as `(elem_or_key, value)`: `List`/`Set` yield
+    /// `(T, None)`; `Map` yields `(K, Some(V))`. A missing type arg defaults to
+    /// `interface{}`. `None` for any non-collection type. Used to set
+    /// [`Self::expected_collection_elem`] so a literal in a typed binding adopts
+    /// the declared element type(s).
+    fn collection_elem_go_types(&self, node: &AIRNode) -> Option<(String, Option<String>)> {
+        let NodeKind::TypeNamed { path, args } = &node.kind else {
+            return None;
+        };
+        let name = path.segments.last().map(|s| s.name.as_str())?;
+        let arg = |i: usize| {
+            args.get(i)
+                .map_or_else(|| "interface{}".to_string(), |a| self.type_to_go(a))
+        };
+        match name {
+            "List" | "Set" => Some((arg(0), None)),
+            "Map" => Some((arg(0), Some(arg(1)))),
+            _ => None,
+        }
+    }
+
+    /// The Go element type a `for x in <iterable>` loop binds, when
+    /// structurally recoverable:
+    /// - an identifier whose declared `List[T]` element type is in
+    ///   [`Self::var_list_elem`] (a typed `let` / parameter),
+    /// - a list literal whose elements infer to one homogeneous Go type,
+    /// - a range (`a..b` / `a..=b`), which yields `int64`.
+    ///
+    /// Returns `None` otherwise; the loop variable is then left out of the type
+    /// scope and inference falls back to `interface{}` — never a wrong type.
+    fn for_loop_elem_go_type(&self, iterable: &AIRNode) -> Option<String> {
+        match &iterable.kind {
+            NodeKind::Identifier { name } => {
+                self.var_list_elem.get(&to_camel_case(&name.name)).cloned()
+            }
+            NodeKind::ListLiteral { elems } => self.infer_homogeneous_elem_type(elems),
+            NodeKind::Range { .. } => Some("int64".to_string()),
+            _ => None,
+        }
+    }
+
+    /// The Go slice element type of a `List` *value* expression used as the
+    /// receiver of a built-in list method (`get`/`concat`/…). The list-method
+    /// closures take a `[]<elem>` parameter that must match the receiver's now
+    /// concretely-typed slice. Recovered from a declared `List[T]` identifier
+    /// (via [`Self::var_list_elem`]) or a homogeneously-typed list literal;
+    /// `None` otherwise, in which case the receiver is `[]interface{}` and the
+    /// `interface{}` element default matches.
+    fn list_receiver_elem_go_type(&self, recv: &AIRNode) -> Option<String> {
+        match &recv.kind {
+            NodeKind::Identifier { name } => {
+                self.var_list_elem.get(&to_camel_case(&name.name)).cloned()
+            }
+            NodeKind::ListLiteral { elems } => self.infer_homogeneous_elem_type(elems),
+            _ => None,
+        }
+    }
+
     /// True when `node` is (or contains, in operand position) an identifier
     /// whose Go type is not in `scope` — i.e. an `interface{}`-typed value an
     /// arithmetic operation cannot soundly operate on. Used to keep arithmetic
@@ -1216,8 +1286,57 @@ impl GoEmitCtx {
                 }
                 BinOp::Compose => None,
             },
+            // Collection literals so a nested collection (`[[1], [2]]`,
+            // `{"k": [1, 2]}`) types its element concretely. A literal whose
+            // elements infer to a single homogeneous Go type yields that
+            // container type; otherwise `None` (callers fall back to
+            // `interface{}`, never a wrong type).
+            NodeKind::ListLiteral { elems } => self
+                .infer_homogeneous_elem_type(elems)
+                .map(|e| format!("[]{e}")),
+            NodeKind::SetLiteral { elems } => self
+                .infer_homogeneous_elem_type(elems)
+                .map(|e| format!("map[{e}]struct{{}}")),
+            NodeKind::MapLiteral { entries } => {
+                let keys: Vec<&AIRNode> = entries.iter().map(|e| &e.key).collect();
+                let vals: Vec<&AIRNode> = entries.iter().map(|e| &e.value).collect();
+                match (
+                    self.infer_homogeneous_elem_type_refs(&keys),
+                    self.infer_homogeneous_elem_type_refs(&vals),
+                ) {
+                    (Some(k), Some(v)) => Some(format!("map[{k}]{v}")),
+                    _ => None,
+                }
+            }
             _ => None,
         }
+    }
+
+    /// Infer a single homogeneous Go element type for a collection literal's
+    /// elements: `Some(ty)` iff the literal is non-empty and EVERY element
+    /// infers (via [`Self::infer_go_expr_type`]) to the *same* concrete Go type.
+    /// An empty literal, an element whose type can't be inferred, or a mix of
+    /// types yields `None` — the caller then emits `interface{}`, which is never
+    /// wrong (only loose). The `has_unresolved_operand` guard inside
+    /// `infer_go_expr_type` already keeps arithmetic over unresolved identifiers
+    /// from inferring an unsound type.
+    fn infer_homogeneous_elem_type(&self, elems: &[AIRNode]) -> Option<String> {
+        let refs: Vec<&AIRNode> = elems.iter().collect();
+        self.infer_homogeneous_elem_type_refs(&refs)
+    }
+
+    /// `&AIRNode`-slice variant of [`Self::infer_homogeneous_elem_type`] (used
+    /// for `MapLiteral` keys/values, which are not stored as a contiguous
+    /// `&[AIRNode]`).
+    fn infer_homogeneous_elem_type_refs(&self, elems: &[&AIRNode]) -> Option<String> {
+        let mut iter = elems.iter();
+        let first = self.infer_go_expr_type(iter.next()?)?;
+        for e in iter {
+            if self.infer_go_expr_type(e)? != first {
+                return None;
+            }
+        }
+        Some(first)
     }
 
     /// Build the explicit type-argument suffix (`[int64]`, `[int64, string]`)
@@ -1769,6 +1888,16 @@ impl GoEmitCtx {
             return Ok(false);
         };
         let recv_str = self.expr_to_string(recv)?;
+        // The receiver's Go slice element type. Lists are now concretely typed
+        // (`[]int64`, etc.), so the closure parameter type (`__r []<elem>`) must
+        // match the receiver — a `[]int64` argument does NOT convert to a
+        // `[]interface{}` parameter in Go. When the element type can't be
+        // recovered the receiver is still `[]interface{}` (the literal/inference
+        // fallback), so `interface{}` is the correct, matching default.
+        let elem = self
+            .list_receiver_elem_go_type(recv)
+            .unwrap_or_else(|| "interface{}".to_string());
+        let slice = format!("[]{elem}");
         let code = match method {
             "len" | "length" | "count" => format!("int64(len({recv_str}))"),
             "is_empty" => format!("(len({recv_str}) == 0)"),
@@ -1778,18 +1907,18 @@ impl GoEmitCtx {
                 };
                 let i = self.expr_to_string(&idx.value)?;
                 format!(
-                    "func(__r []interface{{}}, __i int64) __bockOption {{ \
+                    "func(__r {slice}, __i int64) __bockOption {{ \
                      if __i >= 0 && __i < int64(len(__r)) {{ return __bockSome(__r[__i]) }}; \
                      return __bockNone }}({recv_str}, {i})"
                 )
             }
             "first" => format!(
-                "func(__r []interface{{}}) __bockOption {{ \
+                "func(__r {slice}) __bockOption {{ \
                  if len(__r) > 0 {{ return __bockSome(__r[0]) }}; \
                  return __bockNone }}({recv_str})"
             ),
             "last" => format!(
-                "func(__r []interface{{}}) __bockOption {{ \
+                "func(__r {slice}) __bockOption {{ \
                  if len(__r) > 0 {{ return __bockSome(__r[len(__r)-1]) }}; \
                  return __bockNone }}({recv_str})"
             ),
@@ -1805,9 +1934,10 @@ impl GoEmitCtx {
                 // under Go's type-and-value interface equality. The checker
                 // guarantees `contains(x: T)` on `List[T]` (same T), so the two
                 // operands always denote the same Bock type — `%v` normalises
-                // only the int/int64 boxing difference.
+                // only the int/int64 boxing difference. `__x` stays
+                // `interface{}` (a typed argument boxes into it).
                 format!(
-                    "func(__r []interface{{}}, __x interface{{}}) bool {{ \
+                    "func(__r {slice}, __x interface{{}}) bool {{ \
                      __xs := fmt.Sprintf(\"%v\", __x); \
                      for _, __e := range __r {{ if fmt.Sprintf(\"%v\", __e) == __xs {{ return true }} }}; \
                      return false }}({recv_str}, {x})"
@@ -1821,7 +1951,7 @@ impl GoEmitCtx {
                 let x = self.expr_to_string(&x.value)?;
                 // See `contains` for why this compares `%v` forms, not `==`.
                 format!(
-                    "func(__r []interface{{}}, __x interface{{}}) __bockOption {{ \
+                    "func(__r {slice}, __x interface{{}}) __bockOption {{ \
                      __xs := fmt.Sprintf(\"%v\", __x); \
                      for __i, __e := range __r {{ if fmt.Sprintf(\"%v\", __e) == __xs {{ return __bockSome(int64(__i)) }} }}; \
                      return __bockNone }}({recv_str}, {x})"
@@ -1833,8 +1963,8 @@ impl GoEmitCtx {
                 };
                 let o = self.expr_to_string(&o.value)?;
                 format!(
-                    "func(__r []interface{{}}, __o []interface{{}}) []interface{{}} {{ \
-                     __v := make([]interface{{}}, 0, len(__r)+len(__o)); \
+                    "func(__r {slice}, __o {slice}) {slice} {{ \
+                     __v := make({slice}, 0, len(__r)+len(__o)); \
                      __v = append(__v, __r...); __v = append(__v, __o...); \
                      return __v }}({recv_str}, {o})"
                 )
@@ -1846,7 +1976,7 @@ impl GoEmitCtx {
                 self.needs_fmt_import = true;
                 let sep = self.expr_to_string(&sep.value)?;
                 format!(
-                    "func(__r []interface{{}}, __sep string) string {{ \
+                    "func(__r {slice}, __sep string) string {{ \
                      __s := \"\"; \
                      for __i, __e := range __r {{ if __i > 0 {{ __s += __sep }}; \
                      __s += fmt.Sprintf(\"%v\", __e) }}; \
@@ -2699,14 +2829,17 @@ impl GoEmitCtx {
         method: &AIRNode,
         use_value_receiver: bool,
     ) -> Result<(), CodegenError> {
-        // In a trait-impl method, a `Self` type resolves to the concrete target
-        // (the receiver type) — most relevant for a synthesized default method
-        // whose source uses `Self` (e.g. `other: Self`). Saved/restored so the
-        // bundle-wide default of `/* Self */` is unchanged outside trait impls.
+        // Inside ANY impl method (trait or plain inherent), a `Self` type
+        // resolves to the concrete target (the receiver type) — whether it
+        // appears in a synthesized trait default (`other: Self`) or an inherent
+        // method's own signature (`fn combine(self, ...) -> Self`). Previously
+        // this was gated on `use_value_receiver` (trait impls only), so an
+        // inherent-impl `Self` lowered to the `/* Self */` placeholder and
+        // produced an invalid Go signature. `receiver_type` is in scope for both
+        // method kinds. Saved/restored so the bundle-wide default of `/* Self */`
+        // is unchanged outside impl methods.
         let prev_self_subst = self.go_self_subst.take();
-        if use_value_receiver {
-            self.go_self_subst = Some(receiver_type.to_string());
-        }
+        self.go_self_subst = Some(receiver_type.to_string());
         let result =
             self.emit_method_body(receiver_type, target_generics, method, use_value_receiver);
         self.go_self_subst = prev_self_subst;
@@ -2964,7 +3097,24 @@ impl GoEmitCtx {
                     let type_str = self.type_to_go(t);
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}var {binding} {type_str} = ");
+                    // When the binding *value* is itself a collection literal,
+                    // it takes its element type(s) from the declared type, so an
+                    // empty `[]` (or under-inferred literal) matches the declared
+                    // `[]T` / `map[K]V` rather than falling back to
+                    // `[]interface{}`. Guarded to the top-level literal so the
+                    // hint never leaks to a nested/argument literal whose own
+                    // type may differ.
+                    let prev_expected = self.expected_collection_elem.take();
+                    if matches!(
+                        value.kind,
+                        NodeKind::ListLiteral { .. }
+                            | NodeKind::MapLiteral { .. }
+                            | NodeKind::SetLiteral { .. }
+                    ) {
+                        self.expected_collection_elem = self.collection_elem_go_types(t);
+                    }
                     self.emit_expr(value)?;
+                    self.expected_collection_elem = prev_expected;
                     self.buf.push('\n');
                 } else {
                     let ind = self.indent_str();
@@ -3027,7 +3177,23 @@ impl GoEmitCtx {
                 self.emit_expr(iterable)?;
                 self.buf.push_str(" {\n");
                 self.indent += 1;
+                // Record the loop variable's element Go type into the body scope
+                // so element arithmetic / typed returns type-check (Go ranges
+                // over a concretely-typed `[]T` / range yield a `T`, not
+                // `interface{}`). Recoverable when the iterable is a known
+                // `List[T]` identifier, a homogeneously-typed list literal, or a
+                // range (`int64`). Saved/restored around the body — Go has no
+                // block-scoped reset here. Unrecoverable ⇒ left absent, so
+                // inference yields the `interface{}` fallback, never a wrong
+                // type.
+                let saved_go_types = self.var_go_type.clone();
+                if let (NodeKind::BindPat { name, .. }, Some(elem)) =
+                    (&pattern.kind, self.for_loop_elem_go_type(iterable))
+                {
+                    self.var_go_type.insert(to_camel_case(&name.name), elem);
+                }
                 self.emit_block_body(body)?;
+                self.var_go_type = saved_go_types;
                 self.indent -= 1;
                 self.writeln("}");
                 self.loop_labels.pop();
@@ -3557,22 +3723,27 @@ impl GoEmitCtx {
                 // from the field values. Recover each param's concrete Go type
                 // by inferring the type of the field value that names it.
                 let type_args = self.infer_construct_type_args(&type_name, fields);
-                if let Some(_sp) = spread {
-                    // Go doesn't have spread syntax; emit TODO comment.
-                    self.buf.push_str(&format!("{type_name}{type_args}{{"));
-                    self.buf.push_str("/* spread */ ");
-                    for (i, f) in fields.iter().enumerate() {
-                        if i > 0 {
-                            self.buf.push_str(", ");
-                        }
-                        let _ = write!(self.buf, "{}: ", to_pascal_case(&f.name.name));
+                if let Some(sp) = spread {
+                    // Go has no struct-spread syntax (`Point{..p}`), so a record
+                    // spread lowers to an IIFE that copies the base value, then
+                    // assigns each override field, then returns the copy:
+                    //   func() T { __s := <base>; __s.Field = val; …; return __s }()
+                    // The base is the spread expression; the overrides are the
+                    // explicitly-given fields. (A struct copy in Go is a value
+                    // copy, so this does not mutate the base.)
+                    let _ = write!(self.buf, "func() {type_name}{type_args} {{ __s := ");
+                    self.emit_expr(sp)?;
+                    self.buf.push_str("; ");
+                    for f in fields {
+                        let _ = write!(self.buf, "__s.{} = ", to_pascal_case(&f.name.name));
                         if let Some(val) = &f.value {
                             self.emit_expr(val)?;
                         } else {
                             self.buf.push_str(&to_camel_case(&f.name.name));
                         }
+                        self.buf.push_str("; ");
                     }
-                    self.buf.push('}');
+                    self.buf.push_str("return __s }()");
                 } else {
                     self.buf.push_str(&format!("{type_name}{type_args}{{"));
                     for (i, f) in fields.iter().enumerate() {
@@ -3591,7 +3762,19 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::ListLiteral { elems } => {
-                self.buf.push_str("[]interface{}{");
+                // A declared binding type (`let x: List[T] = ...`) takes priority
+                // so an empty `[]` matches the declared `[]T`; otherwise infer a
+                // homogeneous element type so `[1, 2, 3]` emits `[]int64{...}`
+                // (not `[]interface{}{...}`), letting element arithmetic / typed
+                // iteration / typed returns compile. Falls back to `interface{}`
+                // when neither is available (empty literal with no declared
+                // type, mixed types, unresolved operands).
+                let expected = self.expected_collection_elem.take();
+                let elem_ty = expected
+                    .map(|(e, _)| e)
+                    .or_else(|| self.infer_homogeneous_elem_type(elems))
+                    .unwrap_or_else(|| "interface{}".to_string());
+                let _ = write!(self.buf, "[]{elem_ty}{{");
                 for (i, e) in elems.iter().enumerate() {
                     if i > 0 {
                         self.buf.push_str(", ");
@@ -3602,7 +3785,24 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::MapLiteral { entries } => {
-                self.buf.push_str("map[interface{}]interface{}{");
+                // A declared `Map[K, V]` binding type takes priority (so an
+                // empty `{}` matches `map[K]V`); otherwise infer key and value
+                // element types separately so `{"a": 1}` emits
+                // `map[string]int64{...}`. Either falling back to `interface{}`.
+                let expected = self.expected_collection_elem.take();
+                let keys: Vec<&AIRNode> = entries.iter().map(|e| &e.key).collect();
+                let vals: Vec<&AIRNode> = entries.iter().map(|e| &e.value).collect();
+                let (exp_key, exp_val) = match expected {
+                    Some((k, v)) => (Some(k), v),
+                    None => (None, None),
+                };
+                let key_ty = exp_key
+                    .or_else(|| self.infer_homogeneous_elem_type_refs(&keys))
+                    .unwrap_or_else(|| "interface{}".to_string());
+                let val_ty = exp_val
+                    .or_else(|| self.infer_homogeneous_elem_type_refs(&vals))
+                    .unwrap_or_else(|| "interface{}".to_string());
+                let _ = write!(self.buf, "map[{key_ty}]{val_ty}{{");
                 for (i, entry) in entries.iter().enumerate() {
                     if i > 0 {
                         self.buf.push_str(", ");
@@ -3615,8 +3815,16 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::SetLiteral { elems } => {
-                // Go doesn't have sets; use map[T]struct{}.
-                self.buf.push_str("map[interface{}]struct{}{");
+                // Go doesn't have sets; use map[T]struct{}. A declared `Set[T]`
+                // binding type takes priority (empty set matches); otherwise
+                // infer a homogeneous element type so `#{1, 2}` emits
+                // `map[int64]struct{}{...}`.
+                let expected = self.expected_collection_elem.take();
+                let elem_ty = expected
+                    .map(|(e, _)| e)
+                    .or_else(|| self.infer_homogeneous_elem_type(elems))
+                    .unwrap_or_else(|| "interface{}".to_string());
+                let _ = write!(self.buf, "map[{elem_ty}]struct{{}}{{");
                 for (i, e) in elems.iter().enumerate() {
                     if i > 0 {
                         self.buf.push_str(", ");
@@ -4783,6 +4991,36 @@ impl GoEmitCtx {
 
     // ── Type emission ───────────────────────────────────────────────────────
 
+    /// If `name` is one of the three collection types, emit the concrete Go
+    /// container type with its element/key/value types recovered from `args`
+    /// (each mapped to Go via `arg_to_go`), rather than the `interface{}`-erased
+    /// `map_type_name` fallback:
+    /// - `List[T]`  → `[]T`
+    /// - `Set[T]`   → `map[T]struct{}`
+    /// - `Map[K,V]` → `map[K]V`
+    ///
+    /// A missing arg defaults to `interface{}` (e.g. a bare `List` with no type
+    /// argument), preserving the prior erased behavior for the untyped case.
+    /// Returns `None` for any non-collection type so callers fall through to the
+    /// `Optional`/`Result` runtime-struct and generic-struct paths unchanged.
+    fn collection_type_to_go<T>(
+        &self,
+        name: &str,
+        args: &[T],
+        arg_to_go: impl Fn(&T) -> String,
+    ) -> Option<String> {
+        let elem = |i: usize| {
+            args.get(i)
+                .map_or_else(|| "interface{}".to_string(), &arg_to_go)
+        };
+        match name {
+            "List" => Some(format!("[]{}", elem(0))),
+            "Set" => Some(format!("map[{}]struct{{}}", elem(0))),
+            "Map" => Some(format!("map[{}]{}", elem(0), elem(1))),
+            _ => None,
+        }
+    }
+
     fn type_to_go(&self, node: &AIRNode) -> String {
         match &node.kind {
             NodeKind::TypeNamed { path, args } => {
@@ -4792,10 +5030,21 @@ impl GoEmitCtx {
                     .map(|s| s.name.as_str())
                     .collect::<Vec<_>>()
                     .join(".");
+                // The three collection types are NOT erased to an `interface{}`
+                // element: a declared `List[Int]` must emit `[]int64` (not
+                // `[]interface{}`) so element arithmetic / iteration / typed
+                // returns compile. Emit the concrete Go container recursively
+                // over the type args, BEFORE the `map_type_name`
+                // `is_mapped_runtime` fallback (which would erase them).
+                if let Some(collection) =
+                    self.collection_type_to_go(&name, args, |a| self.type_to_go(a))
+                {
+                    return collection;
+                }
                 let go_name = self.map_type_name(&name);
-                // Runtime container types (`__bockOption`, slices, maps) carry
-                // their element type as `interface{}`, not as a Go generic
-                // parameter; never append `[T]` to a mapped runtime type.
+                // Runtime container types (`__bockOption`, `__bockResult`) carry
+                // their payload as `interface{}`, not as a Go generic parameter;
+                // never append `[T]` to such a mapped runtime type.
                 let is_mapped_runtime = go_name != name;
                 if args.is_empty() || is_mapped_runtime {
                     go_name
@@ -4867,6 +5116,14 @@ impl GoEmitCtx {
                     .map(|s| s.name.as_str())
                     .collect::<Vec<_>>()
                     .join(".");
+                // See `type_to_go`: emit concrete `[]T` / `map[K]V` /
+                // `map[T]struct{}` for the three collection types rather than
+                // erasing their element type to `interface{}`.
+                if let Some(collection) =
+                    self.collection_type_to_go(&name, args, |a| self.ast_type_to_go(a))
+                {
+                    return collection;
+                }
                 let go_name = self.map_type_name(&name);
                 let is_mapped_runtime = go_name != name;
                 if args.is_empty() || is_mapped_runtime {
@@ -5201,7 +5458,7 @@ fn go_typed_access(child: &AIRNode, raw_access: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bock_air::{AirArg, AirRecordField};
+    use bock_air::{AirArg, AirMapEntry, AirRecordField};
     use bock_ast::{Ident, TypePath};
     use bock_errors::{FileId, Span};
 
@@ -5971,7 +6228,70 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![l]));
-        assert!(out.contains("[]interface{}{1, 2, 3}"), "got: {out}");
+        // A homogeneous integer list literal now infers a concrete element
+        // type (`[]int64`), not the erased `[]interface{}` — so element
+        // arithmetic / typed iteration / typed returns compile (P3-α item 1b).
+        assert!(out.contains("[]int64{1, 2, 3}"), "got: {out}");
+    }
+
+    /// A list literal with no concretely-inferable common element type (here a
+    /// mixed int/string literal) falls back to the erased `[]interface{}` —
+    /// never a wrong concrete type (P3-α item 1b).
+    #[test]
+    fn list_literal_mixed_falls_back_to_interface() {
+        let l = node(
+            1,
+            NodeKind::ListLiteral {
+                elems: vec![int_lit(2, "1"), str_lit(3, "x")],
+            },
+        );
+        let out = gen(&module(vec![], vec![l]));
+        assert!(out.contains("[]interface{}{1, \"x\"}"), "got: {out}");
+    }
+
+    /// An empty list literal cannot infer an element type, so it falls back to
+    /// `[]interface{}` when emitted with no declared-type context.
+    #[test]
+    fn empty_list_literal_falls_back_to_interface() {
+        let l = node(1, NodeKind::ListLiteral { elems: vec![] });
+        let out = gen(&module(vec![], vec![l]));
+        assert!(out.contains("[]interface{}{}"), "got: {out}");
+    }
+
+    /// A homogeneous map literal infers its key and value element types
+    /// separately (`map[string]int64`), not the erased
+    /// `map[interface{}]interface{}` (P3-α item 1b).
+    #[test]
+    fn map_literal_infers_key_and_value() {
+        let entry = AirMapEntry {
+            key: str_lit(2, "a"),
+            value: int_lit(3, "1"),
+        };
+        let m = node(
+            1,
+            NodeKind::MapLiteral {
+                entries: vec![entry],
+            },
+        );
+        let out = gen(&module(vec![], vec![m]));
+        assert!(out.contains("map[string]int64{\"a\": 1}"), "got: {out}");
+    }
+
+    /// A homogeneous set literal infers a concrete element type
+    /// (`map[int64]struct{}`).
+    #[test]
+    fn set_literal_infers_elem() {
+        let s = node(
+            1,
+            NodeKind::SetLiteral {
+                elems: vec![int_lit(2, "1"), int_lit(3, "2")],
+            },
+        );
+        let out = gen(&module(vec![], vec![s]));
+        assert!(
+            out.contains("map[int64]struct{}{1: {}, 2: {}}"),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -6167,6 +6487,84 @@ mod tests {
         assert!(
             out.contains("func (p *Point) Distance() float64 {"),
             "got: {out}"
+        );
+    }
+
+    /// A plain inherent `impl` method that names `Self` in its return type must
+    /// resolve `Self` to the receiver type (`Point`), not the `/* Self */`
+    /// placeholder. Before P3-α item 6-go-self, `go_self_subst` was set only for
+    /// trait impls (value receivers), so an inherent-impl `Self` lowered to the
+    /// placeholder and produced an invalid Go signature.
+    #[test]
+    fn self_in_plain_impl_resolves_to_receiver_type() {
+        let imp = node(
+            1,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(node(
+                    2,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Point"]),
+                        args: vec![],
+                    },
+                )),
+                where_clause: vec![],
+                methods: vec![node(
+                    3,
+                    NodeKind::FnDecl {
+                        annotations: vec![],
+                        visibility: Visibility::Public,
+                        is_async: false,
+                        name: ident("clone"),
+                        generic_params: vec![],
+                        params: vec![],
+                        return_type: Some(Box::new(node(4, NodeKind::TypeSelf))),
+                        effect_clause: vec![],
+                        where_clause: vec![],
+                        body: Box::new(block(5, vec![], None)),
+                    },
+                )],
+            },
+        );
+        let out = gen(&module(vec![], vec![imp]));
+        assert!(
+            out.contains("func (p *Point) Clone() Point {"),
+            "Self should resolve to the receiver type Point, got: {out}"
+        );
+        assert!(
+            !out.contains("/* Self */"),
+            "Self placeholder must not leak, got: {out}"
+        );
+    }
+
+    /// A record construction with a spread base (`Point { y: 9, ..p }`) lowers
+    /// to a copy-then-override IIFE — Go has no struct-spread syntax — rather
+    /// than dropping the `..p` base (P3-α item 5).
+    #[test]
+    fn record_spread_lowers_to_iife() {
+        let spread_base = id_node(10, "p");
+        let rc = node(
+            1,
+            NodeKind::RecordConstruct {
+                path: type_path(&["Point"]),
+                fields: vec![AirRecordField {
+                    name: ident("y"),
+                    value: Some(Box::new(int_lit(2, "9"))),
+                }],
+                spread: Some(Box::new(spread_base)),
+            },
+        );
+        let out = gen(&module(vec![], vec![rc]));
+        assert!(
+            out.contains("func() Point { __s := p; __s.Y = 9; return __s }()"),
+            "spread should copy base then override, got: {out}"
+        );
+        assert!(
+            !out.contains("/* spread */"),
+            "the dropped-spread TODO must be gone, got: {out}"
         );
     }
 
@@ -7016,6 +7414,67 @@ mod tests {
         assert_eq!(ctx.map_type_name("String"), "string");
         assert_eq!(ctx.map_type_name("Void"), "struct{}");
         assert_eq!(ctx.map_type_name("Any"), "interface{}");
+    }
+
+    /// Build a `TypeNamed { path: [name], args }` AIR node.
+    fn type_named(name: &str, args: Vec<AIRNode>) -> AIRNode {
+        node(
+            900,
+            NodeKind::TypeNamed {
+                path: type_path(&[name]),
+                args,
+            },
+        )
+    }
+
+    /// The three collection types emit a concrete Go container with their
+    /// element/key/value types recovered recursively, NOT the erased
+    /// `interface{}` element (P3-α item 1a).
+    #[test]
+    fn type_to_go_collections_carry_element_types() {
+        let ctx = GoEmitCtx::new();
+        let int_ty = || type_named("Int", vec![]);
+        let str_ty = || type_named("String", vec![]);
+
+        assert_eq!(
+            ctx.type_to_go(&type_named("List", vec![int_ty()])),
+            "[]int64"
+        );
+        assert_eq!(
+            ctx.type_to_go(&type_named("Set", vec![int_ty()])),
+            "map[int64]struct{}"
+        );
+        assert_eq!(
+            ctx.type_to_go(&type_named("Map", vec![str_ty(), int_ty()])),
+            "map[string]int64"
+        );
+        // Recursive: a list of maps.
+        let inner_map = type_named("Map", vec![str_ty(), int_ty()]);
+        assert_eq!(
+            ctx.type_to_go(&type_named("List", vec![inner_map])),
+            "[]map[string]int64"
+        );
+        // A bare collection with no type arg keeps the erased element.
+        assert_eq!(ctx.type_to_go(&type_named("List", vec![])), "[]interface{}");
+    }
+
+    /// Lifting the collection element type must NOT disturb the genuine runtime
+    /// structs `Optional`/`Result`, which still erase their payload to the
+    /// tagged runtime struct (`__bockOption` / `__bockResult`) — the regression
+    /// the P3-α item 1a change was warned against.
+    #[test]
+    fn type_to_go_runtime_structs_unchanged() {
+        let ctx = GoEmitCtx::new();
+        let int_ty = || type_named("Int", vec![]);
+        let str_ty = || type_named("String", vec![]);
+        assert_eq!(
+            ctx.type_to_go(&type_named("Optional", vec![int_ty()])),
+            "__bockOption"
+        );
+        assert_eq!(
+            ctx.type_to_go(&type_named("Result", vec![int_ty(), str_ty()])),
+            "__bockResult"
+        );
     }
 
     #[test]

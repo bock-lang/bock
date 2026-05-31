@@ -1,0 +1,38 @@
+// TEST: exec_go_typed_list_iter
+// EXPECT: output "6;12"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go collection element typing (codegen-completeness P3-α, item 1c):
+// `for x in [1,2,3] { sum = sum + x }` plus a typed `Int` return. Before the
+// fix Go erased the list element type to `interface{}` (`for _, x := range
+// []interface{}{...}`), so `sum + x` (an `int64 + interface{}`) and the typed
+// `return sum` did not compile (`go build` rejected the arithmetic). The fix
+// (a) types the `[1,2,3]` literal as `[]int64{...}` via homogeneous element
+// inference and (b) records the loop var's element Go type into the loop-body
+// scope so the arithmetic and return type-check. js/ts/python/rust type
+// collections natively, so they were already green; this proves Go now agrees.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn sumList(nums: List[Int]) -> Int {
+  let mut sum: Int = 0
+  for x in nums {
+    sum = sum + x
+  }
+  return sum
+}
+
+fn sumLiteral() -> Int {
+  let mut sum: Int = 0
+  for x in [2, 4, 6] {
+    sum = sum + x
+  }
+  return sum
+}
+
+fn main() -> Void {
+  let nums: List[Int] = [1, 2, 3]
+  println("${sumList(nums)};${sumLiteral()}")
+}

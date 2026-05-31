@@ -1,0 +1,42 @@
+// TEST: exec_go_typed_map_decl
+// EXPECT: output "2;20"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go collection element typing (codegen-completeness P3-α, item 1): a declared
+// `Map[String, Int]` and a `List[Int]`, each constructed from a typed literal,
+// then threaded through a typed function signature and read back. Before the
+// fix Go erased both to `interface{}` element types
+// (`map[string]interface{}` / `[]interface{}`), so the declared
+// `var m map[string]int64 = ...` mismatched the `map[interface{}]interface{}`
+// literal, and `int64` arithmetic on a read-back list element did not compile.
+// The fix emits the concrete declared type (`map[string]int64`, `[]int64`) AND
+// a concretely-typed literal (key and value inferred separately for maps), so
+// the declared-type assignment and the typed read-back agree.
+//
+// Map indexing/iteration *methods* are the NEXT session (P3-β); this fixture
+// confines itself to literal + declared-type element typing. The map is
+// consumed by passing it to a typed `Map[String, Int]` parameter (a Go function
+// parameter is exempt from the "declared and not used" rule), proving the
+// declared map type round-trips through a signature; the observable output is
+// driven by the typed list element arithmetic.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn doubleFirst(xs: List[Int]) -> Int {
+  match xs.get(0) {
+    Some(x) => return x * 2
+    None => return 0
+  }
+}
+
+fn mapTag(scores: Map[String, Int]) -> Int {
+  return 0
+}
+
+fn main() -> Void {
+  let scores: Map[String, Int] = { "a": 10, "b": 20 }
+  let nums: List[Int] = [10, 20, 30]
+  let tag: Int = mapTag(scores)
+  println("${nums.len() - 1 + tag};${doubleFirst(nums)}")
+}
