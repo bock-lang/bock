@@ -1210,3 +1210,25 @@ Merged this half: #123 (vscode CI), #124 (TS codegen), #125 (changelog hygiene),
     Design); go/ts Self-in-plain-impl (#141 → P3/P4); Go nested-payload typed-arith (#142 → P4); FOUND: stdlib
     core.compare.bock can drop its `other: Key` workaround for `other: Self` now (#141; stdlib-cleanup follow-up).
   NEXT: P3 (per the design) → P4 → then Q-stdlib R1 (iter, effect) resumes. main 7806e8d.
+
+[2026-05-31 05:04 UTC] PHASE 3 of the codegen-completeness milestone COMPLETE (#144/#145)
+  Input: continued autonomous execution (operator chose "continue P3→P4" at the P2/P3 checkpoint). Phase-3 plan
+    tracking/plans/2026-05-31-...phase3-plan.md. Sequenced P3-α → P3-β (both go.rs → sequential).
+  MERGED (main 7806e8d → 11887ba; each gate-clean, full-matrix CI, worktree-removed-first, re-synced):
+    - #144 P3-α Go collection element typing — type_to_go/literals/for-iteration emit concrete `[]T`/`map[K]V`
+      (was `interface{}`-erased); record-spread IIFE; Self-in-plain-impl (Go); List-builtin closure param types.
+      222 exec. (Go was the only target erasing List/Map elem types → on core.iter/string's Go critical path.)
+    - #145 P3-β Map/Set method dispatch (MAP_METHODS/SET_METHODS recognizers keyed on recv_kind, ordered before
+      the List path) + per-target lowering (native Map/Set; Go typed maps w/ var_map_kv/var_set_elem tracking) +
+      `range()` runtime (js/ts array-builder; Go __bockRange). 247 exec, 0 failed.
+  COLLECTIONS now work on all 5 (List typed on Go; Map/Set dispatch correct; range()). The codegen substrate is
+    essentially built: cross-module, enums, generics, Optional/Result, primitive-bridge, traits, match,
+    collections all ×5 (~247 exec pairs, from 32 at block start).
+  OPENs/FOUNDs → P4 / Design: Go Optional/Result NESTED-payload typed-arith (#142 residual — match-lowering
+    surgery, deferred from P3-α); TS Self-in-plain-impl (#141 TS half, TS2526); **DQ22** bare `m.contains(k)`
+    type-checks via a fresh var but has no lowering (checker should reject or alias to contains_key — #145 FOUND).
+    Mutating Map/Set return the receiver; full value-vs-mut-self = DQ18 (P4).
+  NEXT: P4 (polish — design dispatched, Plan agent a0f6b8f2): tuple `.N` parser, expr-position match
+    (Q-match-exprpos), Go nested-payload, TS Self-in-plain-impl, Int/Int + Bool-interp harmonize; design-gated
+    DQ18 (mutating collections) + DQ20 (`expr?`) routed to Design. Then Q-stdlib R1 (iter, effect) resumes —
+    likely NONE of P4 gates R1 (iter uses concat not push; no expr?). main 11887ba.
