@@ -1,6 +1,6 @@
 // TEST: exec_for_user_iterable_break_continue
 // EXPECT: output "sum=8"
-// EXPECT: targets js, ts, python
+// EXPECT: targets js, ts, python, rust, go
 //
 // `break` and `continue` inside a `for`-over-`Iterable` body (§18.5) target the
 // synthesized drive `loop`, not the synthesized `match`: iterating [1..6],
@@ -10,8 +10,8 @@
 // `switch` on the targets that need a labeled loop, e.g. Go's `switch`).
 // Exhaustion is also covered: the iterator runs dry past the break.
 //
-// TARGETS — js/ts/python only; see exec_for_user_iterable.bock for the Rust/Go
-// embedded-combinator codegen residue FOUND in this PR.
+// TARGETS — all five; the Rust/Go embedded-combinator codegen residue is fixed
+// in the rust/go codegen fast-follow (see exec_for_user_iterable.bock).
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).

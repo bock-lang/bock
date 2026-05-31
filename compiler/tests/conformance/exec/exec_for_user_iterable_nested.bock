@@ -1,6 +1,6 @@
 // TEST: exec_for_user_iterable_nested
 // EXPECT: output "sum=180"
-// EXPECT: targets js, ts, python
+// EXPECT: targets js, ts, python, rust, go
 //
 // Nested `for`-over-`Iterable` loops (§18.5): each `for` desugars to its own
 // `{ let mut __it = ..; loop { match __it.next() ... } }`, and the gensym'd
@@ -8,8 +8,8 @@
 // drive does NOT shadow the outer one. Iterating outer [1,2,3] × inner [10,20]
 // accumulates sum(a*b) = (1+2+3) * (10+20) = 6 * 30 = 180.
 //
-// TARGETS — js/ts/python only; see exec_for_user_iterable.bock for the Rust/Go
-// embedded-combinator codegen residue FOUND in this PR.
+// TARGETS — all five; the Rust/Go embedded-combinator codegen residue is fixed
+// in the rust/go codegen fast-follow (see exec_for_user_iterable.bock).
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).

@@ -651,6 +651,18 @@ struct GoEmitCtx {
     /// entry is poisoned (left absent) so the payload falls back to the runtime
     /// `interface{}` — conservative, never wrong, only un-type-asserted.
     method_optional_ret_elem: HashMap<String, String>,
+    /// Maps a method name → the concrete generic-record instantiation it returns
+    /// (`("ListIterator", ["int64"])` for `Bag.iter() -> ListIterator[Int]`),
+    /// for methods whose declared return type is a concrete generic-record
+    /// apply (no remaining type params). Lets an *untyped* binding of such a
+    /// call (`__it := bag.Iter()`, the `for x in <Iterable>` desugar) record the
+    /// binding's record args ([`Self::var_record_type_args`]) so the
+    /// subsequent `match __it.next() { Some(x) => ... }` resolves the generic
+    /// `Optional[T]` payload to the concrete arg (`int64`) — `T` is undefined in
+    /// the calling fn (`main`). Keyed by method name only; poisoned (left
+    /// absent) on a name clash with disagreeing args, as
+    /// [`Self::method_optional_ret_elem`].
+    method_ret_record_args: HashMap<String, (String, Vec<String>)>,
     /// Maps an in-scope variable name → its concrete generic record
     /// instantiation `(base record name, concrete Go type-args)` — e.g. a `let
     /// c: ListIter[Int]` binding or a `c: Counter[Int]` parameter maps to
@@ -829,7 +841,34 @@ struct GoEmitCtx {
     /// `[]T` return). Set at fn/method entry from the return type, restored on
     /// exit; `None` for a non-collection or absent return type.
     current_fn_ret_collection_elem: Option<(String, Option<String>)>,
+    /// Signatures of top-level generic functions, keyed by fn name: the declared
+    /// generic-param names and each value param's declared type node. Used at a
+    /// call site to type an *untyped lambda argument* (`Filter(it, (x) => x >
+    /// 2)`): the non-lambda arguments bind the fn's type params to concrete Go
+    /// types, and the lambda's `Fn(T) -> U` parameter type is then specialised
+    /// (`func(int64) bool`) so the emitted closure's param is `x int64`, not the
+    /// `interface{}` default an unannotated param falls back to (which both
+    /// breaks `x > 2` arithmetic and mismatches the `func(int64) bool`
+    /// parameter). Only generic fns are recorded (a non-generic fn's lambda arg
+    /// already types correctly). Pre-scanned across the bundle.
+    fn_signatures: HashMap<String, GoFnSig>,
+    /// The concrete Go parameter types an *untyped lambda argument* should adopt
+    /// at its current call site, derived from the callee's generic signature
+    /// specialised by the other arguments ([`Self::fn_signatures`]). A lambda's
+    /// own params carry no source annotation (`(x) => x > 2`), so without this
+    /// they default to `interface{}` — which both breaks the body's arithmetic
+    /// and mismatches the typed `func(int64) bool` callee parameter. Set just
+    /// before emitting such an argument, consumed (taken) by the lambda emit so
+    /// it never leaks to a nested lambda. `None` for an ordinarily-typed lambda.
+    expected_lambda_param_types: Option<Vec<String>>,
 }
+
+/// A recorded generic-function signature ([`GoEmitCtx::fn_signatures`]): the
+/// declared generic-param names, each value param's declared type node, and the
+/// return type node. Used to specialise an untyped lambda argument at a call
+/// site (bind the type params from the non-lambda args, substitute into the
+/// lambda's `Fn(...)` param type) and to infer a generic call's result type.
+type GoFnSig = (Vec<String>, Vec<Option<AIRNode>>, Option<AIRNode>);
 
 impl GoEmitCtx {
     fn new() -> Self {
@@ -854,6 +893,7 @@ impl GoEmitCtx {
             fn_optional_ret_elem: HashMap::new(),
             var_optional_elem: HashMap::new(),
             method_optional_ret_elem: HashMap::new(),
+            method_ret_record_args: HashMap::new(),
             var_record_type_args: HashMap::new(),
             var_list_elem: HashMap::new(),
             var_map_kv: HashMap::new(),
@@ -879,6 +919,8 @@ impl GoEmitCtx {
             current_fn_ret_type: None,
             current_expected_type: None,
             current_fn_ret_collection_elem: None,
+            fn_signatures: HashMap::new(),
+            expected_lambda_param_types: None,
             expected_collection_elem: None,
         }
     }
@@ -954,6 +996,38 @@ impl GoEmitCtx {
                         self.public_fns.insert(name.name.clone());
                     }
                     _ => {}
+                }
+                // Record every *generic* top-level fn's signature (generic-param
+                // names + each value param's declared type) so a call site can
+                // specialise an untyped lambda argument to the concrete Go type
+                // (see `fn_signatures`). Recorded regardless of visibility — the
+                // embedded `core.iter` combinators are public, but a user's
+                // private generic fn taking a lambda needs the same treatment.
+                if let NodeKind::FnDecl {
+                    name,
+                    generic_params,
+                    params,
+                    ..
+                } = &item.kind
+                {
+                    if !generic_params.is_empty() {
+                        let gp_names: Vec<String> =
+                            generic_params.iter().map(|p| p.name.name.clone()).collect();
+                        let param_tys: Vec<Option<AIRNode>> = params
+                            .iter()
+                            .map(|p| match &p.kind {
+                                NodeKind::Param { ty, .. } => ty.as_deref().cloned(),
+                                _ => None,
+                            })
+                            .collect();
+                        let ret_ty = if let NodeKind::FnDecl { return_type, .. } = &item.kind {
+                            return_type.as_deref().cloned()
+                        } else {
+                            None
+                        };
+                        self.fn_signatures
+                            .insert(name.name.clone(), (gp_names, param_tys, ret_ty));
+                    }
                 }
             }
         }
@@ -1205,12 +1279,43 @@ impl GoEmitCtx {
         // Methods sharing a name but disagreeing on element type are ambiguous;
         // track them here so the final map omits them entirely.
         let mut poisoned: HashSet<String> = HashSet::new();
+        let mut poisoned_record: HashSet<String> = HashSet::new();
         if let NodeKind::Module { items, .. } = &module.kind {
             for item in items {
-                let methods = match &item.kind {
-                    NodeKind::ImplBlock { methods, .. }
-                    | NodeKind::ClassDecl { methods, .. }
-                    | NodeKind::TraitDecl { methods, .. } => methods,
+                // The item's in-scope generic-param names: an impl's own plus
+                // the target record's (`impl ListIterator { ... }` inherits the
+                // `[T]` from `record ListIterator[T]`); a trait's declared
+                // params. A method whose record return names one of these is
+                // *not* a concrete return (it is the generic declaration), so it
+                // is excluded from `method_ret_record_args`.
+                let (methods, item_params): (&Vec<AIRNode>, Vec<String>) = match &item.kind {
+                    NodeKind::ImplBlock {
+                        methods,
+                        generic_params,
+                        target,
+                        ..
+                    } => {
+                        let mut ps: Vec<String> =
+                            generic_params.iter().map(|p| p.name.name.clone()).collect();
+                        let target_name = self.type_expr_to_string(target);
+                        if let Some(decl) = self.generic_decls.get(&target_name) {
+                            ps.extend(decl.iter().map(|p| p.name.name.clone()));
+                        }
+                        (methods, ps)
+                    }
+                    NodeKind::ClassDecl {
+                        methods,
+                        generic_params,
+                        ..
+                    }
+                    | NodeKind::TraitDecl {
+                        methods,
+                        generic_params,
+                        ..
+                    } => (
+                        methods,
+                        generic_params.iter().map(|p| p.name.name.clone()).collect(),
+                    ),
                     _ => continue,
                 };
                 for m in methods {
@@ -1231,12 +1336,38 @@ impl GoEmitCtx {
                                 }
                             }
                         }
+                        // A method returning a *concrete* generic-record apply
+                        // (`iter() -> ListIterator[Int]`, no remaining param) is
+                        // recorded so an untyped binding of its call resolves the
+                        // record args (`for x in bag` → `__it := bag.Iter()`).
+                        // A return still naming an in-scope generic param (the
+                        // `Iterable[T]` trait decl's `iter() -> ListIterator[T]`)
+                        // is skipped — it is the generic signature, not a
+                        // concrete return, and would falsely poison the concrete
+                        // impl's entry.
+                        if let Some(args) = self.record_type_args(rt) {
+                            let is_concrete =
+                                !args.1.iter().any(|a| item_params.iter().any(|p| p == a));
+                            if is_concrete {
+                                match self.method_ret_record_args.get(&name.name) {
+                                    Some(existing) if *existing != args => {
+                                        poisoned_record.insert(name.name.clone());
+                                    }
+                                    _ => {
+                                        self.method_ret_record_args.insert(name.name.clone(), args);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
         for name in &poisoned {
             self.method_optional_ret_elem.remove(name);
+        }
+        for name in &poisoned_record {
+            self.method_ret_record_args.remove(name);
         }
     }
 
@@ -1420,6 +1551,55 @@ impl GoEmitCtx {
         None
     }
 
+    /// Infer the concrete generic-record instantiation a *value* expression
+    /// produces — `("ListIterator", ["int64"])` for `list_iter([1, 2, 3])` or
+    /// `bag.iter()`. Resolved for: a call to a generic fn whose return type is a
+    /// generic record ([`Self::infer_go_expr_type`]'s `Call` arm), and a method
+    /// call (direct or the desugared `Call(FieldAccess(recv, m), [recv, ..])`
+    /// shape) whose method has a recorded concrete record return
+    /// ([`Self::method_ret_record_args`]). Used to record an untyped binding's
+    /// record args so a later `match binding.next() { Some(x) => ... }` asserts
+    /// the payload concretely. `None` when not structurally determinable.
+    fn value_record_type_args(&self, value: &AIRNode) -> Option<(String, Vec<String>)> {
+        // A method whose declared return is a concrete generic record.
+        match &value.kind {
+            NodeKind::MethodCall { method, .. } => {
+                if let Some(args) = self.method_ret_record_args.get(&method.name) {
+                    return Some(args.clone());
+                }
+            }
+            NodeKind::Call { callee, args, .. } => {
+                // The AIR also lowers `recv.m(rest)` to `Call(FieldAccess(recv,
+                // m), [recv, ...])`.
+                if let Some((_recv, method, _)) =
+                    crate::generator::desugared_self_call(callee, args)
+                {
+                    if let Some(ra) = self.method_ret_record_args.get(&method.name) {
+                        return Some(ra.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+        // A free generic-fn call resolving to a concrete record return
+        // (`list_iter([...])` → `ListIterator[int64]`): parse the rendered type.
+        let go_ty = self.infer_go_expr_type(value)?;
+        let open = go_ty.find('[')?;
+        if !go_ty.ends_with(']') {
+            return None;
+        }
+        let base = go_ty[..open].to_string();
+        if self.generic_decls.get(&base).is_none_or(|p| p.is_empty()) {
+            return None;
+        }
+        let arg_str = &go_ty[open + 1..go_ty.len() - 1];
+        let args = Self::split_top_level_commas(arg_str);
+        if args.is_empty() {
+            return None;
+        }
+        Some((base, args))
+    }
+
     /// For a `List[T]` / `Set[T]` / `Map[K, V]` type expression, the declared
     /// Go element types as `(elem_or_key, value)`: `List`/`Set` yield
     /// `(T, None)`; `Map` yields `(K, Some(V))`. A missing type arg defaults to
@@ -1538,6 +1718,186 @@ impl GoEmitCtx {
     /// [`Self::var_go_type`]), arithmetic/comparison binary ops, and unary ops.
     /// Returns `None` when the type can't be determined structurally — callers
     /// fall back to `any`/`interface{}`, never a wrong type.
+    /// Structurally unify a generic-param *pattern* go-type (a `type_to_go`
+    /// rendering that still names the type params, e.g. `ListIterator[T]` or
+    /// `[]T`) against a *concrete* go-type string, recording each param's
+    /// concrete binding into `bindings`. A bare pattern that is exactly a
+    /// generic-param name binds that param to the whole concrete string;
+    /// otherwise the two must share a structural skeleton (same brackets/commas
+    /// in the same places) and the unification recurses into the differing
+    /// segments. Conservative: a structural mismatch simply records nothing
+    /// (the caller then leaves the lambda param untyped — never wrong, only
+    /// loose). Only the `[`/`]`/`,` skeleton is parsed; this covers the generic
+    /// container / iterator shapes the combinators use.
+    fn unify_go_pattern(
+        pattern: &str,
+        concrete: &str,
+        gp_names: &[String],
+        bindings: &mut HashMap<String, String>,
+    ) {
+        let pat = pattern.trim();
+        let con = concrete.trim();
+        // A bare param name binds to the entire concrete type.
+        if gp_names.iter().any(|g| g == pat) {
+            bindings
+                .entry(pat.to_string())
+                .or_insert_with(|| con.to_string());
+            return;
+        }
+        // Split each into (head, bracketed-args) on the first top-level `[`.
+        let split = |s: &str| -> Option<(String, String)> {
+            let open = s.find('[')?;
+            if !s.ends_with(']') {
+                return None;
+            }
+            Some((s[..open].to_string(), s[open + 1..s.len() - 1].to_string()))
+        };
+        // A slice prefix `[]elem` — split into the `[]` marker and the element.
+        if let (Some(pe), Some(ce)) = (pat.strip_prefix("[]"), con.strip_prefix("[]")) {
+            Self::unify_go_pattern(pe, ce, gp_names, bindings);
+            return;
+        }
+        match (split(pat), split(con)) {
+            (Some((ph, pa)), Some((ch, ca))) if ph == ch => {
+                let p_args = Self::split_top_level_commas(&pa);
+                let c_args = Self::split_top_level_commas(&ca);
+                if p_args.len() == c_args.len() {
+                    for (pp, cc) in p_args.iter().zip(c_args.iter()) {
+                        Self::unify_go_pattern(pp, cc, gp_names, bindings);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Split a go-type-arg list on top-level commas (commas not nested inside a
+    /// `[...]`). `int64, []string` → `["int64", "[]string"]`.
+    fn split_top_level_commas(s: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0usize;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '[' | '(' => depth += 1,
+                ']' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    out.push(s[start..i].trim().to_string());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        let last = s[start..].trim();
+        if !last.is_empty() {
+            out.push(last.to_string());
+        }
+        out
+    }
+
+    /// Bind a generic fn's type params to concrete go-types from its call's
+    /// *non-lambda* arguments (a lambda argument is what we are specialising, so
+    /// it can't drive the binding). Each argument whose Go type infers is
+    /// unified against the matching declared param type. Returns the
+    /// `param-name → go-type` bindings discovered.
+    fn bind_fn_type_params(
+        &self,
+        gp_names: &[String],
+        param_tys: &[Option<AIRNode>],
+        args: &[bock_air::AirArg],
+    ) -> HashMap<String, String> {
+        let mut bindings: HashMap<String, String> = HashMap::new();
+        for (i, arg) in args.iter().enumerate() {
+            if matches!(arg.value.kind, NodeKind::Lambda { .. }) {
+                continue;
+            }
+            let Some(pty) = param_tys.get(i).and_then(|p| p.as_ref()) else {
+                continue;
+            };
+            let Some(arg_go) = self.infer_go_expr_type(&arg.value) else {
+                continue;
+            };
+            let pattern = self.type_to_go(pty);
+            Self::unify_go_pattern(&pattern, &arg_go, gp_names, &mut bindings);
+        }
+        bindings
+    }
+
+    /// Substitute the `param-name → go-type` bindings into a `Fn(...)` parameter
+    /// type, returning the concrete Go parameter types (`[int64]` for
+    /// `Fn(T) -> Bool` with `T → int64`). `None` when the param type is not a
+    /// function type or a needed binding is missing (caller leaves the lambda
+    /// param untyped).
+    fn specialise_lambda_param_types(
+        &self,
+        fn_param_ty: &AIRNode,
+        gp_names: &[String],
+        bindings: &HashMap<String, String>,
+    ) -> Option<Vec<String>> {
+        let NodeKind::TypeFunction { params, .. } = &fn_param_ty.kind else {
+            return None;
+        };
+        let mut out = Vec::with_capacity(params.len());
+        for p in params {
+            let rendered = self.type_to_go(p);
+            // Substitute each bound param name token-for-token. The rendered form
+            // names params verbatim (`T`, `[]T`), so a binding maps them.
+            let resolved = if let Some(b) = bindings.get(rendered.trim()) {
+                b.clone()
+            } else {
+                let mut r = rendered.clone();
+                for g in gp_names {
+                    if let Some(b) = bindings.get(g) {
+                        r = Self::replace_type_token(&r, g, b);
+                    }
+                }
+                // If any generic param token remains unbound, give up (untyped).
+                if gp_names.iter().any(|g| Self::contains_type_token(&r, g)) {
+                    return None;
+                }
+                r
+            };
+            out.push(resolved);
+        }
+        Some(out)
+    }
+
+    /// Replace whole-identifier occurrences of `token` in a go-type string with
+    /// `repl` (so `T` in `[]T` becomes the binding, without clobbering a `T`
+    /// inside a longer identifier like `Tree`).
+    fn replace_type_token(s: &str, token: &str, repl: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = String::with_capacity(s.len());
+        let mut i = 0;
+        while i < s.len() {
+            if s[i..].starts_with(token) {
+                let before_ok = i == 0 || !Self::is_ident_byte(bytes[i - 1]);
+                let after_idx = i + token.len();
+                let after_ok = after_idx >= s.len() || !Self::is_ident_byte(bytes[after_idx]);
+                if before_ok && after_ok {
+                    out.push_str(repl);
+                    i = after_idx;
+                    continue;
+                }
+            }
+            // Push one char (handle UTF-8 boundaries safely).
+            let ch = s[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out
+    }
+
+    /// True when `s` contains `token` as a whole identifier (used to detect an
+    /// unbound generic param remaining after substitution).
+    fn contains_type_token(s: &str, token: &str) -> bool {
+        Self::replace_type_token(s, token, "\0") != *s
+    }
+
+    fn is_ident_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+
     fn infer_go_expr_type(&self, node: &AIRNode) -> Option<String> {
         match &node.kind {
             NodeKind::Literal { lit } => match lit {
@@ -1611,6 +1971,32 @@ impl GoEmitCtx {
                     (Some(k), Some(v)) => Some(format!("map[{k}]{v}")),
                     _ => None,
                 }
+            }
+            // A call to a known generic fn (`list_iter([]int64{...})`) resolves
+            // to its return type with the type params bound from the arguments
+            // (`ListIterator[int64]`), so a downstream call (`filter(it, ..)`)
+            // can in turn bind its own params and specialise its lambda arg.
+            NodeKind::Call { callee, args, .. } => {
+                let NodeKind::Identifier { name } = &callee.kind else {
+                    return None;
+                };
+                let (gp_names, param_tys, ret_ty) = self.fn_signatures.get(&name.name)?;
+                let ret = ret_ty.as_ref()?;
+                let bindings = self.bind_fn_type_params(gp_names, param_tys, args);
+                let mut rendered = self.type_to_go(ret);
+                for g in gp_names {
+                    if let Some(b) = bindings.get(g) {
+                        rendered = Self::replace_type_token(&rendered, g, b);
+                    }
+                }
+                // Only return a fully-resolved type (no generic param left).
+                if gp_names
+                    .iter()
+                    .any(|g| Self::contains_type_token(&rendered, g))
+                {
+                    return None;
+                }
+                Some(rendered)
             }
             _ => None,
         }
@@ -1764,20 +2150,57 @@ impl GoEmitCtx {
     /// concrete return type). Returns the previous map so the caller can restore
     /// it on exit. Untyped params are skipped (left absent → inference yields
     /// the `interface{}` fallback, never a wrong type).
-    fn enter_param_go_types(&mut self, params: &[AIRNode]) -> HashMap<String, String> {
+    /// Record each param's Go type into the variable scope so the body's
+    /// `infer_go_expr_type` sees concrete param types. A param whose source type
+    /// is absent (an untyped lambda param) takes its type from the positional
+    /// `expected` entry (the callee-specialised type, e.g. `int64`) when
+    /// present, so `x > 2` / `x * 2` type-check and the lambda's inferred return
+    /// type is concrete. Returns the previous scope for restore on exit. Pass
+    /// `None` for `expected` when there are no specialised types (an ordinary
+    /// typed lambda / fn body).
+    fn enter_param_go_types_with_expected(
+        &mut self,
+        params: &[AIRNode],
+        expected: Option<&[String]>,
+    ) -> HashMap<String, String> {
         let saved = self.var_go_type.clone();
-        for p in params {
-            if let NodeKind::Param {
-                pattern,
-                ty: Some(t),
-                ..
-            } = &p.kind
-            {
+        for (i, p) in params.iter().enumerate() {
+            if let NodeKind::Param { pattern, ty, .. } = &p.kind {
                 let name = to_camel_case(&self.pattern_to_binding_name(pattern));
-                self.var_go_type.insert(name, self.type_to_go(t));
+                let go_ty = ty
+                    .as_deref()
+                    .map(|t| self.type_to_go(t))
+                    .or_else(|| expected.and_then(|e| e.get(i).cloned()));
+                if let Some(g) = go_ty {
+                    self.var_go_type.insert(name, g);
+                }
             }
         }
         saved
+    }
+
+    /// Render lambda params with explicit Go types drawn from `types` (one per
+    /// param, positionally) — used when a lambda argument is specialised to a
+    /// callee's concrete parameter types. A param with its own source
+    /// annotation keeps it; otherwise the positional `types` entry is used.
+    fn collect_param_strs_with_types(&self, params: &[AIRNode], types: &[String]) -> Vec<String> {
+        params
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                if let NodeKind::Param { pattern, ty, .. } = &p.kind {
+                    let name = to_camel_case(&self.pattern_to_binding_name(pattern));
+                    let type_str = ty
+                        .as_ref()
+                        .map(|t| self.type_to_go(t))
+                        .or_else(|| types.get(i).cloned())
+                        .unwrap_or_else(|| "interface{}".into());
+                    Some(format!("{name} {type_str}"))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Resolve the Go element type to assert for the payload of a `Some` bound in
@@ -2346,7 +2769,23 @@ impl GoEmitCtx {
                 let Some(o) = rest.first() else {
                     return Ok(false);
                 };
+                // The `__o` IIFE parameter is `[]elem` (the receiver's element
+                // type), so the argument list literal must also be `[]elem{...}`
+                // — a `[]interface{}{x}` argument is not assignable to a `[]T`
+                // parameter in Go. Thread the receiver's element type into the
+                // literal as its expected collection element (extends #144's
+                // return-position typed-literal fix to argument position).
+                let prev_expected = self.expected_collection_elem.take();
+                if matches!(
+                    o.value.kind,
+                    NodeKind::ListLiteral { .. }
+                        | NodeKind::MapLiteral { .. }
+                        | NodeKind::SetLiteral { .. }
+                ) {
+                    self.expected_collection_elem = Some((elem.clone(), None));
+                }
                 let o = self.expr_to_string(&o.value)?;
+                self.expected_collection_elem = prev_expected;
                 format!(
                     "func(__r {slice}, __o {slice}) {slice} {{ \
                      __v := make({slice}, 0, len(__r)+len(__o)); \
@@ -3056,7 +3495,12 @@ impl GoEmitCtx {
                 }
                 Ok(())
             }
-            NodeKind::TraitDecl { name, methods, .. } => {
+            NodeKind::TraitDecl {
+                name,
+                methods,
+                generic_params,
+                ..
+            } => {
                 // Traits → Go interfaces. A trait whose methods take a
                 // `Self`-typed operand is encoded as an F-bounded *generic*
                 // interface — `type Comparable[__Self any] interface {
@@ -3064,13 +3508,28 @@ impl GoEmitCtx {
                 // Compare(Key)` satisfies `Comparable[Key]` and a bound `[T:
                 // Comparable]` lowers to `[T Comparable[T]]`. `Self` in the
                 // method signatures then renders as the interface's type param.
+                //
+                // A trait that declares its own generic params
+                // (`trait Iterable[T] { fn iter(self) -> ListIterator[T] }`)
+                // must carry them on the interface header too, or the param
+                // appears `undefined` in a method signature (`Iter()
+                // ListIterator[T]` with no `[T any]` → Go `undefined: T`). The
+                // declared params and the synthesized `__Self` (if any) are both
+                // threaded into the header.
                 let uses_self = self.self_param_traits.contains(&name.name);
                 let prev_self_subst = self.go_self_subst.take();
-                let head = if uses_self {
+                let mut header_params: Vec<String> = Vec::new();
+                if uses_self {
                     self.go_self_subst = Some("__Self".to_string());
-                    format!("{}[__Self any]", name.name)
-                } else {
+                    header_params.push("__Self any".to_string());
+                }
+                for p in generic_params {
+                    header_params.push(format!("{} any", p.name.name));
+                }
+                let head = if header_params.is_empty() {
                     name.name.clone()
+                } else {
+                    format!("{}[{}]", name.name, header_params.join(", "))
                 };
                 self.writeln(&format!("type {head} interface {{"));
                 self.indent += 1;
@@ -3895,6 +4354,18 @@ impl GoEmitCtx {
                         self.var_set_elem
                             .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
                     }
+                    // Record an untyped binding's concrete generic-record args
+                    // when its value is a call returning one (`__it := bag.Iter()`
+                    // → `("ListIterator", ["int64"])`), so a later
+                    // `match __it.next() { Some(x) => ... }` asserts the payload
+                    // to the concrete arg. This is the `for x in <Iterable>`
+                    // desugar case, whose gensym binding carries no annotation.
+                    if let Some(record_args) = self.value_record_type_args(value) {
+                        self.var_record_type_args.insert(
+                            to_camel_case(&self.pattern_to_binding_name(pattern)),
+                            record_args,
+                        );
+                    }
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}{binding} := ");
                     self.emit_expr(value)?;
@@ -4020,8 +4491,16 @@ impl GoEmitCtx {
                     ) {
                         self.expected_collection_elem = self.current_fn_ret_collection_elem.clone();
                     }
+                    // A generic-record construction in explicit-`return` position
+                    // adopts the function's return type for its args (see
+                    // `emit_block_body_inner`'s tail-return arm).
+                    let prev_expected_type = self.current_expected_type.take();
+                    if matches!(val.kind, NodeKind::RecordConstruct { .. }) {
+                        self.current_expected_type = self.current_fn_ret_type.clone();
+                    }
                     self.emit_expr(val)?;
                     self.expected_collection_elem = prev_expected;
+                    self.current_expected_type = prev_expected_type;
                     self.buf.push('\n');
                 } else {
                     self.writeln("return");
@@ -4405,11 +4884,39 @@ impl GoEmitCtx {
                 let type_arg_str = self.format_generic_args(type_args);
                 self.buf.push_str(&type_arg_str);
                 self.buf.push('(');
+                // When the callee is a known generic fn, bind its type params
+                // from the non-lambda args so each untyped lambda argument can
+                // be specialised to the concrete Go param type (`func(int64)
+                // bool` for `filter(it, (x) => x > 2)`), rather than the
+                // `interface{}` default that breaks the body and mismatches the
+                // typed callee param.
+                let fn_sig = if let NodeKind::Identifier { name } = &callee.kind {
+                    self.fn_signatures.get(&name.name).cloned()
+                } else {
+                    None
+                };
+                let lambda_bindings = fn_sig.as_ref().map(|(gp, ptys, _)| {
+                    (
+                        gp.clone(),
+                        ptys.clone(),
+                        self.bind_fn_type_params(gp, ptys, args),
+                    )
+                });
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         self.buf.push_str(", ");
                     }
+                    let prev_lambda = self.expected_lambda_param_types.take();
+                    if matches!(arg.value.kind, NodeKind::Lambda { .. }) {
+                        if let Some((gp, ptys, binds)) = &lambda_bindings {
+                            if let Some(pty) = ptys.get(i).and_then(|p| p.as_ref()) {
+                                self.expected_lambda_param_types =
+                                    self.specialise_lambda_param_types(pty, gp, binds);
+                            }
+                        }
+                    }
                     self.emit_expr(&arg.value)?;
+                    self.expected_lambda_param_types = prev_lambda;
                 }
                 if let Some(ea) = effects_args {
                     if !args.is_empty() {
@@ -4454,12 +4961,25 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::Lambda { params, body } => {
-                let param_strs = self.collect_param_strs(params);
+                // An untyped lambda argument adopts the callee's specialised
+                // parameter types when known (`expected_lambda_param_types`,
+                // e.g. `func(int64) bool` for `filter(it, (x) => x > 2)`), so
+                // the body's arithmetic type-checks and the closure satisfies
+                // the typed callee parameter. Consume the hint so it never
+                // leaks to a nested lambda in the body.
+                let expected_params = self.expected_lambda_param_types.take();
+                let param_strs = match &expected_params {
+                    Some(tys) if tys.len() == params.len() => {
+                        self.collect_param_strs_with_types(params, tys)
+                    }
+                    _ => self.collect_param_strs(params),
+                };
                 // Record the lambda's typed params so the body's return type can
                 // be inferred structurally. Without a concrete return type Go
                 // infers `interface{}`, which fails to satisfy a typed
                 // `func(int64) int64` parameter at the use site.
-                let saved_go_types = self.enter_param_go_types(params);
+                let saved_go_types =
+                    self.enter_param_go_types_with_expected(params, expected_params.as_deref());
                 let ret_ty = self
                     .infer_go_expr_type(body)
                     .unwrap_or_else(|| "interface{}".to_string());
@@ -6048,6 +6568,16 @@ impl GoEmitCtx {
                 {
                     self.expected_collection_elem = self.current_fn_ret_collection_elem.clone();
                 }
+                // A generic-record construction in tail-return position adopts
+                // the function's rendered return type as its expected type, so
+                // `fn list_iter[T](xs: List[T]) -> ListIterator[T] {
+                // ListIterator { xs: xs, cursor: 0 } }` emits `ListIterator[T]{
+                // ... }` rather than the field-inference `[any]` fallback (Go
+                // requires explicit type args on a generic struct literal).
+                let prev_expected_type = self.current_expected_type.take();
+                if should_return && matches!(t.kind, NodeKind::RecordConstruct { .. }) {
+                    self.current_expected_type = self.current_fn_ret_type.clone();
+                }
                 if should_return {
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}return ");
@@ -6059,6 +6589,7 @@ impl GoEmitCtx {
                     self.buf.push('\n');
                 }
                 self.expected_collection_elem = prev_expected;
+                self.current_expected_type = prev_expected_type;
             }
         } else if crate::generator::node_is_statement(node) {
             // A bare statement body (`break`/`continue`/`return`/assignment):
@@ -6084,6 +6615,12 @@ impl GoEmitCtx {
             {
                 self.expected_collection_elem = self.current_fn_ret_collection_elem.clone();
             }
+            // See the block-tail arm: a generic-record construction as the sole
+            // body expression adopts the function's return type for its args.
+            let prev_expected_type = self.current_expected_type.take();
+            if should_return && matches!(node.kind, NodeKind::RecordConstruct { .. }) {
+                self.current_expected_type = self.current_fn_ret_type.clone();
+            }
             if should_return {
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}return ");
@@ -6095,6 +6632,7 @@ impl GoEmitCtx {
                 self.buf.push('\n');
             }
             self.expected_collection_elem = prev_expected;
+            self.current_expected_type = prev_expected_type;
         }
         Ok(())
     }
@@ -9578,6 +10116,115 @@ mod tests {
         assert!(
             !out.contains("func(n int64) interface{}"),
             "lambda should NOT fall back to interface{{}} return, got: {out}"
+        );
+    }
+
+    #[test]
+    fn unify_go_pattern_binds_iterator_and_slice_params() {
+        let gp = vec!["T".to_string(), "U".to_string()];
+        // `ListIterator[T]` against `ListIterator[int64]` binds T → int64.
+        let mut b = HashMap::new();
+        GoEmitCtx::unify_go_pattern("ListIterator[T]", "ListIterator[int64]", &gp, &mut b);
+        assert_eq!(b.get("T"), Some(&"int64".to_string()));
+        // `[]T` against `[]string` binds T → string.
+        let mut b2 = HashMap::new();
+        GoEmitCtx::unify_go_pattern("[]T", "[]string", &gp, &mut b2);
+        assert_eq!(b2.get("T"), Some(&"string".to_string()));
+        // A bare param binds to the whole concrete type.
+        let mut b3 = HashMap::new();
+        GoEmitCtx::unify_go_pattern("U", "map[string]int64", &gp, &mut b3);
+        assert_eq!(b3.get("U"), Some(&"map[string]int64".to_string()));
+        // A structural mismatch records nothing (conservative).
+        let mut b4 = HashMap::new();
+        GoEmitCtx::unify_go_pattern("ListIterator[T]", "int64", &gp, &mut b4);
+        assert!(b4.is_empty());
+    }
+
+    #[test]
+    fn split_top_level_commas_respects_nesting() {
+        assert_eq!(
+            GoEmitCtx::split_top_level_commas("int64, []string"),
+            vec!["int64".to_string(), "[]string".to_string()]
+        );
+        // A comma nested inside `[...]` is not a top-level separator.
+        assert_eq!(
+            GoEmitCtx::split_top_level_commas("map[string]int64, T"),
+            vec!["map[string]int64".to_string(), "T".to_string()]
+        );
+        assert_eq!(
+            GoEmitCtx::split_top_level_commas("int64"),
+            vec!["int64".to_string()]
+        );
+    }
+
+    #[test]
+    fn replace_type_token_only_swaps_whole_identifiers() {
+        // `T` in `[]T` is replaced; `T` inside `Tree` is not.
+        assert_eq!(
+            GoEmitCtx::replace_type_token("[]T", "T", "int64"),
+            "[]int64"
+        );
+        assert_eq!(GoEmitCtx::replace_type_token("Tree", "T", "int64"), "Tree");
+        assert_eq!(
+            GoEmitCtx::replace_type_token("func(T) T", "T", "int64"),
+            "func(int64) int64"
+        );
+        assert!(GoEmitCtx::contains_type_token("ListIterator[T]", "T"));
+        assert!(!GoEmitCtx::contains_type_token("ListIterator[int64]", "T"));
+    }
+
+    #[test]
+    fn generic_trait_with_type_param_is_a_generic_interface() {
+        // A trait that declares its own generic param (`Iterable[T]`) becomes a
+        // generic Go interface so a method signature naming `T` is in scope.
+        let method = node(
+            2,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("iter"),
+                generic_params: vec![],
+                params: vec![node(
+                    10,
+                    NodeKind::Param {
+                        pattern: Box::new(bind_pat(11, "self")),
+                        ty: None,
+                        default: None,
+                    },
+                )],
+                return_type: Some(Box::new(node(
+                    20,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["ListIterator"]),
+                        args: vec![named_type(21, "T")],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(3, vec![], None)),
+            },
+        );
+        let t = node(
+            1,
+            NodeKind::TraitDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_platform: false,
+                name: ident("Iterable"),
+                generic_params: vec![generic_param(30, "T")],
+                associated_types: vec![],
+                methods: vec![method],
+            },
+        );
+        let out = gen(&module(vec![], vec![t]));
+        assert!(
+            out.contains("type Iterable[T any] interface {"),
+            "generic trait should carry its type param on the interface, got: {out}"
+        );
+        assert!(
+            out.contains("Iter() ListIterator[T]"),
+            "the method return must keep `[T]`, got: {out}"
         );
     }
 }

@@ -1,6 +1,6 @@
 // TEST: exec_for_user_iterable
 // EXPECT: output "sum=6"
-// EXPECT: targets js, ts, python
+// EXPECT: targets js, ts, python, rust, go
 //
 // THE end-to-end proof of the §18.5 `for`-over-`Iterable` checker desugar: a
 // user `record Bag` implements `Iterable[Int]`, and `for x in Bag{items:[1,2,3]}
@@ -11,14 +11,14 @@
 // `for`-over-user-type support is needed. The `Some(x)` arm types `x` to the
 // concrete element `Int`.
 //
-// TARGETS — js/ts/python only (NOT rust/go). The desugar SHAPE itself is correct
-// on every target, but the embedded `core.iter` module's generic combinators
-// (compiled into every importing program — no tree-shaking) carry codegen
-// residue that fails the Rust/Go *compile* (FOUND in the PR: Rust `T: Clone`
-// not propagated to the combinator free fns + `Iterable.iter` body moving
-// `self.items` out of `&self`; Go generic-record-construct `[any]` /
-// `[]interface{}` residue + an `undefined: T` `Iterable` interface). Restoring
-// rust/go is the codegen fast-follow tracked from this PR.
+// TARGETS — all five. The desugar SHAPE is correct on every target, and the
+// embedded `core.iter` module's generic combinators (compiled into every
+// importing program — no tree-shaking) now compile on Rust and Go too: the
+// rust/go codegen fast-follow propagates the `T: Clone` bound to the combinator
+// free fns, clones the `self.items` field-move out of `&self` in
+// `Iterable.iter` (Rust), and threads concrete type args through the Go
+// generic-record-construct / typed concat-arg literals / `Iterable[T]`
+// interface.
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).
