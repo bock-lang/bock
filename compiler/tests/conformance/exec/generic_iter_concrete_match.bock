@@ -1,0 +1,65 @@
+// TEST: exec_generic_iter_concrete_match
+// EXPECT: output "sum=6"
+// EXPECT: targets js, ts, python, rust, go
+//
+// The GENERIC counterpart of optional_match_in_loop.bock: a generic
+// `record ListIter[T]` (holding a `List[T]` and an `Int` cursor) with
+// `fn next(mut self) -> Optional[T]`, instantiated as a CONCRETE `ListIter[Int]`
+// in `main`, driven by the manual for->Iterable desugar shape `core.iter` emits:
+//
+//   loop {
+//     match c.next() {              // scrutinee is a METHOD CALL on ListIter[Int]
+//       Some(x) => { total = total + x }   // payload used in a *typed* op
+//       None => break
+//     }
+//   }
+//
+// `next` advances an `Int` cursor and yields `xs.get(cursor)` — a generic
+// `Optional[T]` whose payload is the record's type param `T`. No arithmetic is
+// done on `T` itself (the cursor is `Int`), so the generic body type-checks on
+// every statically-typed target; the GAP is purely about resolving the Some
+// payload's element type at the CONCRETE call site.
+//
+// GAP-D (Go): the `match c.next()` Some-payload assert emitted
+// `x := __opt.v.(T)` — `T` is the record's generic param, UNDEFINED in the
+// concrete caller (`main`) → `undefined: T`. The payload element type must
+// resolve to the CONCRETE instantiation (`int64`), not the generic param name —
+// a generic-trait extension of #137/#138's method-call-scrutinee Optional-payload
+// typing, threading the concrete type-arg at the call site.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record ListIter[T] {
+  xs: List[T]
+  cursor: Int
+}
+
+impl ListIter {
+  // `mut self` Optional return whose payload is the generic param `T`. At the
+  // concrete `ListIter[Int]` call site the payload type-assert must be `int64`.
+  fn next(mut self) -> Optional[T] {
+    match self.xs.get(self.cursor) {
+      Some(v) => {
+        self.cursor = self.cursor + 1
+        return Some(v)
+      }
+      None => return None
+    }
+  }
+}
+
+fn main() -> Void {
+  let mut c: ListIter[Int] = ListIter { xs: [1, 2, 3], cursor: 0 }
+  let mut total: Int = 0
+  loop {
+    match c.next() {
+      Some(x) => {
+        total = total + x
+      }
+      None => break
+    }
+  }
+  println("sum=${total}")
+}

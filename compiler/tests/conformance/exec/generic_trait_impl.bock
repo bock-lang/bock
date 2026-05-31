@@ -1,0 +1,50 @@
+// TEST: exec_generic_trait_impl
+// EXPECT: output "7"
+// EXPECT: targets js, ts, python, rust, go
+//
+// A GENERIC trait implemented by a GENERIC record: `trait P[T] { fn f(self) ->
+// Optional[T] }` plus `record R[T] { v: T }` plus `impl P[T] for R[T]`. This is
+// the generic-container/generic-trait residue (GAP-A) that #135/#136 did not
+// cover — those handled generic records/methods and bounded-VALUE dispatch
+// (`max[T: Comparable]`), but not a generic-trait `impl` whose TS interface
+// `extends` clause must carry the trait's type argument.
+//
+//   * TS (GAP-A): `impl P[T] for R[T]` emitted `interface R<T> extends P { ... }`
+//     — #136 fixed the interface HEAD's `<T>`, not the `extends`-trait clause, so
+//     `tsc` rejected with `error TS2314: Generic type 'P<T>' requires 1 type
+//     argument(s)`. Fixed by threading the impl's trait type-args into the
+//     `extends` clause (`extends P<T>`).
+//
+// `R[Int]{ v: 7 }.f()` returns `Some(7)`, matched to the payload and printed.
+// The other targets (js/python erase generics; rust/go carry them natively on
+// the trait `impl`) were already green; this proves TS now agrees.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+trait P[T] {
+  fn f(self) -> Optional[T]
+}
+
+record R[T] {
+  v: T
+}
+
+impl P[T] for R[T] {
+  fn f(self) -> Optional[T] {
+    return Some(self.v)
+  }
+}
+
+fn unwrapOr(r: R[Int], dflt: Int) -> Int {
+  match r.f() {
+    Some(x) => return x
+    None => return dflt
+  }
+}
+
+fn main() -> Void {
+  let r: R[Int] = R { v: 7 }
+  println("${unwrapOr(r, -1)}")
+}
