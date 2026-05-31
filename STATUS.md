@@ -77,9 +77,13 @@ PAUSED** behind it. The for→Iterable desugar is proven (T1 ×5) and resumes af
 Optional/Result methods. **Phase 2 DONE** (#140 trait self/defaults/bounded-dispatch · #141 Self-subst · #142
 match guards/or/nested/tuple) — **the stdlib's trait-using modules now EXECUTE cross-module on all 5** (proven by
 `use_core_compare.bock`). Generics/Result/Optional/traits/match/primitive-bridge all work ×5 (~195 exec pairs).
-**Phase 3 (Go collection typing / Map/Set / range()) NEXT** — then P4 (polish: `expr?`/DQ20, tuple `.N` parser,
-expr-position, Int/Int+Bool-interp, mutating-List/DQ18, go/ts Self-in-plain-impl, Go nested-payload typed-arith),
-then Q-stdlib R1 (iter, effect) resumes. (§20.6.1 bundling → DQ19; `expr?` → DQ20; has_body flag → DQ21.)
+**Phase 3 DONE** (#144 Go collection element typing + record-spread + Self-in-plain-impl · #145 Map/Set method
+dispatch + literals + range()). **Collections work ×5** — the codegen substrate is essentially built (cross-module,
+enums, generics, Optional/Result, primitive-bridge, traits, match, collections; ~247 exec pairs). **Phase 4 (polish)
+NEXT** — codegen-only (tuple `.N` parser, expr-position match, Go nested-payload, TS Self-in-plain-impl, Int/Int +
+Bool-interp harmonize) + design-gated (DQ18 mutating collections, DQ20 `expr?`, DQ22 bare `m.contains`). Likely none
+of P4 gates R1, so **Q-stdlib R1 (iter, effect) can resume after/alongside P4**. (DQ19 §20.6.1 bundling; DQ20 `expr?`;
+DQ21 has_body flag; DQ22 m.contains — all → Design, non-blocking.)
 **§18.2 prelude auto-import is live** (#120): the core-defined prelude symbols
 (`Ordering`/`Less`/`Equal`/`Greater`, `Comparable`/`Equatable`, `Into`/`From`/
 `TryFrom`/`Displayable`, `Error`) resolve without an explicit `use` (the membership

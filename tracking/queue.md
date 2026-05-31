@@ -83,15 +83,16 @@ _Last reconciled: 2026-05-30 vs main c9a241e (post #129 + the codegen-completene
   bundling-divergence → DQ19/Design.] **P1 stdlib types DONE** (#135 Python lambdas/generics · #136 Go/TS/Rust generics [DV12 resolved] · #137
   recv_kind annotation + primitive-bridge · #138 Result runtime + Optional/Result methods; `expr?` deferred → DQ20). **P2 traits+match DONE** (#140 trait self/defaults/bounded-dispatch — `use core.compare` runs ×5 · #141
   Self-subst · #142 match guards/or/nested/tuple). **P3 Go collection
-  typing** — `[]interface{}`→typed; Map/Set dispatch; `range()` helper; record-spread Go (Q-go-list-literal).
+  typing DONE** (#144 Go List/Map/Set element typing + record-spread + Self-in-plain-impl · #145 Map/Set method
+  dispatch + literals + range()). Collections work ×5.
   **P4 polish** — tuple `.N` parser; Optional-interp; Int/Int + Bool-interp harmonize; mutating-List guard
   (DQ18). SUBSUMES prior codegen follow-ups (Q-match-exprpos, Q-go-list-literal, Q-ts-generic-impl,
-  Q-self-subst, Q-prim-assoc). Q-list-codegen READ-ONLY methods DONE (#129); mutating → P4. **Phase 0 DONE (#131-#133); Phase 1 DONE
-  (#135-#138); Phase 2 DONE (#140-#142) — the stdlib's trait-using modules now execute cross-module ×5; Phase 3
-  (Go collection typing / Map/Set / range()) NEXT** (design in flight, Plan agent aeede38d) — then P4 (polish:
-  `expr?`/DQ20, tuple `.N` parser, Go/TS expr-position, Int/Int + Bool-interp, mutating-List/DQ18, go/ts
-  Self-in-plain-impl [#141], Go nested-payload typed-arith [#142]), then Q-stdlib R1 (iter, effect) resumes.
-  Operator chose "continue P3→P4" at the P2/P3 checkpoint (over resume-stdlib-now).
+  Q-self-subst, Q-prim-assoc). Q-list-codegen READ-ONLY methods DONE (#129); mutating → P4. **Phases 0-3 DONE (#131-#145); collections work ×5;
+  the codegen substrate is essentially built. Phase 4 (polish) NEXT** (design in flight, Plan agent a0f6b8f2):
+  codegen-only = tuple `.N` parser, expr-position match (Q-match-exprpos), Go nested-payload typed-arith [#142],
+  TS Self-in-plain-impl [#141], Int/Int + Bool-interp harmonize; design-gated = DQ18 (mutating List/Map/Set),
+  DQ20 (`expr?`), DQ22 (bare `m.contains`). **Likely NONE of P4 gates R1** (iter uses concat not push; no expr?),
+  so Q-stdlib R1 (iter, effect) can resume after/alongside P4. Operator chose "continue P3→P4" (P2/P3 checkpoint).
 - **[Q-stdlib] Implement the core standard library** — impl ·
   **v1-BLOCKING** (3/11 landed — but those 3 are check-only, NOT executed cross-module [DV13]; R1 PAUSED
   behind **Q-codegen-completeness**: the for→Iterable desugar is PROVEN [T1 green ×5], but the stdlib needs

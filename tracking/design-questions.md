@@ -170,6 +170,14 @@ decided→link)`
   heuristic is exact for the current lowerer; the flag is the unambiguous follow-up. Non-blocking.
 - **Status:** escalated → Design (escalations.md)
 
+### DQ22 — bare `m.contains(k)` on a Map: reject or alias to `contains_key`?
+- **Question:** the checker resolves Map membership as `contains_key`; a bare `m.contains(k)` resolves to a fresh
+  var (not a real Map method) → passes `bock check` but has no codegen lowering. Should the checker reject
+  `m.contains` on a Map (only `contains_key` valid), or alias `contains`→`contains_key`?
+- **§:** §18.3 (collections) / checker · **context:** FOUND #145 (P3-β). Low priority — `contains_key` works
+  end-to-end ×5; this is only the spelling of the membership method. Non-blocking.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and
