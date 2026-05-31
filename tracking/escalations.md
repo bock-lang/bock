@@ -280,5 +280,27 @@ precedent; all three are additive/reversible.
 **Status:** pending
 
 > Standing non-blocking Design queue (filed; queue not blocked on any): DQ10, DQ11, DQ12, DQ13, DQ16-residue,
-> DQ17, DQ18, DQ19, DQ20, DQ21, DQ22, DQ23, DQ24, Bool-interp spelling. The orchestrator proceeds on safe defaults
+> DQ17, DQ18, DQ19, DQ20, DQ21, DQ22, DQ23, DQ24, DQ25, Bool-interp spelling. The orchestrator proceeds on safe defaults
 > and reconciles spec/divergences as Design decides.
+
+## [2026-05-31 22:35 UTC] core.effect v1 surface — 8 questions (DQ25) → Design
+
+**Type:** design (core-spec)
+**Severity:** medium (the floor BUILD waits on Q1/Q2 — but the queue is NOT blocked: feasibility probe + scoping proceed in parallel)
+**Trigger:** the operator chose "scope core.effect" (the next R1 module). The Plan agent found `core.effect`'s
+v1 surface is genuinely **under-specified** (§18.3:1728 = "Effect system primitives" only; no §18.3.x subsection).
+Per the core-spec rule the orchestrator FILES the surface questions for Design rather than deciding them.
+**Context (design-questions.md DQ25 — 8 sub-questions):** the headline ones — **Q1** primitives-only vs a
+library of concrete effects (rec primitives-only); **Q2** ship a standard `Log` effect as the executable
+example, conditioned on cross-module effect execution proving feasible ×5 (rec yes-iff-feasible) — the most
+consequential, since it decides whether the floor contains a *runnable* effect; **Q8** what is the
+"representative example that runs" (§18.3:1716 acceptance bar) for a primitives-only floor. Q3-Q7 (ambient
+effects / Clock-Cancel ownership / handler utility traits / composites / Reserved-v1.x) have low-controversy recs.
+**The effect MACHINERY is implemented** (§10; effects.rs ~1112 lines; effect codegen ×5; 7 fixtures) and
+resolve-layer cross-module-wired — this is a SURFACE decision + a cross-module-EXECUTION feasibility gap on
+Rust/Go (never proven; all effect fixtures are check-only). A feasibility probe is running to inform Q2/Q8.
+**Recommendation:** none on the merits (Design's call); the plan gives a recommended minimum-useful default per
+question. Q2 should be decided WITH the feasibility-probe result (the orchestrator will route that result here).
+**Awaiting:** Design (+ owner) decision on Q1/Q2 (the floor contents) — the rest are additive. The owner is
+present in-chat and may answer directly, which the orchestrator then reconciles into the spec/floor.
+**Status:** pending
