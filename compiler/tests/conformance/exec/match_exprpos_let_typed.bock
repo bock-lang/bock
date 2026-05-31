@@ -1,0 +1,63 @@
+// TEST: exec_match_exprpos_let_typed
+// EXPECT: output "stop;slow;go"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Expression-position `match` bound into a typed `let` whose declared type
+// differs from the enclosing function's return type (Q-match-exprpos,
+// codegen-completeness P4): `let a: Action = match l { … }` inside a function
+// that returns `String`. The match yields a *user-enum* value (`Action`), bound
+// into `a: Action`, while `decide` returns `String`.
+//
+// Go (P4): the expression-position match lowers to an IIFE. Its return type was
+// taken from `current_fn_ret_type` (here `string`), so a value-position match
+// binding into `Action` emitted `func() string { … }()` — not assignable to the
+// `var a Action`. The fix records the binding's declared type as a
+// `current_expected_type` around the `let` value emit and prefers it for the
+// IIFE return, so the IIFE is `func() Action { … }()`.
+//
+// TS (P4): the value-position match IIFE arrow is now annotated with the
+// binding type (`(() : Action => { … })()`) and a bare-identifier scrutinee is
+// hoisted to a temp (`const __matchN = l; switch (__matchN._tag) …`) so the
+// `switch` narrows the temp, not the original binding.
+//
+// Python (P4): an expression-position user-enum match arm test resolved the
+// variant through the registry to its `{enum}_{variant}` dataclass
+// (`isinstance(__v, Light_Red)`) rather than the bare variant leaf name
+// (`isinstance(__v, Red)`, an undefined name) — mirroring the statement-position
+// `emit_pattern`.
+//
+// js/rust already handled this (JS is untyped; Rust binds the enum value
+// natively).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Light {
+  Red
+  Yellow
+  Green
+}
+
+enum Action {
+  Stop
+  Slow
+  Go
+}
+
+fn decide(l: Light) -> String {
+  let a: Action = match l {
+    Red => Stop
+    Yellow => Slow
+    Green => Go
+  }
+  match a {
+    Stop => return "stop"
+    Slow => return "slow"
+    Go => return "go"
+  }
+}
+
+fn main() -> Void {
+  println("${decide(Red)};${decide(Yellow)};${decide(Green)}")
+}

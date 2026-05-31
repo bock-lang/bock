@@ -775,6 +775,19 @@ struct GoEmitCtx {
     /// trailing `panic("unreachable")` instead of `return nil` when typed, since
     /// a concrete (non-interface) return type has no `nil`.
     current_fn_ret_type: Option<String>,
+    /// The Go type a value-position expression is being assigned *into*, when
+    /// known and distinct from the enclosing function's return type. Set around a
+    /// `let x: T = <value>`'s value emit. An expression-position `match` lowers
+    /// to an IIFE whose return type must be the *binding*'s declared `T`, not the
+    /// function's return type (`current_fn_ret_type`) — a `let x: T = match …`
+    /// where `T` ≠ the fn return otherwise emits `func() <RetType> { … }()` whose
+    /// result is not assignable to `T`. When set (and not `interface{}`), the
+    /// match/if IIFE prefers this over `current_fn_ret_type`. `None` outside a
+    /// typed binding context; consumed (taken) around the value emit so it never
+    /// leaks to a sibling/outer expression. Additive: when absent the IIFE keeps
+    /// using `current_fn_ret_type`, preserving the working Optional/Result/enum
+    /// return-position behavior.
+    current_expected_type: Option<String>,
     /// Expected collection element Go types for a collection literal emitted in
     /// a *typed context* (a `let x: List[T] = [...]`). A collection literal
     /// infers its element type from its elements, but an EMPTY literal (`[]`)
@@ -830,7 +843,26 @@ impl GoEmitCtx {
             go_self_subst: None,
             self_param_traits: HashSet::new(),
             current_fn_ret_type: None,
+            current_expected_type: None,
             expected_collection_elem: None,
+        }
+    }
+
+    /// The Go type to use for an expression-position `if`/`match` IIFE return.
+    ///
+    /// Prefers the binding's *expected* type ([`Self::current_expected_type`],
+    /// set around a `let x: T = …` value emit) when known and concrete, so a
+    /// value-position `let x: T = match …` produces `func() T { … }()` —
+    /// assignable to `T` even when `T` differs from the enclosing function's
+    /// return type. An `interface{}` expected type is ignored (it carries no more
+    /// information than the untyped fallback and would suppress a more specific
+    /// `current_fn_ret_type`). Falls back to the function's return type
+    /// ([`Self::current_fn_ret_type`]) for the return-position case
+    /// (`return match …`). `None` ⇒ the caller emits the `interface{}` fallback.
+    fn expected_iife_type(&self) -> Option<String> {
+        match self.current_expected_type.as_deref() {
+            Some(t) if t != "interface{}" => Some(t.to_string()),
+            _ => self.current_fn_ret_type.clone(),
         }
     }
 
@@ -3643,7 +3675,15 @@ impl GoEmitCtx {
                     ) {
                         self.expected_collection_elem = self.collection_elem_go_types(t);
                     }
+                    // The binding's declared Go type is the expected type for the
+                    // value expression. An expression-position `match`/`if` lowers
+                    // to an IIFE whose return must be this `T` (not the enclosing
+                    // function's return type), so `let x: T = match …` is
+                    // assignable. Restored after the value so it never leaks.
+                    let prev_expected_type = self.current_expected_type.take();
+                    self.current_expected_type = Some(type_str.clone());
                     self.emit_expr(value)?;
+                    self.current_expected_type = prev_expected_type;
                     self.expected_collection_elem = prev_expected;
                     self.buf.push('\n');
                 } else {
@@ -4495,15 +4535,19 @@ impl GoEmitCtx {
                 ..
             } => {
                 // If in expression position: Go doesn't have ternary; emit as
-                // IIFE. Type it with the enclosing function's return type when
-                // known (`func() Ordering { … }`) so a named/concrete result is
+                // IIFE. Type it with the binding's expected type when known (a
+                // `let x: T = if …`), else the enclosing function's return type
+                // (`func() Ordering { … }`) so a named/concrete result is
                 // assignable; the `else` falls back to a typed zero only for the
                 // untyped form (a concrete return type always has both branches
                 // in a Bock `if`-expression).
                 let iife_ty = self
-                    .current_fn_ret_type
-                    .clone()
+                    .expected_iife_type()
                     .unwrap_or_else(|| "interface{}".to_string());
+                // Consume the expected type for THIS IIFE's return only; the
+                // branch bodies are separately typed (and may re-set it via a
+                // nested `let`), so it must not leak into them.
+                let prev_expected = self.current_expected_type.take();
                 let _ = write!(self.buf, "func() {iife_ty} {{ if ");
                 self.emit_expr(condition)?;
                 self.buf.push_str(" { return ");
@@ -4515,6 +4559,7 @@ impl GoEmitCtx {
                     self.buf.push_str("nil");
                 }
                 self.buf.push_str(" } }()");
+                self.current_expected_type = prev_expected;
                 Ok(())
             }
             NodeKind::Block { stmts, tail } => {
@@ -4549,15 +4594,23 @@ impl GoEmitCtx {
                 // `__bockOrdering` value-enum, used when the real enum is NOT
                 // bundled, stays a value-switch via the path below.)
                 let is_user_enum = self.go_match_is_user_enum(arms);
-                // Type the IIFE with the enclosing function's return type when
-                // known (`func() Ordering { … }`), so its result is assignable
-                // where a concrete/named type is required — `interface{}` does
-                // not satisfy a named interface like the user `Ordering`. A typed
-                // IIFE closes with `panic("unreachable")` (a Bock match is
-                // exhaustive) rather than `return nil`, which has no value for a
-                // concrete return type.
-                let iife_ret = self.current_fn_ret_type.clone();
+                // Type the IIFE so its result is assignable where a
+                // concrete/named type is required — `interface{}` does not
+                // satisfy a named interface like the user `Ordering`. Prefer the
+                // binding's *expected* type (`let x: T = match …`) when known and
+                // concrete: a value-position match binds into `T`, which need not
+                // equal the enclosing function's return type. Otherwise fall back
+                // to the function's return type (the return-position case:
+                // `return match …`), preserving the working Optional/Result/enum
+                // behavior. A typed IIFE closes with `panic("unreachable")` (a
+                // Bock match is exhaustive) rather than `return nil`, which has no
+                // value for a concrete return type.
+                let iife_ret = self.expected_iife_type();
                 let iife_ty = iife_ret.as_deref().unwrap_or("interface{}");
+                // Consume the expected type for THIS IIFE's return only; the
+                // scrutinee and arm bodies are separately typed (and may re-set
+                // it via a nested `let`), so it must not leak into them.
+                let prev_expected = self.current_expected_type.take();
                 let _ = write!(self.buf, "func() {iife_ty} {{ switch ");
                 if is_user_enum {
                     // Non-binding type-switch (`switch x.(type)`): the
@@ -4600,6 +4653,7 @@ impl GoEmitCtx {
                 } else {
                     self.buf.push_str("}; return nil }()");
                 }
+                self.current_expected_type = prev_expected;
                 Ok(())
             }
             // Ownership nodes: erase in Go.
@@ -6677,6 +6731,91 @@ mod tests {
         );
         let out = gen(&module(vec![], vec![l]));
         assert!(out.contains("var x int64 = 42"), "got: {out}");
+    }
+
+    /// Q-match-exprpos (P4): a value-position `let flag: Bool = match n { … }`
+    /// inside a function returning `String`. The expression-position match IIFE
+    /// must take its return type from the *binding's* declared type (`bool`), not
+    /// the enclosing function's return type (`string`) — otherwise the IIFE
+    /// (`func() string { … }()`) is not assignable to `var flag bool`. The fix
+    /// records the declared `let` type as `current_expected_type` and prefers it
+    /// for the IIFE return.
+    #[test]
+    fn expr_position_match_uses_binding_type_not_fn_ret() {
+        let m = node(
+            10,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(11, "n")),
+                arms: vec![
+                    node(
+                        12,
+                        NodeKind::MatchArm {
+                            pattern: Box::new(node(
+                                13,
+                                NodeKind::LiteralPat {
+                                    lit: Literal::Int("0".into()),
+                                },
+                            )),
+                            guard: None,
+                            body: Box::new(block(14, vec![], Some(bool_lit(15, true)))),
+                        },
+                    ),
+                    node(
+                        16,
+                        NodeKind::MatchArm {
+                            pattern: Box::new(node(17, NodeKind::WildcardPat)),
+                            guard: None,
+                            body: Box::new(block(18, vec![], Some(bool_lit(19, false)))),
+                        },
+                    ),
+                ],
+            },
+        );
+        let let_flag = node(
+            20,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(21, "flag")),
+                ty: Some(Box::new(node(
+                    22,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Bool"]),
+                        args: vec![],
+                    },
+                ))),
+                value: Box::new(m),
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("decide"),
+                generic_params: vec![],
+                params: vec![typed_param_node(2, "n", "Int")],
+                return_type: Some(Box::new(node(
+                    3,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(4, vec![let_flag], Some(str_lit(5, "x")))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("var flag bool = func() bool {"),
+            "IIFE must be typed with the binding type (bool), not the fn return (string), got: {out}"
+        );
+        assert!(
+            !out.contains("func() string {"),
+            "the match IIFE must not be typed with the function return type, got: {out}"
+        );
     }
 
     #[test]
