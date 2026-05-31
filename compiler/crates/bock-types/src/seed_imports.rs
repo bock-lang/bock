@@ -76,8 +76,12 @@ pub fn seed_imports(checker: &mut TypeChecker, imports: &[ImportDecl], registry:
 /// utility functions (`print`, `println`, `debug`, `assert`, `todo`,
 /// `unreachable`, `sleep`) are seeded as builtins by the CLI's
 /// `register_type_builtins`. Traits with no embedded definition yet
-/// (`Hashable`, `Serializable`, `Cloneable`, `Default`, `Iterator`, `Iterable`)
-/// are name-level prelude builtins in the resolver only.
+/// (`Hashable`, `Serializable`, `Cloneable`, `Default`) are name-level prelude
+/// builtins in the resolver only; `Iterator`/`Iterable` are now defined in the
+/// embedded `core.iter` module and seeded here (alongside its concrete iterator
+/// `ListIterator`), so bare `Iterator`/`Iterable`/`ListIterator` resolve and
+/// type-check without an explicit import — this is what the `for`-over-Iterable
+/// desugar relies on to recognise an `Iterable` user type.
 ///
 /// Seeding `Ordering` also seeds its variants `Less`/`Equal`/`Greater`
 /// (via the enum-detail path), so they need no separate entries.
@@ -93,6 +97,10 @@ pub const PRELUDE_FROM_CORE: &[(&str, &str)] = &[
     ("core.convert", "Displayable"),
     // core.error
     ("core.error", "Error"),
+    // core.iter
+    ("core.iter", "Iterator"),
+    ("core.iter", "Iterable"),
+    ("core.iter", "ListIterator"),
 ];
 
 /// Seeds the §18.2 prelude subset that is **defined in the embedded `core.*`
