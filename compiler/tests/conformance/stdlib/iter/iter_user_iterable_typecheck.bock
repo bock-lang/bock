@@ -1,0 +1,34 @@
+// TEST: stdlib_iter_user_iterable_typecheck
+// EXPECT: no_errors
+//
+// A user `record Bag` that implements `Iterable[Int]` (its `iter` yielding a
+// `ListIterator[Int]` built from the backing list) can be iterated with a
+// `for x in bag { ... }` loop. The checker's §18.5 desugar rewrites the loop
+// into `{ let mut __it = bag.iter(); loop { match __it.next() { Some(x) => ...;
+// None => break } } }`, and the synthesized `Some(x)` arm types `x` to the
+// concrete element type `Int` — so `total + x` (an Int op) type-checks.
+//
+// `Iterable` / `ListIterator` are bare (no `use`): they are §18.2 prelude
+// symbols seeded from the embedded `core.iter`. Only the `list_iter` helper
+// (a function, not a prelude type) is imported.
+module userapp
+
+use core.iter.{list_iter}
+
+public record Bag {
+  items: List[Int]
+}
+
+impl Iterable[Int] for Bag {
+  public fn iter(self) -> ListIterator[Int] {
+    list_iter(self.items)
+  }
+}
+
+public fn sum(bag: Bag) -> Int {
+  let mut total: Int = 0
+  for x in bag {
+    total = total + x
+  }
+  total
+}

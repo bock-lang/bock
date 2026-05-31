@@ -1,0 +1,46 @@
+// TEST: exec_for_user_iterable
+// EXPECT: output "sum=6"
+// EXPECT: targets js, ts, python
+//
+// THE end-to-end proof of the §18.5 `for`-over-`Iterable` checker desugar: a
+// user `record Bag` implements `Iterable[Int]`, and `for x in Bag{items:[1,2,3]}
+// { total = total + x }` sums to 6. The checker rewrites the `for` into
+//   { let mut __it = bag.iter(); loop { match __it.next() { Some(x) => <body>;
+//     None => break } } }
+// which lowers through the already-native loop/match codegen — no per-target
+// `for`-over-user-type support is needed. The `Some(x)` arm types `x` to the
+// concrete element `Int`.
+//
+// TARGETS — js/ts/python only (NOT rust/go). The desugar SHAPE itself is correct
+// on every target, but the embedded `core.iter` module's generic combinators
+// (compiled into every importing program — no tree-shaking) carry codegen
+// residue that fails the Rust/Go *compile* (FOUND in the PR: Rust `T: Clone`
+// not propagated to the combinator free fns + `Iterable.iter` body moving
+// `self.items` out of `&self`; Go generic-record-construct `[any]` /
+// `[]interface{}` residue + an `undefined: T` `Iterable` interface). Restoring
+// rust/go is the codegen fast-follow tracked from this PR.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.iter.{ListIterator, list_iter}
+
+record Bag {
+  items: List[Int]
+}
+
+impl Iterable[Int] for Bag {
+  fn iter(self) -> ListIterator[Int] {
+    list_iter(self.items)
+  }
+}
+
+fn main() -> Void {
+  let bag: Bag = Bag { items: [1, 2, 3] }
+  let mut total: Int = 0
+  for x in bag {
+    total = total + x
+  }
+  println("sum=${total}")
+}

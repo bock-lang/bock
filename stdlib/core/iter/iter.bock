@@ -1,0 +1,191 @@
+//! `core.iter` — the iteration abstractions for the Bock standard library.
+//!
+//! This module is pure Bock (two traits, a concrete iterator record, a
+//! constructor, and a set of eager combinators), so it compiles to every target
+//! with no per-target runtime shim. It is the iteration counterpart to
+//! `core.compare`/`core.convert`: a user type opts into `for`-loop iteration by
+//! implementing [`Iterable`], whose single `iter` method yields a concrete
+//! [`ListIterator`]. The compiler desugars `for x in iterable { ... }` over an
+//! `Iterable` user type into the proven manual drive shape
+//! `loop { match it.next() { Some(x) => ...; None => break } }`.
+//!
+//! The v1 surface is intentionally minimal (Design DQ12/DQ14/DQ15/DQ16): there
+//! is a single concrete iterator type ([`ListIterator`]) rather than
+//! `impl Trait`/existential iterators, the combinators are **eager** and
+//! **`List`-returning** (not lazy/streaming), and every operation is built from
+//! read-only `List` methods (`len`/`get`/`concat`) — `List.push` is unavailable
+//! pending Design DQ18.
+
+module core.iter
+
+/// The interface for types that produce a sequence of values one at a time.
+///
+/// An iterator is *driven* by repeatedly calling [`Iterator.next`]: each call
+/// yields `Some(value)` for the next element, or `None` once the sequence is
+/// exhausted. The canonical driver is `loop { match it.next() { Some(x) => ...;
+/// None => break } }`, which is exactly what the `for`-loop desugar emits.
+public trait Iterator[T] {
+  /// Advances the iterator and returns the next element, or `None` when the
+  /// sequence is exhausted.
+  fn next(mut self) -> Optional[T]
+}
+
+/// The interface for types that can be iterated, producing a [`ListIterator`].
+///
+/// Implementing `Iterable` is how a user type opts into `for`-loop support: the
+/// compiler desugars `for x in value { ... }` into a drive over the
+/// [`ListIterator`] returned by `value.iter()`. The v1 surface fixes the
+/// iterator type to the concrete [`ListIterator`] (Design DQ14: no `impl Trait`
+/// / existential iterators), so an `Iterable[T]` always iterates a `List[T]`.
+public trait Iterable[T] {
+  /// Returns a fresh iterator over this value's elements.
+  fn iter(self) -> ListIterator[T]
+}
+
+/// The single concrete iterator type in the v1 surface: a cursor over a
+/// `List[T]`.
+///
+/// `ListIterator` walks `xs` from `cursor` forward, yielding each element once
+/// via [`ListIterator.next`]. It is the iterator every [`Iterable`] produces and
+/// the iterator every combinator in this module consumes. Construct one with
+/// [`list_iter`] rather than by hand.
+public record ListIterator[T] {
+  /// The backing list being iterated.
+  xs: List[T]
+  /// The index of the next element to yield.
+  cursor: Int
+}
+
+/// `ListIterator` advances an `Int` cursor over its backing list, yielding each
+/// element once.
+impl ListIterator {
+  /// Advances the cursor and returns the element at the previous position, or
+  /// `None` once the cursor has passed the end of the backing list.
+  ///
+  /// This is the read-only drive the proven `loop { match it.next() }` shape
+  /// relies on: the cursor is an `Int`, and `self.xs.get(self.cursor)` yields a
+  /// generic `Optional[T]` whose payload is the iterator's element type.
+  public fn next(mut self) -> Optional[T] {
+    match self.xs.get(self.cursor) {
+      Some(v) => {
+        self.cursor = self.cursor + 1
+        return Some(v)
+      }
+      None => return None
+    }
+  }
+}
+
+/// Constructs a [`ListIterator`] positioned at the start of `xs`.
+///
+/// This is the ergonomic way to obtain an iterator over a list:
+/// `list_iter([1, 2, 3]).next()`.
+public fn list_iter[T](xs: List[T]) -> ListIterator[T] {
+  ListIterator { xs: xs, cursor: 0 }
+}
+
+/// Drains `it` into a `List[T]`, preserving order.
+///
+/// Eagerly consumes the iterator, building the result with read-only `concat`
+/// over singleton list literals (no `List.push`, per DQ18).
+public fn to_list[T](it: ListIterator[T]) -> List[T] {
+  let mut cur: ListIterator[T] = it
+  let mut out: List[T] = []
+  loop {
+    match cur.next() {
+      Some(x) => {
+        out = out.concat([x])
+      }
+      None => break
+    }
+  }
+  return out
+}
+
+/// Counts the elements produced by `it`, draining it.
+public fn count[T](it: ListIterator[T]) -> Int {
+  let mut cur: ListIterator[T] = it
+  let mut n: Int = 0
+  loop {
+    match cur.next() {
+      Some(_) => {
+        n = n + 1
+      }
+      None => break
+    }
+  }
+  return n
+}
+
+/// Folds `it` left-to-right into a single accumulator, starting from `init`.
+///
+/// For each element `x`, the accumulator becomes `f(acc, x)`; the final
+/// accumulator is returned once the iterator is exhausted.
+public fn fold[T, A](it: ListIterator[T], init: A, f: Fn(A, T) -> A) -> A {
+  let mut cur: ListIterator[T] = it
+  let mut acc: A = init
+  loop {
+    match cur.next() {
+      Some(x) => {
+        acc = f(acc, x)
+      }
+      None => break
+    }
+  }
+  return acc
+}
+
+/// Eagerly maps `f` over `it`, returning the transformed elements as a
+/// `List[U]` in order.
+public fn map[T, U](it: ListIterator[T], f: Fn(T) -> U) -> List[U] {
+  let mut cur: ListIterator[T] = it
+  let mut out: List[U] = []
+  loop {
+    match cur.next() {
+      Some(x) => {
+        out = out.concat([f(x)])
+      }
+      None => break
+    }
+  }
+  return out
+}
+
+/// Eagerly keeps the elements of `it` for which `pred` returns `true`,
+/// returning them as a `List[T]` in order.
+public fn filter[T](it: ListIterator[T], pred: Fn(T) -> Bool) -> List[T] {
+  let mut cur: ListIterator[T] = it
+  let mut out: List[T] = []
+  loop {
+    match cur.next() {
+      Some(x) => {
+        if (pred(x)) {
+          out = out.concat([x])
+        }
+      }
+      None => break
+    }
+  }
+  return out
+}
+
+/// Eagerly takes up to the first `n` elements of `it`, returning them as a
+/// `List[T]`. Fewer than `n` elements are returned if the iterator is shorter.
+public fn take[T](it: ListIterator[T], n: Int) -> List[T] {
+  let mut cur: ListIterator[T] = it
+  let mut out: List[T] = []
+  let mut taken: Int = 0
+  loop {
+    if (taken >= n) {
+      break
+    }
+    match cur.next() {
+      Some(x) => {
+        out = out.concat([x])
+        taken = taken + 1
+      }
+      None => break
+    }
+  }
+  return out
+}

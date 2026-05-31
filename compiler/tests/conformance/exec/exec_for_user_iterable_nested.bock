@@ -1,0 +1,40 @@
+// TEST: exec_for_user_iterable_nested
+// EXPECT: output "sum=180"
+// EXPECT: targets js, ts, python
+//
+// Nested `for`-over-`Iterable` loops (§18.5): each `for` desugars to its own
+// `{ let mut __it = ..; loop { match __it.next() ... } }`, and the gensym'd
+// iterator binding name (`__bock_iter_<n>`) differs per loop, so the inner
+// drive does NOT shadow the outer one. Iterating outer [1,2,3] × inner [10,20]
+// accumulates sum(a*b) = (1+2+3) * (10+20) = 6 * 30 = 180.
+//
+// TARGETS — js/ts/python only; see exec_for_user_iterable.bock for the Rust/Go
+// embedded-combinator codegen residue FOUND in this PR.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.iter.{ListIterator, list_iter}
+
+record Bag {
+  items: List[Int]
+}
+
+impl Iterable[Int] for Bag {
+  fn iter(self) -> ListIterator[Int] {
+    list_iter(self.items)
+  }
+}
+
+fn main() -> Void {
+  let outer: Bag = Bag { items: [1, 2, 3] }
+  let inner: Bag = Bag { items: [10, 20] }
+  let mut total: Int = 0
+  for a in outer {
+    for b in inner {
+      total = total + (a * b)
+    }
+  }
+  println("sum=${total}")
+}
