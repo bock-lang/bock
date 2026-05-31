@@ -227,6 +227,16 @@ struct RsEmitCtx {
     /// to `self.field.clone()`). Populated by [`Self::collect_clone_targets`]
     /// before emission so the `RecordDecl` can decide whether to derive `Clone`.
     clone_target_records: std::collections::HashSet<String>,
+    /// Names of *generic* records whose inherent or trait `impl` will carry a
+    /// `T: Clone` bound — either because they return a `self` field by value
+    /// ([`Self::clone_target_records`]) or because a method clones a generic
+    /// collection element ([`Self::body_clones_collection_element`], e.g.
+    /// `ListIterator.next` doing `self.xs.get(self.cursor)`). A free generic
+    /// function that takes such a record by value and calls a method on it
+    /// (`count[T](it: ListIterator[T])` driving `it.next()`) must propagate the
+    /// bound, or method resolution fails (`E0599`: trait bounds not satisfied).
+    /// Populated by [`Self::collect_clone_targets`].
+    clone_bound_records: std::collections::HashSet<String>,
     /// True while emitting a method body whose impl target is generic and clones
     /// `self` fields. Gates the `self.field` → `self.field.clone()` rewrite so it
     /// applies only inside such methods (never to general field reads, which
@@ -242,6 +252,17 @@ struct RsEmitCtx {
     /// from the trait registry; keyed by the bare method name (globally unique
     /// within a v1 program).
     self_operand_methods: std::collections::HashSet<String>,
+    /// Names of match-pattern bindings in the current arm that are *used more
+    /// than once* in the arm body. Such a binding (`Some(x) => ... pred(x) ...
+    /// [x] ...`) is moved by its first by-value consumer (the Rust pattern
+    /// binds by value), so each later by-value use must clone to keep the value
+    /// live (`E0382`: use of moved value). When a bare-identifier call argument
+    /// names a binding in this set, codegen emits `x.clone()` rather than `x`.
+    /// The clone is always valid: a generic such binding is element-typed and
+    /// its fn already carries the matching `T: Clone` bound (e.g.
+    /// `filter[T](.., pred: Fn(T) -> Bool)`), and concrete v1 element types are
+    /// `Clone`. Saved/restored around each arm so it never leaks across arms.
+    reused_match_bindings: std::collections::HashSet<String>,
 }
 
 impl RsEmitCtx {
@@ -260,8 +281,10 @@ impl RsEmitCtx {
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             clone_target_records: std::collections::HashSet::new(),
+            clone_bound_records: std::collections::HashSet::new(),
             in_clone_self_method: false,
             self_operand_methods: std::collections::HashSet::new(),
+            reused_match_bindings: std::collections::HashSet::new(),
         }
     }
 
@@ -317,7 +340,22 @@ impl RsEmitCtx {
             }
             let returns_self_field = methods.iter().any(Self::method_returns_self_field);
             if returns_self_field {
-                self.clone_target_records.insert(target_name);
+                self.clone_target_records.insert(target_name.clone());
+            }
+            // Record every generic record whose impl will carry a `T: Clone`
+            // bound, so a free generic fn taking it by value and driving its
+            // methods can propagate the bound (see `clone_bound_records`). This
+            // mirrors the impl-site `add_clone_bound` predicate: a field-return
+            // getter, a `self.field` move-out, or a generic-collection-element
+            // clone (`ListIterator.next` doing `self.xs.get(...)`).
+            let needs_clone_bound = returns_self_field
+                || methods.iter().any(|m| {
+                    matches!(&m.kind, NodeKind::FnDecl { body, .. }
+                        if Self::body_moves_self_field(body)
+                            || Self::body_clones_collection_element(body))
+                });
+            if needs_clone_bound {
+                self.clone_bound_records.insert(target_name);
             }
         }
     }
@@ -502,6 +540,58 @@ impl RsEmitCtx {
             }
         }
         let mut scan = CloneScan { found: false };
+        bock_air::visitor::Visitor::visit_node(&mut scan, body);
+        scan.found
+    }
+
+    /// True when a *generic* free function takes a parameter whose base type is
+    /// a clone-bound record ([`Self::clone_bound_records`] — a record whose
+    /// `impl` carries a `T: Clone` bound, e.g. `ListIterator[T]`) and drives it
+    /// with at least one method call. Such a function must propagate the
+    /// record's `T: Clone` bound to its own signature, or method resolution
+    /// fails (`count[T](it: ListIterator[T])` calling `it.next()` →
+    /// `E0599`: the method exists but its trait bounds are not satisfied).
+    ///
+    /// Conservative on both halves: the param must base-resolve to a recorded
+    /// clone-bound record (never a built-in collection or a non-generic record),
+    /// AND the body must contain a `MethodCall` (driving the record) — a fn that
+    /// merely receives such a record but never calls a method on it emits no
+    /// bound-requiring code and is left un-constrained.
+    fn params_drive_clone_bound_record(&self, params: &[AIRNode], body: &AIRNode) -> bool {
+        let takes_clone_bound_record = params.iter().any(|p| {
+            let NodeKind::Param { ty: Some(t), .. } = &p.kind else {
+                return false;
+            };
+            self.clone_bound_records
+                .contains(&self.type_expr_base_name(t))
+        });
+        if !takes_clone_bound_record {
+            return false;
+        }
+        struct MethodCallScan {
+            found: bool,
+        }
+        impl bock_air::visitor::Visitor for MethodCallScan {
+            fn visit_node(&mut self, node: &AIRNode) {
+                if self.found {
+                    return;
+                }
+                // A user method call (`cur.next()`) lowers to a `Call` whose
+                // callee is a `FieldAccess` (the lowerer's desugared-self-call
+                // shape — see `generator::desugared_self_call`), not a
+                // `MethodCall` node; the bare `MethodCall` variant never reaches
+                // codegen for these. Treat either form as "drives a method".
+                let is_call_on_member = matches!(&node.kind,
+                    NodeKind::Call { callee, .. }
+                        if matches!(callee.kind, NodeKind::FieldAccess { .. }));
+                if is_call_on_member || matches!(node.kind, NodeKind::MethodCall { .. }) {
+                    self.found = true;
+                    return;
+                }
+                bock_air::visitor::walk_node(self, node);
+            }
+        }
+        let mut scan = MethodCallScan { found: false };
         bock_air::visitor::Visitor::visit_node(&mut scan, body);
         scan.found
     }
@@ -1616,14 +1706,25 @@ impl RsEmitCtx {
                     // emits `.clone()`. Set it *per method* and only for methods
                     // that genuinely move a `self.field` out by value — never for
                     // a method that merely reads/assigns a field (cloning the LHS
-                    // of `self.cursor = ...` would emit invalid Rust). The bound
-                    // must be in scope for the `.clone()` to type-check, hence the
-                    // `add_clone_bound` conjunct.
+                    // of `self.cursor = ...` would emit invalid Rust).
+                    //
+                    // A `&self` Rust method cannot move a non-`Copy` field out,
+                    // so the `self.field` read is lowered to `self.field.clone()`
+                    // whether the receiver is generic or concrete — e.g.
+                    // `impl Iterable[Int] for Bag { fn iter(self) {
+                    // list_iter(self.items) } }` moves the concrete `Vec<i64>`
+                    // field out of `&self` (`E0507`). For a *generic* receiver
+                    // the matching `T: Clone` bound must be in scope; the
+                    // impl-level `add_clone_bound` predicate already guarantees
+                    // `is_generic_impl && method_moves_self ⟹ add_clone_bound`,
+                    // so dropping the conjunct here only newly enables the clone
+                    // for concrete receivers (whose field type is itself
+                    // clonable, no bound required).
                     let method_moves_self = matches!(
                         &method.kind,
                         NodeKind::FnDecl { body, .. } if Self::body_moves_self_field(body)
                     );
-                    self.in_clone_self_method = add_clone_bound && method_moves_self;
+                    self.in_clone_self_method = method_moves_self;
                     self.emit_method_inner(method, suppress_vis)?;
                 }
                 self.indent -= 1;
@@ -1795,8 +1896,15 @@ impl RsEmitCtx {
         // List[T])` returning `xs.concat(xs)` fails with `E0277: T: Clone is not
         // satisfied`. Only generic functions qualify, and only when such a clone
         // is actually emitted.
-        let add_clone_bound =
-            !generic_params.is_empty() && Self::body_clones_collection_element(body);
+        //
+        // It also needs the bound *transitively*: a fn that takes a clone-bound
+        // record by value (`ListIterator[T]`, whose `impl` requires `T: Clone`)
+        // and drives it with a method call must propagate that bound, or
+        // method resolution fails (`count[T]`/`fold[T,A]` calling `it.next()` →
+        // `E0599`). See `params_drive_clone_bound_record`.
+        let add_clone_bound = !generic_params.is_empty()
+            && (Self::body_clones_collection_element(body)
+                || self.params_drive_clone_bound_record(params, body));
         let generics = self.generic_params_to_rs_with_clone(generic_params, add_clone_bound);
         let param_strs = self.collect_param_strs(params);
         let effects = self.effects_params(effect_clause);
@@ -2580,7 +2688,15 @@ impl RsEmitCtx {
                     if borrow_operands {
                         self.buf.push('&');
                     }
+                    // A by-value pass of a reused match binding (e.g.
+                    // `filter`'s `pred(x)` before the later `[x]`) must clone, or
+                    // Rust moves the value here and rejects the later use
+                    // (`E0382`). A borrowed operand is never moved, so skip it.
+                    let clone_reused = !borrow_operands && self.arg_is_reused_binding(&arg.value);
                     self.emit_expr(&arg.value)?;
+                    if clone_reused {
+                        self.buf.push_str(".clone()");
+                    }
                 }
                 if let Some(ea) = effects_args {
                     if !args.is_empty() {
@@ -2991,6 +3107,84 @@ impl RsEmitCtx {
 
     // ── Match ───────────────────────────────────────────────────────────────
 
+    /// Collect the snake-cased binding names a pattern introduces (`Some(x)` →
+    /// `["x"]`, `Pair(a, b)` → `["a", "b"]`). Used to seed the move-reuse clone
+    /// analysis: a binding the arm body uses more than once must clone on each
+    /// by-value use after the first (see `reused_match_bindings`).
+    fn collect_pattern_binding_names(pat: &AIRNode, out: &mut Vec<String>) {
+        match &pat.kind {
+            NodeKind::BindPat { name, .. } => out.push(to_snake_case(&name.name)),
+            NodeKind::ConstructorPat { fields, .. } => {
+                for e in fields {
+                    Self::collect_pattern_binding_names(e, out);
+                }
+            }
+            NodeKind::TuplePat { elems } => {
+                for e in elems {
+                    Self::collect_pattern_binding_names(e, out);
+                }
+            }
+            NodeKind::ListPat { elems, rest } => {
+                for e in elems {
+                    Self::collect_pattern_binding_names(e, out);
+                }
+                if let Some(r) = rest {
+                    Self::collect_pattern_binding_names(r, out);
+                }
+            }
+            NodeKind::RecordPat { fields, .. } => {
+                for f in fields {
+                    if let Some(p) = &f.pattern {
+                        Self::collect_pattern_binding_names(p, out);
+                    } else {
+                        // Shorthand `{ name }` binds `name`.
+                        out.push(to_snake_case(&f.name.name));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Count how many times the snake-cased identifier `name` is read inside
+    /// `node`. A binding read more than once is move-reused (the Rust pattern
+    /// binds by value, so the first by-value consumer moves it). Counts every
+    /// `Identifier` occurrence; over-counting only ever adds a harmless clone.
+    fn count_identifier_uses(node: &AIRNode, name: &str) -> usize {
+        struct UseCounter<'a> {
+            name: &'a str,
+            count: usize,
+        }
+        impl bock_air::visitor::Visitor for UseCounter<'_> {
+            fn visit_node(&mut self, node: &AIRNode) {
+                if let NodeKind::Identifier { name } = &node.kind {
+                    if to_snake_case(&name.name) == self.name {
+                        self.count += 1;
+                    }
+                }
+                bock_air::visitor::walk_node(self, node);
+            }
+        }
+        let mut c = UseCounter { name, count: 0 };
+        bock_air::visitor::Visitor::visit_node(&mut c, node);
+        c.count
+    }
+
+    /// True when `arg` is a bare identifier naming a match binding the current
+    /// arm reuses ([`Self::reused_match_bindings`]) — a by-value pass of it
+    /// after an earlier by-value consumer would move an already-moved value
+    /// (`E0382`). The caller emits `<arg>.clone()` instead of `<arg>` for such
+    /// args. Bare identifiers only: a non-identifier expression (`f(x)`,
+    /// `x + 1`) produces a fresh value with no move hazard.
+    fn arg_is_reused_binding(&self, arg: &AIRNode) -> bool {
+        match &arg.kind {
+            NodeKind::Identifier { name } => self
+                .reused_match_bindings
+                .contains(&to_snake_case(&name.name)),
+            _ => false,
+        }
+    }
+
     fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
         let ind = self.indent_str();
         let _ = write!(self.buf, "{ind}match ");
@@ -3012,6 +3206,19 @@ impl RsEmitCtx {
             body,
         } = &arm.kind
         {
+            // Seed the move-reuse clone set for this arm: any pattern binding
+            // the body reads more than once is moved by its first by-value
+            // consumer, so later by-value uses must `.clone()` (`E0382`). Scoped
+            // to the arm (saved/restored) so it never leaks to a sibling/outer
+            // arm. See `reused_match_bindings`.
+            let prev_reused = self.reused_match_bindings.clone();
+            let mut bound = Vec::new();
+            Self::collect_pattern_binding_names(pattern, &mut bound);
+            for name in bound {
+                if Self::count_identifier_uses(body, &name) > 1 {
+                    self.reused_match_bindings.insert(name);
+                }
+            }
             let ind = self.indent_str();
             let _ = write!(self.buf, "{ind}");
             self.emit_pattern(pattern)?;
@@ -3034,6 +3241,7 @@ impl RsEmitCtx {
                 }
                 self.indent -= 1;
                 self.writeln("}");
+                self.reused_match_bindings = prev_reused;
                 return Ok(());
             }
             // Single-expression body → inline; otherwise block.
@@ -3042,6 +3250,7 @@ impl RsEmitCtx {
                     if let Some(t) = tail {
                         self.emit_expr(t)?;
                         self.buf.push_str(",\n");
+                        self.reused_match_bindings = prev_reused;
                         return Ok(());
                     }
                 }
@@ -3054,6 +3263,7 @@ impl RsEmitCtx {
                 self.emit_expr(body)?;
                 self.buf.push_str(",\n");
             }
+            self.reused_match_bindings = prev_reused;
         }
         Ok(())
     }
@@ -6114,5 +6324,51 @@ mod tests {
             !out.contains("T: Clone"),
             "must NOT over-constrain a non-cloning generic fn with Clone, got: {out}"
         );
+    }
+
+    #[test]
+    fn collect_pattern_binding_names_walks_constructor_pat() {
+        // `Some(x)` binds `x`; the names are collected for the move-reuse scan.
+        let pat = node(
+            1,
+            NodeKind::ConstructorPat {
+                path: type_path(&["Some"]),
+                fields: vec![bind_pat(2, "x")],
+            },
+        );
+        let mut names = Vec::new();
+        RsEmitCtx::collect_pattern_binding_names(&pat, &mut names);
+        assert_eq!(names, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn count_identifier_uses_counts_every_read() {
+        // A body that reads `x` twice (`pred(x)` then `[x]`) reports 2 uses, so
+        // the move-reuse analysis flags `x` as needing a clone-on-second-use.
+        let body = block(
+            10,
+            vec![
+                node(
+                    11,
+                    NodeKind::Call {
+                        callee: Box::new(id_node(12, "pred")),
+                        args: vec![AirArg {
+                            label: None,
+                            value: id_node(13, "x"),
+                        }],
+                        type_args: vec![],
+                    },
+                ),
+                node(
+                    14,
+                    NodeKind::ListLiteral {
+                        elems: vec![id_node(15, "x")],
+                    },
+                ),
+            ],
+            None,
+        );
+        assert_eq!(RsEmitCtx::count_identifier_uses(&body, "x"), 2);
+        assert_eq!(RsEmitCtx::count_identifier_uses(&body, "y"), 0);
     }
 }

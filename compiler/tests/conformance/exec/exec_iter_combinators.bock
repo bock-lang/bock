@@ -1,6 +1,6 @@
 // TEST: exec_iter_combinators
 // EXPECT: output "6;3;2;6"
-// EXPECT: targets js, ts, python
+// EXPECT: targets js, ts, python, rust, go
 //
 // Cross-target proof that the eager, List-returning `core.iter` combinators run,
 // built from read-only `List` ops (`concat`/`get`, never `.push`, per DQ18).
@@ -14,8 +14,8 @@
 // => "6;3;2;6". This exercises `fold`/`count`/`filter`/`map`/`to_list` and the
 // higher-order Bock lambdas they take.
 //
-// TARGETS — js/ts/python only (NOT rust/go); see exec_iter_manual_drive.bock for
-// the Rust/Go generic-combinator codegen residue FOUND in this PR.
+// TARGETS — all five; the Rust/Go generic-combinator codegen residue is fixed
+// in the rust/go codegen fast-follow (see exec_iter_manual_drive.bock).
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).
