@@ -1303,6 +1303,34 @@ impl<'src> Parser<'src> {
                                 };
                             }
                         }
+                        // `t.0` — tuple positional indexing. The lexer tokenizes
+                        // this as `Ident`/expr, `Dot`, `IntLiteral` (or
+                        // `FloatLiteral` for chains like `t.0.0`). Positional
+                        // tuple indexing is deferred to v1.x
+                        // (spec §7.6); emit a specific, actionable diagnostic
+                        // pointing users at destructuring rather than the
+                        // generic "expected expression, found `.`" error, and
+                        // recover by consuming the `.` and the numeric literal.
+                        Some(TokenKind::IntLiteral) | Some(TokenKind::FloatLiteral) => {
+                            let dot_span = self.advance().span; // consume `.`
+                            let index_tok = self.advance(); // consume the numeric literal
+                            let index = index_tok.literal.clone().unwrap_or_default();
+                            let span = Span::merge(dot_span, index_tok.span);
+                            self.diagnostics.error(
+                                DiagnosticCode {
+                                    prefix: 'E',
+                                    number: 2092,
+                                },
+                                format!(
+                                    "tuple positional indexing `t.{index}` is not available in v1; \
+                                     destructure with `let (a, b) = t` to bind tuple elements instead"
+                                ),
+                                span,
+                            );
+                            // `expr` is left unchanged so the surrounding
+                            // expression still has a node to attach to; parsing
+                            // continues from the next token.
+                        }
                         _ => break,
                     }
                 }
@@ -5408,6 +5436,73 @@ use app.services.*\n\
         let (e, diags) = parse_expr_str("obj.method(1, 2)");
         assert!(!diags.has_errors(), "{diags:?}");
         assert!(matches!(e, Expr::MethodCall { ref method, .. } if method.name == "method"));
+    }
+
+    #[test]
+    fn expr_tuple_index_diagnostic() {
+        // `t.0` is tuple positional indexing, deferred to v1.x
+        // (spec §7.6). The parser should emit a specific, actionable
+        // diagnostic (E2092) that points at destructuring rather than the
+        // generic "expected expression, found `.`" error (E2020).
+        let (_e, diags) = parse_expr_str("t.0");
+        assert!(diags.has_errors(), "expected an error for `t.0`");
+        let diag = diags
+            .iter()
+            .find(|d| d.code.prefix == 'E' && d.code.number == 2092)
+            .expect("expected an E2092 tuple-index diagnostic");
+        assert!(
+            diag.message
+                .contains("tuple positional indexing `t.0` is not available in v1"),
+            "unexpected message: {}",
+            diag.message
+        );
+        assert!(
+            diag.message.contains("destructure with `let (a, b) = t`"),
+            "diagnostic should suggest destructuring: {}",
+            diag.message
+        );
+        // The old generic error must not also fire for this construct.
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code.prefix == 'E' && d.code.number == 2020),
+            "should not emit the generic E2020 for `t.0`"
+        );
+    }
+
+    #[test]
+    fn expr_tuple_index_recovers_single_error() {
+        // Recovery: parsing continues past the `.0`, so a larger expression
+        // like `t.0 + 1` yields exactly one diagnostic (no cascade).
+        let (_e, diags) = parse_expr_str("t.0 + 1");
+        assert_eq!(
+            diags.error_count(),
+            1,
+            "expected exactly one error from `t.0 + 1`, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn expr_tuple_index_float_chain_diagnostic() {
+        // `t.0.0` lexes the trailing part as a float literal after the dot;
+        // it should still produce the tuple-index diagnostic, not a panic or
+        // the generic error.
+        let (_e, diags) = parse_expr_str("t.0.0");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code.prefix == 'E' && d.code.number == 2092),
+            "expected an E2092 tuple-index diagnostic for `t.0.0`, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn tuple_destructuring_still_parses() {
+        // Regression guard: the destructuring alternative the diagnostic
+        // recommends must continue to parse without errors.
+        let src = "fn test() {\n  let t = (1, 2)\n  let (a, b) = t\n  a\n}";
+        let (_m, diags) = parse(src);
+        assert!(!diags.has_errors(), "{diags:?}");
     }
 
     #[test]
