@@ -189,6 +189,22 @@ decided→link)`
   for R1 (no Int/Int division or Bool-interp in the iter/effect floor); minor R2 `string` output-equality interaction.
 - **Status:** escalated → Design (escalations.md)
 
+### DQ24 — `core.iter` shipped surface refinements (combinator set + protocol shape)
+- **Question:** `core.iter` shipped (#151/#152) on a minimum-useful floor; three surface choices refine DQ12 and
+  want Design ratification (all additive/reversible in v1-dev): (1) **the combinator set** — shipped 6 eager,
+  `List`-returning, read-only combinators (`to_list`, `count`, `fold`, `map`, `filter`, `take`); `enumerate` was
+  omitted and any mutating/`zip`/`flat_map`/lazy combinator is out of the floor. Is this set the normative v1
+  surface? (2) **`Iterator` trait impl** — the concrete `ListIterator` ships an *inherent* `next` only; the
+  `impl Iterator[T] for ListIterator` trait impl was dropped (it caused a Go duplicate-`Next`, and `Iterable`
+  detection keys on `Iterable`, not `Iterator`). Is a value-type satisfying `Iterator` via an inherent method
+  (not a trait impl) acceptable, or must the trait impl exist? (3) **§6.5 vs §18.3** — §6.5's example trait
+  `Collection { type Item; fn iter(self) -> Iterator[Item = Self.Item] }` uses associated types, which are inert;
+  the shipped `core.iter` uses generic `Iterator[T]`/`Iterable[T]` (per DQ12). §6.5's example reads as misleading
+  for the stdlib — clarify/annotate, or leave as a generic trait-syntax illustration?
+- **§:** §18.3 / §18.5 / §6.5 / §18.2 · **context:** surfaced by core.iter R1 (#151/#152). Non-blocking — the
+  floor is shipped and exercised ×5; refining any of the three is additive.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and

@@ -1275,3 +1275,48 @@ Escalations/Design queue (non-blocking): DQ23 (Int/Int §3.6, NEW), DQ18/20/21/2
 Notes: core.iter remained a sensitive probe to the very end — its v5 STOP surfaced that the "systematic audit"
   had a blind spot for deeper generic-container/trait codegen. All gaps now closed; the stdlib build resumes next
   session on a genuinely complete substrate. Paused clean per operator request. main b59b42e.
+
+[2026-05-31 21:20 UTC] core.iter R1 COMPLETE on all 5 — module + for→Iterable desugar (#151) + Rust/Go codegen (#152)
+  Input: operator "let's get back at it" (resume from the night pause). Documented next action: re-resume core.iter.
+  Startup: recovered continuity; repo clean at b0ab80a (local==origin), 0 open PRs, only main worktree. One deviation
+    from the paused state — the preserved /tmp/bock-iter-module-preserved.bock draft was lost over the pause; not a
+    blocker (re-authored from the in-repo proven shape generic_iter_concrete_match.bock).
+  Planning: dispatched a Plan agent (matches the per-phase pattern). Saved tracking/plans/2026-05-31-core-iter-r1-plan.md.
+    Key finding shaping dispatch: the for→Iterable desugar was NOT landed (checker.rs:1960 fell to fresh_var for
+    non-List/Range) — so R1 iter = module + checker desugar, not just the module. Plan's risk control: Phase-1/Phase-2
+    split (Phase 1 = module + combinators + manual/combinator exec, ZERO desugar risk, always lands; Phase 2 = the
+    no-precedent checker AST-rewrite) + a fallback to ship Phase 1 alone.
+  DISPATCH 1 — feat/core-iter (engineer sub-agent, opus, owned: stdlib/core/iter + bock-types checker/seed_imports +
+    iter conformance). Landed BOTH phases. Reviewed the desugar code directly (high quality: synth node-ids above the
+    dense range, gensym'd nested-loop bindings, mem::replace moves, matches the lowerer's method-call shape, re-infers
+    via the normal path). Verified the full gate MYSELF before merge (fmt/clippy/test/doc clean; conformance 290 exec
+    pairs, 0 failed) AND reproduced the Rust failures to confirm the FOUND. **MERGED #151 (b0ab80a→aed7b47).**
+  THE 6TH core.iter PROBE: the real generic COMBINATOR surface exposed NEW Rust/Go codegen gaps (no tree-shaking →
+    the whole embedded module must compile on each target). The desugar SHAPE works ×5; the combinators/constructor
+    didn't compile on rust/go. So #151 shipped honestly labeled — 5 iter exec fixtures pinned to js/ts/python — rather
+    than overstating all-5. Gaps were the same families as #144/#149 (typed list literals, T:Clone detection) extended
+    to arg-position + transitive bounds → routine, not architectural. NOT escalated (within autonomy; "ship what's
+    decided"); surfaced to the operator in-session + here.
+  DISPATCH 2 — fix/iter-rustgo-codegen (engineer sub-agent, opus, owned: bock-codegen rs.rs/go.rs + the 5 iter fixtures)
+    with the reproduced errors as its spec. Fixed all gaps (Rust: transitive T:Clone via clone_bound_records pre-scan;
+    move-then-reuse clone; &self field-move clone for concrete impls. Go: generic-record-construct [T] not [any];
+    concat arg-position []T; generic-trait interface header; **net-new** fn-signature registry + structural go-type
+    unification for lambda specialization; method-ret concrete-record args for the desugar payload). Verified scope
+    (only go.rs/rs.rs + 5 fixtures; no stray artifacts; fixture ASSERTIONS unchanged — only directives flipped + comments
+    updated, NOT weakened) and re-ran the FULL gate MYSELF with BOCK_CONFORMANCE_REQUIRE=all → **300 exec pairs (60×5),
+    0 failed, 0 skipped**; wide-blast-radius fixtures (self_method/self_return/self_in_plain_impl/generic_record_method/
+    generic_trait_impl/trait_default_method) all still green ×5. **MERGED #152 (aed7b47→9f1a2bd).**
+  RESULT: **core.iter R1 COMPLETE on all 5 (4/11 stdlib).** ~300 exec pairs. Both PRs gate-clean, independently
+    re-verified, worktrees removed, local main re-synced to 9f1a2bd.
+  OPEN/FOUND triaged: DQ24 (combinator-set + dropped Iterator-trait-impl + omitted enumerate — surface refinement of
+    DQ12 → Design, non-blocking). Q-iter-interp-mutself (FOUND: tree-walking interpreter hangs on a mut-self iterator
+    drive — cursor mutations don't persist across method calls; compiled targets fine; pre-existing, same as
+    generic_iter_concrete_match — bug → queue). Doc-sync: per-module stdlib reference is the DEFERRED D4 batch
+    (blocked on Q-stdlib); the module's /// doc comments are the reference source — no separate doc PR now. §18.3 stays
+    consistent at the statement level; §6.5's associated-type Collection example is inert (DQ12 chose generic) — noted
+    under DQ24.
+  Operational note (not a hub item): the engineer sub-agents' Read/Edit/Write tools were DENIED in the worktree; they
+    fell back to cat/sed + Python-via-Bash and produced clean diffs (verified). Worth checking the worktree
+    settings.local.json symlink / background-agent permission mode for future dispatches; did not block this block.
+  NEXT: P4-hygiene (bock-types checker.rs: DQ18 mutating-collection guard + DQ22 bare-m.contains — sequence; both
+    design-gated) OR core.effect (R1). Decide next.
