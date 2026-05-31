@@ -2823,6 +2823,15 @@ impl TsEmitCtx {
     // ── Match → switch ──────────────────────────────────────────────────────
 
     fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
+        // Guards, or-patterns, tuple patterns, and nested constructor/record
+        // patterns cannot be expressed by the flat `switch` below. Lower those
+        // to an if/else-if chain. Additive: the proven Optional / Result /
+        // user-enum / value `switch` fast-path is kept for everything else (see
+        // `match_needs_ifchain`).
+        if crate::generator::match_needs_ifchain(arms) {
+            return self.emit_match_ifchain(scrutinee, arms);
+        }
+
         // ADT (dispatch on `._tag`) when any arm is a constructor pattern or a
         // record pattern naming a registered enum variant. The record-pattern
         // case is the struct-payload variant the prior `ConstructorPat`-only
@@ -3014,6 +3023,258 @@ impl TsEmitCtx {
             self.writeln("}");
         }
         Ok(())
+    }
+
+    // ── Match → if/else-if chain (guards, or-/tuple/nested patterns) ──────────
+
+    /// Lower a `match` whose arms cannot be expressed by a flat `switch` (see
+    /// [`crate::generator::match_needs_ifchain`]) to an `if (<test>) { <binds>;
+    /// <body> } else if …` chain. Mirrors the JS lowering; the only difference
+    /// is that TS access paths into the scrutinee are cast through `as any` so a
+    /// nested access (`__matchN._0._tag`) typechecks without relying on
+    /// discriminated-union narrowing flowing through `&&`.
+    fn emit_match_ifchain(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<(), CodegenError> {
+        // Single-evaluation root. A bare identifier is stable; anything else is
+        // hoisted into `__matchN`. The access root the tests/binds descend from
+        // is cast to `any` so nested field access typechecks under `tsc`.
+        let root: String = if let NodeKind::Identifier { name } = &scrutinee.kind {
+            format!("({} as any)", name.name)
+        } else {
+            self.match_temp_counter += 1;
+            let name = format!("__match{}", self.match_temp_counter);
+            let ind = self.indent_str();
+            let _ = write!(self.buf, "{ind}const {name} = ");
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str(";\n");
+            format!("({name} as any)")
+        };
+
+        let mut first = true;
+        let mut closed = false;
+        let arm_count = arms.len();
+        for (idx, arm) in arms.iter().enumerate() {
+            let NodeKind::MatchArm {
+                pattern,
+                guard,
+                body,
+            } = &arm.kind
+            else {
+                continue;
+            };
+            let test = self.pattern_test_ts(pattern, &root);
+            let is_catch_all = matches!(
+                pattern.kind,
+                NodeKind::WildcardPat | NodeKind::BindPat { .. }
+            );
+            let is_last = idx + 1 == arm_count;
+            // See the JS lowering: an unguarded catch-all *or* the final
+            // unguarded arm becomes the unconditional `else`, closing the chain
+            // so a value-returning function typechecks under `tsc`.
+            let unconditional = guard.is_none() && (is_catch_all || is_last);
+            let ind = self.indent_str();
+            if unconditional {
+                if first {
+                    let _ = writeln!(self.buf, "{ind}{{");
+                } else {
+                    let _ = writeln!(self.buf, "{ind}else {{");
+                }
+                closed = true;
+            } else {
+                let mut cond = if test.is_empty() {
+                    "true".to_string()
+                } else {
+                    test
+                };
+                if let Some(g) = guard {
+                    let g_str = self.expr_to_string(g)?;
+                    let binds = self.pattern_binds_to_string_ts(pattern, &root);
+                    let guard_test = if binds.is_empty() {
+                        format!("({g_str})")
+                    } else {
+                        format!("(() => {{ {binds}return ({g_str}); }})()")
+                    };
+                    if cond == "true" {
+                        cond = guard_test;
+                    } else {
+                        cond = format!("{cond} && {guard_test}");
+                    }
+                }
+                if first {
+                    let _ = writeln!(self.buf, "{ind}if ({cond}) {{");
+                } else {
+                    let _ = writeln!(self.buf, "{ind}else if ({cond}) {{");
+                }
+            }
+            first = false;
+            self.indent += 1;
+            self.pattern_binds_ts(pattern, &root)?;
+            self.emit_block_body(body)?;
+            self.indent -= 1;
+            self.writeln("}");
+        }
+        if !closed && !first {
+            self.writeln("else { throw new Error(\"non-exhaustive match\"); }");
+        }
+        Ok(())
+    }
+
+    /// Build the boolean test that selects `pat` against the TS expression
+    /// `access` (already `any`-typed by the caller). Mirrors `pattern_test_js`.
+    fn pattern_test_ts(&self, pat: &AIRNode, access: &str) -> String {
+        match &pat.kind {
+            NodeKind::WildcardPat | NodeKind::BindPat { .. } => String::new(),
+            NodeKind::LiteralPat { lit } => {
+                format!("{access} === {}", ts_literal(lit))
+            }
+            NodeKind::ConstructorPat { path, fields } => {
+                let variant = path.segments.last().map_or("_", |s| s.name.as_str());
+                let mut tests = vec![format!("{access}._tag === \"{variant}\"")];
+                for (i, field) in fields.iter().enumerate() {
+                    let sub = self.pattern_test_ts(field, &format!("{access}._{i}"));
+                    if !sub.is_empty() {
+                        tests.push(sub);
+                    }
+                }
+                tests.join(" && ")
+            }
+            NodeKind::RecordPat { path, fields, .. } => {
+                let variant = path.segments.last().map_or("_", |s| s.name.as_str());
+                let mut tests = Vec::new();
+                if self.user_variant_for_path(path).is_some() {
+                    tests.push(format!("{access}._tag === \"{variant}\""));
+                }
+                for f in fields {
+                    if let Some(p) = &f.pattern {
+                        let sub = self.pattern_test_ts(p, &format!("{access}.{}", f.name.name));
+                        if !sub.is_empty() {
+                            tests.push(sub);
+                        }
+                    }
+                }
+                if tests.is_empty() {
+                    String::new()
+                } else {
+                    tests.join(" && ")
+                }
+            }
+            NodeKind::TuplePat { elems } => {
+                let mut tests = vec![format!("Array.isArray({access})")];
+                for (i, e) in elems.iter().enumerate() {
+                    let sub = self.pattern_test_ts(e, &format!("{access}[{i}]"));
+                    if !sub.is_empty() {
+                        tests.push(sub);
+                    }
+                }
+                tests.join(" && ")
+            }
+            NodeKind::OrPat { alternatives } => {
+                let alts: Vec<String> = alternatives
+                    .iter()
+                    .map(|a| {
+                        let t = self.pattern_test_ts(a, access);
+                        if t.is_empty() {
+                            "true".to_string()
+                        } else {
+                            format!("({t})")
+                        }
+                    })
+                    .collect();
+                alts.join(" || ")
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Emit the `const <name> = <access…>;` bindings introduced by `pat`.
+    /// Mirrors `pattern_binds_js`.
+    fn pattern_binds_ts(&mut self, pat: &AIRNode, access: &str) -> Result<(), CodegenError> {
+        match &pat.kind {
+            NodeKind::BindPat { name, .. } => {
+                let ind = self.indent_str();
+                let _ = writeln!(
+                    self.buf,
+                    "{ind}const {} = {access};",
+                    to_camel_case(&name.name)
+                );
+            }
+            NodeKind::ConstructorPat { fields, .. } => {
+                for (i, field) in fields.iter().enumerate() {
+                    self.pattern_binds_ts(field, &format!("{access}._{i}"))?;
+                }
+            }
+            NodeKind::RecordPat { fields, .. } => {
+                for f in fields {
+                    let field_access = format!("{access}.{}", f.name.name);
+                    match &f.pattern {
+                        Some(p) => self.pattern_binds_ts(p, &field_access)?,
+                        None => {
+                            let ind = self.indent_str();
+                            let _ =
+                                writeln!(self.buf, "{ind}const {} = {field_access};", f.name.name);
+                        }
+                    }
+                }
+            }
+            NodeKind::TuplePat { elems } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.pattern_binds_ts(e, &format!("{access}[{i}]"))?;
+                }
+            }
+            NodeKind::OrPat { alternatives } => {
+                if let Some(first) = alternatives.first() {
+                    self.pattern_binds_ts(first, access)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Collect `pat`'s bindings as a single-line `const … = …; ` string for the
+    /// guard-evaluating IIFE. Mirrors `pattern_binds_to_string_js`.
+    fn pattern_binds_to_string_ts(&self, pat: &AIRNode, access: &str) -> String {
+        let mut out = String::new();
+        self.collect_binds_ts(pat, access, &mut out);
+        out
+    }
+
+    fn collect_binds_ts(&self, pat: &AIRNode, access: &str, out: &mut String) {
+        match &pat.kind {
+            NodeKind::BindPat { name, .. } => {
+                let _ = write!(out, "const {} = {access}; ", to_camel_case(&name.name));
+            }
+            NodeKind::ConstructorPat { fields, .. } => {
+                for (i, field) in fields.iter().enumerate() {
+                    self.collect_binds_ts(field, &format!("{access}._{i}"), out);
+                }
+            }
+            NodeKind::RecordPat { fields, .. } => {
+                for f in fields {
+                    let field_access = format!("{access}.{}", f.name.name);
+                    match &f.pattern {
+                        Some(p) => self.collect_binds_ts(p, &field_access, out),
+                        None => {
+                            let _ = write!(out, "const {} = {field_access}; ", f.name.name);
+                        }
+                    }
+                }
+            }
+            NodeKind::TuplePat { elems } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.collect_binds_ts(e, &format!("{access}[{i}]"), out);
+                }
+            }
+            NodeKind::OrPat { alternatives } => {
+                if let Some(first) = alternatives.first() {
+                    self.collect_binds_ts(first, access, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     // ── Pipe operator ───────────────────────────────────────────────────────
@@ -3229,6 +3490,24 @@ fn escape_js_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// Render a literal as a TS value expression — used by the if-chain match
+/// lowering to compare a scrutinee against a literal pattern (`<access> === …`).
+fn ts_literal(lit: &Literal) -> String {
+    match lit {
+        Literal::Int(s) | Literal::Float(s) => s.clone(),
+        Literal::Bool(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        Literal::Char(s) => format!("'{s}'"),
+        Literal::String(s) => format!("\"{}\"", escape_js_string(s)),
+        Literal::Unit => "undefined".to_string(),
+    }
 }
 
 /// Escape special characters in a JS/TS template literal.

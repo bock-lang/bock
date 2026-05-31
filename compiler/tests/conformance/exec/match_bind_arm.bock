@@ -1,0 +1,32 @@
+// TEST: exec_match_bind_arm
+// EXPECT: output "zero;n:42"
+// EXPECT: targets js, ts, python, rust, go
+//
+// A bare BINDING arm (`x => …`) after a literal arm (codegen-completeness P2).
+// This is a *value*-switch match (literal + bind), so it stays on the proven
+// `switch` fast-path on js/ts/go — it must NOT regress to the if-chain. It
+// exercises two backend-specific defects the fast-path carried:
+//
+//   - Go binding-drop: `x => …` lowered to `default:` with the name DISCARDED,
+//     and the body referenced an undefined `x` (`go build` error). Fixed by
+//     binding the value-switch scrutinee into `__v` (`switch __v := s; __v`) and
+//     emitting `x := __v; _ = x` in the bind arm.
+//   - Python bare-binding ordering: a `case x:` is irrefutable; it must follow
+//     the literal `case 0:` so the literal arm is still reachable (a leading
+//     irrefutable arm is a 3.10 `SyntaxError`). The natural arm order already
+//     satisfies this; the fixture pins it.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn label(n: Int) -> String {
+  match n {
+    0 => return "zero"
+    x => return "n:${x}"
+  }
+}
+
+fn main() -> Void {
+  println("${label(0)};${label(42)}")
+}

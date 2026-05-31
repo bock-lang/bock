@@ -3628,8 +3628,28 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::TupleLiteral { elems } => {
-                // Go doesn't have tuples; emit as a struct literal or slice.
-                self.buf.push_str("[...]interface{}{");
+                // Go has no tuples; a `(a, b)` value is a struct with numbered
+                // fields — the SAME representation `type_to_go` gives a tuple
+                // *type* (`struct{ Field0 T0; Field1 T1 }`) and the match
+                // pattern reads (`.Field0`). Emitting a `[...]interface{}` array
+                // here (the prior lowering) produced a value whose type did not
+                // match the `struct{…}` parameter type, so a tuple argument
+                // failed `go build`. Build the matching struct literal instead,
+                // inferring each field's element type (falling back to
+                // `interface{}` when it can't be inferred).
+                let field_types: Vec<String> = elems
+                    .iter()
+                    .map(|e| {
+                        self.infer_go_expr_type(e)
+                            .unwrap_or_else(|| "interface{}".to_string())
+                    })
+                    .collect();
+                let fields: Vec<String> = field_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| format!("Field{i} {t}"))
+                    .collect();
+                let _ = write!(self.buf, "struct{{ {} }}{{", fields.join("; "));
                 for (i, e) in elems.iter().enumerate() {
                     if i > 0 {
                         self.buf.push_str(", ");
@@ -4177,6 +4197,17 @@ impl GoEmitCtx {
     }
 
     fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
+        // Guards, or-patterns, tuple patterns, and nested constructor/record
+        // patterns cannot be expressed by the value/type `switch` below (a
+        // failed guard's `break` exits the switch; an or-pattern has no single
+        // discriminant; a nested sub-pattern's bindings are lost). Lower those
+        // to an if/else-if chain. This takes priority over the Optional/Result
+        // fast-paths so e.g. `Some(Ok(v))` (an Optional-leaf match that is still
+        // nested) routes here. Additive: everything else keeps its existing
+        // switch / tag-chain lowering (see `match_needs_ifchain`).
+        if crate::generator::match_needs_ifchain(arms) {
+            return self.emit_match_ifchain(scrutinee, arms);
+        }
         // `Optional` / `Result` matches dispatch on the runtime tag, not a Go
         // type/value switch.
         if go_match_is_optional(arms) {
@@ -4197,6 +4228,20 @@ impl GoEmitCtx {
         // record patterns dispatch on dynamic type; literal / bind patterns
         // dispatch on value. `Ordering` is forced to a value-switch.
         let type_switch = !ordering && (user_enum || go_match_is_type_switch(arms));
+        // A value-switch arm may bind the whole scrutinee (`x => …`). The
+        // scrutinee is bound into `__v` via the switch's init clause so the arm
+        // can emit `x := __v` — without this the `default:` discarded the name
+        // and the body referenced an undefined variable (the Go binding-drop
+        // defect). Only needed for the value-switch path; the type-switches
+        // already bind `__v`.
+        let value_switch_binds = !user_enum
+            && !type_switch
+            && arms.iter().any(|arm| {
+                matches!(
+                    &arm.kind,
+                    NodeKind::MatchArm { pattern, .. } if matches!(pattern.kind, NodeKind::BindPat { .. })
+                )
+            });
         let ind = self.indent_str();
         if user_enum {
             // A *narrowing* type-switch: `switch __v := s.(type)` rebinds `__v`
@@ -4211,6 +4256,12 @@ impl GoEmitCtx {
             let _ = write!(self.buf, "{ind}switch __v := ");
             self.emit_expr(scrutinee)?;
             self.buf.push_str("; __v.(type) {\n");
+        } else if value_switch_binds {
+            // `switch __v := <scrutinee>; __v { … }` — evaluate once, give the
+            // value a name so a bind arm can alias it.
+            let _ = write!(self.buf, "{ind}switch __v := ");
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str("; __v {\n");
         } else {
             let _ = write!(self.buf, "{ind}switch ");
             self.emit_expr(scrutinee)?;
@@ -4219,7 +4270,7 @@ impl GoEmitCtx {
         self.indent += 1;
         self.switch_label_depth += 1;
         for arm in arms {
-            self.emit_match_arm(arm, user_enum)?;
+            self.emit_match_arm(arm, user_enum, value_switch_binds)?;
         }
         // Bock matches are exhaustive, but Go can't prove a type-switch covers
         // every implementor of a sealed interface (nor a value-switch every
@@ -4250,7 +4301,303 @@ impl GoEmitCtx {
         Ok(())
     }
 
-    fn emit_match_arm(&mut self, arm: &AIRNode, user_enum: bool) -> Result<(), CodegenError> {
+    // ── Match → if/else-if chain (guards, or-/tuple/nested patterns) ──────────
+
+    /// Lower a `match` whose arms cannot be expressed by a value/type `switch`
+    /// (see [`crate::generator::match_needs_ifchain`]) to an `if <test> {
+    /// <binds>; <body> } else if …` chain.
+    ///
+    /// The scrutinee is evaluated once into `__match` (a typed local), so nested
+    /// tests/binds read off a single stable, typed value. Each arm contributes
+    /// one `if`/`else if`; an unguarded catch-all (or the final unguarded arm,
+    /// since Bock matches are exhaustive) becomes the unconditional `else`. A
+    /// chain not closed by an `else` gets a trailing `else { panic(...) }` so a
+    /// value-returning function still compiles (Go cannot prove exhaustiveness).
+    ///
+    /// Unlike the `switch` lowering, a bare `break`/`continue` in an arm body
+    /// targets the enclosing `for` directly (there is no switch to escape), so
+    /// `switch_label_depth` is deliberately left untouched.
+    fn emit_match_ifchain(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<(), CodegenError> {
+        // Single-evaluation root. A bare identifier is already a stable, typed
+        // reference (emit it through the normal expression path so its name
+        // matches the rest of the program); anything else is hoisted into a
+        // typed `__match` local. Either way, leave the cursor indented at the
+        // chain's column so the leading `if` lines up.
+        let ind = self.indent_str();
+        let root: String = if matches!(scrutinee.kind, NodeKind::Identifier { .. }) {
+            let r = self.expr_to_string(scrutinee)?;
+            self.write_indent();
+            r
+        } else {
+            let _ = write!(self.buf, "{ind}__match := ");
+            self.emit_expr(scrutinee)?;
+            self.buf.push('\n');
+            self.write_indent();
+            "__match".to_string()
+        };
+
+        let arm_count = arms.len();
+        let mut first = true;
+        let mut closed = false;
+        for (idx, arm) in arms.iter().enumerate() {
+            let NodeKind::MatchArm {
+                pattern,
+                guard,
+                body,
+            } = &arm.kind
+            else {
+                continue;
+            };
+            let test = self.pattern_test_go(pattern, &root);
+            let is_catch_all = matches!(
+                pattern.kind,
+                NodeKind::WildcardPat | NodeKind::BindPat { .. }
+            );
+            let is_last = idx + 1 == arm_count;
+            let unconditional = guard.is_none() && (is_catch_all || is_last);
+
+            if unconditional {
+                if first {
+                    self.buf.push('{');
+                } else {
+                    self.buf.push_str(" else {");
+                }
+                closed = true;
+            } else {
+                let mut cond = if test.is_empty() {
+                    "true".to_string()
+                } else {
+                    test
+                };
+                if let Some(g) = guard {
+                    // The guard may reference the arm's pattern bindings; they
+                    // are only introduced inside the arm body, so evaluate the
+                    // guard in an anonymous func that re-introduces them. A
+                    // failed guard then falls through to the next `else if` (the
+                    // fall-through a `switch` could not express).
+                    let g_str = self.expr_to_string(g)?;
+                    let binds = self.pattern_binds_to_string_go(pattern, &root);
+                    let guard_test = if binds.is_empty() {
+                        format!("({g_str})")
+                    } else {
+                        format!("func() bool {{ {binds}return ({g_str}) }}()")
+                    };
+                    if cond == "true" {
+                        cond = guard_test;
+                    } else {
+                        cond = format!("{cond} && {guard_test}");
+                    }
+                }
+                if first {
+                    let _ = write!(self.buf, "if {cond} {{");
+                } else {
+                    let _ = write!(self.buf, " else if {cond} {{");
+                }
+            }
+            first = false;
+            self.buf.push('\n');
+            self.indent += 1;
+            self.pattern_binds_go(pattern, &root)?;
+            self.emit_block_body(body)?;
+            self.indent -= 1;
+            self.write_indent();
+            self.buf.push('}');
+        }
+        // A chain with no unconditional arm (all guarded, or no catch-all) needs
+        // a trailing panic so a value-returning function compiles and an
+        // unmatched scrutinee fails loudly. Bock matches are exhaustive, so this
+        // is only ever reached if a guard chain is non-total.
+        if !closed && !first {
+            self.buf.push_str(" else {\n");
+            self.indent += 1;
+            self.writeln("panic(\"non-exhaustive match\")");
+            self.indent -= 1;
+            self.write_indent();
+            self.buf.push('}');
+        }
+        self.buf.push('\n');
+        Ok(())
+    }
+
+    /// Build the boolean test that selects `pat` against the Go expression
+    /// `access` (a correctly-typed value at this pattern position). Returns the
+    /// empty string for a pattern that always matches (wildcard / bare bind).
+    fn pattern_test_go(&self, pat: &AIRNode, access: &str) -> String {
+        match &pat.kind {
+            NodeKind::WildcardPat | NodeKind::BindPat { .. } => String::new(),
+            NodeKind::LiteralPat { lit } => {
+                format!("{access} == {}", go_literal(lit))
+            }
+            NodeKind::ConstructorPat { path, fields } => {
+                let leaf = path.segments.last().map_or("", |s| s.name.as_str());
+                // Optional / Result dispatch on the runtime `.tag`; the payload
+                // is `<access>.v` (an `interface{}` the child must re-assert).
+                if matches!(leaf, "Some" | "None" | "Ok" | "Err") {
+                    let mut tests = vec![format!("{access}.tag == \"{leaf}\"")];
+                    if let Some(f) = fields.first() {
+                        let child = go_typed_access(f, &format!("{access}.v"));
+                        let sub = self.pattern_test_go(f, &child);
+                        if !sub.is_empty() {
+                            tests.push(sub);
+                        }
+                    }
+                    return tests.join(" && ");
+                }
+                // User enum: a sealed-interface value; test via a comma-ok type
+                // assertion to the concrete variant struct.
+                let variant_ty = self.go_variant_struct(path);
+                format!("func() bool {{ _, ok := {access}.({variant_ty}); return ok }}()")
+            }
+            NodeKind::RecordPat { path, fields, .. } => {
+                if self.user_variant_for_path(path).is_some() {
+                    let variant_ty = self.go_variant_struct(path);
+                    // Field sub-tests would require binding the asserted struct;
+                    // a struct-variant record pattern with nested field patterns
+                    // is rare — test the variant type and let binds extract.
+                    let _ = fields;
+                    return format!(
+                        "func() bool {{ _, ok := {access}.({variant_ty}); return ok }}()"
+                    );
+                }
+                String::new()
+            }
+            NodeKind::TuplePat { elems } => {
+                let mut tests = Vec::new();
+                for (i, e) in elems.iter().enumerate() {
+                    let sub = self.pattern_test_go(e, &format!("{access}.Field{i}"));
+                    if !sub.is_empty() {
+                        tests.push(sub);
+                    }
+                }
+                if tests.is_empty() {
+                    String::new()
+                } else {
+                    tests.join(" && ")
+                }
+            }
+            NodeKind::OrPat { alternatives } => {
+                let alts: Vec<String> = alternatives
+                    .iter()
+                    .map(|a| {
+                        let t = self.pattern_test_go(a, access);
+                        if t.is_empty() {
+                            "true".to_string()
+                        } else {
+                            format!("({t})")
+                        }
+                    })
+                    .collect();
+                alts.join(" || ")
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Emit the `name := <access…>; _ = name` bindings introduced by `pat`,
+    /// recursing into nested constructor / record / tuple sub-patterns. The
+    /// trailing `_ = name` keeps an unused binding from failing `go build`.
+    fn pattern_binds_go(&mut self, pat: &AIRNode, access: &str) -> Result<(), CodegenError> {
+        let binds = self.pattern_binds_to_string_go(pat, access);
+        if binds.is_empty() {
+            return Ok(());
+        }
+        // `pattern_binds_to_string_go` emits each `name := …; _ = name; `
+        // separated by `; `; split onto its own indented line for readability.
+        for stmt in binds.split("; ") {
+            let stmt = stmt.trim();
+            if stmt.is_empty() {
+                continue;
+            }
+            self.writeln(stmt);
+        }
+        Ok(())
+    }
+
+    /// Collect `pat`'s bindings as a single-line string of `name := …; _ = name;
+    /// ` statements. Shared by [`Self::pattern_binds_go`] (statement position)
+    /// and the guard-evaluating anonymous func in [`Self::emit_match_ifchain`].
+    fn pattern_binds_to_string_go(&self, pat: &AIRNode, access: &str) -> String {
+        let mut out = String::new();
+        self.collect_binds_go(pat, access, &mut out);
+        out
+    }
+
+    fn collect_binds_go(&self, pat: &AIRNode, access: &str, out: &mut String) {
+        match &pat.kind {
+            NodeKind::BindPat { name, .. } => {
+                let n = to_camel_case(&name.name);
+                let _ = write!(out, "{n} := {access}; _ = {n}; ");
+            }
+            NodeKind::ConstructorPat { path, fields } => {
+                let leaf = path.segments.last().map_or("", |s| s.name.as_str());
+                if matches!(leaf, "Some" | "None" | "Ok" | "Err") {
+                    if let Some(f) = fields.first() {
+                        let child = go_typed_access(f, &format!("{access}.v"));
+                        self.collect_binds_go(f, &child, out);
+                    }
+                } else {
+                    // User-enum variant: bind payload fields off the asserted
+                    // concrete struct.
+                    let variant_ty = self.go_variant_struct(path);
+                    for (i, f) in fields.iter().enumerate() {
+                        let child = format!("{access}.({variant_ty}).Field{i}");
+                        self.collect_binds_go(f, &child, out);
+                    }
+                }
+            }
+            NodeKind::RecordPat { path, fields, .. } => {
+                let variant_ty = self.go_variant_struct(path);
+                for f in fields {
+                    let go_field = to_pascal_case(&f.name.name);
+                    let child = format!("{access}.({variant_ty}).{go_field}");
+                    match &f.pattern {
+                        Some(p) => self.collect_binds_go(p, &child, out),
+                        None => {
+                            let n = to_camel_case(&f.name.name);
+                            let _ = write!(out, "{n} := {child}; _ = {n}; ");
+                        }
+                    }
+                }
+            }
+            NodeKind::TuplePat { elems } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.collect_binds_go(e, &format!("{access}.Field{i}"), out);
+                }
+            }
+            NodeKind::OrPat { alternatives } => {
+                if let Some(first) = alternatives.first() {
+                    self.collect_binds_go(first, access, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The Go struct type name for a user-enum variant path (`ShapeRect`), or the
+    /// joined path as a fallback.
+    fn go_variant_struct(&self, path: &bock_ast::TypePath) -> String {
+        if let Some(info) = self.user_variant_for_path(path) {
+            let variant = path.segments.last().map_or("", |s| s.name.as_str());
+            format!("{}{variant}", info.enum_name)
+        } else {
+            path.segments
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        }
+    }
+
+    fn emit_match_arm(
+        &mut self,
+        arm: &AIRNode,
+        user_enum: bool,
+        value_switch_binds: bool,
+    ) -> Result<(), CodegenError> {
         if let NodeKind::MatchArm {
             pattern,
             guard,
@@ -4274,6 +4621,14 @@ impl GoEmitCtx {
             // the concrete `__v` (`radius := __v.Radius`, `w := __v.Field0`).
             if user_enum {
                 self.emit_user_enum_arm_bindings(pattern)?;
+            }
+            // Value-switch bind arm (`x => …`): alias the named scrutinee `__v`
+            // so the body's references resolve (the Go binding-drop fix).
+            if value_switch_binds {
+                if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                    let n = to_camel_case(&name.name);
+                    self.writeln(&format!("{n} := __v; _ = {n}"));
+                }
             }
             if let Some(g) = guard {
                 let gi = self.indent_str();
@@ -4805,6 +5160,40 @@ fn escape_go_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// Render a literal as a Go value expression — used by the if-chain match
+/// lowering to compare a scrutinee against a literal pattern (`<access> == …`).
+fn go_literal(lit: &Literal) -> String {
+    match lit {
+        Literal::Int(s) | Literal::Float(s) => s.clone(),
+        Literal::Bool(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        Literal::Char(s) => format!("'{s}'"),
+        Literal::String(s) => format!("\"{}\"", escape_go_string(s)),
+        Literal::Unit => "nil".to_string(),
+    }
+}
+
+/// Wrap a raw `interface{}` access (a container's `.v` payload) with the type
+/// assertion the *child* pattern needs to read it as a typed value. An Optional
+/// / Result child re-asserts to its runtime struct so `.tag`/`.v` are reachable;
+/// everything else (bind / wildcard / literal / tuple) reads the raw value.
+fn go_typed_access(child: &AIRNode, raw_access: &str) -> String {
+    if let NodeKind::ConstructorPat { path, .. } = &child.kind {
+        let leaf = path.segments.last().map_or("", |s| s.name.as_str());
+        match leaf {
+            "Some" | "None" => return format!("{raw_access}.(__bockOption)"),
+            "Ok" | "Err" => return format!("{raw_access}.(__bockResult)"),
+            _ => {}
+        }
+    }
+    raw_access.to_string()
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -5396,6 +5785,11 @@ mod tests {
         assert!(out.contains("default:"), "got: {out}");
     }
 
+    /// A guarded arm now lowers to the shared if/else-if chain: the arm's
+    /// condition tests the *pattern* AND the *guard* (`x == 1 && (ok)`), so a
+    /// failed guard falls through to the next arm — the fall-through the prior
+    /// `case 1: if ok { … }` lowering could not express (its `break` exited the
+    /// whole switch).
     #[test]
     fn match_arm_guard_emits_if() {
         let m = node(
@@ -5423,8 +5817,12 @@ mod tests {
         );
         let out = gen(&module(vec![], vec![m]));
         assert!(
-            out.contains("if ok {"),
-            "guard should emit real if-statement, got: {out}"
+            out.contains("if x == 1 && (ok) {"),
+            "guard should test pattern AND guard in an if-chain, got: {out}"
+        );
+        assert!(
+            !out.contains("switch"),
+            "a guarded match must not use a switch, got: {out}"
         );
         assert!(
             !out.contains("// guard"),

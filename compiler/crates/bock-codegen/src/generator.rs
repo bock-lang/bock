@@ -641,6 +641,62 @@ pub fn match_has_statement_arm(arms: &[AIRNode]) -> bool {
     )
 }
 
+/// Returns true if a `match`'s arms require the *if/else-if-chain* lowering
+/// (JS, TS, Go) rather than the value/tag `switch` fast-path.
+///
+/// The value/tag `switch` those backends emit can express only a flat dispatch
+/// on a single discriminant (a literal value, or an ADT `._tag`). It
+/// **structurally cannot** express:
+///
+/// - **guards** — a failed guard must fall through to the *next arm*, but a
+///   `break` inside a `switch` exits the whole `switch`;
+/// - **or-patterns** (`1 | 2 | 3 => …`) — one arm, several discriminants;
+/// - **tuple patterns** (`(a, b) => …`) — no single discriminant;
+/// - **nested constructor / record patterns** (`Some(Ok(v)) => …`) — the inner
+///   pattern must itself be tested and its bindings extracted recursively.
+///
+/// When any arm needs one of these, the backend lowers the *whole* match to an
+/// `if (<test> && <guard?>) { <binds>; <body> } else if …` chain (see each
+/// backend's `emit_match_ifchain`). Otherwise the existing `switch` fast-path is
+/// kept, so the proven Optional / Result / user-enum / value lowerings do not
+/// regress.
+///
+/// A constructor / record field counts as "nested" only when its sub-pattern is
+/// itself refutable or structured — another constructor, record, tuple,
+/// or-pattern, or literal. A bare bind (`Some(x)`) or wildcard (`Some(_)`) field
+/// is *not* nested: the flat `switch` already extracts those correctly.
+#[must_use]
+pub fn match_needs_ifchain(arms: &[AIRNode]) -> bool {
+    arms.iter().any(|arm| {
+        let NodeKind::MatchArm { pattern, guard, .. } = &arm.kind else {
+            return false;
+        };
+        guard.is_some() || pattern_needs_ifchain(pattern)
+    })
+}
+
+/// True if `pat` (a pattern node) can only be lowered via the if/else-if chain
+/// — i.e. it is an or-pattern, a tuple pattern, or a constructor/record pattern
+/// carrying a nested structured sub-pattern. See [`match_needs_ifchain`].
+fn pattern_needs_ifchain(pat: &AIRNode) -> bool {
+    match &pat.kind {
+        NodeKind::OrPat { .. } | NodeKind::TuplePat { .. } => true,
+        NodeKind::ConstructorPat { fields, .. } => fields.iter().any(field_is_structured),
+        NodeKind::RecordPat { fields, .. } => fields
+            .iter()
+            .filter_map(|f| f.pattern.as_deref())
+            .any(field_is_structured),
+        _ => false,
+    }
+}
+
+/// True if a constructor / record *field* sub-pattern is structured (anything
+/// other than a bare bind or wildcard), so the enclosing match must take the
+/// if-chain path to test and bind it recursively.
+fn field_is_structured(pat: &AIRNode) -> bool {
+    !matches!(&pat.kind, NodeKind::WildcardPat | NodeKind::BindPat { .. })
+}
+
 /// Decide whether a loop must be given a target label so that a `break`/
 /// `continue` inside a statement-arm `match` reaches the loop rather than the
 /// `switch` the `match` lowers to.
@@ -1982,6 +2038,144 @@ mod tests {
             ),
         )];
         assert!(!match_has_statement_arm(&value_arms));
+    }
+
+    /// A single-segment type path (`Some`, `Ok`, …) for constructor patterns.
+    fn ctor_path(name: &str) -> bock_ast::TypePath {
+        bock_ast::TypePath {
+            segments: vec![ident(name)],
+            span: dummy_span(),
+        }
+    }
+
+    /// A `match` arm with an explicit pattern and optional guard.
+    fn arm_with(id: u32, pattern: AIRNode, guard: Option<AIRNode>) -> AIRNode {
+        n(
+            id,
+            NodeKind::MatchArm {
+                pattern: Box::new(pattern),
+                guard: guard.map(Box::new),
+                body: Box::new(int_lit(id + 100)),
+            },
+        )
+    }
+
+    #[test]
+    fn match_needs_ifchain_keeps_switch_fast_path_for_simple_matches() {
+        // A bind-only / wildcard match (`x => …`, `_ => …`) stays on the switch.
+        let bind_arms = vec![
+            arm_with(
+                1,
+                n(
+                    2,
+                    NodeKind::BindPat {
+                        name: ident("x"),
+                        is_mut: false,
+                    },
+                ),
+                None,
+            ),
+            arm_with(3, n(4, NodeKind::WildcardPat), None),
+        ];
+        assert!(!match_needs_ifchain(&bind_arms));
+
+        // A flat `Some(x)` / `Ok(v)` constructor match (bare-bind fields) stays
+        // on the switch — the proven Optional/Result lowering must not regress.
+        let flat_ctor = vec![arm_with(
+            10,
+            n(
+                11,
+                NodeKind::ConstructorPat {
+                    path: ctor_path("Some"),
+                    fields: vec![n(
+                        12,
+                        NodeKind::BindPat {
+                            name: ident("x"),
+                            is_mut: false,
+                        },
+                    )],
+                },
+            ),
+            None,
+        )];
+        assert!(!match_needs_ifchain(&flat_ctor));
+    }
+
+    #[test]
+    fn match_needs_ifchain_detects_guard() {
+        let arms = vec![arm_with(1, n(2, NodeKind::WildcardPat), Some(int_lit(3)))];
+        assert!(match_needs_ifchain(&arms));
+    }
+
+    #[test]
+    fn match_needs_ifchain_detects_or_and_tuple() {
+        let or_arm = vec![arm_with(
+            1,
+            n(
+                2,
+                NodeKind::OrPat {
+                    alternatives: vec![int_lit(3), int_lit(4)],
+                },
+            ),
+            None,
+        )];
+        assert!(match_needs_ifchain(&or_arm));
+
+        let tuple_arm = vec![arm_with(
+            10,
+            n(
+                11,
+                NodeKind::TuplePat {
+                    elems: vec![
+                        n(
+                            12,
+                            NodeKind::BindPat {
+                                name: ident("a"),
+                                is_mut: false,
+                            },
+                        ),
+                        n(
+                            13,
+                            NodeKind::BindPat {
+                                name: ident("b"),
+                                is_mut: false,
+                            },
+                        ),
+                    ],
+                },
+            ),
+            None,
+        )];
+        assert!(match_needs_ifchain(&tuple_arm));
+    }
+
+    #[test]
+    fn match_needs_ifchain_detects_nested_constructor() {
+        // `Some(Ok(v))`: the inner field is itself a constructor → nested.
+        let nested = vec![arm_with(
+            1,
+            n(
+                2,
+                NodeKind::ConstructorPat {
+                    path: ctor_path("Some"),
+                    fields: vec![n(
+                        3,
+                        NodeKind::ConstructorPat {
+                            path: ctor_path("Ok"),
+                            fields: vec![n(
+                                4,
+                                NodeKind::BindPat {
+                                    name: ident("v"),
+                                    is_mut: false,
+                                },
+                            )],
+                        },
+                    )],
+                },
+            ),
+            None,
+        )];
+        assert!(match_needs_ifchain(&nested));
     }
 
     #[test]
