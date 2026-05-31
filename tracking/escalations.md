@@ -261,3 +261,24 @@ future "library build" mode), or should §20.6.1 be preserved (requiring multi-f
 **Recommendation:** none on merits (Design's). Bundling is the lower-friction v1 path given the run model.
 **Awaiting:** Design ratification; non-blocking.
 **Status:** pending
+
+## [2026-05-31 21:20 UTC] core.iter shipped surface refinements (DQ24) → Design
+
+**Type:** design (core-spec)
+**Severity:** low (non-blocking — `core.iter` R1 shipped on the floor, exercised ×5; refinements are additive)
+**Trigger:** `core.iter` R1 landed (#151 module + for→Iterable desugar; #152 Rust/Go codegen — all 5×5). Three
+surface choices refine DQ12 and want Design ratification per the core-spec rule (filed, queue continues).
+**Context (design-questions.md DQ24):** (1) the **combinator set** — shipped 6 (`to_list`/`count`/`fold`/`map`/
+`filter`/`take`), omitted `enumerate`, excluded mutating/`zip`/`flat_map`/lazy — is this the normative v1 surface?
+(2) the concrete `ListIterator` satisfies `Iterator` via an **inherent `next`**, not an `impl Iterator[T] for
+ListIterator` (dropped — caused a Go duplicate-`Next`; `Iterable` detection keys on `Iterable`). Acceptable, or must
+the trait impl exist? (3) §6.5's associated-type `Collection`/`Iterator[Item=…]` **example** is inert and reads as
+misleading vs the shipped generic `Iterator[T]`/`Iterable[T]` (DQ12) — clarify §6.5 or leave as illustration?
+**Recommendation:** none on the merits (Design's call). The shipped floor follows DQ12/DQ14/DQ15 + Rust/Swift
+precedent; all three are additive/reversible.
+**Awaiting:** Design ratification; non-blocking (R1 continues to `effect`).
+**Status:** pending
+
+> Standing non-blocking Design queue (filed; queue not blocked on any): DQ10, DQ11, DQ12, DQ13, DQ16-residue,
+> DQ17, DQ18, DQ19, DQ20, DQ21, DQ22, DQ23, DQ24, Bool-interp spelling. The orchestrator proceeds on safe defaults
+> and reconciles spec/divergences as Design decides.

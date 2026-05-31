@@ -6,22 +6,22 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 10
+- Ready: 11
 - v1-blocking: 2
 - Blocked: 5
 - Deferred: 1
 
-## Build status (as of main c9a241e, 2026-05-30)
+## Build status (as of main 9f1a2bd, 2026-05-31)
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (~2370 tests, 0 failed — per #127) |
+| `cargo test --workspace` | passing (~2471 tests, 0 failed — per #152) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |
 | `mdbook build docs` | clean |
 | CI on `main` | green; cache via Swatinem/rust-cache@v2.9.1 (#116, faster) |
-| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **55+ exec pairs** across 5 targets (deepened by #124/#126/#127 Optional-payload fixtures) |
+| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **300 exec pairs (60 fixtures × 5 targets), 0 failed under `REQUIRE=all`** (incl. the full `core.iter` generic-combinator surface, #151/#152) |
 | `bock check` on examples | 20/20 exit 0 |
 
 ## What works today
@@ -56,10 +56,10 @@ Live summary derived from `tracking/queue.md` (items per section):
 
 The embedded source-compiled loading mechanism is **live** (#103): `core.*`
 modules ship as Bock source bundled in the `bock` binary and resolve through
-the module registry (hermetic; works from any cwd). **3 of 11 v1 modules
-landed** — `core.error` (#103), `core.compare` (#104), `core.convert` (#110) — though these are
-**check-only**: cross-module `use` codegen is broken on all 5 (DV13), so they have not executed
-cross-module on any target (the conformance for them was `no_errors`/`--source-only`, not run).
+the module registry (hermetic; works from any cwd). **4 of 11 v1 modules
+landed** — `core.error` (#103), `core.compare` (#104), `core.convert` (#110), **`core.iter` (#151/#152)** — and
+all four now **EXECUTE cross-module on all 5 targets** (the codegen-completeness milestone #131-#152 closed the
+DV13 cross-module-`use` gap and the generic-combinator codegen; `core.iter` is exercised end-to-end ×5).
 The 2026-05-30 Design stdlib batch (DQ6–DQ9) is reconciled into the spec (#106);
 **Q-bridge (#108)** wired the trait-impl table + canonical primitive conformances
 (primitives satisfy bounds; `where`-bounds enforced; DV6 fixed); **#110** added
@@ -81,13 +81,18 @@ match guards/or/nested/tuple) — **the stdlib's trait-using modules now EXECUTE
 dispatch + literals + range()). **Collections work ×5** — the codegen substrate is essentially built (cross-module,
 enums, generics, Optional/Result, primitive-bridge, traits, match, collections). **P4-codegen DONE** (#147 tuple-`.N`
 diagnostic · #148 TS Self-in-plain-impl + expr-position match · #149 generic-container/trait residue — the 4 gaps
-core.iter's v5 STOP exposed; the audit had under-covered them). The codegen substrate is now COMPLETE; ~275 exec
-pairs ×5. **PAUSED for the night at main b59b42e (2026-05-31; operator request).** On resume: (1) re-resume
-**core.iter** (UNBLOCKED — module written/preserved at /tmp/bock-iter-module-preserved.bock → 4/11, R1 iter); (2)
-P4-hygiene (mutating-collection + `m.contains` guarding diagnostics, bock-types); (3) **core.effect**, then R2
-(option/result/string/time), R3 (collections/test). Design-gated (non-blocking, → Design): DQ23 (Int/Int §3.6 NEW),
-DQ18/20/21/22, DQ10-DQ15/DQ19, Bool-interp spelling; + Go nested-runtime-payload arith (#142) & Rust by-value-reuse
-(#149) codegen follow-ups.
+core.iter's v5 STOP exposed; the audit had under-covered them). The codegen substrate is COMPLETE. **`core.iter`
+R1 is now DONE on all 5 (#151 module + for→Iterable checker desugar; #152 Rust/Go generic-combinator codegen)** —
+the 6th and final core.iter probe (the real combinator surface) exposed Rust/Go residue (transitive `T: Clone`, Go
+generic-record-construct / typed concat-arg / generic-trait interface / lambda specialization), now fixed; ~300 exec
+pairs ×5. **4/11 stdlib modules landed; main 9f1a2bd (2026-05-31).** Remaining R1: (1) **P4-hygiene**
+(mutating-collection + `m.contains` guarding diagnostics, bock-types/checker.rs — both design-gated DQ18/DQ22); (2)
+**core.effect** (effect-system bridge — likely needs its own plan + a core-spec escalation), then R2
+(option/result/string/time), R3 (collections/test). Design-gated (non-blocking, → Design): DQ24 (core.iter surface —
+combinator set / dropped Iterator-impl / omitted enumerate, NEW), DQ23 (Int/Int §3.6), DQ18/20/21/22,
+DQ10-DQ15/DQ19, Bool-interp spelling; + Go nested-runtime-payload arith (#142) & Rust by-value-reuse (#149)
+codegen follow-ups. Known interpreter gap: `mut self` iterator drive hangs under `bock run` (Q-iter-interp-mutself;
+compiled targets fine).
 **§18.2 prelude auto-import is live** (#120): the core-defined prelude symbols
 (`Ordering`/`Less`/`Equal`/`Greater`, `Comparable`/`Equatable`, `Into`/`From`/
 `TryFrom`/`Displayable`, `Error`) resolve without an explicit `use` (the membership

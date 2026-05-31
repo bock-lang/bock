@@ -12,8 +12,8 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-05-30 vs main c9a241e (post #129 + the codegen-completeness audit:
-#123-#129 merged; core.iter PAUSED behind the codegen-completeness milestone; repo wins). See audit.md._
+_Last reconciled: 2026-05-31 vs main 9f1a2bd (core.iter R1 COMPLETE on all 5: #151 module + for→Iterable
+desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged; repo wins). See audit.md._
 
 ---
 
@@ -70,6 +70,14 @@ _Last reconciled: 2026-05-30 vs main c9a241e (post #129 + the codegen-completene
   `compiler/crates/bock-codegen/` (ts.rs) · — · links #124 · note: `impl Box[T]` types `self` as
   `Box` not `Box<T>` (`type_expr_to_string` drops generic args) — imprecise, not implicit-any; no
   fixture exercises it. Minor follow-up from #124.
+- **[Q-iter-interp-mutself] Interpreter hangs on a `mut self` iterator drive** — bug · ready ·
+  interpreter crate · — · links #151, #152 · note: a `loop { match it.next() }` drive over a
+  `ListIterator` HANGS under the tree-walking interpreter — `mut self` cursor mutations don't persist
+  across method calls, so `next()` never advances and `None` is never reached. Compiled targets (all 5)
+  are fine; only `bock run` (interpreter) is affected. Pre-existing (the proven `generic_iter_concrete_match.bock`
+  hangs identically) — NOT introduced by core.iter; surfaced by it. The `stdlib_iter.rs` smoke uses a single
+  `next()` to avoid it. Fix: persist `mut self` field mutations across interpreter method-call frames.
+  Same family as Q-interp-enum.
 
 ## v1-blocking
 
@@ -91,28 +99,32 @@ _Last reconciled: 2026-05-30 vs main c9a241e (post #129 + the codegen-completene
   substrate is essentially built (cross-module, enums, generics incl. container/trait, Optional/Result, traits,
   match, collections, primitive-bridge; ~275 exec ×5).** P4-codegen landed: #147 tuple-`.N` diagnostic, #148 TS
   Self-in-plain-impl + expr-position match, #149 generic-container/trait residue (GAP-A/B/C/D — the 4 gaps
-  core.iter's v5 STOP exposed; the systematic audit under-covered them). **REMAINING:** (a) re-resume core.iter
-  (module written/preserved at /tmp/bock-iter-module-preserved.bock; UNBLOCKED); (b) **Q-codegen-completeness
-  P4-hygiene** (bock-types: mutating-collection guarding diagnostic [DQ18 v1-floor] + bare-`m.contains` [DQ22] —
-  sequence around core.iter, both checker.rs); (c) design-gated → Design: DQ23 (Int/Int §3.6 NEW), DQ18 (mutating
-  lowering), DQ20 (`expr?`), DQ22, DQ21, Bool-interp spelling; (d) Go nested-runtime-payload arith [#142 residual]
-  + Rust by-value-reuse [#149 OPEN]. NONE of these gate the R1 iter/effect floor.
+  core.iter's v5 STOP exposed; the systematic audit under-covered them). **6th PROBE CLOSED (#152):** core.iter's
+  real generic-combinator surface exposed Rust/Go codegen residue (transitive `T: Clone`, Go generic-record-construct
+  / concat-arg typed literals / generic-trait interface header / lambda specialization) — fixed, ~300 exec ×5. The
+  codegen substrate is now exercised by a full generic stdlib module on all 5. **REMAINING:** (a) ~~core.iter~~ DONE
+  (#151/#152); (b) **Q-codegen-completeness P4-hygiene** (bock-types: mutating-collection guarding diagnostic
+  [DQ18 v1-floor] + bare-`m.contains` [DQ22] — both checker.rs); (c) design-gated → Design: DQ23 (Int/Int §3.6 NEW),
+  DQ18 (mutating lowering), DQ20 (`expr?`), DQ22, DQ21, Bool-interp spelling; (d) Go nested-runtime-payload arith
+  [#142 residual] + Rust by-value-reuse [#149 OPEN]. NONE of these gate the R1 effect floor.
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (3/11 landed; the codegen substrate is now COMPLETE [#131-#149] and the 3 landed modules
-  execute cross-module on all 5. **R1 `iter` UNBLOCKED — re-resume is the next action** [module written/preserved
-  at /tmp/bock-iter-module-preserved.bock; #149 closed the last generic gaps]; then `effect`, then R2/R3) ·
+  **v1-BLOCKING** (4/11 landed; the codegen substrate is COMPLETE [#131-#149] and the landed modules
+  execute cross-module on all 5. **R1 `iter` COMPLETE on all 5** [#151 module + for→Iterable checker desugar;
+  #152 Rust/Go generic-combinator codegen — 5 iter exec fixtures green ×5]. **Next: P4-hygiene then `core.effect`**,
+  then R2/R3) ·
   `stdlib/`, `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: v1 = **11 core modules** at minimum-useful surface (option, result,
   collections, string, iter, compare, convert, error, effect, time, test). Each =
   `stdlib/core/<m>/` source + per-target shims + conformance fixtures, compile/run
   on every target. **Landed:** loading mechanism + `core.error` (#103); `core.compare`
   (#104); the primitive-conformance bridge (#108); `core.convert` + parameterized
-  traits (#110). **Codegen gate CLEARED:** Q-fconf execution conformance (#114/#115)
-  + Q-codegen-fixes (#121, DV9) — 5-target parity now real + tested. **R1 RESUMES**
-  with `iter` (generic `Iterator[T]`/`Iterable[T]`, eager combinator floor,
-  for→Iterable desugar in the CHECKER + collection conformances; protocol shape =
-  DQ12), then `effect` (effect-system bridge), then R2 (option/result/string/time),
-  R3 (collections/test). `core.types/math/memory/concurrency` Reserved for v1.x.
+  traits (#110); **`core.iter`** (#151 generic `Iterator[T]`/`Iterable[T]` + concrete `ListIterator[T]`
+  + 6 eager List-returning combinators + the for→Iterable checker desugar; #152 Rust/Go codegen — all 5×5).
+  **Codegen gate CLEARED:** Q-fconf execution conformance (#114/#115)
+  + Q-codegen-fixes (#121, DV9) + the codegen-completeness milestone (#131-#152) — 5-target parity real + tested.
+  **R1 REMAINING:** `effect` (effect-system bridge) — likely needs its own plan + core-spec escalation; then R2
+  (option/result/string/time), R3 (collections/test). Plan: `plans/2026-05-31-core-iter-r1-plan.md` (done).
+  `core.types/math/memory/concurrency` Reserved for v1.x.
   Plans: `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`,
   `plans/2026-05-30-primitive-conformance-bridge-plan.md`,
   `plans/2026-05-30-codegen-correctness-conformance-plan.md` (done).
@@ -151,9 +163,9 @@ _Last reconciled: 2026-05-30 vs main c9a241e (post #129 + the codegen-completene
  #126 Py-Optional+Go-typed-payload · #127 Go match-in-loop · #129 read-only List methods]
 Q-codegen-completeness (MILESTONE: cross-module + user-enums + generics + Result + traits + Go-typing + …
   — v1-BLOCKING, phased P0→P4, mostly bock-codegen → SEQUENTIAL) ──┐ gates ↓
-Q-stdlib R1 (iter, effect) → R2 (option/result/string/time) → R3 (collections/test) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
-  ⮑ R1/R2/R3 ALL blocked behind Q-codegen-completeness (audit: cross-module + enums + generics broken; the 3 "landed" modules are check-only)
-  ⮑ iter: for→Iterable desugar PROVEN (T1 ×5); resumes after the milestone's P0/P1
+Q-stdlib R1 (iter ✓ #151/#152 · effect NEXT) → R2 (option/result/string/time) → R3 (collections/test) ──→ D4 ──→ D5 ──→ ItemB (P1 → P2-5 → P6) ──→ ItemD
+  ⮑ codegen-completeness milestone #131-#152 essentially DONE — substrate complete + now EXERCISED by a full generic stdlib module (core.iter) on all 5
+  ⮑ iter DONE on all 5: module + for→Iterable checker desugar (#151) + Rust/Go generic-combinator codegen (#152), ~300 exec ×5
 (decided-ready: Q-import-reject [DQ8])
 (subsumed by Q-codegen-completeness: Q-self-subst, Q-prim-assoc, Q-match-exprpos, Q-go-list-literal, Q-ts-generic-impl)
 (separate bugs: Q-xmod-bounds, Q-xmod-impl, Q-interp-enum)
