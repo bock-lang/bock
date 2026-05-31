@@ -81,15 +81,17 @@ _Last reconciled: 2026-05-30 vs main c9a241e (post #129 + the codegen-completene
   PHASES: **P0 foundations DONE** — tail-`if`-in-loop (#131, DV15); cross-module `use` via single-file
   bundling of reachable modules (#132, DV13); user-enum codegen / variant registry (#133, DV14). [§20.6.1
   bundling-divergence → DQ19/Design.] **P1 stdlib types DONE** (#135 Python lambdas/generics · #136 Go/TS/Rust generics [DV12 resolved] · #137
-  recv_kind annotation + primitive-bridge · #138 Result runtime + Optional/Result methods; `expr?` deferred → DQ20). **P2 traits+match** — default methods, TS trait-self,
-  Self-subst (Q-self-subst), match guards/or/nested on js/ts/go, Go value-match binding. **P3 Go collection
+  recv_kind annotation + primitive-bridge · #138 Result runtime + Optional/Result methods; `expr?` deferred → DQ20). **P2 traits+match DONE** (#140 trait self/defaults/bounded-dispatch — `use core.compare` runs ×5 · #141
+  Self-subst · #142 match guards/or/nested/tuple). **P3 Go collection
   typing** — `[]interface{}`→typed; Map/Set dispatch; `range()` helper; record-spread Go (Q-go-list-literal).
   **P4 polish** — tuple `.N` parser; Optional-interp; Int/Int + Bool-interp harmonize; mutating-List guard
   (DQ18). SUBSUMES prior codegen follow-ups (Q-match-exprpos, Q-go-list-literal, Q-ts-generic-impl,
   Q-self-subst, Q-prim-assoc). Q-list-codegen READ-ONLY methods DONE (#129); mutating → P4. **Phase 0 DONE (#131-#133); Phase 1 DONE
-  (#135-#138); Phase 2 (traits+match) NEXT** — then P3 (Go collection typing/Map/Set), P4 (polish: `expr?`/DQ20,
-  tuple `.N` parser, Go/TS expr-position, Int/Int + Bool-interp, mutating-List/DQ18), then Q-stdlib R1 resumes.
-  P2 gates the stdlib's trait-using modules (core.compare/convert) running cross-module on typed targets.
+  (#135-#138); Phase 2 DONE (#140-#142) — the stdlib's trait-using modules now execute cross-module ×5; Phase 3
+  (Go collection typing / Map/Set / range()) NEXT** (design in flight, Plan agent aeede38d) — then P4 (polish:
+  `expr?`/DQ20, tuple `.N` parser, Go/TS expr-position, Int/Int + Bool-interp, mutating-List/DQ18, go/ts
+  Self-in-plain-impl [#141], Go nested-payload typed-arith [#142]), then Q-stdlib R1 (iter, effect) resumes.
+  Operator chose "continue P3→P4" at the P2/P3 checkpoint (over resume-stdlib-now).
 - **[Q-stdlib] Implement the core standard library** — impl ·
   **v1-BLOCKING** (3/11 landed — but those 3 are check-only, NOT executed cross-module [DV13]; R1 PAUSED
   behind **Q-codegen-completeness**: the for→Iterable desugar is PROVEN [T1 green ×5], but the stdlib needs

@@ -162,6 +162,14 @@ decided→link)`
   Q-codegen-completeness P4. Non-blocking (no regression; Rust works).
 - **Status:** escalated → Design (escalations.md)
 
+### DQ21 — distinguishing default vs required trait methods in AIR
+- **Question:** trait default methods (#140) are detected by an empty-block heuristic (a bodyless/required trait
+  method lowers to an empty AIR `Block`; a default has a non-empty body). This misclassifies a genuinely empty
+  default body. Add a robust `has_body: bool` flag to the AIR `FnDecl` (a `bock-air` change), or keep the heuristic?
+- **§:** codegen / bock-air · **context:** surfaced by #140 (P2-α default-method synthesis). Low priority — the
+  heuristic is exact for the current lowerer; the flag is the unambiguous follow-up. Non-blocking.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and
