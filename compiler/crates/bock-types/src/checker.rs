@@ -87,6 +87,14 @@ const E_NO_CONVERSION: DiagnosticCode = DiagnosticCode {
 /// receiver — so a backend reads `call_node.metadata[RECV_KIND_META_KEY]`.
 pub const RECV_KIND_META_KEY: &str = "recv_kind";
 
+/// Base node id for AIR nodes the checker synthesizes (the `for`-over-`Iterable`
+/// desugar). Chosen high enough to sit far above the dense, zero-based ids the
+/// lowerer assigns to real nodes, so synthesized nodes never collide with real
+/// ones for the `id`-equality checks codegen performs. A `u32` leaves ample
+/// headroom above this base for the handful of nodes one module's `for` loops
+/// expand to.
+const SYNTH_ID_BASE: NodeId = 0x4000_0000;
+
 /// Compute the receiver-kind tag for a resolved receiver [`Type`].
 ///
 /// The tag is a compact, codegen-facing string identifying which *family* the
@@ -278,6 +286,19 @@ pub struct TypeChecker {
     /// and where-clause constraints. Used by the FieldAccess handler to
     /// resolve methods on bounded type parameters.
     type_var_bounds: HashMap<TypeVarId, Vec<String>>,
+    /// Monotonic node-id source for AIR nodes the checker *synthesizes* (today
+    /// only the `for`-over-`Iterable` desugar, see
+    /// [`TypeChecker::desugar_for_iterable`]). The checker is constructed
+    /// without the session's `NodeIdGen`, so it mints its own ids from a high
+    /// base (`SYNTH_ID_BASE`) chosen to sit far above the dense, zero-based range
+    /// the lowerer assigns — synthesized nodes therefore never collide with real
+    /// nodes for the `id`-equality checks codegen relies on (e.g. the
+    /// desugared-method-call receiver-identity test in the generator).
+    synth_id: std::cell::Cell<NodeId>,
+    /// Per-checker counter that makes each synthesized `for`-loop iterator
+    /// binding name (`__bock_iter_<n>`) unique, so nested desugared `for` loops
+    /// do not shadow one another.
+    synth_iter_var: std::cell::Cell<u32>,
 }
 
 impl TypeChecker {
@@ -301,6 +322,8 @@ impl TypeChecker {
             type_aliases: HashMap::new(),
             trait_method_types: HashMap::new(),
             type_var_bounds: HashMap::new(),
+            synth_id: std::cell::Cell::new(SYNTH_ID_BASE),
+            synth_iter_var: std::cell::Cell::new(0),
         }
     }
 
@@ -309,6 +332,234 @@ impl TypeChecker {
     /// Allocate a fresh type-inference variable.
     fn fresh_var(&self) -> Type {
         Type::TypeVar(self.var_gen.next())
+    }
+
+    // ── Synthesized-node helpers (for the `for`-over-`Iterable` desugar) ──────
+
+    /// Mint a fresh, collision-free [`NodeId`] for a synthesized AIR node.
+    ///
+    /// Ids are drawn monotonically from [`SYNTH_ID_BASE`], far above the
+    /// lowerer's dense zero-based range, so a synthesized node's id never
+    /// equals a real node's id (which codegen's receiver-identity check and the
+    /// per-module item dedup rely on).
+    fn next_synth_id(&self) -> NodeId {
+        let id = self.synth_id.get();
+        self.synth_id.set(id.wrapping_add(1));
+        id
+    }
+
+    /// Build a synthesized AIR node carrying a fresh id, the given `span`, and
+    /// the `scope_id` metadata downstream passes expect (copied from the `for`
+    /// node so the synthesized subtree lives in the loop's lexical scope).
+    fn synth_node(&self, span: Span, scope_id: i64, kind: NodeKind) -> AIRNode {
+        let mut node = AIRNode::new(self.next_synth_id(), span, kind);
+        node.metadata
+            .insert("scope_id".to_string(), Value::Int(scope_id));
+        node
+    }
+
+    /// Build a synthesized identifier-reference node for a local binding.
+    fn synth_ident(&self, name: &str, span: Span, scope_id: i64) -> AIRNode {
+        self.synth_node(
+            span,
+            scope_id,
+            NodeKind::Identifier {
+                name: bock_ast::Ident {
+                    name: name.to_string(),
+                    span,
+                },
+            },
+        )
+    }
+
+    /// Build a synthesized zero-argument method call on `receiver`, in the SAME
+    /// desugared shape the lowerer produces (`Call { callee: FieldAccess(recv,
+    /// method), args: [self = recv] }`). The receiver is cloned into both the
+    /// field-access object and the `self` arg with the *same* node id, matching
+    /// the lowerer so codegen's receiver-identity check recognises the call as a
+    /// method call rather than a field-closure invocation.
+    fn synth_method_call(
+        &self,
+        receiver: AIRNode,
+        method: &str,
+        span: Span,
+        scope_id: i64,
+    ) -> AIRNode {
+        let field_access = self.synth_node(
+            span,
+            scope_id,
+            NodeKind::FieldAccess {
+                object: Box::new(receiver.clone()),
+                field: bock_ast::Ident {
+                    name: method.to_string(),
+                    span,
+                },
+            },
+        );
+        let self_arg = bock_air::AirArg {
+            label: None,
+            value: receiver,
+        };
+        self.synth_node(
+            span,
+            scope_id,
+            NodeKind::Call {
+                callee: Box::new(field_access),
+                args: vec![self_arg],
+                type_args: vec![],
+            },
+        )
+    }
+
+    /// Build a synthesized `Some`/`None`-style constructor pattern.
+    fn synth_ctor_pat(
+        &self,
+        ctor: &str,
+        fields: Vec<AIRNode>,
+        span: Span,
+        scope_id: i64,
+    ) -> AIRNode {
+        self.synth_node(
+            span,
+            scope_id,
+            NodeKind::ConstructorPat {
+                path: TypePath {
+                    segments: vec![bock_ast::Ident {
+                        name: ctor.to_string(),
+                        span,
+                    }],
+                    span,
+                },
+                fields,
+            },
+        )
+    }
+
+    /// Rewrite a `for <pattern> in <iterable> { <body> }` whose `iterable`
+    /// implements `Iterable` into the proven manual-drive shape, in place.
+    ///
+    /// The `node` (a [`NodeKind::For`]) is rewritten to:
+    ///
+    /// ```text
+    /// {
+    ///   let mut __bock_iter_N = <iterable>.iter();
+    ///   loop {
+    ///     match __bock_iter_N.next() {
+    ///       Some(<pattern>) => <body>
+    ///       None            => break
+    ///     }
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// The user's `<pattern>`, `<iterable>`, and `<body>` are *moved* (not
+    /// cloned) out of the original `For` node into the synthesized subtree.
+    /// After rewriting, the caller infers the new subtree through the normal
+    /// [`TypeChecker::infer_node`] path, so the `match`/`Some(pat)`/method-call
+    /// nodes pick up exactly the metadata codegen needs (the `Optional[T]`
+    /// payload typing, receiver-kind tags, copy-type marks). The synthesized
+    /// `loop` is native on every target, and the user's `break`/`continue` land
+    /// inside the `Some` arm body, targeting that loop.
+    ///
+    /// `iter_var` names the binding; passing a per-loop-unique name keeps nested
+    /// desugared `for` loops from shadowing one another.
+    fn desugar_for_iterable(
+        &self,
+        node: &mut AIRNode,
+        pattern: AIRNode,
+        iterable: AIRNode,
+        body: AIRNode,
+        iter_var: &str,
+    ) {
+        let span = node.span;
+        let scope_id = node
+            .metadata
+            .get("scope_id")
+            .and_then(|v| match v {
+                Value::Int(i) => Some(*i),
+                _ => None,
+            })
+            .unwrap_or(0);
+
+        // `let mut __bock_iter_N = <iterable>.iter()`
+        let iter_call = self.synth_method_call(iterable, "iter", span, scope_id);
+        let let_pat = self.synth_node(
+            span,
+            scope_id,
+            NodeKind::BindPat {
+                name: bock_ast::Ident {
+                    name: iter_var.to_string(),
+                    span,
+                },
+                is_mut: true,
+            },
+        );
+        let let_binding = self.synth_node(
+            span,
+            scope_id,
+            NodeKind::LetBinding {
+                is_mut: true,
+                pattern: Box::new(let_pat),
+                ty: None,
+                value: Box::new(iter_call),
+            },
+        );
+
+        // `match __bock_iter_N.next() { Some(<pattern>) => <body>; None => break }`
+        let next_recv = self.synth_ident(iter_var, span, scope_id);
+        let next_call = self.synth_method_call(next_recv, "next", span, scope_id);
+        let some_pat = self.synth_ctor_pat("Some", vec![pattern], span, scope_id);
+        let some_arm = self.synth_node(
+            span,
+            scope_id,
+            NodeKind::MatchArm {
+                pattern: Box::new(some_pat),
+                guard: None,
+                body: Box::new(body),
+            },
+        );
+        let none_pat = self.synth_ctor_pat("None", vec![], span, scope_id);
+        let break_node = self.synth_node(span, scope_id, NodeKind::Break { value: None });
+        let none_arm = self.synth_node(
+            span,
+            scope_id,
+            NodeKind::MatchArm {
+                pattern: Box::new(none_pat),
+                guard: None,
+                body: Box::new(break_node),
+            },
+        );
+        let match_node = self.synth_node(
+            span,
+            scope_id,
+            NodeKind::Match {
+                scrutinee: Box::new(next_call),
+                arms: vec![some_arm, none_arm],
+            },
+        );
+
+        // `loop { <match> }`
+        let loop_body = self.synth_node(
+            span,
+            scope_id,
+            NodeKind::Block {
+                stmts: vec![match_node],
+                tail: None,
+            },
+        );
+        let loop_node = self.synth_node(
+            span,
+            scope_id,
+            NodeKind::Loop {
+                body: Box::new(loop_body),
+            },
+        );
+
+        // `{ <let>; <loop> }` — replace the `for` node's kind in place.
+        node.kind = NodeKind::Block {
+            stmts: vec![let_binding, loop_node],
+            tail: None,
+        };
     }
 
     // ── Side-table helpers ───────────────────────────────────────────────────
@@ -1948,16 +2199,95 @@ impl TypeChecker {
 
             // ── Loops ─────────────────────────────────────────────────────────
             NodeKind::For { .. } => {
+                let node_span = node.span;
+                // First, infer the iterable so we can classify it. The built-in
+                // collections (`List`/`Range`, and `Map`/`Set` element typing
+                // below) keep their native fast path; a *user* type that
+                // implements `Iterable` is rewritten (§18.5 desugar) into the
+                // proven `loop { match it.next() { Some(pat) => body; None =>
+                // break } }` shape so it lowers through the already-native
+                // loop/match codegen with no per-target `for`-over-user-type
+                // support.
+                let iter_ty = if let NodeKind::For { iterable, .. } = &mut node.kind {
+                    self.infer_node(iterable)
+                } else {
+                    unreachable!()
+                };
+                let resolved_iter_ty = self.subst.apply(&iter_ty);
+
+                let is_builtin_iterable = matches!(
+                    &resolved_iter_ty,
+                    Type::Generic(g)
+                        if matches!(g.constructor.as_str(), "List" | "Range" | "Map" | "Set")
+                );
+
+                // Desugar only a *user* type (not a built-in collection) that
+                // has a registered `Iterable` impl for some type argument.
+                if !is_builtin_iterable {
+                    let implements_iterable = self
+                        .impl_table
+                        .as_ref()
+                        .map(|table| {
+                            let key = crate::traits::type_key(&resolved_iter_ty);
+                            resolve_impl(&TraitRef::new("Iterable"), &resolved_iter_ty, table)
+                                .is_some()
+                                || table.has_any_param_trait_impl("Iterable", &key)
+                        })
+                        .unwrap_or(false);
+
+                    if implements_iterable {
+                        // Move the user's pattern / iterable / body out of the
+                        // `For` node into the synthesized subtree.
+                        let (pattern, iterable, body) = if let NodeKind::For {
+                            pattern,
+                            iterable,
+                            body,
+                        } = &mut node.kind
+                        {
+                            (
+                                std::mem::replace(
+                                    pattern,
+                                    Box::new(AIRNode::new(0, node_span, NodeKind::Placeholder)),
+                                ),
+                                std::mem::replace(
+                                    iterable,
+                                    Box::new(AIRNode::new(0, node_span, NodeKind::Placeholder)),
+                                ),
+                                std::mem::replace(
+                                    body,
+                                    Box::new(AIRNode::new(0, node_span, NodeKind::Placeholder)),
+                                ),
+                            )
+                        } else {
+                            unreachable!()
+                        };
+
+                        // Gensym a unique binding name so nested desugared `for`
+                        // loops do not shadow one another.
+                        let n = self.synth_iter_var.get();
+                        self.synth_iter_var.set(n.wrapping_add(1));
+                        let iter_var = format!("__bock_iter_{n}");
+
+                        self.desugar_for_iterable(node, *pattern, *iterable, *body, &iter_var);
+                        // Re-infer the rewritten subtree (now a `Block`) through
+                        // the normal path, so the synthesized `match`/`Some(pat)`
+                        // / method-call nodes pick up the element typing and the
+                        // codegen metadata (Optional payload, receiver kind).
+                        return self.infer_block(node);
+                    }
+                }
+
+                // Built-in / fallback path: element-type the loop variable from
+                // the iterable's generic argument (List/Range/Map/Set), else a
+                // fresh var, exactly as before.
                 self.env.push_scope();
                 if let NodeKind::For {
                     pattern,
-                    iterable,
+                    iterable: _,
                     body,
                 } = &mut node.kind
                 {
-                    let iter_ty = self.infer_node(iterable);
-                    // Bind pattern variable to element type
-                    let elem_ty = match &iter_ty {
+                    let elem_ty = match &resolved_iter_ty {
                         Type::Generic(g) if g.constructor == "List" && g.args.len() == 1 => {
                             g.args[0].clone()
                         }

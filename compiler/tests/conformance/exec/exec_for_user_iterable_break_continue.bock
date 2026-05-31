@@ -1,0 +1,45 @@
+// TEST: exec_for_user_iterable_break_continue
+// EXPECT: output "sum=8"
+// EXPECT: targets js, ts, python
+//
+// `break` and `continue` inside a `for`-over-`Iterable` body (§18.5) target the
+// synthesized drive `loop`, not the synthesized `match`: iterating [1..6],
+// `continue` skips 2 and `break` stops at 5, so the body sums 1 + 3 + 4 == 8.
+// This proves the user `break`/`continue` land in the `Some(pat)` arm body at
+// the right loop-label depth (the synthesized `match` is a statement-position
+// `switch` on the targets that need a labeled loop, e.g. Go's `switch`).
+// Exhaustion is also covered: the iterator runs dry past the break.
+//
+// TARGETS — js/ts/python only; see exec_for_user_iterable.bock for the Rust/Go
+// embedded-combinator codegen residue FOUND in this PR.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.iter.{ListIterator, list_iter}
+
+record Bag {
+  items: List[Int]
+}
+
+impl Iterable[Int] for Bag {
+  fn iter(self) -> ListIterator[Int] {
+    list_iter(self.items)
+  }
+}
+
+fn main() -> Void {
+  let bag: Bag = Bag { items: [1, 2, 3, 4, 5, 6] }
+  let mut total: Int = 0
+  for x in bag {
+    if (x == 2) {
+      continue
+    }
+    if (x == 5) {
+      break
+    }
+    total = total + x
+  }
+  println("sum=${total}")
+}

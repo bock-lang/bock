@@ -136,3 +136,40 @@ fn run_single_next_yields_first() {
         String::from_utf8_lossy(&output.stderr),
     );
 }
+
+/// The §18.5 `for`-over-`Iterable` desugar: a user `record Bag` implementing
+/// `Iterable[Int]` can be iterated with `for x in bag { ... }`. The checker
+/// rewrites the loop into the manual `loop { match it.next() }` drive, and the
+/// `Some(x)` arm types `x` to the concrete element `Int`, so the body's
+/// `total + x` (an Int op) type-checks. This is the type-checking half of the
+/// `exec_for_user_iterable*` conformance fixtures.
+#[test]
+fn check_for_over_user_iterable_desugars() {
+    let f = write_temp_file(
+        "module userapp\n\
+         \n\
+         use core.iter.{list_iter}\n\
+         \n\
+         public record Bag {\n\
+         \x20\x20items: List[Int]\n\
+         }\n\
+         \n\
+         impl Iterable[Int] for Bag {\n\
+         \x20\x20public fn iter(self) -> ListIterator[Int] {\n\
+         \x20\x20\x20\x20list_iter(self.items)\n\
+         \x20\x20}\n\
+         }\n\
+         \n\
+         public fn sum(bag: Bag) -> Int {\n\
+         \x20\x20let mut total: Int = 0\n\
+         \x20\x20for x in bag {\n\
+         \x20\x20\x20\x20total = total + x\n\
+         \x20\x20}\n\
+         \x20\x20total\n\
+         }\n",
+    );
+    let output = bock_bin().arg("check").arg(f.path()).output().unwrap();
+    assert_exit_code(&output, 0, "for-over-Iterable desugar type-checks");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("no errors"), "stdout: {stdout}");
+}
