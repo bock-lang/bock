@@ -178,6 +178,17 @@ decided→link)`
   end-to-end ×5; this is only the spelling of the membership method. Non-blocking.
 - **Status:** escalated → Design (escalations.md)
 
+### DQ23 — normative Int/Int division semantics (§3.6) [+ Bool string-conversion spelling]
+- **Question:** §3.6 lists `/` as arithmetic but never pins Int/Int result semantics. Codegen diverges:
+  Rust/Go truncate (`17/5`→`3`), js/ts/python true-divide (`3.4`). Decide the normative v1 semantic —
+  truncating-Int (Rust/Go) or always-Float? Once decided, js/ts/py codegen must match (truncating needs
+  `Math.trunc(a/b)` / `a//b` when BOTH operands are Int — requires operand type info / an AIR `IntDiv` vs
+  `FloatDiv` distinction). **Bundled small clarification:** string-conversion/interpolation of a Bool should use
+  the canonical literal spelling `true`/`false` (harmonize Python's `True`/`False`).
+- **§:** §3.6 (+ §3.x Bool) · **context:** surfaced by the P4 design (item 5). Core-spec semantics. Non-blocking
+  for R1 (no Int/Int division or Bool-interp in the iter/effect floor); minor R2 `string` output-equality interaction.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and
