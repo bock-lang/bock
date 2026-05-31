@@ -78,6 +78,20 @@ desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged;
   hangs identically) — NOT introduced by core.iter; surfaced by it. The `stdlib_iter.rs` smoke uses a single
   `next()` to avoid it. Fix: persist `mut self` field mutations across interpreter method-call frames.
   Same family as Q-interp-enum.
+- **[Q-effect-interp-rust] Rust interpolation sub-context drops the effect-op rewrite** — bug · ready ·
+  `compiler/crates/bock-codegen/` (rs.rs:~2917) · — · links DV16, #152 · note: an effect op called inside a
+  `"${...}"` interpolation emits UNREWRITTEN on Rust only (`now()` not `clock.now()` → rustc E0425). The
+  `NodeKind::Interpolation` branch spawns a fresh `RsEmitCtx::new()` that copies `enum_variants`/`self_operand_methods`
+  but NOT `effect_ops`/`current_handler_vars` (the other 4 targets emit interpolated exprs inline, so they're fine).
+  Fix = ~4 lines: clone those maps into the sub-context — the SAME shape as the #152 iter sub-context fix. Confirmed
+  by the 2026-05-31 effect probe (P2). One site; add an `exec_effect_interpolation.bock` ×5 fixture.
+- **[Q-effect-conformance-wiring] The `conformance/effects/` suite is never checked or executed** — bug/test-infra ·
+  ready (couples to DV16/Design) · `compiler/tests/`, `compiler/tests/conformance/effects/` · — · links DV16 · note:
+  the `effects/` fixtures are parse-only (the directive harness only parses; the exec harness scans only `exec/`), so
+  `// EXPECT: no_errors`/`output` on them is inert and the effect system has never been checked/executed there. Wire
+  `effects/` into the execution harness (or move runnable effect fixtures under `exec/` with `targets` directives).
+  WILL EXPOSE the DV16 bare-op E1001 failures — so sequence with the §10 Design ruling (the fixtures may need
+  rewriting to the `with`-clause form, or the checker bare-op resolution fixed, depending on Design).
 
 ## v1-blocking
 

@@ -304,3 +304,18 @@ question. Q2 should be decided WITH the feasibility-probe result (the orchestrat
 **Awaiting:** Design (+ owner) decision on Q1/Q2 (the floor contents) — the rest are additive. The owner is
 present in-chat and may answer directly, which the orchestrator then reconciles into the spec/floor.
 **Status:** pending
+
+**Probe result (2026-05-31 22:55 UTC) — informs Q2/Q8:** the cross-module effect feasibility probe verdict:
+the `with`-clause form (declare op in module A; perform inside `fn ... with <Effect>` bodies; handle via
+`handling (Effect with h()) { }`; `use A.{Effect, handler}`) **executes correctly on ALL 5 targets** (P1). So
+**Q2 = an executable `Log` effect IS shippable ×5 in Variant-A form — via the `with`-clause surface** (avoiding
+value-returning ops inside `${...}` on Rust until Q-effect-interp-rust lands). BUT the probe also surfaced a
+**new core-spec divergence, DV16** (filed): bare effect-op calls (`log("...")`) don't resolve even same-module
+(E1001), so the §10.2 bare-op/Layer-1-direct/Layer-2 ergonomic surface is non-functional, and the entire
+`effects/` conformance suite is inert (never checked/executed). **This couples to Q1/Q2:** if Design intends
+bare-op invocation as a v1 form, the checker has a real bug to fix (and core.effect's `Log` would otherwise present
+only the `with`-clause surface); if the `with`-clause is the intended v1 form, §10.2 + the `effects/` fixtures need
+correcting. **New question for Design alongside DQ25: is bare effect-op invocation a v1 form (→ fix the checker), or
+is the `with`-clause the v1 form (→ correct the spec/fixtures)?** Sequencing of the effect-foundation fixes
+(DV16 / Q-effect-conformance-wiring / Q-effect-interp-rust) vs. shipping core.effect on the working subset is an
+operator call (surfaced in-chat).
