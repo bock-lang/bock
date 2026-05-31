@@ -1,0 +1,25 @@
+// TEST: stdlib_iter_traits_resolve
+// EXPECT: no_errors
+//
+// A user file importing the `core.iter` traits, the concrete iterator record,
+// and the constructor resolves cleanly through the embedded stdlib: `list_iter`
+// builds a `ListIterator[Int]`, and driving it with the proven
+// `loop { match it.next() { Some(x) => ...; None => break } }` shape type-checks
+// (the Some payload `x` resolves to the concrete element type `Int`).
+module userapp
+
+use core.iter.{Iterator, Iterable, ListIterator, list_iter}
+
+public fn sum_via_drive() -> Int {
+  let mut it: ListIterator[Int] = list_iter([1, 2, 3])
+  let mut total: Int = 0
+  loop {
+    match it.next() {
+      Some(x) => {
+        total = total + x
+      }
+      None => break
+    }
+  }
+  total
+}

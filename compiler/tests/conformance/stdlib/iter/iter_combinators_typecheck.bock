@@ -1,0 +1,20 @@
+// TEST: stdlib_iter_combinators_typecheck
+// EXPECT: no_errors
+//
+// Every `core.iter` combinator type-checks against a `ListIterator[Int]`:
+// `to_list`/`count`/`fold`/`map`/`filter`/`take`. The higher-order combinators
+// (`fold`/`map`/`filter`) receive Bock lambdas, exercising the function-typed
+// parameters (`Fn(A, T) -> A`, `Fn(T) -> U`, `Fn(T) -> Bool`).
+module userapp
+
+use core.iter.{ListIterator, list_iter, to_list, count, fold, map, filter, take}
+
+public fn all_combinators() -> Int {
+  let listed: List[Int] = to_list(list_iter([1, 2, 3]))
+  let n: Int = count(list_iter([1, 2, 3]))
+  let summed: Int = fold(list_iter([1, 2, 3]), 0, (acc, x) => acc + x)
+  let doubled: List[Int] = map(list_iter([1, 2, 3]), (x) => x * 2)
+  let kept: List[Int] = filter(list_iter([1, 2, 3, 4]), (x) => x > 2)
+  let taken: List[Int] = take(list_iter([1, 2, 3, 4]), 2)
+  n + summed
+}

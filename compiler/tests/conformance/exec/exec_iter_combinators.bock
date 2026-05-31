@@ -1,0 +1,39 @@
+// TEST: exec_iter_combinators
+// EXPECT: output "6;3;2;6"
+// EXPECT: targets js, ts, python
+//
+// Cross-target proof that the eager, List-returning `core.iter` combinators run,
+// built from read-only `List` ops (`concat`/`get`, never `.push`, per DQ18).
+// The four printed fields are integer-only on every target (Python `/` is float
+// division, so no division is used):
+//   * fold(list_iter([1,2,3]), 0, add)              == 6   (sum)
+//   * count(list_iter([1,2,3]))                     == 3
+//   * filter(list_iter([1,2,3,4]), (x) => x > 2)    -> [3,4], len 2
+//   * map(list_iter([1,2,3]), (x) => x * 2) = [2,4,6]; fold(.., add) = 12;
+//     12 - 6 = 6
+// => "6;3;2;6". This exercises `fold`/`count`/`filter`/`map`/`to_list` and the
+// higher-order Bock lambdas they take.
+//
+// TARGETS — js/ts/python only (NOT rust/go); see exec_iter_manual_drive.bock for
+// the Rust/Go generic-combinator codegen residue FOUND in this PR.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.iter.{list_iter, count, fold, filter, map}
+
+fn add(acc: Int, x: Int) -> Int {
+  acc + x
+}
+
+fn main() -> Void {
+  let folded: Int = fold(list_iter([1, 2, 3]), 0, add)
+  let counted: Int = count(list_iter([1, 2, 3]))
+  let kept: List[Int] = filter(list_iter([1, 2, 3, 4]), (x) => x > 2)
+  let kept_len: Int = kept.len()
+  let doubled: List[Int] = map(list_iter([1, 2, 3]), (x) => x * 2)
+  let doubled_sum: Int = fold(list_iter(doubled), 0, add)
+  let doubled_half: Int = doubled_sum - 6
+  println("${folded};${counted};${kept_len};${doubled_half}")
+}

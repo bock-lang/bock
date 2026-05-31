@@ -1,0 +1,41 @@
+// TEST: exec_iter_manual_drive
+// EXPECT: output "sum=6"
+// EXPECT: targets js, ts, python
+//
+// End-to-end proof that the embedded `core.iter` `ListIterator` drives the
+// proven manual loop: `list_iter([1, 2, 3])` builds a `ListIterator[Int]`, and
+// `loop { match it.next() { Some(x) => ...; None => break } }` sums its
+// elements. This is the SAME drive shape as the hand-written
+// `generic_iter_concrete_match.bock` (#149), here resolved through the embedded
+// `core.iter` module.
+//
+// TARGETS — js/ts/python only (NOT rust/go). The embedded `core.iter` module
+// compiles ALL its items into every importing program (no tree-shaking), so the
+// generic combinator codegen residue on Rust and Go (FOUND in the PR: Rust
+// `T: Clone` not propagated from the `next` impl to the combinator free
+// functions; Go generic-record-construct emits `ListIterator[any]` in
+// `list_iter` + `[]interface{}{x}` in concat-arg position + an `undefined: T`
+// `Iterable` interface) fails the Rust/Go *compile* even for this manual-drive
+// program that never calls a combinator. js/ts/python carry generics
+// structurally and are unaffected. Restoring rust/go here is the codegen
+// fast-follow tracked from this PR.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.iter.{ListIterator, list_iter}
+
+fn main() -> Void {
+  let mut it: ListIterator[Int] = list_iter([1, 2, 3])
+  let mut total: Int = 0
+  loop {
+    match it.next() {
+      Some(x) => {
+        total = total + x
+      }
+      None => break
+    }
+  }
+  println("sum=${total}")
+}
