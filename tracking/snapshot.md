@@ -74,10 +74,12 @@ v1-blocking, phased P0-P4, ~10-15 PRs): fix comprehensively, THEN resume the std
 PAUSED** behind it. The for→Iterable desugar is proven (T1 ×5) and resumes after the milestone's P0/P1.
 **Phase 0 + Phase 1 DONE** (#131-#138): cross-module single-file bundling, user-enum registry, generics on all 5
 (DV12), the `recv_kind` receiver-type annotation (#137), primitive-bridge dispatch, Result runtime +
-Optional/Result methods. Generics/Result/Optional/primitive-bridge now work on all 5. **Phase 2 (traits + match
-completeness) NEXT** — gates the stdlib's trait-using modules (core.compare/convert) running cross-module on the
-typed targets — then P3 (Go collection typing / Map/Set / range()), P4 (polish: `expr?`/DQ20, tuple `.N`,
-expr-position, Int/Int+Bool-interp, mutating-List/DQ18). (§20.6.1 bundling → DQ19; `expr?` → DQ20.)
+Optional/Result methods. **Phase 2 DONE** (#140 trait self/defaults/bounded-dispatch · #141 Self-subst · #142
+match guards/or/nested/tuple) — **the stdlib's trait-using modules now EXECUTE cross-module on all 5** (proven by
+`use_core_compare.bock`). Generics/Result/Optional/traits/match/primitive-bridge all work ×5 (~195 exec pairs).
+**Phase 3 (Go collection typing / Map/Set / range()) NEXT** — then P4 (polish: `expr?`/DQ20, tuple `.N` parser,
+expr-position, Int/Int+Bool-interp, mutating-List/DQ18, go/ts Self-in-plain-impl, Go nested-payload typed-arith),
+then Q-stdlib R1 (iter, effect) resumes. (§20.6.1 bundling → DQ19; `expr?` → DQ20; has_body flag → DQ21.)
 **§18.2 prelude auto-import is live** (#120): the core-defined prelude symbols
 (`Ordering`/`Less`/`Equal`/`Greater`, `Comparable`/`Equatable`, `Into`/`From`/
 `TryFrom`/`Displayable`, `Error`) resolve without an explicit `use` (the membership

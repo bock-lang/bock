@@ -1183,3 +1183,30 @@ Merged this half: #123 (vscode CI), #124 (TS codegen), #125 (changelog hygiene),
     value-match binding. Then P3 (Go collection typing + Map/Set + range()), P4 (polish: `?`, tuple `.N` parser,
     Go/TS expr-position, Int/Int + Bool-interp harmonize, mutating-List/DQ18). Then Q-stdlib R1 resumes.
   Checkpoint with the operator at the P1/P2 boundary (this report). main 7c201fc.
+
+[2026-05-31 03:44 UTC] PHASE 2 of the codegen-completeness milestone COMPLETE (#140/#141/#142); operator: continue P3→P4
+  Input: continued autonomous execution (Phase-2 plan tracking/plans/...phase2-plan.md). Sequenced P2-α → [P2-β ∥ P2-γ].
+  MERGED (main d1f32f1 → 7806e8d; each gate-clean, full-matrix CI, worktree-removed-first, re-synced):
+    - #140 P2-α trait codegen (TS trait-self typing; trait default methods via a new collect_trait_decls
+      registry; generic-bounded dispatch via a `TraitBound:<Trait>` recv_kind tag — extended #137, NO ripple).
+      **PAYOFF: `use_core_compare.bock` (a real `use core.compare.{Ordering,key,max}`) runs on ALL 5** — the
+      stdlib's trait-using modules now execute cross-module everywhere. Also fixed pre-existing defects the
+      payoff exposed (py forward-refs; Rust Self-operand borrow incl. stdlib max/min; Go F-bounded interfaces +
+      bundled Ordering). 170 exec pairs.
+    - #141 P2-γ Self-subst (Q-self-subst) — pure-checker: substitute Self→target at impl-method-sig registration
+      (E4001 gone for `-> Self` and `other: Self`). bock-types only; trait path + recv_kind undisturbed.
+    - #142 P2-β match completeness — shared if/else-if-chain lowering (additive, behind match_needs_ifchain) for
+      guards/or/nested/tuple on js/ts/go; Python native + recursion; Go binding-drop + tuple-construction fixes;
+      Rust verified. 195 exec pairs; all existing matches stay green.
+  P2-β ∥ P2-γ ran in parallel (disjoint crates: β bock-codegen, γ bock-types) — the safe parallelization.
+  MILESTONE STATUS: P0+P1+P2 done; the codegen substrate (cross-module, enums, generics, Optional/Result+methods,
+    primitive-bridge, traits [self/defaults/bounded], match) is in on all 5; the stdlib's trait-using modules
+    EXECUTE cross-module. ~195 exec pairs (from 32 at block start). Remaining: P3 (Go collection typing, Map/Set,
+    range()), P4 (polish: expr?/DQ20, tuple `.N` parser, expr-position/Q-match-exprpos, Int/Int+Bool-interp,
+    mutating-List/DQ18, + the go/ts Self-in-PLAIN-impl OPEN [#141] and Go nested-payload typed-arith [#142]).
+  CHECKPOINT (AskUserQuestion at P2/P3): operator chose **"Continue: P3 then P4"** (over resume-stdlib-now / pause)
+    — finish the substrate, then resume the stdlib. Phase-3 design dispatched (Plan agent aeede38d).
+  OPEN/follow-ups: DQ21 (is_default_method empty-block heuristic → a robust `has_body` AIR flag; #140; low-pri →
+    Design); go/ts Self-in-plain-impl (#141 → P3/P4); Go nested-payload typed-arith (#142 → P4); FOUND: stdlib
+    core.compare.bock can drop its `other: Key` workaround for `other: Self` now (#141; stdlib-cleanup follow-up).
+  NEXT: P3 (per the design) → P4 → then Q-stdlib R1 (iter, effect) resumes. main 7806e8d.
