@@ -1,0 +1,42 @@
+// TEST: exec_range_for
+// EXPECT: output "3;6"
+// EXPECT: targets js, ts, python, rust, go
+//
+// T1 spike for `range()` codegen (codegen-completeness P3, item 4). A half-open
+// `for i in 0..n` (sums 0+1+2 = 3) and an inclusive `for j in 0..=n`
+// (0+1+2+3 = 6). Pins the exact inclusive/exclusive bound semantics across all
+// five targets. Before: js/ts emitted bare `range(...)`/`rangeInclusive(...)`
+// with no runtime definition (`ReferenceError`), and Go emitted
+// `/* range */ nil` (a non-iterable). After: js/ts inject a `range`/
+// `rangeInclusive` array-builder runtime (once per bundle), and Go injects a
+// `__bockRange(lo, hi, inclusive) []int64` helper so `for _, x := range
+// __bockRange(...)` iterates. Python (`range(lo, hi)` / `range(lo, hi + 1)`)
+// and Rust (`lo..hi` / `lo..=hi`) are native and unchanged.
+//
+// The accumulator is explicitly `Int` (`let mut total: Int = 0`) so Go binds it
+// as `int64` to match the `int64` range loop variable — an untyped `0` would
+// default to Go `int`, a pre-existing, range-independent int-literal-typing
+// concern (DV-adjacent) this fixture does not couple to.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn sumRange(n: Int) -> Int {
+  let mut total: Int = 0
+  for i in 0..n {
+    total = total + i
+  }
+  total
+}
+
+fn sumInclusive(n: Int) -> Int {
+  let mut total: Int = 0
+  for j in 0..=n {
+    total = total + j
+  }
+  total
+}
+
+fn main() -> Void {
+  println("${sumRange(3)};${sumInclusive(3)}")
+}

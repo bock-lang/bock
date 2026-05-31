@@ -46,6 +46,29 @@ const __bockChannelNew = () => {
 const __bockSpawn = (x) => x;
 ";
 
+/// Runtime helpers for Bock range expressions (`0..n` / `0..=n`), injected at
+/// the top of any module that uses a `Range`. JS has no native range value, so
+/// `for i in 0..n` lowers to `for (const i of range(0, n))`; these define
+/// `range`/`rangeInclusive` as eager `Array` builders matching Bock's
+/// half-open (`range`) and inclusive (`rangeInclusive`) bound semantics — the
+/// same semantics Python's `range(lo, hi)` / `range(lo, hi + 1)` and Rust's
+/// `lo..hi` / `lo..=hi` produce. Emitted at most once per bundle, gated on a
+/// ctx flag (mirrors the concurrency runtime).
+const RANGE_RUNTIME_JS: &str = "\
+// ── Bock range runtime ──
+const range = (lo, hi) => { const r = []; for (let i = lo; i < hi; i++) r.push(i); return r; };
+const rangeInclusive = (lo, hi) => { const r = []; for (let i = lo; i <= hi; i++) r.push(i); return r; };
+";
+
+/// True if the module references a `Range` node anywhere (so the range runtime
+/// prelude must be emitted). A cheap structural scan over the debug rendering,
+/// mirroring [`EmitCtx::module_uses_concurrency`]. `RangePat` (a match-arm range
+/// pattern) does not contain the `Range {` substring, so it is not matched —
+/// the helpers are only needed for range *values*.
+fn js_module_uses_range(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| format!("{n:?}").contains("Range {"))
+}
+
 /// JavaScript code generator implementing the `CodeGenerator` trait.
 #[derive(Debug)]
 pub struct JsGenerator {
@@ -211,6 +234,12 @@ struct EmitCtx {
     /// emits the runtime at most once. A lone-module build sets it on first use
     /// exactly as before.
     concurrency_runtime_emitted: bool,
+    /// Set once the range runtime prelude ([`RANGE_RUNTIME_JS`]) has been
+    /// emitted, so a single-file bundle emits the `range`/`rangeInclusive`
+    /// helpers at most once (a duplicate `const range` would be a redeclaration
+    /// error). Deduped across a bundle exactly as
+    /// [`Self::concurrency_runtime_emitted`].
+    range_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Maps a variant name to its enum so a
     /// unit-variant reference lowers to the frozen `{enum}_{variant}` const, a
     /// struct/tuple construction lowers to the `{enum}_{variant}(..)` factory,
@@ -246,6 +275,7 @@ impl EmitCtx {
             loop_label_counter: 0,
             match_temp_counter: 0,
             concurrency_runtime_emitted: false,
+            range_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
         }
@@ -809,6 +839,301 @@ impl EmitCtx {
         Ok(true)
     }
 
+    /// Emit a built-in `Map[K, V]` method call to its JS form (native `Map`).
+    ///
+    /// Recognised via [`crate::generator::desugared_map_method`] (gated on the
+    /// checker's `recv_kind = "Map"` annotation) and wired into the `Call` arm
+    /// *before* [`Self::try_emit_list_method`], so a `Map` receiver's
+    /// `get`/`contains_key`/`len` dispatch here rather than through the `List`
+    /// path. `get` returns the same tagged-`Optional` representation the rest of
+    /// codegen uses (`{ _tag: "Some", _0: v }` / `{ _tag: "None" }`). Mutating
+    /// methods (`set`/`delete`/`merge`) mutate in place and return the receiver,
+    /// matching the checker's `-> Map[K, V]` return type (full value-vs-`mut
+    /// self` semantics is DQ18 → P4). Returns `true` if the call was handled.
+    fn try_emit_map_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_map_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "len" | "length" | "count" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").size");
+            }
+            "is_empty" => {
+                self.buf.push_str("((");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").size === 0)");
+            }
+            "contains_key" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").has(");
+                self.emit_expr(&k.value)?;
+                self.buf.push(')');
+            }
+            "get" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "((__m, __k) => __m.has(__k) ? { _tag: \"Some\", _0: __m.get(__k) } : \
+                     { _tag: \"None\" })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&k.value)?;
+                self.buf.push(')');
+            }
+            "set" => {
+                let (Some(k), Some(v)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__m, __k, __v) => { __m.set(__k, __v); return __m; })(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&k.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&v.value)?;
+                self.buf.push(')');
+            }
+            "delete" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__m, __k) => { __m.delete(__k); return __m; })(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&k.value)?;
+                self.buf.push(')');
+            }
+            "merge" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "((__m, __o) => { for (const [__k, __v] of __o) __m.set(__k, __v); \
+                     return __m; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "((__m, __f) => { const __r = new Map(); \
+                     for (const [__k, __v] of __m) if (__f(__k, __v)) __r.set(__k, __v); \
+                     return __r; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            "keys" => {
+                self.buf.push_str("[...(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").keys()]");
+            }
+            "values" => {
+                self.buf.push_str("[...(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").values()]");
+            }
+            "entries" | "to_list" => {
+                self.buf.push_str("[...(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").entries()]");
+            }
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__m, __f) => { for (const [__k, __v] of __m) __f(__k, __v); })(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Emit a built-in `Set[E]` method call to its JS form (native `Set`).
+    ///
+    /// Recognised via [`crate::generator::desugared_set_method`] (gated on
+    /// `recv_kind = "Set"`) and wired *before* [`Self::try_emit_list_method`],
+    /// so a `Set` receiver's `contains`/`len`/`filter`/`map` no longer route
+    /// through the `List` path. Mutating methods (`add`/`remove`) mutate in
+    /// place and return the receiver. Returns `true` if handled.
+    fn try_emit_set_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_set_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "len" | "length" | "count" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").size");
+            }
+            "is_empty" => {
+                self.buf.push_str("((");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").size === 0)");
+            }
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").has(");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "add" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__s, __x) => { __s.add(__x); return __s; })(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "remove" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__s, __x) => { __s.delete(__x); return __s; })(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "union" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__a, __b) => new Set([...__a, ...__b]))(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "intersection" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__a, __b) => new Set([...__a].filter((__x) => __b.has(__x))))(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "difference" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__a, __b) => new Set([...__a].filter((__x) => !__b.has(__x))))(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "is_subset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__a, __b) => [...__a].every((__x) => __b.has(__x)))(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "is_superset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__a, __b) => [...__b].every((__x) => __a.has(__x)))(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__s, __f) => new Set([...__s].filter(__f)))(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            "map" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__s, __f) => new Set([...__s].map(__f)))(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            "to_list" => {
+                self.buf.push_str("[...(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(")]");
+            }
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("((__s, __f) => { for (const __x of __s) __f(__x); })(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     /// Lower a primitive trait-bridge method call (`compare`/`eq`/`to_string`/
     /// `display` on a primitive receiver) to its JS form.
     ///
@@ -871,6 +1196,11 @@ impl EmitCtx {
                     self.buf.push_str(CONCURRENCY_RUNTIME_JS);
                     self.buf.push('\n');
                     self.concurrency_runtime_emitted = true;
+                }
+                if !self.range_runtime_emitted && js_module_uses_range(items) {
+                    self.buf.push_str(RANGE_RUNTIME_JS);
+                    self.buf.push('\n');
+                    self.range_runtime_emitted = true;
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -1713,6 +2043,16 @@ impl EmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                // Map/Set method dispatch runs *before* the List recogniser so
+                // the overlapping method names (`len`/`contains`/`filter`/`map`/
+                // `to_list`) and the Map/Set-only `get`/`set`/`add`/`keys`/… are
+                // routed by the checker's `recv_kind`, not by name alone.
+                if self.try_emit_map_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_set_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {

@@ -1,0 +1,26 @@
+// TEST: exec_map_literal
+// EXPECT: output "2;10"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Map literal `{"k": v}` construction (codegen-completeness P3, item 3). Builds
+// a `Map[String, Int]` literal and reads it back via `len()` and a matched
+// `get(k)`. The js/ts "Map literal failures" were largely item-2 artifacts (the
+// `m.get`/`m.len` misdispatch); with the Map recogniser in place this confirms
+// the literal itself emits a valid native `Map`/`dict`/`HashMap`/typed `map[K]V`
+// on every target. Go literal element typing was done in P3-α.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn readBack(m: Map[String, Int]) -> String {
+  let n = m.len()
+  match m.get("a") {
+    Some(x) => return "${n};${x}"
+    None => return "${n};none"
+  }
+}
+
+fn main() -> Void {
+  let m: Map[String, Int] = {"a": 10, "b": 20}
+  println(readBack(m))
+}

@@ -836,6 +836,289 @@ impl PyEmitCtx {
         Ok(true)
     }
 
+    /// Emit a built-in `Map[K, V]` method call to its Python form (native
+    /// `dict`).
+    ///
+    /// Recognised via [`crate::generator::desugared_map_method`] (gated on
+    /// `recv_kind = "Map"`) and wired *before* [`Self::try_emit_list_method`],
+    /// so a `Map` receiver's `get`/`contains_key`/`len` no longer route through
+    /// the `List` path (where `get` would index `__m[__i]` instead of testing
+    /// key membership, and `set`/`contains_key` would call non-existent `dict`
+    /// methods). `get` returns the tagged `Optional` rep
+    /// (`_BockSome(v)`/`_bock_none`). Mutating methods (`set`/`delete`/`merge`)
+    /// mutate in place via the `(side_effect, recv)[1]` tuple idiom (Python
+    /// lambdas are expression-only) and return the receiver. Returns `true` if
+    /// handled.
+    fn try_emit_map_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_map_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "len" | "length" | "count" => {
+                self.buf.push_str("len(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "is_empty" => {
+                self.buf.push_str("(len(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(") == 0)");
+            }
+            "contains_key" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(&k.value)?;
+                self.buf.push_str(" in ");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "get" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(lambda __m, __k: _BockSome(__m[__k]) if __k in __m else _bock_none)(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&k.value)?;
+                self.buf.push(')');
+            }
+            "set" => {
+                let (Some(k), Some(v)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("(lambda __m, __k, __v: (__m.__setitem__(__k, __v), __m)[1])(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&k.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&v.value)?;
+                self.buf.push(')');
+            }
+            "delete" => {
+                let Some(k) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("(lambda __m, __k: (__m.pop(__k, None), __m)[1])(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&k.value)?;
+                self.buf.push(')');
+            }
+            "merge" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("(lambda __m, __o: (__m.update(__o), __m)[1])(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(lambda __m, __f: {__k: __v for __k, __v in __m.items() if __f(__k, __v)})(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&f.value)?;
+                self.buf.push(')');
+            }
+            "keys" => {
+                self.buf.push_str("list(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(".keys())");
+            }
+            "values" => {
+                self.buf.push_str("list(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(".values())");
+            }
+            "entries" | "to_list" => {
+                self.buf.push_str("list(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(".items())");
+            }
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str("[(");
+                self.emit_expr(&f.value)?;
+                self.buf.push_str(")(__k, __v) for __k, __v in (");
+                self.emit_expr(recv)?;
+                self.buf.push_str(").items()]");
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Emit a built-in `Set[E]` method call to its Python form (native `set`).
+    ///
+    /// Recognised via [`crate::generator::desugared_set_method`] (gated on
+    /// `recv_kind = "Set"`) and wired *before* [`Self::try_emit_list_method`].
+    /// Set algebra maps to Python's operators (`|`/`&`/`-`/`<=`/`>=`). Mutating
+    /// methods (`add`/`remove`) mutate in place via the `(side_effect, recv)[1]`
+    /// idiom and return the receiver.
+    fn try_emit_set_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) = crate::generator::desugared_set_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "len" | "length" | "count" => {
+                self.buf.push_str("len(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "is_empty" => {
+                self.buf.push_str("(len(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(") == 0)");
+            }
+            "contains" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(&x.value)?;
+                self.buf.push_str(" in ");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "add" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("(lambda __s, __x: (__s.add(__x), __s)[1])(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "remove" => {
+                let Some(x) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf
+                    .push_str("(lambda __s, __x: (__s.discard(__x), __s)[1])(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "union" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(" | ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "intersection" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(" & ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "difference" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(" - ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "is_subset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(" <= ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "is_superset" => {
+                let Some(o) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(" >= ");
+                self.emit_expr(&o.value)?;
+                self.buf.push(')');
+            }
+            "filter" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str("{__x for __x in (");
+                self.emit_expr(recv)?;
+                self.buf.push_str(") if (");
+                self.emit_expr(&f.value)?;
+                self.buf.push_str(")(__x)}");
+            }
+            "map" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str("{(");
+                self.emit_expr(&f.value)?;
+                self.buf.push_str(")(__x) for __x in (");
+                self.emit_expr(recv)?;
+                self.buf.push_str(")}");
+            }
+            "to_list" => {
+                self.buf.push_str("list(");
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "for_each" => {
+                let Some(f) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str("[(");
+                self.emit_expr(&f.value)?;
+                self.buf.push_str(")(__x) for __x in (");
+                self.emit_expr(recv)?;
+                self.buf.push_str(")]");
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     /// Lower a primitive trait-bridge method call (`compare`/`eq`/`to_string`/
     /// `display` on a primitive receiver) to its Python form.
     ///
@@ -2132,6 +2415,14 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
+                    return Ok(());
+                }
+                // Map/Set dispatch precedes the List recogniser so the
+                // overlapping method names route by `recv_kind`, not by name.
+                if self.try_emit_map_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_set_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {

@@ -1,0 +1,28 @@
+// TEST: exec_set_literal
+// EXPECT: output "3;yes;no"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Set literal `#{a, b, c}` construction (codegen-completeness P3, item 3).
+// Builds a `Set[Int]` literal and reads it back via `len()` and `contains(x)`.
+// Verifies the literal emits a valid native `Set`/`set`/`HashSet`/typed
+// `map[E]struct{}` on every target (Go set-literal typing was done in P3-α),
+// now that the Set recogniser routes `len`/`contains` to the native form.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn yn(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn readBack(s: Set[Int]) -> String {
+  return "${s.len()};${yn(s.contains(2))};${yn(s.contains(7))}"
+}
+
+fn main() -> Void {
+  let s: Set[Int] = #{1, 2, 3}
+  println(readBack(s))
+}

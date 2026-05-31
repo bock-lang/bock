@@ -1,0 +1,35 @@
+// TEST: exec_set_add_contains
+// EXPECT: output "4;yes;no;4"
+// EXPECT: targets js, ts, python, rust, go
+//
+// T1 spike for `Set[E]` built-in method dispatch (codegen-completeness P3,
+// item 2). `s.add(x)` (returns the set), `s.len()` (Int), `s.contains(x)`
+// (Bool — the *set* membership, distinct from `List.contains`'s linear scan),
+// and `s.union(o).len()` to exercise a non-mutating set-algebra method.
+// Proves the Set recogniser + per-backend lowering on all five targets:
+// without them `s.add` double-passed the receiver (`s.add(s, x)`), `s.len()`
+// mis-routed through the List path (JS `.length` on a `Set`, which is
+// `undefined`), and `contains` matched List rather than native membership.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn yn(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn report(s: Set[Int]) -> String {
+  let n = s.len()
+  let other: Set[Int] = #{3, 4}
+  let u = s.union(other)
+  return "${n};${yn(s.contains(2))};${yn(s.contains(9))};${u.len()}"
+}
+
+fn main() -> Void {
+  let base: Set[Int] = #{1, 2, 3}
+  let s2 = base.add(4)
+  println(report(s2))
+}
