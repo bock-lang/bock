@@ -1,0 +1,25 @@
+// TEST: exec_record_spread
+// EXPECT: output "1;9"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Record-spread (codegen-completeness P3-α, item 5): `Point { y: 9, ..p }`
+// builds a new record from a base value `p`, overriding field `y`. Before the
+// fix Go emitted `Point{/* spread */ Y: 9}` and DROPPED `..p` entirely, so `x`
+// was the zero value (`0`) instead of `p.x` (`1`). Go has no struct-spread
+// syntax, so the fix emits an IIFE that copies the base then assigns the
+// overrides: `func() Point { __s := p; __s.Y = 9; return __s }()`. js/ts/python
+// /rust have native spread/struct-update and were already correct.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+record Point {
+  x: Int
+  y: Int
+}
+
+fn main() -> Void {
+  let p: Point = Point { x: 1, y: 2 }
+  let q: Point = Point { y: 9, ..p }
+  println("${q.x};${q.y}")
+}

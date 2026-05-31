@@ -1,0 +1,49 @@
+// TEST: exec_nested_match_arith
+// EXPECT: output "30"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Nested-match-payload typed arithmetic (codegen-completeness P3-α,
+// item 6-go-nested): a depth-2 *nested constructor pattern* over USER enums
+// (`Wrap(Leaf(n))`) whose deepest binding `n` is used in typed `Int`
+// arithmetic (`n * 3`). For user-enum payloads the Go type-switch binds the
+// deepest field through a concrete field-access chain
+// (`__v.(OuterWrap).Field0.(InnerLeaf).Field0`), which carries the concrete
+// `int64` type — so typed arithmetic on a depth-2 user-enum binding compiles
+// and runs on all five targets. This fixture is the regression guard for that
+// case.
+//
+// SCOPE NOTE — the Optional/Result *runtime-struct* nested case is NOT covered
+// here and is split to P4 (surfaced as an OPEN in the PR). A nested match
+// through the tagged Optional/Result runtime (e.g.
+// `match o: Result[Int, String]? { Some(Ok(v)) => v + 1 }`) takes the
+// shared if/else-if-chain lowering, whose Go nested-bind emitter binds the
+// deepest payload from the runtime struct's `interface{}` `.v`
+// (`v := o.v.(__bockResult).v`) WITHOUT a numeric/type re-assertion, so typed
+// arithmetic on `v` falls back to `interface{}` and `go build` rejects it.
+// Re-asserting that leaf requires threading the STRUCTURED scrutinee type
+// (`Result[Int, String]` → `Ok` payload is `Int`) through the nested-bind
+// emitter — the Go element-type scope maps only carry one un-unwrappable level
+// (`__bockResult`), so this is match-lowering surgery, not a scope-map
+// recursion. Deferred to P4 per the session's STOP-and-split directive.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+enum Inner {
+  Leaf(Int)
+}
+
+enum Outer {
+  Wrap(Inner)
+}
+
+fn unwrap(o: Outer) -> Int {
+  match o {
+    Wrap(Leaf(n)) => return n * 3
+  }
+}
+
+fn main() -> Void {
+  let o: Outer = Wrap(Leaf(10))
+  println("${unwrap(o)}")
+}

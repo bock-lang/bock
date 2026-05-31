@@ -1,0 +1,46 @@
+// TEST: exec_self_in_plain_impl
+// EXPECT: output "12"
+// EXPECT: targets js, python, rust, go
+//
+// `Self`-in-plain-impl (codegen-completeness P3-α, item 6-go-self; folds the
+// Go half of OPEN #141): a plain inherent `impl` method that names the `Self`
+// type in return position (a constructor-style `combine` returning `Self`).
+// Before the fix Go set `go_self_subst` only for trait-impl (value-receiver)
+// methods, so an inherent-impl `Self` lowered to the placeholder `/* Self */`,
+// producing uncompilable Go (`func(...) /* Self */`). The fix sets
+// `go_self_subst` to the receiver type for ALL impl methods. js/python/rust
+// resolve a `Self` return type in inherent impls already (Rust lowers it to its
+// native `Self`).
+//
+// `ts` is intentionally OMITTED, mirroring `self_return.bock`: TS lowers `Self`
+// to the `this` type, but the impl methods are assigned as
+// `Counter.prototype.x = function(...): this { … }`, and `tsc` only permits a
+// `this` type inside a class/interface member, so it rejects the assignment
+// (TS2526). That is a pre-existing ts.rs codegen gap, orthogonal to this
+// Go-only session and outside its ownership — surfaced as an OPEN in the PR.
+// This session fixes the Go half of `self_return.bock`'s two documented gaps;
+// `go` could be added to that fixture's targets as a follow-up.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+record Counter {
+  value: Int
+}
+
+impl Counter {
+  fn combine(self, other: Counter) -> Self {
+    return Counter { value: self.value + other.value }
+  }
+
+  fn get(self) -> Int {
+    return self.value
+  }
+}
+
+fn main() -> Void {
+  let a: Counter = Counter { value: 5 }
+  let b: Counter = Counter { value: 7 }
+  let c: Counter = a.combine(b)
+  println("${c.get()}")
+}
