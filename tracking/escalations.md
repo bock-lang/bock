@@ -280,5 +280,42 @@ precedent; all three are additive/reversible.
 **Status:** pending
 
 > Standing non-blocking Design queue (filed; queue not blocked on any): DQ10, DQ11, DQ12, DQ13, DQ16-residue,
-> DQ17, DQ18, DQ19, DQ20, DQ21, DQ22, DQ23, DQ24, Bool-interp spelling. The orchestrator proceeds on safe defaults
+> DQ17, DQ18, DQ19, DQ20, DQ21, DQ22, DQ23, DQ24, DQ25, Bool-interp spelling. The orchestrator proceeds on safe defaults
 > and reconciles spec/divergences as Design decides.
+
+## [2026-05-31 22:35 UTC] core.effect v1 surface — 8 questions (DQ25) → Design
+
+**Type:** design (core-spec)
+**Severity:** medium (the floor BUILD waits on Q1/Q2 — but the queue is NOT blocked: feasibility probe + scoping proceed in parallel)
+**Trigger:** the operator chose "scope core.effect" (the next R1 module). The Plan agent found `core.effect`'s
+v1 surface is genuinely **under-specified** (§18.3:1728 = "Effect system primitives" only; no §18.3.x subsection).
+Per the core-spec rule the orchestrator FILES the surface questions for Design rather than deciding them.
+**Context (design-questions.md DQ25 — 8 sub-questions):** the headline ones — **Q1** primitives-only vs a
+library of concrete effects (rec primitives-only); **Q2** ship a standard `Log` effect as the executable
+example, conditioned on cross-module effect execution proving feasible ×5 (rec yes-iff-feasible) — the most
+consequential, since it decides whether the floor contains a *runnable* effect; **Q8** what is the
+"representative example that runs" (§18.3:1716 acceptance bar) for a primitives-only floor. Q3-Q7 (ambient
+effects / Clock-Cancel ownership / handler utility traits / composites / Reserved-v1.x) have low-controversy recs.
+**The effect MACHINERY is implemented** (§10; effects.rs ~1112 lines; effect codegen ×5; 7 fixtures) and
+resolve-layer cross-module-wired — this is a SURFACE decision + a cross-module-EXECUTION feasibility gap on
+Rust/Go (never proven; all effect fixtures are check-only). A feasibility probe is running to inform Q2/Q8.
+**Recommendation:** none on the merits (Design's call); the plan gives a recommended minimum-useful default per
+question. Q2 should be decided WITH the feasibility-probe result (the orchestrator will route that result here).
+**Awaiting:** Design (+ owner) decision on Q1/Q2 (the floor contents) — the rest are additive. The owner is
+present in-chat and may answer directly, which the orchestrator then reconciles into the spec/floor.
+**Status:** pending
+
+**Probe result (2026-05-31 22:55 UTC) — informs Q2/Q8:** the cross-module effect feasibility probe verdict:
+the `with`-clause form (declare op in module A; perform inside `fn ... with <Effect>` bodies; handle via
+`handling (Effect with h()) { }`; `use A.{Effect, handler}`) **executes correctly on ALL 5 targets** (P1). So
+**Q2 = an executable `Log` effect IS shippable ×5 in Variant-A form — via the `with`-clause surface** (avoiding
+value-returning ops inside `${...}` on Rust until Q-effect-interp-rust lands). BUT the probe also surfaced a
+**new core-spec divergence, DV16** (filed): bare effect-op calls (`log("...")`) don't resolve even same-module
+(E1001), so the §10.2 bare-op/Layer-1-direct/Layer-2 ergonomic surface is non-functional, and the entire
+`effects/` conformance suite is inert (never checked/executed). **This couples to Q1/Q2:** if Design intends
+bare-op invocation as a v1 form, the checker has a real bug to fix (and core.effect's `Log` would otherwise present
+only the `with`-clause surface); if the `with`-clause is the intended v1 form, §10.2 + the `effects/` fixtures need
+correcting. **New question for Design alongside DQ25: is bare effect-op invocation a v1 form (→ fix the checker), or
+is the `with`-clause the v1 form (→ correct the spec/fixtures)?** Sequencing of the effect-foundation fixes
+(DV16 / Q-effect-conformance-wiring / Q-effect-interp-rust) vs. shipping core.effect on the working subset is an
+operator call (surfaced in-chat).

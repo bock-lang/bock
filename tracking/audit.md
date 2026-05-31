@@ -1320,3 +1320,39 @@ Notes: core.iter remained a sensitive probe to the very end — its v5 STOP surf
     settings.local.json symlink / background-agent permission mode for future dispatches; did not block this block.
   NEXT: P4-hygiene (bock-types checker.rs: DQ18 mutating-collection guard + DQ22 bare-m.contains — sequence; both
     design-gated) OR core.effect (R1). Decide next.
+
+[2026-05-31 22:55 UTC] core.effect SCOPED — Design questions (DQ25) filed + feasibility probe surfaced DV16
+  Input: at the post-core.iter checkpoint, operator chose (AskUserQuestion) **"Scope core.effect"** (over P4-hygiene
+    / pause).
+  ACTION 1 — Plan agent designed core.effect R1 (plan saved `plans/2026-05-31-core-effect-r1-plan.md`). Key finding:
+    core.effect's v1 surface is UNDER-SPECIFIED (§18.3:1728 = "Effect system primitives" only, no §18.3.x). The effect
+    machinery (§10; effects.rs ~1112 lines; codegen ×5; 7 fixtures) is implemented + resolve-layer cross-module-wired,
+    so this is a SURFACE/Design problem + a cross-module-EXECUTION feasibility gap on Rust/Go (never proven — the
+    core.iter lesson). Two-variant floor (A = executable Log; B = types/docs-only) gated on a Phase-0 feasibility check.
+  ACTION 2 — filed **DQ25** (8 sub-questions on the floor surface) → Design + escalations, per the core-spec rule (I
+    do NOT decide; the owner is in-chat and may answer Q1/Q2 directly). Recs: primitives-only floor; ship Log iff
+    feasible; ambient/Clock/Cancel out; no utility traits/composites in v1.
+  ACTION 3 — dispatched a feasibility PROBE (investigation-only, no repo edits; opus, background): can a cross-module
+    effect declare→use→handle→EXECUTE on all 5? VERDICT: **P1 (the `with`-clause form) PASSES ×5** — so Variant-A
+    `Log` IS shippable via the `with`-clause surface. **P2 (effect op inside `"${...}"`) FAILS on Rust only.**
+  FINDINGS (both filed):
+    - **Q-effect-interp-rust** (FOUND, small): rs.rs:2917 `Interpolation` sub-context drops `effect_ops`/
+      `current_handler_vars` (copies enum_variants/self_operand_methods but not these) → effect op in `${...}`
+      unrewritten on Rust only (E0425). ~4-line #152-shaped fix, one site. READY.
+    - **DV16** (NEW core-spec divergence + test-infra hole): bare effect-op calls (`log("...")`) don't resolve even
+      SAME-module (E1001); the ONLY working form is the `with`-clause. AND the entire `conformance/effects/` suite is
+      INERT — directive harness only parses, exec harness scans only `exec/` — so the committed effect fixtures
+      actually error on `bock check` and the effect system has never been checked/executed there (0/300 exec are
+      effect cases). Per CLAUDE.md "spec divergence is OPEN, not silent" → OPEN to Design: is bare-op a v1 form (→
+      fix the checker) or is `with`-clause the v1 form (→ correct §10.2 + the fixtures)? Couples to Q1/Q2.
+      Filed Q-effect-conformance-wiring (wire effects/ into exec — will EXPOSE the bare-op failures, so sequence
+      with the Design ruling).
+  DECISION SURFACED (not taken): the core.effect floor BUILD is now gated on (a) Design Q1/Q2 + the §10 bare-op
+    ruling, and (b) a sequencing call — harden the effect foundation first (wire the suite + fix bare-op + interp)
+    vs. ship core.effect on the proven `with`-clause subset now, fixes as fast-follows. Brought to the operator
+    (AskUserQuestion). The probe's good news: the PRIMARY effect form (with-clause, cross-module) works ×5 — the
+    mechanism is sound; the gaps are the bare-op shorthand + test coverage.
+  Tracking: plan + DQ25 + DV16 + Q-effect-* queue items committed to chore/tracking-20260531-2235; merged as one PR.
+    Queue NOT blocked (probe + scoping done); only the floor build waits. main unchanged by this (tracking-only).
+  NEXT: await operator on the sequencing fork + Design on Q1/Q2 + the §10 bare-op question. Q-effect-interp-rust is
+    dispatchable independently (clear bug). P4-hygiene still available.

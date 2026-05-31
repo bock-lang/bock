@@ -205,6 +205,25 @@ decided→link)`
   floor is shipped and exercised ×5; refining any of the three is additive.
 - **Status:** escalated → Design (escalations.md)
 
+### DQ25 — `core.effect` v1 surface (8 sub-questions — the floor is UNDER-SPECIFIED)
+- **Question:** §18.3:1728 says only "`core.effect` (v1) — Effect system primitives" with no §18.3.x
+  subsection (contrast §18.3.1 core.time). The effect MACHINERY (§10) is fully implemented + resolve-layer
+  cross-module-wired, but the v1 module SURFACE is undefined. Sub-questions (recs are Design's to ratify):
+  **(1)** primitives-only (vocabulary + one worked handler pattern) vs a library of concrete effects? *rec
+  primitives-only.* **(2)** include a standard `Log` effect (`fn log(message: String) -> Void`) as the
+  executable example — **conditioned on the feasibility probe passing ×5**? *rec yes-iff-feasible* — THE
+  most consequential (decides if the floor has a runnable effect). **(3)** do ambient `Panic`/`Allocate`
+  (§10.5, "always available without declaration") need any module surface? *rec no.* **(4)** confirm
+  `core.effect` owns neither `Clock` (§18.3.1 — core.time owns it) nor `Cancel` (§13.5, partly Reserved).
+  *rec out.* **(5)** effect-handler utility traits/types? *rec none in v1.* **(6)** composite effects
+  (§10.1)? *rec not in the floor.* **(7)** Reserved-for-v1.x to restate in docs: adaptive handlers (§10.8),
+  lambda handler constructors (§10.4), Layer-3 defaults (§10.3). **(8)** acceptance bar (§18.3:1716 = a
+  representative example compile+run ×5): what runs for a primitives-only floor? *rec the cross-module effect
+  exec fixture — requires (2) feasible.*
+- **§:** §18.3 / §10 · **context:** surfaced by the core.effect plan (`plans/2026-05-31-core-effect-r1-plan.md`).
+  Non-blocking the QUEUE (the feasibility probe + scoping proceed), but the floor BUILD waits on Q1/Q2.
+- **Status:** escalated → Design (escalations.md)
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and

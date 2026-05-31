@@ -78,6 +78,20 @@ desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged;
   hangs identically) — NOT introduced by core.iter; surfaced by it. The `stdlib_iter.rs` smoke uses a single
   `next()` to avoid it. Fix: persist `mut self` field mutations across interpreter method-call frames.
   Same family as Q-interp-enum.
+- **[Q-effect-interp-rust] Rust interpolation sub-context drops the effect-op rewrite** — bug · ready ·
+  `compiler/crates/bock-codegen/` (rs.rs:~2917) · — · links DV16, #152 · note: an effect op called inside a
+  `"${...}"` interpolation emits UNREWRITTEN on Rust only (`now()` not `clock.now()` → rustc E0425). The
+  `NodeKind::Interpolation` branch spawns a fresh `RsEmitCtx::new()` that copies `enum_variants`/`self_operand_methods`
+  but NOT `effect_ops`/`current_handler_vars` (the other 4 targets emit interpolated exprs inline, so they're fine).
+  Fix = ~4 lines: clone those maps into the sub-context — the SAME shape as the #152 iter sub-context fix. Confirmed
+  by the 2026-05-31 effect probe (P2). One site; add an `exec_effect_interpolation.bock` ×5 fixture.
+- **[Q-effect-conformance-wiring] The `conformance/effects/` suite is never checked or executed** — bug/test-infra ·
+  ready (couples to DV16/Design) · `compiler/tests/`, `compiler/tests/conformance/effects/` · — · links DV16 · note:
+  the `effects/` fixtures are parse-only (the directive harness only parses; the exec harness scans only `exec/`), so
+  `// EXPECT: no_errors`/`output` on them is inert and the effect system has never been checked/executed there. Wire
+  `effects/` into the execution harness (or move runnable effect fixtures under `exec/` with `targets` directives).
+  WILL EXPOSE the DV16 bare-op E1001 failures — so sequence with the §10 Design ruling (the fixtures may need
+  rewriting to the `with`-clause form, or the checker bare-op resolution fixed, depending on Design).
 
 ## v1-blocking
 
@@ -122,7 +136,9 @@ desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged;
   + 6 eager List-returning combinators + the for→Iterable checker desugar; #152 Rust/Go codegen — all 5×5).
   **Codegen gate CLEARED:** Q-fconf execution conformance (#114/#115)
   + Q-codegen-fixes (#121, DV9) + the codegen-completeness milestone (#131-#152) — 5-target parity real + tested.
-  **R1 REMAINING:** `effect` (effect-system bridge) — likely needs its own plan + core-spec escalation; then R2
+  **R1 REMAINING:** `effect` — **SCOPED** (plan `plans/2026-05-31-core-effect-r1-plan.md`; surface UNDER-SPECIFIED
+  → DQ25 8 questions escalated to Design; cross-module effect-execution feasibility probe running [Rust/Go never
+  proven — the core.iter lesson]; the floor BUILD waits on Design Q1/Q2 + the probe). Then R2
   (option/result/string/time), R3 (collections/test). Plan: `plans/2026-05-31-core-iter-r1-plan.md` (done).
   `core.types/math/memory/concurrency` Reserved for v1.x.
   Plans: `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`,

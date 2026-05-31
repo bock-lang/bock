@@ -116,6 +116,24 @@ status(open | resolved→link)`
   now classifies no-else/all-statement-branch `If` as a statement (#131); no backend edits needed. · **Status:**
   resolved → #131
 
+### DV16 — Effect operation surface: bare-op calls don't resolve + the `effects/` suite is inert
+- **§:** §10.2/§10.3 · **impl-does:** a bare effect-op call (`log("...")` inside a `handling` block) fails
+  **E1001 undefined name 'log'** even SAME-module; the op name is neither callable bare nor importable
+  (`use m.{log}` → E1006 not exported). The ONLY working invocation form is calling the op inside a
+  `fn ... with <Effect>` body (handler threaded as a param) — which executes correctly cross-module on ALL 5
+  (probe P1). The committed `conformance/effects/*` fixtures use bare ops and therefore ERROR on `bock check`/
+  `bock run` — undetected because the **entire `effects/` suite is parse-only**: the directive harness
+  (`compiler/tests/harness/mod.rs`) only parses directives; the execution harness (`execution.rs:122`) scans
+  ONLY `conformance/exec/`. So `// EXPECT: no_errors`/`output` on `effects/` fixtures is inert; the effect
+  system has never been checked or executed there (0 of 300 exec cases are `exec_effect_*`).
+- **Classification:** spec↔impl divergence (does §10.2 intend bare-op invocation in v1, making E1001 a checker
+  bug — likely — or is the `with`-clause the only v1 form, making the spec examples + fixtures wrong?) + a
+  test-coverage hole. · **Disposition:** **OPEN → Design** (the §10 invocation-form question — see DQ25 context /
+  escalations); the test-infra fix (wire `effects/` into the exec harness, or move runnable effect fixtures to
+  `exec/`) is actionable now (queue Q-effect-conformance-wiring) but will expose the bare-op failures, so it
+  couples to the Design ruling. · **Status:** OPEN — surfaced by the 2026-05-31 core.effect feasibility probe.
+  Linked: Q-effect-conformance-wiring, Q-effect-interp-rust (the narrower rs.rs interpolation drop), DQ25.
+
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)
