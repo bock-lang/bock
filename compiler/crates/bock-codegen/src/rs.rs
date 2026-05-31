@@ -369,6 +369,143 @@ impl RsEmitCtx {
         )
     }
 
+    /// True when this fn/method body, in value/return position, evaluates to an
+    /// expression that *contains* a `self.field` read — either a bare
+    /// `self.field` or a `self.field` wrapped in a constructor such as
+    /// `Some(self.field)` / `Ok(self.field)` / a record or enum-variant build.
+    ///
+    /// Such a return moves the field out of the `&self` receiver, which Rust's
+    /// borrow checker forbids for a non-`Copy` field; the codegen lowers the
+    /// `self.field` read to `self.field.clone()` (gated on
+    /// [`Self::in_clone_self_method`]) and the impl/fn carries a `T: Clone`
+    /// bound. This generalises [`Self::block_returns_self_field`] (a *bare*
+    /// `return self.field`) to the wrapped case `return Some(self.v)`, the shape
+    /// a generic `fn f(self) -> Optional[T]` produces.
+    ///
+    /// Crucially it inspects only return/tail *value* positions, never a
+    /// statement such as `self.cursor = self.cursor + 1` (whose `self.cursor`
+    /// reads must NOT be cloned — the assignment LHS would become an invalid
+    /// `self.cursor.clone() = ...`).
+    fn body_moves_self_field(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::Block { stmts, tail } => {
+                if let Some(t) = tail {
+                    if Self::expr_contains_self_field(t) || Self::body_moves_self_field(t) {
+                        return true;
+                    }
+                }
+                stmts.iter().any(Self::body_moves_self_field)
+            }
+            NodeKind::Return { value: Some(v) } => Self::expr_contains_self_field(v),
+            // Control-flow whose arms carry value/return positions worth
+            // descending into (e.g. a `match` whose arms `return Some(self.v)`).
+            NodeKind::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                Self::body_moves_self_field(then_block)
+                    || else_block
+                        .as_ref()
+                        .is_some_and(|e| Self::body_moves_self_field(e))
+            }
+            NodeKind::Match { arms, .. } => arms.iter().any(|arm| {
+                if let NodeKind::MatchArm { body, .. } = &arm.kind {
+                    Self::expr_contains_self_field(body) || Self::body_moves_self_field(body)
+                } else {
+                    false
+                }
+            }),
+            _ => false,
+        }
+    }
+
+    /// True when `node` (an expression in value position) reads a `self.field`
+    /// directly or via a wrapping constructor call / aggregate. Deliberately
+    /// conservative: it descends through `Call` arguments (the `Some(self.v)`
+    /// case) and record/aggregate fields, but treats the read as a move only
+    /// when it is genuinely a `self.field` access, not e.g. `self.field.method()`
+    /// (a method call borrows rather than moves) or a comparison.
+    fn expr_contains_self_field(node: &AIRNode) -> bool {
+        if Self::is_self_field(node) {
+            return true;
+        }
+        match &node.kind {
+            // `Some(self.v)`, `Ok(self.v)`, `Variant(self.v)`, `f(self.v)` — the
+            // field flows by value into the constructed/returned value.
+            NodeKind::Call { args, .. } => args
+                .iter()
+                .any(|a| Self::expr_contains_self_field(&a.value)),
+            NodeKind::RecordConstruct { fields, .. } => fields.iter().any(|f| {
+                f.value
+                    .as_deref()
+                    .is_some_and(Self::expr_contains_self_field)
+            }),
+            NodeKind::TupleLiteral { elems } | NodeKind::ListLiteral { elems } => {
+                elems.iter().any(Self::expr_contains_self_field)
+            }
+            _ => false,
+        }
+    }
+
+    /// True when this fn/method body will emit a `.clone()` / `.cloned()` on a
+    /// *generic* element value via a built-in collection method — `List.get` /
+    /// `first` / `last` / `concat`, `Map.get` / `keys` / `values`, or a `Set`
+    /// algebraic op. Each lowers to a `.cloned()` (or `.clone()` for `concat`)
+    /// over the receiver's element type; when that element type is a generic
+    /// param the impl/fn needs a `T: Clone` bound (the v1 concrete element types
+    /// Int/Float/String/Bool all satisfy it).
+    ///
+    /// Detection is conservative on the *operation* (does the body call a
+    /// clone-inducing built-in at all) rather than precisely typing each
+    /// receiver's element — for a generic fn/impl over `List[T]`, the element
+    /// flowing through these calls is always the generic param. A clone bound on
+    /// a generic param that happens not to need it is harmless (every concrete
+    /// instantiation in v1 is `Clone`); the gate is correctness, and the
+    /// detection never fires for a body that emits no such call.
+    fn body_clones_collection_element(body: &AIRNode) -> bool {
+        struct CloneScan {
+            found: bool,
+        }
+        impl bock_air::visitor::Visitor for CloneScan {
+            fn visit_node(&mut self, node: &AIRNode) {
+                if self.found {
+                    return;
+                }
+                if let NodeKind::Call { callee, args, .. } = &node.kind {
+                    if let Some((_, method, _)) =
+                        crate::generator::desugared_list_method(callee, args)
+                    {
+                        if matches!(method, "get" | "first" | "last" | "concat") {
+                            self.found = true;
+                            return;
+                        }
+                    }
+                    if let Some((_, method, _)) =
+                        crate::generator::desugared_map_method(node, callee, args)
+                    {
+                        if matches!(method, "get" | "keys" | "values") {
+                            self.found = true;
+                            return;
+                        }
+                    }
+                    if let Some((_, method, _)) =
+                        crate::generator::desugared_set_method(node, callee, args)
+                    {
+                        if matches!(method, "union" | "intersection" | "difference" | "to_list") {
+                            self.found = true;
+                            return;
+                        }
+                    }
+                }
+                bock_air::visitor::walk_node(self, node);
+            }
+        }
+        let mut scan = CloneScan { found: false };
+        bock_air::visitor::Visitor::visit_node(&mut scan, body);
+        scan.found
+    }
+
     /// The `Enum::` qualifier for a variant *path* if its last segment is a
     /// registered user enum variant, else `None`. The built-in
     /// `Optional`/`Result` pre-seeds are intentionally excluded here: their
@@ -1414,12 +1551,31 @@ impl RsEmitCtx {
                 } else {
                     generic_params.to_vec()
                 };
-                // Returning `self.field` clones it, so a generic clone-target
-                // gets a `T: Clone` bound (only on these — never over-constrain a
-                // generic impl that doesn't move a field out).
-                let add_clone_bound = trait_path.is_none()
-                    && self.clone_target_records.contains(&target_base)
-                    && !synth_params.is_empty();
+                // A *generic* impl needs a `T: Clone` bound when the generated
+                // body clones a generic value — either by moving a `self.field`
+                // out by value (`return self.v` / `return Some(self.v)`, lowered
+                // to `self.v.clone()`) or by calling a built-in collection method
+                // the codegen lowers with `.cloned()` / `.clone()` (`List.get` /
+                // `concat`, `Map.get`, a `Set` op). The pre-scan
+                // `clone_target_records` already flags the bare field-return
+                // getters; here we additionally cover trait impls and the
+                // collection-clone case so a generic `impl P[T] for R[T]` whose
+                // `f` does `return Some(self.v)`, or a generic iterator whose
+                // `next` does `self.xs.get(...)`, carries the bound. Only generic
+                // impls qualify (`!synth_params.is_empty()`) — a concrete record
+                // moving a non-`Copy` field is the orthogonal `&self` move-out
+                // defect, left untouched.
+                let is_generic_impl = !synth_params.is_empty();
+                let any_method_moves_self = methods
+                    .iter()
+                    .any(|m| matches!(&m.kind, NodeKind::FnDecl { body, .. } if Self::body_moves_self_field(body)));
+                let any_method_clones_collection = methods.iter().any(|m| {
+                    matches!(&m.kind, NodeKind::FnDecl { body, .. } if Self::body_clones_collection_element(body))
+                });
+                let add_clone_bound = is_generic_impl
+                    && (self.clone_target_records.contains(&target_base)
+                        || any_method_moves_self
+                        || any_method_clones_collection);
                 let generics = self.generic_params_to_rs_with_clone(&synth_params, add_clone_bound);
                 // The applied target type. Prefer the form the user wrote if it
                 // already carries args (`impl Box[T]`); otherwise synthesize
@@ -1451,12 +1607,23 @@ impl RsEmitCtx {
                 }
                 let suppress_vis = trait_path.is_some();
                 let prev_clone_self = self.in_clone_self_method;
-                self.in_clone_self_method = add_clone_bound;
                 self.indent += 1;
                 for (i, method) in methods.iter().enumerate() {
                     if i > 0 {
                         self.buf.push('\n');
                     }
+                    // `in_clone_self_method` controls whether a `self.field` read
+                    // emits `.clone()`. Set it *per method* and only for methods
+                    // that genuinely move a `self.field` out by value — never for
+                    // a method that merely reads/assigns a field (cloning the LHS
+                    // of `self.cursor = ...` would emit invalid Rust). The bound
+                    // must be in scope for the `.clone()` to type-check, hence the
+                    // `add_clone_bound` conjunct.
+                    let method_moves_self = matches!(
+                        &method.kind,
+                        NodeKind::FnDecl { body, .. } if Self::body_moves_self_field(body)
+                    );
+                    self.in_clone_self_method = add_clone_bound && method_moves_self;
                     self.emit_method_inner(method, suppress_vis)?;
                 }
                 self.indent -= 1;
@@ -1621,7 +1788,16 @@ impl RsEmitCtx {
     ) -> Result<(), CodegenError> {
         let vis = vis_str(visibility);
         let async_kw = if is_async { "async " } else { "" };
-        let generics = self.generic_params_to_rs(generic_params);
+        // A generic free function whose body clones a generic element via a
+        // built-in collection method (`List.get`/`concat`, `Map.get`, a `Set`
+        // op — each lowered with `.cloned()` / `.clone()`) needs a `T: Clone`
+        // bound, just like the generic-impl case. Without it `dup[T](xs:
+        // List[T])` returning `xs.concat(xs)` fails with `E0277: T: Clone is not
+        // satisfied`. Only generic functions qualify, and only when such a clone
+        // is actually emitted.
+        let add_clone_bound =
+            !generic_params.is_empty() && Self::body_clones_collection_element(body);
+        let generics = self.generic_params_to_rs_with_clone(generic_params, add_clone_bound);
         let param_strs = self.collect_param_strs(params);
         let effects = self.effects_params(effect_clause);
         let mut all_params = param_strs;
@@ -5740,6 +5916,203 @@ mod tests {
         assert!(
             !out.contains("#[derive(Clone)]"),
             "must NOT derive Clone when no field is moved out, got: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_trait_impl_clones_field_wrapped_in_constructor() {
+        // GAP-B: a generic *trait* impl whose method returns `Some(self.value)`
+        // moves the field out of `&self`; the body must clone it and the impl
+        // must carry a `T: Clone` bound — even though the field is wrapped in a
+        // `Some(...)` constructor (not a bare `return self.value`).
+        let self_param = node(
+            60,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(61, "self")),
+                ty: None,
+                default: None,
+            },
+        );
+        // `return Some(self.value)`.
+        let some_call = node(
+            62,
+            NodeKind::Call {
+                callee: Box::new(id_node(63, "Some")),
+                args: vec![AirArg {
+                    label: None,
+                    value: node(
+                        64,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(65, "self")),
+                            field: ident("value"),
+                        },
+                    ),
+                }],
+                type_args: vec![],
+            },
+        );
+        let body = block(
+            66,
+            vec![],
+            Some(node(
+                67,
+                NodeKind::Return {
+                    value: Some(Box::new(some_call)),
+                },
+            )),
+        );
+        let method = node(
+            68,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![self_param],
+                // `-> Optional[T]`.
+                return_type: Some(Box::new(node(
+                    69,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Optional"]),
+                        args: vec![named_type(70, "T")],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let impl_block = node(
+            71,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: Some(type_path(&["P"])),
+                trait_args: vec![named_type(72, "T")],
+                target: Box::new(named_type(73, "Box")),
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        );
+        let out = gen(&module(vec![], vec![generic_box_record(), impl_block]));
+        assert!(
+            out.contains("impl<T: Clone> P<T> for Box<T>"),
+            "trait impl should synthesize `<T: Clone>` and carry trait args, got: {out}"
+        );
+        assert!(
+            out.contains("self.value.clone()"),
+            "field wrapped in Some(...) should still be cloned, got: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_fn_clones_collection_element_gets_bound() {
+        // GAP-B (free fn): a generic `fn dup[T](xs: List[T]) -> List[T]` whose
+        // body lowers a `concat`/`get` with `.cloned()`/`.clone()` needs a
+        // `T: Clone` bound. We model the `concat` desugar shape (a
+        // `Call(FieldAccess(xs, "concat"), [xs, xs])`) the checker produces.
+        let xs_param = typed_param_node(80, "xs", "List");
+        let recv = id_node(82, "xs");
+        let concat_call = node(
+            83,
+            NodeKind::Call {
+                callee: Box::new(node(
+                    84,
+                    NodeKind::FieldAccess {
+                        object: Box::new(recv),
+                        field: ident("concat"),
+                    },
+                )),
+                args: vec![
+                    AirArg {
+                        label: None,
+                        value: id_node(82, "xs"),
+                    },
+                    AirArg {
+                        label: None,
+                        value: id_node(82, "xs"),
+                    },
+                ],
+                type_args: vec![],
+            },
+        );
+        let body = block(
+            85,
+            vec![],
+            Some(node(
+                86,
+                NodeKind::Return {
+                    value: Some(Box::new(concat_call)),
+                },
+            )),
+        );
+        let f = node(
+            87,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("dup"),
+                generic_params: vec![generic_param(88, "T")],
+                params: vec![xs_param],
+                return_type: Some(Box::new(node(
+                    89,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["List"]),
+                        args: vec![named_type(90, "T")],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("fn dup<T: Clone>"),
+            "generic fn cloning a collection element should get `T: Clone`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_fn_no_clone_bound_without_collection_clone() {
+        // A generic fn that does NOT clone a collection element must not be
+        // over-constrained with `Clone`.
+        let xs_param = typed_param_node(91, "x", "Int");
+        let body = block(
+            92,
+            vec![],
+            Some(node(
+                93,
+                NodeKind::Return {
+                    value: Some(Box::new(id_node(94, "x"))),
+                },
+            )),
+        );
+        let f = node(
+            95,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("identity"),
+                generic_params: vec![generic_param(96, "T")],
+                params: vec![xs_param],
+                return_type: Some(Box::new(named_type(97, "T"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("fn identity<T>"),
+            "non-cloning generic fn should keep a bare `<T>`, got: {out}"
+        );
+        assert!(
+            !out.contains("T: Clone"),
+            "must NOT over-constrain a non-cloning generic fn with Clone, got: {out}"
         );
     }
 }

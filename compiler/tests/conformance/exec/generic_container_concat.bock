@@ -1,0 +1,59 @@
+// TEST: exec_generic_container_concat
+// EXPECT: output "4;1;9"
+// EXPECT: targets js, ts, python, rust, go
+//
+// A GENERIC function over a generic CONTAINER (`List[T]`) that builds a result
+// via `concat`, a singleton list literal `[x]` (x: T), and reads an element via
+// `get` — the generic-container residue (GAP-B Rust, GAP-C Go) that #136/#144
+// did not cover. `dup[T]` / `firstOr[T]` / `single[T]` carry a real type param
+// `T`, instantiated with `Int` at the call site.
+//
+//   * Rust (GAP-B): a generic fn whose body clones a generic element (the
+//     `.cloned()` from `List.get`, the `.clone()` in `concat`) emitted no
+//     `T: Clone` bound on the fn → `error[E0277]: the trait bound `T: Clone` is
+//     not satisfied` (plus move errors). #136 added `T: Clone` only for
+//     field-returning getters; extended here to emit `T: Clone` whenever the
+//     generated body clones a `T`-typed value (concat / get over `List[T]`).
+//   * Go (GAP-C): inside a generic fn, a list literal of generic-type elements
+//     (`[x]` where `x: T`) emitted `[]interface{}{x}` and was passed to a `[]T`
+//     position → `cannot use []interface{}{x} as []T`. Fixed to emit `[]T{x}`
+//     when the elements are of the in-scope generic param type T (builds on
+//     #144's typed collections).
+//
+// `dup([1, 2])` returns `[1, 2, 1, 2]` (length 4); `firstOr` reads element 0;
+// `single(9)`'s element 0 is read. Each helper is called once on a distinct
+// value, so the program does not trip Rust's orthogonal by-value-reuse
+// ownership gap (see bounded_dispatch.bock's OPEN note). js/python/ts carry
+// generics natively, so they were already green; this proves Rust and Go now
+// agree.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn dup[T](xs: List[T]) -> List[T] {
+  return xs.concat(xs)
+}
+
+fn single[T](x: T) -> List[T] {
+  return [x]
+}
+
+fn firstOr[T](xs: List[T], dflt: T) -> T {
+  match xs.get(0) {
+    Some(x) => return x
+    None => return dflt
+  }
+}
+
+fn lenOf[T](xs: List[T]) -> Int {
+  return xs.len()
+}
+
+fn main() -> Void {
+  let doubled: List[Int] = dup([1, 2])
+  let n = lenOf(doubled)
+  let head = firstOr([1, 2], -1)
+  let only = firstOr(single(9), -1)
+  println("${n};${head};${only}")
+}

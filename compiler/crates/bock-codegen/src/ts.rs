@@ -1365,6 +1365,13 @@ impl TsEmitCtx {
             // `Result[T, E]` lowers to the tagged-union runtime type, mirroring
             // `Optional[T]` → `BockOption<T>` (see `RESULT_RUNTIME_TS`).
             "Result" => "BockResult".into(),
+            // The spelled-out `Optional[T]` (a named type application, distinct
+            // from the `T?` shorthand handled by the `TypeOptional` arm) must
+            // also lower to the tagged runtime union `BockOption<T>`, matching
+            // the emitted `{ _tag: "Some", _0: v }` / `{ _tag: "None" }` value
+            // representation. Without this it emitted a bare `Optional<T>`
+            // (TS2304, undefined name).
+            "Optional" => "BockOption".into(),
             other => other.into(),
         }
     }
@@ -1737,6 +1744,7 @@ impl TsEmitCtx {
             NodeKind::ImplBlock {
                 generic_params,
                 trait_path,
+                trait_args,
                 target,
                 methods,
                 ..
@@ -1835,12 +1843,26 @@ impl TsEmitCtx {
                     ""
                 };
                 if let Some(tp) = trait_path {
-                    let trait_name = tp
+                    let trait_base = tp
                         .segments
                         .iter()
                         .map(|s| s.name.as_str())
                         .collect::<Vec<_>>()
                         .join(".");
+                    // The trait may itself be generic (`trait P[T]`), emitted as
+                    // `interface P<T>`. The `extends` clause must carry the
+                    // impl's trait type arguments (`impl P[T] for R[T]` →
+                    // `extends P<T>`); without them `tsc` rejects with TS2314
+                    // ("Generic type 'P<T>' requires 1 type argument(s)"). The
+                    // args are type-expression AIR nodes; render each to its TS
+                    // form. Empty `trait_args` ⇒ a non-generic trait, no `<...>`.
+                    let trait_name = if trait_args.is_empty() {
+                        trait_base
+                    } else {
+                        let arg_strs: Vec<String> =
+                            trait_args.iter().map(|a| self.type_to_ts(a)).collect();
+                        format!("{trait_base}<{}>", arg_strs.join(", "))
+                    };
                     // Declaration merging: `extends Trait` keeps `new Target()`
                     // assignable to the trait's interface type, while the
                     // concrete signatures (with `self`) make `p.m(p)` resolve.
@@ -5475,6 +5497,94 @@ mod tests {
             out.contains("StdLogger.prototype.log"),
             "impl should attach method to prototype, got: {out}"
         );
+    }
+
+    #[test]
+    fn generic_trait_impl_extends_clause_carries_type_args() {
+        // GAP-A: `impl P[T] for R[T]` for a generic `trait P[T]` must emit
+        // `interface R<T> extends P<T>` — the `extends` clause carries the
+        // impl's trait type-args. Without them `tsc` rejects with TS2314.
+        let rec = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("R"),
+                generic_params: vec![make_generic_param("T")],
+                fields: vec![make_record_field("v", "T")],
+            },
+        );
+        let impl_block = node(
+            10,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                trait_path: Some(type_path(&["P"])),
+                trait_args: vec![node(
+                    11,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["T"]),
+                        args: vec![],
+                    },
+                )],
+                target: Box::new(node(
+                    12,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["R"]),
+                        args: vec![node(
+                            13,
+                            NodeKind::TypeNamed {
+                                path: type_path(&["T"]),
+                                args: vec![],
+                            },
+                        )],
+                    },
+                )),
+                generic_params: vec![],
+                methods: vec![node(
+                    14,
+                    NodeKind::FnDecl {
+                        annotations: vec![],
+                        visibility: Visibility::Public,
+                        is_async: false,
+                        name: ident("f"),
+                        generic_params: vec![],
+                        params: vec![untyped_param_node(15, "self")],
+                        return_type: None,
+                        effect_clause: vec![],
+                        where_clause: vec![],
+                        body: Box::new(block(16, vec![], None)),
+                    },
+                )],
+                where_clause: vec![],
+            },
+        );
+        let out = gen(&module(vec![], vec![rec, impl_block]));
+        assert!(
+            out.contains("interface R<T> extends P<T> {"),
+            "generic trait impl's extends clause must carry `<T>`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn optional_named_type_maps_to_bock_option() {
+        // The spelled-out `Optional[T]` named type must lower to `BockOption<T>`
+        // (matching the `T?` shorthand and the emitted tagged value), not a
+        // bare `Optional<T>` (TS2304 undefined name).
+        let ctx = TsEmitCtx::new();
+        let opt = node(
+            1,
+            NodeKind::TypeNamed {
+                path: type_path(&["Optional"]),
+                args: vec![node(
+                    2,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                )],
+            },
+        );
+        assert_eq!(ctx.type_to_ts(&opt), "BockOption<string>");
     }
 
     #[test]

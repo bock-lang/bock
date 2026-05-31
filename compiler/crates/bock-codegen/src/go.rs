@@ -651,6 +651,16 @@ struct GoEmitCtx {
     /// entry is poisoned (left absent) so the payload falls back to the runtime
     /// `interface{}` — conservative, never wrong, only un-type-asserted.
     method_optional_ret_elem: HashMap<String, String>,
+    /// Maps an in-scope variable name → its concrete generic record
+    /// instantiation `(base record name, concrete Go type-args)` — e.g. a `let
+    /// c: ListIter[Int]` binding or a `c: Counter[Int]` parameter maps to
+    /// `("ListIter", ["int64"])`. Used to resolve a method-call scrutinee's
+    /// `Optional[T]` payload at a CONCRETE call site: `method_optional_ret_elem`
+    /// stores the *generic* element (`"T"`, the record's type param), undefined
+    /// in the concrete caller (`main`); this lets `match c.next() { Some(x) =>
+    /// ... }` assert the payload to the instantiation's arg (`int64`) instead of
+    /// the bare `T`. Scoped per function/method body and restored on exit.
+    var_record_type_args: HashMap<String, (String, Vec<String>)>,
     /// Maps an in-scope variable name → the Go element type of its `List[T]`
     /// (e.g. a `let nums: List[Int] = ...` binding maps to `int64`). The
     /// read-only `List` built-ins `get`/`first`/`last` return `Optional[T]`
@@ -738,6 +748,19 @@ struct GoEmitCtx {
     /// composite-literal field values). `None` for a param not directly named by
     /// any field's type (then the arg falls back to `any`). Pre-scanned.
     record_param_fields: HashMap<String, Vec<Option<String>>>,
+    /// Maps a record name → (field name → the Go element type of that field's
+    /// `List[...]` declared type). Lets a built-in list method on a `self.field`
+    /// receiver inside a (generic) method type its inline closure's `[]<elem>`
+    /// parameter correctly: inside `fn next(self)` of `record ListIter[T] { xs:
+    /// List[T] }`, `self.xs.get(i)` must take `[]T` (T is in scope on the
+    /// receiver), not `[]interface{}` (which a `[]T` argument does not satisfy).
+    /// Only `List`-typed fields are recorded. Pre-scanned across the bundle.
+    record_field_list_elem: HashMap<String, HashMap<String, String>>,
+    /// The base name of the record whose method body is currently being emitted
+    /// (`"ListIter"` inside `impl ListIter`'s methods), so a `self.field` list
+    /// receiver resolves through [`Self::record_field_list_elem`]. Set at method
+    /// entry, restored on exit; `None` outside an impl method body.
+    current_self_record: Option<String>,
     /// Trait-declaration registry. Used at each `impl Trait for Type` site to
     /// recover the trait's *default* methods (those carrying a body) so a
     /// receiver method is synthesized on the target — the Go interface declares
@@ -798,6 +821,14 @@ struct GoEmitCtx {
     /// container. `None` outside a typed-collection binding context. Consumed
     /// (taken) at the literal so it never leaks to a nested/sibling literal.
     expected_collection_elem: Option<(String, Option<String>)>,
+    /// The enclosing function's *return* collection element Go types, when its
+    /// return type is a `List[T]` / `Set[T]` / `Map[K, V]`. A collection literal
+    /// in `return` position adopts these so a generic `fn single[T](x: T) ->
+    /// List[T] { return [x] }` emits `[]T{x}` rather than the `[]interface{}{x}`
+    /// the bare-literal inference falls back to (which is not assignable to the
+    /// `[]T` return). Set at fn/method entry from the return type, restored on
+    /// exit; `None` for a non-collection or absent return type.
+    current_fn_ret_collection_elem: Option<(String, Option<String>)>,
 }
 
 impl GoEmitCtx {
@@ -823,6 +854,7 @@ impl GoEmitCtx {
             fn_optional_ret_elem: HashMap::new(),
             var_optional_elem: HashMap::new(),
             method_optional_ret_elem: HashMap::new(),
+            var_record_type_args: HashMap::new(),
             var_list_elem: HashMap::new(),
             var_map_kv: HashMap::new(),
             var_set_elem: HashMap::new(),
@@ -838,12 +870,15 @@ impl GoEmitCtx {
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             var_go_type: HashMap::new(),
             record_param_fields: HashMap::new(),
+            record_field_list_elem: HashMap::new(),
+            current_self_record: None,
             trait_decls: crate::generator::TraitDeclRegistry::new(),
             type_names: HashSet::new(),
             go_self_subst: None,
             self_param_traits: HashSet::new(),
             current_fn_ret_type: None,
             current_expected_type: None,
+            current_fn_ret_collection_elem: None,
             expected_collection_elem: None,
         }
     }
@@ -943,6 +978,22 @@ impl GoEmitCtx {
             else {
                 continue;
             };
+            // Record each `List[...]`-typed field's Go element type, keyed by
+            // field name — used to type a `self.field.get(i)` list-method
+            // receiver's closure inside the record's methods. Done for every
+            // record (generic or not): a non-generic record may still hold a
+            // `List[Int]` field whose method-side receiver needs `[]int64`.
+            let list_fields: HashMap<String, String> = fields
+                .iter()
+                .filter_map(|f| {
+                    Self::list_field_elem_type(&f.ty)
+                        .map(|elem_ty| (f.name.name.clone(), self.ast_type_to_go(elem_ty)))
+                })
+                .collect();
+            if !list_fields.is_empty() {
+                self.record_field_list_elem
+                    .insert(name.name.clone(), list_fields);
+            }
             if generic_params.is_empty() {
                 continue;
             }
@@ -957,6 +1008,20 @@ impl GoEmitCtx {
                 .collect();
             self.record_param_fields
                 .insert(name.name.clone(), per_param);
+        }
+    }
+
+    /// If `ty` is a `List[Elem]` named type, return its element `TypeExpr`,
+    /// else `None`. Used to record a record field's list element type for
+    /// method-side receiver typing.
+    fn list_field_elem_type(ty: &TypeExpr) -> Option<&TypeExpr> {
+        match ty {
+            TypeExpr::Named { path, args, .. }
+                if args.len() == 1 && path.segments.last().is_some_and(|s| s.name == "List") =>
+            {
+                args.first()
+            }
+            _ => None,
         }
     }
 
@@ -1361,6 +1426,30 @@ impl GoEmitCtx {
     /// `interface{}`. `None` for any non-collection type. Used to set
     /// [`Self::expected_collection_elem`] so a literal in a typed binding adopts
     /// the declared element type(s).
+    /// If `node` is a *generic record* instantiation (`ListIter[Int]`), return
+    /// its base name and the Go-rendered concrete type-args (`("ListIter",
+    /// ["int64"])`). `None` for a non-record type, a non-generic record, or a
+    /// record with no type-args. Used to record [`Self::var_record_type_args`]
+    /// so a method-call scrutinee's generic `Optional[T]` payload can be resolved
+    /// to the concrete instantiation at the call site.
+    fn record_type_args(&self, node: &AIRNode) -> Option<(String, Vec<String>)> {
+        let NodeKind::TypeNamed { path, args } = &node.kind else {
+            return None;
+        };
+        if args.is_empty() {
+            return None;
+        }
+        let base = path.segments.last().map(|s| s.name.clone())?;
+        // Only generic records (those with a declared param list) qualify; this
+        // keeps the map free of `List`/`Map`/etc. and other non-record applies.
+        let params = self.generic_decls.get(&base)?;
+        if params.is_empty() {
+            return None;
+        }
+        let arg_strs: Vec<String> = args.iter().map(|a| self.type_to_go(a)).collect();
+        Some((base, arg_strs))
+    }
+
     fn collection_elem_go_types(&self, node: &AIRNode) -> Option<(String, Option<String>)> {
         let NodeKind::TypeNamed { path, args } = &node.kind else {
             return None;
@@ -1410,6 +1499,18 @@ impl GoEmitCtx {
                 self.var_list_elem.get(&to_camel_case(&name.name)).cloned()
             }
             NodeKind::ListLiteral { elems } => self.infer_homogeneous_elem_type(elems),
+            // A `self.field` list receiver inside an impl method (`self.xs.get(i)`
+            // in `record ListIter[T] { xs: List[T] }`): the field's `List[...]`
+            // element type is recorded per record. `T` is in scope on the
+            // method receiver, so the closure correctly takes `[]T`.
+            NodeKind::FieldAccess { object, field } if matches!(&object.kind, NodeKind::Identifier { name } if name.name == "self") =>
+            {
+                let record = self.current_self_record.as_ref()?;
+                self.record_field_list_elem
+                    .get(record)
+                    .and_then(|m| m.get(&field.name))
+                    .cloned()
+            }
             _ => None,
         }
     }
@@ -1549,6 +1650,27 @@ impl GoEmitCtx {
     /// param with no directly-typed field, or a value whose type can't be
     /// inferred, falls back to `any` (still a valid, if loose, instantiation).
     /// Returns `""` for a non-generic / unregistered type.
+    /// The explicit Go type-argument suffix (`[int64]`) for a generic struct
+    /// construction, recovered from the *declared* binding/expected type when it
+    /// names this exact record (`current_expected_type == "ListIter[int64]"` for
+    /// a `ListIter { ... }` construction). Returns `Some("[int64]")` then,
+    /// `None` when there is no expected type, it names a different type, or it
+    /// carries no args. More robust than field-value inference: it works when a
+    /// generic param appears only *nested* in a field type (`xs: List[T]`),
+    /// where no field is typed exactly `T`.
+    fn expected_construct_type_args(&self, type_name: &str) -> Option<String> {
+        let expected = self.current_expected_type.as_deref()?;
+        let rest = expected.strip_prefix(type_name)?;
+        // The remainder must be exactly a `[...]` type-arg list (so `ListIter`
+        // does not match a hypothetical `ListIterator`); reject an empty suffix
+        // (`ListIter` with no args) and anything not enclosed in brackets.
+        if rest.starts_with('[') && rest.ends_with(']') && rest.len() > 2 {
+            Some(rest.to_string())
+        } else {
+            None
+        }
+    }
+
     fn infer_construct_type_args(
         &self,
         type_name: &str,
@@ -1623,7 +1745,14 @@ impl GoEmitCtx {
                     self.var_set_elem.insert(name.clone(), elem);
                 }
                 if let Some(elems) = self.result_elem_go_types(t) {
-                    self.var_result_elem.insert(name, elems);
+                    self.var_result_elem.insert(name.clone(), elems);
+                }
+                // A generic-record-typed param (`c: Counter[Int]`) records its
+                // concrete instantiation so a `match c.next() { Some(x) => ... }`
+                // can resolve the generic `Optional[T]` payload to the concrete
+                // arg (`int64`) — see `scrutinee_optional_elem`.
+                if let Some(record_args) = self.record_type_args(t) {
+                    self.var_record_type_args.insert(name, record_args);
                 }
             }
         }
@@ -1660,6 +1789,35 @@ impl GoEmitCtx {
     /// the element type cannot be determined structurally, in which case the
     /// binding is left as the runtime `interface{}` (no regression: that is the
     /// prior behavior, and `${v}`-style interpolation still works).
+    /// Resolve a method-call's `Optional[T]` payload element to its CONCRETE Go
+    /// type at the call site. `method_optional_ret_elem` stores the *generic*
+    /// element as written on the method (`"T"`, the record's type param), which
+    /// is undefined in a concrete caller such as `main`. When `receiver` is a
+    /// variable bound to a concrete generic-record instantiation (recorded in
+    /// [`Self::var_record_type_args`], e.g. `c: ListIter[Int]` →
+    /// `("ListIter", ["int64"])`), and `elem` names one of that record's generic
+    /// params, substitute the param with the corresponding concrete arg
+    /// (`"T"` → `"int64"`). Otherwise `elem` is already concrete (a non-generic
+    /// method, or a param-less return) and is returned unchanged.
+    fn resolve_concrete_method_elem(&self, receiver: &AIRNode, elem: &str) -> String {
+        let NodeKind::Identifier { name } = &receiver.kind else {
+            return elem.to_string();
+        };
+        let Some((base, args)) = self.var_record_type_args.get(&to_camel_case(&name.name)) else {
+            return elem.to_string();
+        };
+        let Some(params) = self.generic_decls.get(base) else {
+            return elem.to_string();
+        };
+        // Find the generic param whose name equals `elem`, then map to the arg.
+        if let Some(idx) = params.iter().position(|p| p.name.name == elem) {
+            if let Some(concrete) = args.get(idx) {
+                return concrete.clone();
+            }
+        }
+        elem.to_string()
+    }
+
     fn scrutinee_optional_elem(&self, scrutinee: &AIRNode) -> Option<String> {
         match &scrutinee.kind {
             NodeKind::Identifier { name } => self
@@ -1667,8 +1825,11 @@ impl GoEmitCtx {
                 .get(&to_camel_case(&name.name))
                 .cloned(),
             // A direct method call (`it.next()`).
-            NodeKind::MethodCall { method, .. } => {
-                self.method_optional_ret_elem.get(&method.name).cloned()
+            NodeKind::MethodCall {
+                receiver, method, ..
+            } => {
+                let elem = self.method_optional_ret_elem.get(&method.name).cloned()?;
+                Some(self.resolve_concrete_method_elem(receiver, &elem))
             }
             NodeKind::Call { callee, args, .. } => {
                 // The read-only `List` built-ins `get`/`first`/`last` return
@@ -1707,10 +1868,10 @@ impl GoEmitCtx {
                     // `Call(FieldAccess(recv, method), [recv, ...rest])`; resolve
                     // it the same way as a direct `MethodCall` so both desugar
                     // shapes get a type-asserted payload.
-                    NodeKind::FieldAccess { field, .. }
-                        if crate::generator::desugared_self_call(callee, args).is_some() =>
-                    {
-                        self.method_optional_ret_elem.get(&field.name).cloned()
+                    NodeKind::FieldAccess { object, field } => {
+                        crate::generator::desugared_self_call(callee, args)?;
+                        let elem = self.method_optional_ret_elem.get(&field.name).cloned()?;
+                        Some(self.resolve_concrete_method_elem(object, &elem))
                     }
                     _ => None,
                 }
@@ -3258,6 +3419,7 @@ impl GoEmitCtx {
             self.current_handler_vars
                 .insert(ename.clone(), to_camel_case(ename));
         }
+        let saved_record_args = self.var_record_type_args.clone();
         let (
             saved_opt_scope,
             saved_list_scope,
@@ -3269,15 +3431,20 @@ impl GoEmitCtx {
             self.emit_block_body(body)?;
         } else {
             let prev_ret = self.current_fn_ret_type.take();
+            let prev_ret_coll = self.current_fn_ret_collection_elem.take();
             self.current_fn_ret_type = return_type.map(|t| self.type_to_go(t));
+            self.current_fn_ret_collection_elem =
+                return_type.and_then(|t| self.collection_elem_go_types(t));
             self.emit_block_body_return(body)?;
             self.current_fn_ret_type = prev_ret;
+            self.current_fn_ret_collection_elem = prev_ret_coll;
         }
         self.var_optional_elem = saved_opt_scope;
         self.var_list_elem = saved_list_scope;
         self.var_result_elem = saved_result_scope;
         self.var_map_kv = saved_map_scope;
         self.var_set_elem = saved_set_scope;
+        self.var_record_type_args = saved_record_args;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         self.writeln("}");
@@ -3383,8 +3550,18 @@ impl GoEmitCtx {
         // is unchanged outside impl methods.
         let prev_self_subst = self.go_self_subst.take();
         self.go_self_subst = Some(receiver_type.to_string());
+        // The base record name (`ListIter` from `ListIter[T]` / `ListIter`) so a
+        // `self.field` list receiver inside the body resolves its element type
+        // via `record_field_list_elem`. Restored on exit.
+        let prev_self_record = self.current_self_record.take();
+        let base = receiver_type
+            .split_once('[')
+            .map_or(receiver_type, |(b, _)| b)
+            .to_string();
+        self.current_self_record = Some(base);
         let result =
             self.emit_method_body(receiver_type, target_generics, method, use_value_receiver);
+        self.current_self_record = prev_self_record;
         self.go_self_subst = prev_self_subst;
         result
     }
@@ -3466,6 +3643,7 @@ impl GoEmitCtx {
                 self.current_handler_vars
                     .insert(ename.clone(), to_camel_case(ename));
             }
+            let saved_record_args = self.var_record_type_args.clone();
             let (
                 saved_opt_scope,
                 saved_list_scope,
@@ -3475,9 +3653,14 @@ impl GoEmitCtx {
             ) = self.enter_param_optional_scope(rest);
             if return_type.is_some() && !is_void {
                 let prev_ret = self.current_fn_ret_type.take();
+                let prev_ret_coll = self.current_fn_ret_collection_elem.take();
                 self.current_fn_ret_type = return_type.as_deref().map(|t| self.type_to_go(t));
+                self.current_fn_ret_collection_elem = return_type
+                    .as_deref()
+                    .and_then(|t| self.collection_elem_go_types(t));
                 self.emit_block_body_return(body)?;
                 self.current_fn_ret_type = prev_ret;
+                self.current_fn_ret_collection_elem = prev_ret_coll;
             } else {
                 self.emit_block_body(body)?;
             }
@@ -3486,6 +3669,7 @@ impl GoEmitCtx {
             self.var_result_elem = saved_result_scope;
             self.var_map_kv = saved_map_scope;
             self.var_set_elem = saved_set_scope;
+            self.var_record_type_args = saved_record_args;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
             self.writeln("}");
@@ -3656,6 +3840,17 @@ impl GoEmitCtx {
                         self.var_result_elem
                             .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elems);
                     }
+                    // Record a generic-record binding's concrete instantiation
+                    // (`let c: ListIter[Int]` → `("ListIter", ["int64"])`) so a
+                    // later `match c.next() { Some(x) => ... }` resolves the
+                    // generic `Optional[T]` payload to the concrete arg (`int64`)
+                    // rather than the undefined-in-caller `T`.
+                    if let Some(record_args) = self.record_type_args(t) {
+                        self.var_record_type_args.insert(
+                            to_camel_case(&self.pattern_to_binding_name(pattern)),
+                            record_args,
+                        );
+                    }
                     let type_str = self.type_to_go(t);
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}var {binding} {type_str} = ");
@@ -3809,7 +4004,24 @@ impl GoEmitCtx {
                 if let Some(val) = value {
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}return ");
+                    // A collection literal in return position adopts the
+                    // function's return collection element type(s), so `return
+                    // [x]` in `fn single[T](x: T) -> List[T]` emits `[]T{x}` (not
+                    // the `[]interface{}{x}` bare-literal inference falls back to,
+                    // which is not assignable to the `[]T` return). Guarded to a
+                    // top-level collection literal and consumed at the literal so
+                    // it never leaks to a nested/argument literal.
+                    let prev_expected = self.expected_collection_elem.take();
+                    if matches!(
+                        val.kind,
+                        NodeKind::ListLiteral { .. }
+                            | NodeKind::MapLiteral { .. }
+                            | NodeKind::SetLiteral { .. }
+                    ) {
+                        self.expected_collection_elem = self.current_fn_ret_collection_elem.clone();
+                    }
                     self.emit_expr(val)?;
+                    self.expected_collection_elem = prev_expected;
                     self.buf.push('\n');
                 } else {
                     self.writeln("return");
@@ -4316,9 +4528,16 @@ impl GoEmitCtx {
                 };
                 // Go requires an explicit type-argument list on a generic
                 // struct literal (`Box[int64]{...}`); it does NOT infer the args
-                // from the field values. Recover each param's concrete Go type
-                // by inferring the type of the field value that names it.
-                let type_args = self.infer_construct_type_args(&type_name, fields);
+                // from the field values. Prefer the declared/expected binding
+                // type's concrete args (`let c: ListIter[Int] = ListIter { ... }`
+                // → `[int64]`), which works even when a param appears only
+                // *nested* in a field type (`record ListIter[T] { xs: List[T] }`,
+                // where no field is typed exactly `T` so field-inference yields
+                // `any`). Fall back to inferring each param's type from the field
+                // value that names it directly.
+                let type_args = self
+                    .expected_construct_type_args(&type_name)
+                    .unwrap_or_else(|| self.infer_construct_type_args(&type_name, fields));
                 if let Some(sp) = spread {
                     // Go has no struct-spread syntax (`Point{..p}`), so a record
                     // spread lowers to an IIFE that copies the base value, then
@@ -5814,6 +6033,21 @@ impl GoEmitCtx {
                     }
                 }
                 let should_return = emit_return && !self.is_void_call(t);
+                // A collection literal in *tail-return* position adopts the
+                // function's return collection element type(s), mirroring the
+                // explicit-`return` arm, so `fn single[T](x: T) -> List[T] { [x]
+                // }` emits `[]T{x}` rather than `[]interface{}{x}`.
+                let prev_expected = self.expected_collection_elem.take();
+                if should_return
+                    && matches!(
+                        t.kind,
+                        NodeKind::ListLiteral { .. }
+                            | NodeKind::MapLiteral { .. }
+                            | NodeKind::SetLiteral { .. }
+                    )
+                {
+                    self.expected_collection_elem = self.current_fn_ret_collection_elem.clone();
+                }
                 if should_return {
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}return ");
@@ -5824,6 +6058,7 @@ impl GoEmitCtx {
                     self.emit_expr(t)?;
                     self.buf.push('\n');
                 }
+                self.expected_collection_elem = prev_expected;
             }
         } else if crate::generator::node_is_statement(node) {
             // A bare statement body (`break`/`continue`/`return`/assignment):
@@ -5838,6 +6073,17 @@ impl GoEmitCtx {
                 }
             }
             let should_return = emit_return && !self.is_void_call(node);
+            let prev_expected = self.expected_collection_elem.take();
+            if should_return
+                && matches!(
+                    node.kind,
+                    NodeKind::ListLiteral { .. }
+                        | NodeKind::MapLiteral { .. }
+                        | NodeKind::SetLiteral { .. }
+                )
+            {
+                self.expected_collection_elem = self.current_fn_ret_collection_elem.clone();
+            }
             if should_return {
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}return ");
@@ -5848,6 +6094,7 @@ impl GoEmitCtx {
                 self.emit_expr(node)?;
                 self.buf.push('\n');
             }
+            self.expected_collection_elem = prev_expected;
         }
         Ok(())
     }
@@ -9163,6 +9410,136 @@ mod tests {
         assert!(
             out.contains("Box[int64]{Value: 42}"),
             "generic construction should carry explicit `[int64]`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_fn_return_list_literal_uses_param_type() {
+        // GAP-C: `fn single[T](x: T) -> List[T] { return [x] }` must emit
+        // `return []T{x}`, not `[]interface{}{x}` (which a `[]T` return rejects).
+        let list_t = node(
+            61,
+            NodeKind::TypeNamed {
+                path: type_path(&["List"]),
+                args: vec![named_type(62, "T")],
+            },
+        );
+        let body = block(
+            63,
+            vec![],
+            Some(node(
+                64,
+                NodeKind::Return {
+                    value: Some(Box::new(node(
+                        65,
+                        NodeKind::ListLiteral {
+                            elems: vec![id_node(66, "x")],
+                        },
+                    ))),
+                },
+            )),
+        );
+        let f = node(
+            67,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("single"),
+                generic_params: vec![generic_param(68, "T")],
+                params: vec![node(
+                    69,
+                    NodeKind::Param {
+                        pattern: Box::new(bind_pat(70, "x")),
+                        ty: Some(Box::new(named_type(71, "T"))),
+                        default: None,
+                    },
+                )],
+                return_type: Some(Box::new(list_t)),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("return []T{x}"),
+            "generic fn returning a list literal should use `[]T`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn generic_construct_uses_declared_type_args_for_nested_param() {
+        // GAP-C/D plumbing: `let c: ListIter[Int] = ListIter { xs: [...] }` for
+        // `record ListIter[T] { xs: List[T] }` must emit `ListIter[int64]{...}`.
+        // Field inference yields `any` here (no field is typed exactly `T`; `xs`
+        // is `List[T]`), so the construction must adopt the declared binding
+        // type's concrete args.
+        let record = node(
+            10,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                name: ident("ListIter"),
+                generic_params: vec![generic_param(11, "T")],
+                fields: vec![bock_ast::RecordDeclField {
+                    id: 12,
+                    span: span(),
+                    name: ident("xs"),
+                    ty: TypeExpr::Named {
+                        id: 13,
+                        span: span(),
+                        path: type_path(&["List"]),
+                        args: vec![TypeExpr::Named {
+                            id: 14,
+                            span: span(),
+                            path: type_path(&["T"]),
+                            args: vec![],
+                        }],
+                    },
+                    default: None,
+                }],
+            },
+        );
+        let construct = node(
+            20,
+            NodeKind::RecordConstruct {
+                path: type_path(&["ListIter"]),
+                fields: vec![bock_air::AirRecordField {
+                    name: ident("xs"),
+                    value: Some(Box::new(node(
+                        21,
+                        NodeKind::ListLiteral {
+                            elems: vec![int_lit(22, "1")],
+                        },
+                    ))),
+                }],
+                spread: None,
+            },
+        );
+        let let_stmt = node(
+            23,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(24, "c")),
+                ty: Some(Box::new(node(
+                    25,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["ListIter"]),
+                        args: vec![named_type(26, "Int")],
+                    },
+                ))),
+                value: Box::new(construct),
+            },
+        );
+        let out = gen(&module(vec![], vec![record, let_stmt]));
+        assert!(
+            out.contains("ListIter[int64]{"),
+            "construction should adopt the declared binding type's `[int64]`, got: {out}"
+        );
+        assert!(
+            !out.contains("ListIter[any]{"),
+            "construction must NOT fall back to `[any]` when a declared type is present, got: {out}"
         );
     }
 
