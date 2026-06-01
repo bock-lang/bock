@@ -234,6 +234,8 @@ impl CodeGenerator for PyGenerator {
         let mut ctx = PyEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
+        ctx.trait_decls =
+            crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -280,6 +282,7 @@ impl CodeGenerator for PyGenerator {
 
         let mut ctx = PyEmitCtx::new();
         ctx.enum_variants = crate::generator::collect_enum_variants(modules);
+        ctx.trait_decls = crate::generator::collect_trait_decls(modules);
         for (i, (module, _)) in modules.iter().enumerate() {
             if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
                 ctx.buf.push('\n');
@@ -390,6 +393,12 @@ struct PyEmitCtx {
     /// the bespoke `_BockSome`/`_BockNone` lowering applies. Pre-scanned across
     /// the bundle.
     enum_variants: crate::generator::EnumVariantRegistry,
+    /// The bundle's user-declared traits (keyed by name). Distinguishes a
+    /// `T: Equatable` bound that is a real user trait from the compiler-provided
+    /// sealed-core conformance, which must drop the `bound=` on the `TypeVar` and
+    /// lower `.eq`/`.compare` to native operators (GAP-C). See
+    /// [`crate::generator::is_unimplemented_sealed_core_trait`].
+    trait_decls: crate::generator::TraitDeclRegistry,
 }
 
 impl PyEmitCtx {
@@ -420,6 +429,7 @@ impl PyEmitCtx {
             needs_typing_typevar: Cell::new(false),
             emitted_typevars: std::collections::HashSet::new(),
             enum_variants: crate::generator::EnumVariantRegistry::new(),
+            trait_decls: crate::generator::TraitDeclRegistry::new(),
         }
     }
 
@@ -1214,6 +1224,38 @@ impl PyEmitCtx {
         else {
             return Ok(false);
         };
+        self.emit_bridge_method(recv, method, rest)
+    }
+
+    /// Lower a sealed-core-trait bridge method on a *bounded generic type
+    /// variable* (`a.eq(b)` / `a.compare(b)` inside `eq_check[T: Equatable]`) to
+    /// its Python form (GAP-C). The method body is identical to the
+    /// `Primitive:<Ty>` bridge; the `bound=Equatable` on the `TypeVar` is
+    /// separately dropped (see the generic-decl emission). Fires only when the
+    /// bound trait is sealed-core and NOT a user-declared trait.
+    fn try_emit_trait_bound_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, _tr)) =
+            crate::generator::trait_bound_bridge_call(node, callee, args, &self.trait_decls)
+        else {
+            return Ok(false);
+        };
+        self.emit_bridge_method(recv, method, rest)
+    }
+
+    /// Shared body of the primitive / trait-bound bridges: emit the native Python
+    /// form of `compare` (the `_bock_less`/`_bock_equal`/`_bock_greater`
+    /// conditional), `eq` (`==`), or `to_string`/`display` (`str(..)`).
+    fn emit_bridge_method(
+        &mut self,
+        recv: &AIRNode,
+        method: &str,
+        rest: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
         let recv_str = self.expr_to_string(recv)?;
         match method {
             "compare" => {
@@ -1881,11 +1923,21 @@ impl PyEmitCtx {
             // A bound becomes `bound=<Name>`. Python's `TypeVar` accepts a
             // single `bound`; if Bock ever allows several, the first wins and
             // the rest are dropped (a static-checker approximation only —
-            // Python erases generics at runtime regardless).
+            // Python erases generics at runtime regardless). A compiler-provided
+            // sealed-core bound (`Equatable`/…) with no user `impl` is dropped
+            // entirely: there is no such Python class, so `bound=Equatable` raises
+            // `NameError` at def time (GAP-C). The `.eq`/`.compare` call is lowered
+            // to a native operator by `try_emit_trait_bound_bridge`.
             let bound = gp
                 .bounds
                 .first()
                 .and_then(|tp| tp.segments.last())
+                .filter(|seg| {
+                    !crate::generator::is_unimplemented_sealed_core_trait(
+                        &seg.name,
+                        &self.trait_decls,
+                    )
+                })
                 .map(|seg| format!(", bound={}", self.map_type_name(&seg.name)))
                 .unwrap_or_default();
             self.writeln(&format!("{name} = TypeVar(\"{name}\"{bound})"));
@@ -2516,6 +2568,9 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_trait_bound_bridge(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_container_method(node, callee, args)? {

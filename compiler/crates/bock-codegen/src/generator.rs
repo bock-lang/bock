@@ -978,6 +978,82 @@ pub fn primitive_bridge_call<'a>(
     }
 }
 
+/// The receiver-kind annotation value, parsed into the bounding *trait* name.
+///
+/// Returns the trait name (e.g. `"Equatable"`, `"Comparable"`) when the node
+/// carries a `recv_kind = "TraitBound:<Trait>"` metadata stamp, else `None`. The
+/// checker stamps this on a method call whose receiver is a bounded type variable
+/// (`a.eq(b)` inside `eq_check[T: Equatable]`), recording that the method
+/// dispatches through that trait bound rather than a concrete type. The codegen
+/// analogue of [`primitive_recv_kind`].
+#[must_use]
+pub fn trait_bound_recv_kind(node: &AIRNode) -> Option<&str> {
+    let bock_air::Value::String(tag) =
+        node.metadata.get(bock_types::checker::RECV_KIND_META_KEY)?
+    else {
+        return None;
+    };
+    tag.strip_prefix("TraitBound:")
+}
+
+/// Recognise a *desugared sealed-core-trait bridge method call* on a bounded
+/// generic type variable.
+///
+/// The generic analogue of [`primitive_bridge_call`]: building on
+/// [`desugared_self_call`], this additionally requires that (a) the `call_node`
+/// carries the checker's `recv_kind = "TraitBound:<Trait>"` annotation, (b) the
+/// trait is one of the compiler-provided sealed core traits
+/// ([`bock_types::traits::SEALED_CORE_TRAITS`]) and is NOT declared in
+/// `trait_decls` (i.e. it is the primitive conformance, not a user trait that
+/// happens to share the name), and (c) the method is one of
+/// [`PRIMITIVE_BRIDGE_METHODS`].
+///
+/// When all three hold the method dispatches through a sealed core trait whose
+/// primitive instantiations (`Int`/`String`/`Bool`) have no `.eq`/`.compare`
+/// method in any target, so each backend must lower it to the target intrinsic —
+/// exactly as the `Primitive:<Ty>` bridge does, but driven by the generic bound
+/// rather than a concrete receiver type. Returns the receiver node, the method
+/// name, the remaining (non-self) arguments, and the trait name.
+///
+/// A `TraitBound:<Trait>` whose trait IS user-declared is left to the normal
+/// trait-dispatch lowering (the user `impl` provides the method); a non-sealed
+/// trait bound is likewise untouched.
+#[must_use]
+pub fn trait_bound_bridge_call<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+    trait_decls: &TraitDeclRegistry,
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg], &'a str)> {
+    let tr = trait_bound_recv_kind(call_node)?;
+    if !is_unimplemented_sealed_core_trait(tr, trait_decls) {
+        return None;
+    }
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if PRIMITIVE_BRIDGE_METHODS.contains(&method) {
+        Some((recv, method, rest, tr))
+    } else {
+        None
+    }
+}
+
+/// True when `trait_name` is a compiler-provided sealed core trait
+/// ([`bock_types::traits::SEALED_CORE_TRAITS`]) that is NOT declared as a user
+/// trait in `trait_decls`. Such a bound is the primitive conformance and must be
+/// lowered to the target's built-in (native `==`/comparison/stringification and
+/// the built-in ordered/equality constraint) rather than referenced as a real
+/// trait/interface, which does not exist in any target. Shared by the
+/// generic-bound renderers and the method-call bridge so the two stay in lockstep.
+#[must_use]
+pub fn is_unimplemented_sealed_core_trait(
+    trait_name: &str,
+    trait_decls: &TraitDeclRegistry,
+) -> bool {
+    bock_types::traits::SEALED_CORE_TRAITS.contains(&trait_name)
+        && !trait_decls.contains_key(trait_name)
+}
+
 // ─── Optional / Result built-in method dispatch ──────────────────────────────
 //
 // `Optional[T]` and `Result[T, E]` expose a small set of built-in methods
