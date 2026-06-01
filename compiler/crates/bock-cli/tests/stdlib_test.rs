@@ -152,14 +152,12 @@ fn failing_expect_matcher_reports_fail() {
     );
 }
 
-/// FOUND lock: `bock test` does not yet load the embedded `core.*` stdlib, so a
-/// `@test` file cannot `use core.test.{...}`. The import fails name resolution
-/// (`undefined variable`) and the run errors out (exit 1). This test PINS that
-/// current limitation: when `bock test` is wired to load embedded core (the
-/// FOUND fix), this test will start failing and must be updated to assert that
-/// the import now resolves — making the gap impossible to close silently.
+/// `bock test` loads the embedded `core.*` stdlib (since #167), so a `@test`
+/// file can `use core.test.{...}` and the assertion functions resolve and run.
+/// (This test was previously a FOUND-lock pinning the import GAP; #167 wired
+/// `bock test` to the multi-file pipeline, so it now asserts the import works.)
 #[test]
-fn use_core_test_under_bock_test_is_not_yet_supported() {
+fn use_core_test_under_bock_test_resolves_and_passes() {
     let source = "module imports\n\
         \n\
         use core.test.{assert_true}\n\
@@ -175,14 +173,13 @@ fn use_core_test_under_bock_test_is_not_yet_supported() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
         Some(0),
-        "FOUND regressed: `use core.test` now works under `bock test` — update \
-         this test to assert the import resolves.\noutput:\n{combined}",
+        "`use core.test` should resolve under `bock test` (core-loading landed in #167):\n{combined}",
     );
     assert!(
-        combined.contains("undefined variable") || combined.contains("not found"),
-        "expected a name-resolution failure for the unloaded `core.test` import, got:\n{combined}",
+        combined.contains("1 passed") || combined.contains("PASS"),
+        "expected the stdlib-importing test to pass, got:\n{combined}",
     );
 }
