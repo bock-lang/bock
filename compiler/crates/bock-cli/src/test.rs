@@ -2,20 +2,37 @@
 //!
 //! Discovers `@test`-annotated functions in Bock source files, runs each in an
 //! isolated interpreter environment, and reports pass/fail results with timing.
+//!
+//! Like `check`/`run`/`build`, the test runner compiles each test file through
+//! the **full multi-file pipeline** with the embedded core stdlib prepended:
+//! the parsed `core.*` sources flow through the same dependency-sort →
+//! per-module compile → `ModuleRegistry` registration path, so a test file's
+//! `use core.<name>.{...}` resolves with no special-casing. Each `@test`
+//! function then runs in a fresh interpreter that has every compiled core
+//! module registered (in dependency order) alongside the test module's own
+//! declarations, plus the interpreter-only assertion builtins (`expect`,
+//! `assert`, `to_equal`, …) from `register_test_builtins`. The bare-builtin
+//! assertion form and `use core.*` imports therefore coexist.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use bock_air::{
-    lower_module, resolve_names, Binding, NameKind, NodeIdGen, NodeKind, ResolvedName, SymbolTable,
+    lower_module, resolve_names_with_registry, Binding, ModuleRegistry, NameKind, NodeIdGen,
+    NodeKind, ResolvedName, SymbolTable,
 };
 use bock_ast::Visibility;
+use bock_build::dep_graph::{self, DepGraph};
 use bock_errors::{Diagnostic, DiagnosticBag, FileId, Severity, Span};
 use bock_interp::Interpreter;
 use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
-use bock_types::{FnType, PrimitiveType, Strictness, Type, TypeChecker};
+use bock_types::{
+    collect_exports, seed_imports, seed_prelude, FnType, PrimitiveType, Strictness, Type,
+    TypeChecker,
+};
 
 /// Result of running a single test.
 struct TestResult {
@@ -27,6 +44,19 @@ struct TestResult {
     error: Option<String>,
     /// How long the test took to run.
     duration: std::time::Duration,
+}
+
+/// A compiled test file: the AIR modules to register in each test interpreter
+/// (in dependency order, core first) plus the items of the user test module
+/// itself (where `@test` functions are discovered).
+struct CompiledTestFile {
+    /// AIR modules in dependency (topological) order — core modules first,
+    /// then the user test module last. Each fresh test interpreter registers
+    /// these in this order so dependencies (the core modules a test imports)
+    /// are available before the test module's own declarations.
+    air_modules_in_order: Vec<bock_air::AIRNode>,
+    /// The top-level items of the user test module, used for `@test` discovery.
+    test_items: Vec<bock_air::AIRNode>,
 }
 
 /// Run the `bock test` command.
@@ -110,116 +140,22 @@ pub async fn run(filter: Option<String>, files: Vec<PathBuf>) -> anyhow::Result<
     Ok(())
 }
 
-/// Compile a single file and run all `@test` functions found in it.
+/// Compile a single test file and run all `@test` functions found in it.
 async fn run_tests_in_file(
     path: &Path,
     filter: &Option<String>,
 ) -> anyhow::Result<Vec<TestResult>> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let compiled = compile_test_file(path)?;
 
-    let mut source_map = SourceMap::new();
-    let file_id = source_map.add_file(path.to_path_buf(), content);
-    let source_file = source_map.get_file(file_id);
-    let filename = path.display().to_string();
-
-    let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
-
-    // Phase 1: Lex
-    let mut lexer = Lexer::new(source_file);
-    let tokens = lexer.tokenize();
-    collect_diagnostics(&mut all_diagnostics, lexer.diagnostics());
-
-    if has_errors(&all_diagnostics) {
-        return Err(format_errors(
-            &all_diagnostics,
-            &filename,
-            &source_file.content,
-        ));
-    }
-
-    // Phase 2: Parse
-    let mut parser = Parser::new(tokens, source_file);
-    let module = parser.parse_module();
-    collect_diagnostics(&mut all_diagnostics, parser.diagnostics());
-
-    if has_errors(&all_diagnostics) {
-        return Err(format_errors(
-            &all_diagnostics,
-            &filename,
-            &source_file.content,
-        ));
-    }
-
-    // Phase 3: Name resolution
-    let mut symbols = SymbolTable::new();
-    register_builtins(&mut symbols);
-    let resolve_diags = resolve_names(&module, &mut symbols);
-    collect_diagnostics(&mut all_diagnostics, &resolve_diags);
-
-    if has_errors(&all_diagnostics) {
-        return Err(format_errors(
-            &all_diagnostics,
-            &filename,
-            &source_file.content,
-        ));
-    }
-
-    // Phase 4: Lower to S-AIR
-    let id_gen = NodeIdGen::new();
-    let mut air_module = lower_module(&module, &id_gen, &symbols);
-
-    // Phase 5: Type check (T-AIR)
-    let mut checker = TypeChecker::new();
-    register_type_builtins(&mut checker);
-    checker.check_module(&mut air_module);
-    collect_diagnostics(&mut all_diagnostics, &checker.diags);
-
-    if has_errors(&all_diagnostics) {
-        return Err(format_errors(
-            &all_diagnostics,
-            &filename,
-            &source_file.content,
-        ));
-    }
-
-    // Phase 6: Analysis passes (ownership, effects, capabilities)
-    // In development mode, downgrade errors to warnings so they don't block test execution.
-    let ownership_diags = bock_types::analyze_ownership(&air_module);
-    collect_as_warnings(&mut all_diagnostics, &ownership_diags);
-
-    let strictness = Strictness::Development;
-    let effect_diags = bock_types::track_effects(&air_module, strictness);
-    collect_as_warnings(&mut all_diagnostics, &effect_diags);
-
-    let capability_diags = bock_types::verify_capabilities(&air_module, strictness);
-    collect_as_warnings(&mut all_diagnostics, &capability_diags);
-
-    // Print analysis warnings (don't block test execution)
-    let warnings: Vec<&Diagnostic> = all_diagnostics
-        .iter()
-        .filter(|d| d.severity == Severity::Warning)
-        .collect();
-    if !warnings.is_empty() {
-        let to_render: Vec<Diagnostic> = warnings.into_iter().cloned().collect();
-        let rendered = bock_errors::render(&to_render, &filename, &source_file.content);
-        eprint!("{rendered}");
-    }
-
-    // Extract module items
-    let items = match &air_module.kind {
-        NodeKind::Module { items, .. } => items.clone(),
-        _ => return Err(anyhow::anyhow!("internal: expected Module node")),
-    };
-
-    // Discover @test functions
-    let test_fns = discover_test_functions(&items, filter);
+    // Discover @test functions in the user test module.
+    let test_fns = discover_test_functions(&compiled.test_items, filter);
 
     if test_fns.is_empty() {
         return Ok(Vec::new());
     }
 
     // Derive the file stem for test naming
+    let filename = path.display().to_string();
     let file_stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
@@ -232,7 +168,7 @@ async fn run_tests_in_file(
         let qualified_name = format!("{file_stem}::{test_name}");
 
         let start = Instant::now();
-        let result = run_single_test(&items, test_name).await;
+        let result = run_single_test(&compiled.air_modules_in_order, test_name).await;
         let duration = start.elapsed();
 
         match result {
@@ -254,16 +190,239 @@ async fn run_tests_in_file(
     Ok(results)
 }
 
+/// Compile a test file through the full multi-file pipeline with the embedded
+/// core stdlib prepended.
+///
+/// Mirrors the loading the other CLI commands (`check`/`run`/`build`) perform:
+/// the parsed `core.*` sources are prepended to the parsed-files set, a
+/// dependency graph (with implicit prelude edges from the user module to every
+/// core module) is topologically sorted, and each module is compiled in order
+/// with cross-file name resolution + type seeding against the
+/// [`ModuleRegistry`]. The result carries the compiled AIR modules in
+/// dependency order (for per-test interpreter registration) and the user test
+/// module's items (for `@test` discovery).
+fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+
+    // ── Phase 1: Parse the embedded core sources + the test file ──────────────
+    let mut source_map = SourceMap::new();
+    let mut parsed_files: Vec<ParsedFile> = Vec::new();
+
+    // Prepend the embedded core-stdlib sources so they compile, register, and
+    // become available to the interpreter before the test module — exactly as
+    // `check`/`run` do — letting a test file resolve and run `use core.*`.
+    for src in crate::stdlib::core_sources() {
+        let pf = parse_stdlib_source(&src, &mut source_map)?;
+        parsed_files.push(pf);
+    }
+
+    // The user test file is the entry; remember which parsed index it lands at.
+    let test_pf = parse_user_file(path, &content, &mut source_map)?;
+    let test_idx = parsed_files.len();
+    parsed_files.push(test_pf);
+
+    // ── Phase 2: Build dependency graph ───────────────────────────────────────
+    let mut dep_graph = DepGraph::new();
+    let mut id_to_index: HashMap<String, usize> = HashMap::new();
+
+    // Embedded core (`is_stdlib`) module ids — every user module implicitly
+    // depends on them so the §18.2 prelude can seed core-defined symbols even
+    // without an explicit `use` (see `check::run`/`run::run_project`).
+    let core_module_ids: Vec<String> = parsed_files
+        .iter()
+        .enumerate()
+        .filter(|(_, pf)| pf.is_stdlib)
+        .map(|(i, pf)| dep_graph::module_id_from_module(&pf.module, i))
+        .collect();
+
+    for (i, pf) in parsed_files.iter().enumerate() {
+        let module_id = dep_graph::module_id_from_module(&pf.module, i);
+        let mut deps = dep_graph::extract_dependencies(&pf.module.imports);
+        if !pf.is_stdlib {
+            dep_graph::add_prelude_deps(&mut deps, &module_id, &core_module_ids);
+        }
+        dep_graph.add_module_with_deps(module_id.clone(), deps);
+        id_to_index.insert(module_id, i);
+    }
+
+    // ── Phase 3: Topological sort + cycle detection ───────────────────────────
+    let topo_order = dep_graph
+        .topological_order()
+        .ok_or_else(|| anyhow::anyhow!("circular module dependency detected"))?;
+
+    // ── Phase 4: Compile in dependency order ──────────────────────────────────
+    let mut registry = ModuleRegistry::new();
+    let mut air_modules: HashMap<usize, bock_air::AIRNode> = HashMap::new();
+
+    for module_id in &topo_order {
+        let Some(&idx) = id_to_index.get(module_id) else {
+            continue; // external dependency — not in our source files
+        };
+
+        let pf = &parsed_files[idx];
+        let source_file = source_map.get_file(pf.file_id);
+
+        let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
+
+        // 4a. Name resolution (with registry for cross-file imports)
+        let mut symbols = SymbolTable::new();
+        register_builtins(&mut symbols);
+        let resolve_diags = resolve_names_with_registry(&pf.module, &mut symbols, &registry);
+        collect_diagnostics(&mut all_diagnostics, &resolve_diags);
+
+        if has_errors(&all_diagnostics) {
+            // Surface stdlib errors and user errors alike; a stdlib error here
+            // is a compiler defect, a user error is the test author's bug.
+            return Err(format_errors(
+                &all_diagnostics,
+                &pf.filename,
+                &source_file.content,
+            ));
+        }
+
+        // 4b. Lower to S-AIR
+        let id_gen = NodeIdGen::new();
+        let mut air_module = lower_module(&pf.module, &id_gen, &symbols);
+
+        // 4c. Type check (T-AIR) — seed prelude + imports against the registry
+        // so cross-module symbols (incl. core) type-check.
+        let mut checker = TypeChecker::new();
+        register_type_builtins(&mut checker);
+        seed_prelude(&mut checker, &registry);
+        seed_imports(&mut checker, &pf.module.imports, &registry);
+        checker.check_module(&mut air_module);
+        collect_diagnostics(&mut all_diagnostics, &checker.diags);
+
+        if has_errors(&all_diagnostics) {
+            return Err(format_errors(
+                &all_diagnostics,
+                &pf.filename,
+                &source_file.content,
+            ));
+        }
+
+        // 4d. Analysis passes (ownership, effects, capabilities). In test/dev
+        // mode these are downgraded to warnings so they don't block execution.
+        let ownership_diags = bock_types::analyze_ownership(&air_module);
+        collect_as_warnings(&mut all_diagnostics, &ownership_diags);
+
+        let strictness = Strictness::Development;
+        let effect_diags = bock_types::track_effects(&air_module, strictness);
+        collect_as_warnings(&mut all_diagnostics, &effect_diags);
+
+        let capability_diags = bock_types::verify_capabilities(&air_module, strictness);
+        collect_as_warnings(&mut all_diagnostics, &capability_diags);
+
+        // Print analysis warnings for user modules only (don't block test
+        // execution). Stdlib modules surface only errors (compiler defects);
+        // their development-mode warnings describe internal code the user did
+        // not author and would otherwise be noise on every `bock test`.
+        if !pf.is_stdlib {
+            let warnings: Vec<&Diagnostic> = all_diagnostics
+                .iter()
+                .filter(|d| d.severity == Severity::Warning)
+                .collect();
+            if !warnings.is_empty() {
+                let to_render: Vec<Diagnostic> = warnings.into_iter().cloned().collect();
+                let rendered = bock_errors::render(&to_render, &pf.filename, &source_file.content);
+                eprint!("{rendered}");
+            }
+        }
+
+        // 4e. Register exports for downstream modules
+        let exports = collect_exports(module_id, &pf.path, &checker, &air_module);
+        registry.register(exports);
+
+        air_modules.insert(idx, air_module);
+    }
+
+    // Assemble the compiled AIR modules in dependency (topological) order so
+    // each test interpreter registers core modules before the test module.
+    // Capture the test module's items (for `@test` discovery) as it is moved
+    // into the ordered list.
+    let mut air_modules_in_order: Vec<bock_air::AIRNode> = Vec::new();
+    let mut test_items: Option<Vec<bock_air::AIRNode>> = None;
+    for module_id in &topo_order {
+        let Some(&idx) = id_to_index.get(module_id) else {
+            continue;
+        };
+        if let Some(m) = air_modules.remove(&idx) {
+            if idx == test_idx {
+                let items = match &m.kind {
+                    NodeKind::Module { items, .. } => items.clone(),
+                    _ => return Err(anyhow::anyhow!("internal: expected Module node")),
+                };
+                test_items = Some(items);
+            }
+            air_modules_in_order.push(m);
+        }
+    }
+
+    let test_items = test_items
+        .ok_or_else(|| anyhow::anyhow!("internal: test module not found among compiled modules"))?;
+
+    Ok(CompiledTestFile {
+        air_modules_in_order,
+        test_items,
+    })
+}
+
 /// Run a single test function in a fresh interpreter environment.
-async fn run_single_test(items: &[bock_air::AIRNode], test_name: &str) -> Result<(), String> {
+///
+/// Each test gets its own interpreter so tests cannot observe each other's
+/// mutations. The interpreter is seeded with: the core builtins
+/// (`register_core`), the interpreter-only test-assertion builtins
+/// (`register_test_builtins` — `expect`/`assert`/`to_equal`/…), and every
+/// compiled module (`air_modules_in_order`, core first then the test module),
+/// so a test can call both bare assertion builtins and imported `core.*`
+/// functions.
+async fn run_single_test(
+    air_modules_in_order: &[bock_air::AIRNode],
+    test_name: &str,
+) -> Result<(), String> {
     let mut interp = Interpreter::new();
     bock_core::register_core(&mut interp.builtins);
 
     // Register test assertion builtins (expect, to_equal, etc.)
     interp.builtins.register_test_builtins();
 
-    // Register all top-level functions
-    for item in items {
+    // Register all modules in dependency order (core first, then the test
+    // module), so a test's imported core functions are defined before the
+    // test module's own declarations and the test body that calls them.
+    for air_module in air_modules_in_order {
+        register_module_in_interpreter(&mut interp, air_module).await?;
+    }
+
+    // Look up and call the test function
+    let test_val = match interp.env.get(test_name) {
+        Some(v) => v.clone(),
+        None => {
+            return Err(format!(
+                "test function '{test_name}' not found in environment"
+            ))
+        }
+    };
+
+    match interp.call_fn_value(&test_val, vec![]).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Register all top-level declarations from an AIR module in the interpreter.
+///
+/// Returns `Err` if a setup expression (const/let/handle) fails to evaluate.
+async fn register_module_in_interpreter(
+    interp: &mut Interpreter,
+    air_module: &bock_air::AIRNode,
+) -> Result<(), String> {
+    let items = match &air_module.kind {
+        NodeKind::Module { items, .. } => items.clone(),
+        _ => return Ok(()),
+    };
+
+    for item in &items {
         match &item.kind {
             NodeKind::FnDecl {
                 name,
@@ -288,6 +447,11 @@ async fn run_single_test(items: &[bock_air::AIRNode], test_name: &str) -> Result
             } => {
                 interp.register_impl(target, methods);
             }
+            NodeKind::EffectDecl {
+                name, operations, ..
+            } => {
+                interp.register_effect(&name.name, operations);
+            }
             NodeKind::LetBinding { .. } | NodeKind::ModuleHandle { .. } => {
                 if let Err(e) = interp.eval_expr(item).await {
                     return Err(format!("setup error: {e}"));
@@ -297,20 +461,7 @@ async fn run_single_test(items: &[bock_air::AIRNode], test_name: &str) -> Result
         }
     }
 
-    // Look up and call the test function
-    let test_val = match interp.env.get(test_name) {
-        Some(v) => v.clone(),
-        None => {
-            return Err(format!(
-                "test function '{test_name}' not found in environment"
-            ))
-        }
-    };
-
-    match interp.call_fn_value(&test_val, vec![]).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e.to_string()),
-    }
+    Ok(())
 }
 
 /// Discover `@test`-annotated function declarations in the AIR items.
@@ -353,6 +504,100 @@ fn extract_param_name(param: &bock_air::AIRNode) -> Option<String> {
         }
     }
     None
+}
+
+/// A successfully parsed source file, ready for compilation.
+struct ParsedFile {
+    path: PathBuf,
+    filename: String,
+    file_id: bock_errors::FileId,
+    module: bock_ast::Module,
+    /// Whether this file is an embedded core-stdlib source (prepended by the
+    /// loader) rather than the user test file. Stdlib modules compile and
+    /// register exactly like the test module, but their *non-error* diagnostics
+    /// (e.g. development-mode context-annotation recommendations) are not
+    /// surfaced — they describe internal stdlib code the user did not write.
+    is_stdlib: bool,
+}
+
+/// Lex and parse the user test file into a [`ParsedFile`].
+///
+/// Returns an error (rendered) if lexing or parsing produced errors.
+fn parse_user_file(
+    path: &Path,
+    content: &str,
+    source_map: &mut SourceMap,
+) -> anyhow::Result<ParsedFile> {
+    let filename = path.display().to_string();
+    let file_id = source_map.add_file(path.to_path_buf(), content.to_string());
+    let source_file = source_map.get_file(file_id);
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    let mut lexer = Lexer::new(source_file);
+    let tokens = lexer.tokenize();
+    collect_diagnostics(&mut diags, lexer.diagnostics());
+
+    if has_errors(&diags) {
+        return Err(format_errors(&diags, &filename, &source_file.content));
+    }
+
+    let mut parser = Parser::new(tokens, source_file);
+    let module = parser.parse_module();
+    collect_diagnostics(&mut diags, parser.diagnostics());
+
+    if has_errors(&diags) {
+        return Err(format_errors(&diags, &filename, &source_file.content));
+    }
+
+    Ok(ParsedFile {
+        path: path.to_path_buf(),
+        filename,
+        file_id,
+        module,
+        is_stdlib: false,
+    })
+}
+
+/// Lex and parse an embedded core-stdlib source into a [`ParsedFile`].
+///
+/// Mirrors [`parse_user_file`] but takes the source text directly (the embedded
+/// stdlib is compiled into the binary). A parse error here is a
+/// compiler-internal defect (the embedded sources are fixed at build time), so
+/// it surfaces with the logical path for diagnosis.
+fn parse_stdlib_source(
+    src: &crate::stdlib::StdlibSource,
+    source_map: &mut SourceMap,
+) -> anyhow::Result<ParsedFile> {
+    let filename = src.logical_path.display().to_string();
+    let file_id = source_map.add_file(src.logical_path.clone(), src.source.clone());
+    let source_file = source_map.get_file(file_id);
+
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    let mut lexer = Lexer::new(source_file);
+    let tokens = lexer.tokenize();
+    collect_diagnostics(&mut diags, lexer.diagnostics());
+
+    if has_errors(&diags) {
+        return Err(format_errors(&diags, &filename, &source_file.content));
+    }
+
+    let mut parser = Parser::new(tokens, source_file);
+    let module = parser.parse_module();
+    collect_diagnostics(&mut diags, parser.diagnostics());
+
+    if has_errors(&diags) {
+        return Err(format_errors(&diags, &filename, &source_file.content));
+    }
+
+    Ok(ParsedFile {
+        path: src.logical_path.clone(),
+        filename,
+        file_id,
+        module,
+        is_stdlib: true,
+    })
 }
 
 /// Collect diagnostics from a bag into the accumulator.
@@ -443,6 +688,19 @@ fn register_type_builtins(checker: &mut TypeChecker) {
     for name in ["todo", "unreachable"] {
         checker.env.define(name, never_fn_ty.clone());
     }
+
+    // Ok, Err, Some: (T) -> Result/Optional — modeled loosely via Error.
+    let constructor_fn_ty = Type::Function(FnType {
+        params: vec![Type::Error],
+        ret: Box::new(Type::Error),
+        effects: vec![],
+    });
+    for name in ["Ok", "Err", "Some"] {
+        checker.env.define(name, constructor_fn_ty.clone());
+    }
+
+    // None: Optional[T] (a value, not a function)
+    checker.env.define("None", Type::Error);
 }
 
 /// Register interpreter builtin globals in the symbol table.
@@ -523,64 +781,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("test.bock");
         fs::write(&file_path, source).unwrap();
-
-        let mut source_map = SourceMap::new();
-        let file_id = source_map.add_file(file_path.clone(), source.to_string());
-        let source_file = source_map.get_file(file_id);
-
-        // Lex
-        let mut lexer = Lexer::new(source_file);
-        let tokens = lexer.tokenize();
-
-        // Parse
-        let mut parser = Parser::new(tokens, source_file);
-        let module = parser.parse_module();
-
-        // Name resolution
-        let mut symbols = SymbolTable::new();
-        register_builtins(&mut symbols);
-        let _resolve_diags = resolve_names(&module, &mut symbols);
-
-        // Lower
-        let id_gen = NodeIdGen::new();
-        let mut air_module = lower_module(&module, &id_gen, &symbols);
-
-        // Type check
-        let mut checker = TypeChecker::new();
-        register_type_builtins(&mut checker);
-        checker.check_module(&mut air_module);
-
-        let items = match &air_module.kind {
-            NodeKind::Module { items, .. } => items.clone(),
-            _ => panic!("expected Module node"),
-        };
-
-        let test_fns = discover_test_functions(&items, &None);
-        let file_stem = "test";
-
-        let mut results = Vec::new();
-        for (test_name, _) in &test_fns {
-            let qualified_name = format!("{file_stem}::{test_name}");
-            let start = Instant::now();
-            let result = run_single_test(&items, test_name).await;
-            let duration = start.elapsed();
-            match result {
-                Ok(()) => results.push(TestResult {
-                    name: qualified_name,
-                    passed: true,
-                    error: None,
-                    duration,
-                }),
-                Err(e) => results.push(TestResult {
-                    name: qualified_name,
-                    passed: false,
-                    error: Some(e),
-                    duration,
-                }),
-            }
-        }
-
-        results
+        run_tests_in_file(&file_path, &None).await.unwrap()
     }
 
     #[tokio::test]
@@ -657,30 +858,9 @@ fn test_beta() {
         let file_path = dir.path().join("test.bock");
         fs::write(&file_path, source).unwrap();
 
-        let mut source_map = SourceMap::new();
-        let file_id = source_map.add_file(file_path, source.to_string());
-        let source_file = source_map.get_file(file_id);
-
-        let mut lexer = Lexer::new(source_file);
-        let tokens = lexer.tokenize();
-        let mut parser = Parser::new(tokens, source_file);
-        let module = parser.parse_module();
-        let mut symbols = SymbolTable::new();
-        register_builtins(&mut symbols);
-        resolve_names(&module, &mut symbols);
-        let id_gen = NodeIdGen::new();
-        let mut air_module = lower_module(&module, &id_gen, &symbols);
-        let mut checker = TypeChecker::new();
-        register_type_builtins(&mut checker);
-        checker.check_module(&mut air_module);
-
-        let items = match &air_module.kind {
-            NodeKind::Module { items, .. } => items.clone(),
-            _ => panic!("expected Module"),
-        };
-
+        let compiled = compile_test_file(&file_path).unwrap();
         let filter = Some("alpha".to_string());
-        let tests = discover_test_functions(&items, &filter);
+        let tests = discover_test_functions(&compiled.test_items, &filter);
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].0, "test_alpha");
     }
@@ -769,6 +949,31 @@ fn test_b() {
                 .iter()
                 .map(|r| (&r.name, &r.error))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_use_core_option_resolves_and_runs() {
+        // A test file that `use`s a core.* module must compile (the import
+        // resolves through the same multi-file pipeline as check/run) and run
+        // the imported function in the per-test interpreter. `count(Some(5))`
+        // is `1`; `count(None)` is `0`.
+        let source = r#"module mytest
+
+use core.option.{count}
+
+@test
+fn test_core_option_count() {
+    expect(count(Some(5))).to_equal(1)
+    expect(count(None)).to_equal(0)
+}
+"#;
+        let results = run_test_on_source(source).await;
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].passed,
+            "test using core.option should pass: {:?}",
+            results[0].error
         );
     }
 }
