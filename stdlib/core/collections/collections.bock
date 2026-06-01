@@ -1,0 +1,493 @@
+//! `core.collections` — the v1 collection surface: free-function utilities that
+//! complement the built-in `List`/`Map`/`Set` methods, plus a pure-Bock
+//! `SortedSet[T]`.
+//!
+//! This module is pure Bock (free functions plus one generic record and
+//! constructors), so it needs no per-target runtime shim. Per spec §18.3 `List`,
+//! `Map`, and `Set` are **built-in types** whose methods lower to each target's
+//! native collection op; this module ships only what genuinely *complements*
+//! that method set, never a duplicate of it.
+//!
+//! ## Target support (verified by running, not assumed)
+//!
+//! Unlike the all-concrete `core.string`, this module is unavoidably **generic
+//! over `List[T]`** (the spec mandates `SortedSet[T]`, and a `T: Comparable`
+//! comparison surface). Generic-`List[T]` traversal once exposed compiler-side
+//! codegen gaps on Go and Rust; those have been closed (the broad
+//! generic-container fix plus the Go/Rust residue the `exec_core_collections`
+//! payoff fixture drove out — see its header). Concretely:
+//!
+//!   * **Go** — a list literal of constructor calls (`[key(3), …]`) now infers
+//!     its homogeneous element type (`[]Key`, not `[]interface{}`), so a generic
+//!     callee over a `List[T]` (`from_list`/`max_of`/`unique`) recovers `T`; a
+//!     `List[T]` record-field literal emits `[]T{}`; a zero-arg / return-only
+//!     generic constructor (`empty[T]()`) gets an explicit turbofish from its
+//!     expected type; and a payload-less user-enum (`Ordering`) match no longer
+//!     leaves an unused `__v`. The whole module builds and runs on Go.
+//!   * **Rust** — user `Comparable` records `#[derive(Clone)]`, satisfying the
+//!     `T: Clone` bound the backend adds (from `List.get(..).cloned()`), and a
+//!     `let`-bound record reused across query helpers (`size(s)`/`contains(s,
+//!     x)`) clones at each by-value pass rather than moving. The full surface is
+//!     callable on Rust.
+//!
+//! Net, verified by building + running each op on **all five targets** (js, ts,
+//! python, rust, go): [`sum`], [`max_of`], [`min_of`], [`unique`], [`reversed`],
+//! [`get_or`], and the entire [`SortedSet`] surface.
+//!
+//! ## What is built-in (and therefore NOT shipped here)
+//!
+//! The following lower as built-in **methods** on the value and are used
+//! directly — re-exporting them as free functions would duplicate the surface:
+//!
+//!   * `List` (read-only): `len`/`length`/`count`, `is_empty`, `get` (-> an
+//!     `Optional[T]`), `contains`, `first`/`last`, `concat`, `index_of`, `join`.
+//!   * `Set`: `add`/`remove`, `union`/`intersection`/`difference`, `contains`,
+//!     `is_subset`/`is_superset`, `len`, `is_empty`, `to_list`, `filter`/`map`.
+//!   * `Map`: `get` (-> an `Optional[V]`), `set`/`delete`, `merge`,
+//!     `contains_key`, `keys`/`values`/`entries`/`to_list`, `len`, `is_empty`,
+//!     `filter`.
+//!
+//! Because `Set` already ships `union`/`intersection`/`difference` and `Map`
+//! already ships `merge`, those set-/map-algebra helpers are **dropped** here:
+//! they exist as native, lowering methods on the value. The utilities below are
+//! the genuinely-missing pieces.
+//!
+//! ## Free-function utilities (complementing `List`)
+//!
+//!   * [`sum`] — total of a `List[Int]` (no built-in `List.sum`).
+//!   * [`max_of`] / [`min_of`] — the greatest / least element of a non-empty
+//!     `List[T: Comparable]`, as an `Optional[T]` (`None` for an empty list),
+//!     dispatching through the type's `compare` impl (`core.compare`).
+//!   * [`unique`] — order-preserving dedup of a `List[T: Comparable]` (no
+//!     built-in `List.unique`).
+//!   * [`reversed`] — a `List[T]` in reverse order (no built-in `List.reversed`).
+//!   * [`get_or`] — `Map.get(k)` with an eager default (the built-in `Map.get`
+//!     returns an `Optional[V]`; this names the common "value-or-default" lookup).
+//!
+//! ## `SortedSet[T]`
+//!
+//! [`SortedSet`] is a `T: Comparable` set kept **sorted ascending and deduped**,
+//! backed by a single `List[T]` `items` field. Its operations are
+//! *value-semantics* (each returns a **new** `SortedSet`, the same
+//! DQ18-sidestepping thin-floor pattern `core.iter`/`core.string` use — it never
+//! relies on `List.push`), built entirely from read-only `List` ops
+//! (`len`/`get`/`concat`) and `Comparable.compare`.
+//!
+//! The query methods are named to avoid the built-in collection-length/emptiness
+//! method lowering, which fires on **any** receiver and would shadow a same-named
+//! user-record method (mis-compiling on TS/Python/Go — see `core.string`'s
+//! `char_count`/`blank` note). They are therefore offered as **free functions**
+//! ([`size`]/[`is_empty`]/[`contains`]/[`to_list`]) rather than methods.
+
+module core.collections
+
+use core.compare.{Comparable}
+
+// ─── List utilities ──────────────────────────────────────────────────────────
+
+/// Returns the sum of the integers in `xs` (`0` for an empty list).
+///
+/// `sum([1, 2, 3])` is `6`. There is no built-in `List.sum` method, so this is a
+/// genuine addition; it folds with `+` over the read-only `get`/`len` drive.
+public fn sum(xs: List[Int]) -> Int {
+  let mut total: Int = 0
+  let mut i: Int = 0
+  loop {
+    if (i >= xs.len()) {
+      break
+    }
+    match xs.get(i) {
+      Some(x) => {
+        total = total + x
+      }
+      None => break
+    }
+    i = i + 1
+  }
+  return total
+}
+
+/// Returns the greatest element of `xs`, or `None` when `xs` is empty.
+///
+/// Generic over any `T: Comparable`, dispatching through the type's `compare`
+/// impl (`core.compare`). `max_of([key(1), key(3)])` is `Some(key(3))`. Returns
+/// an `Optional[T]` so the empty case is total (no panic / sentinel).
+public fn max_of[T: Comparable](xs: List[T]) -> Optional[T] {
+  match xs.first() {
+    None => return None
+    Some(head) => {
+      let mut best: T = head
+      let mut i: Int = 1
+      loop {
+        if (i >= xs.len()) {
+          break
+        }
+        match xs.get(i) {
+          Some(x) => {
+            match x.compare(best) {
+              Greater => {
+                best = x
+              }
+              _ => {}
+            }
+          }
+          None => break
+        }
+        i = i + 1
+      }
+      return Some(best)
+    }
+  }
+}
+
+/// Returns the least element of `xs`, or `None` when `xs` is empty.
+///
+/// The mirror of [`max_of`]: generic over `T: Comparable`, `None` for an empty
+/// list, otherwise `Some(min)`.
+public fn min_of[T: Comparable](xs: List[T]) -> Optional[T] {
+  match xs.first() {
+    None => return None
+    Some(head) => {
+      let mut best: T = head
+      let mut i: Int = 1
+      loop {
+        if (i >= xs.len()) {
+          break
+        }
+        match xs.get(i) {
+          Some(x) => {
+            match x.compare(best) {
+              Less => {
+                best = x
+              }
+              _ => {}
+            }
+          }
+          None => break
+        }
+        i = i + 1
+      }
+      return Some(best)
+    }
+  }
+}
+
+/// Returns `xs` with later duplicates removed, preserving first-seen order.
+///
+/// `unique([key(1), key(1), key(2)])` is `[key(1), key(2)]`. Generic over
+/// `T: Comparable`, using `compare` for equality (an `Equal` ordering). Built
+/// from read-only `get`/`len`/`concat` (no `List.push`).
+public fn unique[T: Comparable](xs: List[T]) -> List[T] {
+  let mut out: List[T] = []
+  let mut i: Int = 0
+  loop {
+    if (i >= xs.len()) {
+      break
+    }
+    match xs.get(i) {
+      Some(x) => {
+        // The membership scan is inlined (not a separate helper call) so the
+        // accumulator `out` is never passed *by value* into a helper inside the
+        // loop — Rust codegen moves a by-value argument, so reusing `out` on the
+        // next iteration would be a use-after-move (`bock check` accepts the
+        // by-value call, but the emitted Rust does not borrow-check).
+        let mut seen: Bool = false
+        let mut j: Int = 0
+        loop {
+          if (j >= out.len()) {
+            break
+          }
+          match out.get(j) {
+            Some(o) => {
+              match x.compare(o) {
+                Equal => {
+                  seen = true
+                }
+                _ => {}
+              }
+            }
+            None => break
+          }
+          j = j + 1
+        }
+        if (!seen) {
+          out = out.concat([x])
+        }
+      }
+      None => break
+    }
+    i = i + 1
+  }
+  return out
+}
+
+/// Returns the elements of `xs` in reverse order.
+///
+/// `reversed([1, 2, 3])` is `[3, 2, 1]`. There is no built-in `List.reversed`
+/// method; this walks the backing list from the end via read-only `get` and
+/// accumulates with `concat`.
+public fn reversed[T](xs: List[T]) -> List[T] {
+  let mut out: List[T] = []
+  let mut i: Int = xs.len() - 1
+  loop {
+    if (i < 0) {
+      break
+    }
+    match xs.get(i) {
+      Some(x) => {
+        out = out.concat([x])
+      }
+      None => break
+    }
+    i = i - 1
+  }
+  return out
+}
+
+// ─── Map utility ─────────────────────────────────────────────────────────────
+
+/// Returns the value `m` maps `k` to, or `fallback` when `k` is absent.
+///
+/// `get_or({"a": 1}, "a", 0)` is `1`; `get_or({"a": 1}, "z", 0)` is `0`. The
+/// built-in `Map.get` returns an `Optional[V]`; this names the common
+/// value-or-default lookup by matching that option against an eager `fallback`.
+///
+/// Typed concretely as `Map[String, Int]` rather than generic `Map[K, V]`: a
+/// free function generic over a `Map`'s key type does not codegen on Rust or Go,
+/// which require the key to satisfy `Eq + Hash` / `comparable` and do not
+/// synthesise that bound for an unconstrained `K` (the same monomorphic-built-in
+/// limitation that keeps `core.string` all-concrete). `String`-keyed,
+/// `Int`-valued maps are the common case and lower on all five targets.
+public fn get_or(m: Map[String, Int], k: String, fallback: Int) -> Int {
+  match m.get(k) {
+    Some(v) => return v
+    None => return fallback
+  }
+}
+
+// ─── SortedSet ───────────────────────────────────────────────────────────────
+
+/// A `T: Comparable` set kept sorted ascending and deduplicated.
+///
+/// Backed by a single sorted, dedup `List[T]` `items` field (the proven
+/// `List[T]`-record-field shape from `core.iter`'s `ListIterator`). Construct one
+/// with [`empty`] or [`from_list`], grow it with [`add`] (value semantics — a
+/// **new** `SortedSet` is returned, never an in-place mutation), and query it
+/// with the free functions [`contains`]/[`size`]/[`is_empty`]/[`to_list`].
+public record SortedSet[T] {
+  /// The backing elements, kept sorted ascending and deduplicated.
+  items: List[T]
+}
+
+/// Constructs an empty [`SortedSet`].
+///
+/// The ergonomic starting point: `add(empty(), x)`.
+public fn empty[T]() -> SortedSet[T] {
+  SortedSet { items: [] }
+}
+
+/// Returns a new [`SortedSet`] containing every element of `s` plus `x`.
+///
+/// If `x` is already present (an `Equal` element, per `compare`), `s`'s elements
+/// are returned unchanged; otherwise `x` is inserted at its sorted position. The
+/// result is always sorted ascending and dedup. Value semantics: `s` is not
+/// mutated. Built from read-only `get`/`len`/`concat`.
+///
+/// The scan partitions `s`'s items into those that sort *before* `x`
+/// (`before`) and the rest (`after`) using only `compare`, never moving `x`
+/// inside the loop (the ownership checker disallows moving a loop-external value
+/// reused afterward, so `x` is `compare`d but never inserted in the loop body).
+/// The per-element `match` on the `Ordering` only *sets flags* (a wildcard-free
+/// match in `if (!past)` statement position) and the append is a separate plain
+/// `if/else` — keeping the `match` out of an `if`-`else` tail, which codegen
+/// would otherwise lower to a value-returning ternary. `x` is spliced in exactly
+/// once, after the loop, via a `let`-bound intermediate (the chained form
+/// `before.concat([x]).concat(after)` confuses the move analysis).
+public fn add[T: Comparable](s: SortedSet[T], x: T) -> SortedSet[T] {
+  let mut before: List[T] = []
+  let mut after: List[T] = []
+  let mut present: Bool = false
+  let mut past: Bool = false
+  let mut i: Int = 0
+  loop {
+    if (i >= s.items.len()) {
+      break
+    }
+    match s.items.get(i) {
+      Some(y) => {
+        if (!past) {
+          match x.compare(y) {
+            Greater => {}
+            Equal => {
+              present = true
+              past = true
+            }
+            Less => {
+              past = true
+            }
+          }
+        }
+        if (past) {
+          after = after.concat([y])
+        } else {
+          before = before.concat([y])
+        }
+      }
+      None => break
+    }
+    i = i + 1
+  }
+  if (present) {
+    let unchanged: List[T] = before.concat(after)
+    return SortedSet { items: unchanged }
+  }
+  let spliced: List[T] = before.concat([x])
+  let items: List[T] = spliced.concat(after)
+  return SortedSet { items: items }
+}
+
+/// Builds a [`SortedSet`] from `xs`, sorting and deduplicating its elements.
+///
+/// `from_list([key(3), key(1), key(1)])` has sorted items `[key(1), key(3)]`.
+/// Folds [`add`] over `xs`, so the result is independent of input order and
+/// duplicate-free.
+public fn from_list[T: Comparable](xs: List[T]) -> SortedSet[T] {
+  let mut acc: SortedSet[T] = empty()
+  let mut i: Int = 0
+  loop {
+    if (i >= xs.len()) {
+      break
+    }
+    match xs.get(i) {
+      Some(x) => {
+        acc = add(acc, x)
+      }
+      None => break
+    }
+    i = i + 1
+  }
+  return acc
+}
+
+/// Returns `true` when `s` contains an element `Equal` (per `compare`) to `x`.
+///
+/// A linear scan over the (sorted) backing list using the `T: Comparable`
+/// `compare` dispatch. Offered as a free function rather than a method to avoid
+/// the built-in `contains` method lowering shadowing it. The scan is inlined
+/// (rather than delegating to a shared membership helper) so the membership
+/// receiver is never passed by value into a helper inside a loop, which the
+/// emitted Rust would not borrow-check.
+public fn contains[T: Comparable](s: SortedSet[T], x: T) -> Bool {
+  let mut i: Int = 0
+  loop {
+    if (i >= s.items.len()) {
+      break
+    }
+    match s.items.get(i) {
+      Some(y) => {
+        match x.compare(y) {
+          Equal => return true
+          _ => {}
+        }
+      }
+      None => break
+    }
+    i = i + 1
+  }
+  return false
+}
+
+/// Returns the number of elements in `s`.
+///
+/// Offered as a free function (not a `len`/`count` method) to avoid the built-in
+/// collection-length method lowering, which fires on any receiver and would
+/// shadow a same-named record method (see the module header).
+public fn size[T](s: SortedSet[T]) -> Int {
+  return s.items.len()
+}
+
+/// Returns `true` when `s` has no elements.
+///
+/// Named `is_empty` but offered as a free function for the same reason as
+/// [`size`]: a same-named record method would collide with the built-in
+/// emptiness lowering.
+public fn is_empty[T](s: SortedSet[T]) -> Bool {
+  return s.items.is_empty()
+}
+
+/// Returns `s`'s elements as a sorted-ascending `List[T]`.
+///
+/// The backing list is already kept sorted and dedup, so this is the elements in
+/// order. The terminal view of a `SortedSet`.
+public fn to_list[T](s: SortedSet[T]) -> List[T] {
+  return s.items
+}
+
+/// Returns the union of `a` and `b`: every element in either, sorted and dedup.
+///
+/// Folds [`add`] of each of `b`'s elements into `a` (or vice-versa), so the
+/// result preserves the `SortedSet` invariant. `union` of disjoint sets is their
+/// merge; of overlapping sets, the deduplicated combination.
+public fn union[T: Comparable](a: SortedSet[T], b: SortedSet[T]) -> SortedSet[T] {
+  let mut acc: SortedSet[T] = a
+  let mut i: Int = 0
+  loop {
+    if (i >= b.items.len()) {
+      break
+    }
+    match b.items.get(i) {
+      Some(x) => {
+        acc = add(acc, x)
+      }
+      None => break
+    }
+    i = i + 1
+  }
+  return acc
+}
+
+/// Returns the intersection of `a` and `b`: the elements present in **both**.
+///
+/// Scans `a`'s elements, keeping each that also appears in `b`. The result is
+/// sorted and dedup (it is a subsequence of `a`'s sorted items). The
+/// `b`-membership scan is inlined (not a `contains(b, x)` call) so `b` is not
+/// passed by value into a helper inside the loop — see [`unique`] for why the
+/// emitted Rust would otherwise fail to borrow-check.
+public fn intersection[T: Comparable](a: SortedSet[T], b: SortedSet[T]) -> SortedSet[T] {
+  let mut out: List[T] = []
+  let mut i: Int = 0
+  loop {
+    if (i >= a.items.len()) {
+      break
+    }
+    match a.items.get(i) {
+      Some(x) => {
+        let mut both: Bool = false
+        let mut j: Int = 0
+        loop {
+          if (j >= b.items.len()) {
+            break
+          }
+          match b.items.get(j) {
+            Some(y) => {
+              match x.compare(y) {
+                Equal => {
+                  both = true
+                }
+                _ => {}
+              }
+            }
+            None => break
+          }
+          j = j + 1
+        }
+        if (both) {
+          out = out.concat([x])
+        }
+      }
+      None => break
+    }
+    i = i + 1
+  }
+  return SortedSet { items: out }
+}

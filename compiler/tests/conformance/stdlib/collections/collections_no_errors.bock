@@ -1,0 +1,60 @@
+// TEST: stdlib_collections_no_errors
+// EXPECT: no_errors
+//
+// Every `core.collections` public item type-checks from a user module: the
+// `List` utilities (`sum`/`max_of`/`min_of`/`unique`/`reversed`), the `Map`
+// helper (`get_or`), and the `SortedSet` surface (`empty`/`from_list`/`add`/
+// `contains`/`size`/`is_empty`/`to_list`/`union`/`intersection`). The
+// duplicating helpers are deliberately absent: `Set`'s
+// `union`/`intersection`/`difference` and `Map`'s `merge` are built-in
+// *methods* on those values, so this module never re-exports them as free
+// functions — it imports only the genuinely-complementing surface.
+//
+// This is a `bock check` (target-agnostic) fixture: it asserts the surface
+// *type-checks*. Cross-target *execution* is split across two exec fixtures by
+// proven target set — `exec_core_collections` (SortedSet + Comparable utilities;
+// js/ts/python) and `exec_core_collections_utils` (the concrete utilities;
+// js/ts/python/rust) — because generic-`List[T]` traversal does not codegen on
+// Go and `T: Comparable` over a user record does not link on Rust (both
+// compiler-side gaps tracked as FOUND; see the module header).
+module userapp
+
+use core.collections.{sum, max_of, min_of, unique, reversed, get_or}
+use core.collections.{empty, from_list, add, contains, size, is_empty, to_list, union, intersection, SortedSet}
+use core.compare.{Key, key}
+
+public fn list_utilities() -> Int {
+  let total: Int = sum([1, 2, 3])
+  let biggest: Optional[Key] = max_of([key(2), key(9), key(4)])
+  let smallest: Optional[Key] = min_of([key(2), key(9), key(4)])
+  let deduped: List[Key] = unique([key(1), key(1), key(2)])
+  let backwards: List[Int] = reversed([1, 2, 3])
+  let looked: Int = get_or({"a": 1, "b": 2}, "b", -1)
+
+  match biggest {
+    Some(b) => {
+      match smallest {
+        Some(s) => return total + b.value + s.value + deduped.len() + backwards.len() + looked
+        None => return total
+      }
+    }
+    None => return total
+  }
+}
+
+public fn sorted_set_surface() -> Int {
+  let built: SortedSet[Key] = from_list([key(3), key(1), key(2), key(1)])
+  let grown: SortedSet[Key] = add(built, key(0))
+  let present: Bool = contains(grown, key(2))
+  let absent: Bool = contains(grown, key(9))
+  let n: Int = size(grown)
+  let blank: Bool = is_empty(empty())
+  let items: List[Key] = to_list(grown)
+  let combined: SortedSet[Key] = union(from_list([key(1)]), from_list([key(2)]))
+  let shared: SortedSet[Key] = intersection(from_list([key(1), key(2)]), from_list([key(2), key(3)]))
+
+  if (present && !absent && blank && items.len() > 0) {
+    return n + size(combined) + size(shared)
+  }
+  return n
+}

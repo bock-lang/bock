@@ -762,6 +762,14 @@ struct GoEmitCtx {
     /// receiver), not `[]interface{}` (which a `[]T` argument does not satisfy).
     /// Only `List`-typed fields are recorded. Pre-scanned across the bundle.
     record_field_list_elem: HashMap<String, HashMap<String, String>>,
+    /// Maps a record name → its generic-param names in declaration order
+    /// (`"SortedSet" → ["T"]`). Lets a construction site substitute a field's
+    /// declared list-element type (`record SortedSet[T] { items: List[T] }` →
+    /// elem `T`) with the construct's resolved concrete type args, so an empty
+    /// `[]` field literal emits `[]Key{}` for `SortedSet[Key]{…}` (or `[]T{}`
+    /// when the construct is itself generic) rather than the erased
+    /// `[]interface{}{}` Go rejects against the `[]T` struct field. Pre-scanned.
+    record_generic_param_names: HashMap<String, Vec<String>>,
     /// The base name of the record whose method body is currently being emitted
     /// (`"ListIter"` inside `impl ListIter`'s methods), so a `self.field` list
     /// receiver resolves through [`Self::record_field_list_elem`]. Set at method
@@ -854,6 +862,14 @@ struct GoEmitCtx {
     /// (`max2[int64](9, 7)`) even though the signature touches no container. Set
     /// during the same pre-scan as [`Self::fn_signatures`].
     fn_sealed_bound: std::collections::HashSet<String>,
+    /// Maps a *non-generic* top-level fn name → its rendered Go return type
+    /// (`"key" → "Key"`). Lets [`Self::infer_go_expr_type`] type a call to a
+    /// concrete constructor/helper so a list literal of such calls (`[key(3),
+    /// key(1)]`) infers the homogeneous element type `Key` and emits `[]Key{…}`
+    /// — which in turn lets a generic callee taking that slice (`from_list`,
+    /// `max_of`) infer its element type rather than collapsing to
+    /// `[]interface{}` / `[any]`. Generic fns live in [`Self::fn_signatures`].
+    fn_return_go_types: HashMap<String, String>,
     /// The concrete Go parameter types an *untyped lambda argument* should adopt
     /// at its current call site, derived from the callee's generic signature
     /// specialised by the other arguments ([`Self::fn_signatures`]). A lambda's
@@ -966,6 +982,7 @@ impl GoEmitCtx {
             var_go_type: HashMap::new(),
             record_param_fields: HashMap::new(),
             record_field_list_elem: HashMap::new(),
+            record_generic_param_names: HashMap::new(),
             current_self_record: None,
             trait_decls: crate::generator::TraitDeclRegistry::new(),
             type_names: HashSet::new(),
@@ -976,6 +993,7 @@ impl GoEmitCtx {
             current_fn_ret_collection_elem: None,
             fn_signatures: HashMap::new(),
             fn_sealed_bound: std::collections::HashSet::new(),
+            fn_return_go_types: HashMap::new(),
             expected_lambda_param_types: None,
             expected_collection_elem: None,
         }
@@ -1108,6 +1126,16 @@ impl GoEmitCtx {
                         }
                         self.fn_signatures
                             .insert(name.name.clone(), (gp_names, param_tys, ret_ty));
+                    } else if let NodeKind::FnDecl { return_type, .. } = &item.kind {
+                        // A *non-generic* fn: record its rendered Go return type so
+                        // a call (`key(3)`) can be typed for homogeneous list-elem
+                        // inference. Skip `Void`/`Unit` returns (no usable type).
+                        if let Some(ret) = return_type.as_deref() {
+                            if !Self::is_void_type(ret) {
+                                self.fn_return_go_types
+                                    .insert(name.name.clone(), self.type_to_go(ret));
+                            }
+                        }
                     }
                 }
             }
@@ -1152,6 +1180,10 @@ impl GoEmitCtx {
             if generic_params.is_empty() {
                 continue;
             }
+            self.record_generic_param_names.insert(
+                name.name.clone(),
+                generic_params.iter().map(|p| p.name.name.clone()).collect(),
+            );
             let per_param: Vec<Option<String>> = generic_params
                 .iter()
                 .map(|gp| {
@@ -1254,6 +1286,30 @@ impl GoEmitCtx {
             }
         }
         saw_variant
+    }
+
+    /// True if any arm of a user-enum type-switch binds a payload field from the
+    /// concrete `__v` (a `ConstructorPat`/`RecordPat` with at least one non-`_`
+    /// sub-pattern). When no arm does, the statement-position type-switch binds
+    /// `__v` but never reads it — Go's "declared and not used" — unless a
+    /// `default: panic(... __v)` consumes it. See [`Self::emit_match`].
+    fn go_user_enum_match_binds_payload(arms: &[AIRNode]) -> bool {
+        arms.iter().any(|arm| {
+            let NodeKind::MatchArm { pattern, .. } = &arm.kind else {
+                return false;
+            };
+            match &pattern.kind {
+                NodeKind::ConstructorPat { fields, .. } => fields
+                    .iter()
+                    .any(|f| !matches!(f.kind, NodeKind::WildcardPat)),
+                NodeKind::RecordPat { fields, .. } => fields.iter().any(|f| {
+                    f.pattern
+                        .as_ref()
+                        .is_none_or(|p| !matches!(p.kind, NodeKind::WildcardPat))
+                }),
+                _ => false,
+            }
+        })
     }
 
     /// Pre-scan the module for top-level `async fn` names. Must be populated
@@ -2030,6 +2086,70 @@ impl GoEmitCtx {
         }
     }
 
+    /// Build a `param → concrete Go type` substitution for a record construction
+    /// from the record's declared generic-param names and the resolved type-arg
+    /// suffix (`"[Key]"`, `"[T]"`, `"[any]"`). A param with no positional arg
+    /// (malformed/empty suffix) is omitted. Used to specialise a `List[T]` field
+    /// literal's element type at the construction site.
+    fn record_param_substitution(
+        &self,
+        record_name: &str,
+        type_args: &str,
+    ) -> HashMap<String, String> {
+        let mut subst = HashMap::new();
+        let Some(params) = self.record_generic_param_names.get(record_name) else {
+            return subst;
+        };
+        let args = Self::split_type_arg_suffix(type_args);
+        for (param, arg) in params.iter().zip(args.iter()) {
+            subst.insert(param.clone(), arg.clone());
+        }
+        subst
+    }
+
+    /// Split a Go type-argument suffix (`"[A, B[C]]"`) into its top-level args
+    /// (`["A", "B[C]"]`), respecting bracket nesting so a nested instantiation is
+    /// not split at its inner comma. Returns `[]` for an empty/absent suffix.
+    fn split_type_arg_suffix(suffix: &str) -> Vec<String> {
+        let inner = suffix
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or("");
+        let mut args = Vec::new();
+        let mut depth = 0usize;
+        let mut cur = String::new();
+        for ch in inner.chars() {
+            match ch {
+                '[' => {
+                    depth += 1;
+                    cur.push(ch);
+                }
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    cur.push(ch);
+                }
+                ',' if depth == 0 => {
+                    args.push(cur.trim().to_string());
+                    cur.clear();
+                }
+                _ => cur.push(ch),
+            }
+        }
+        if !cur.trim().is_empty() {
+            args.push(cur.trim().to_string());
+        }
+        args
+    }
+
+    /// Substitute whole-token generic-param occurrences in a Go type string
+    /// using `subst` (`"T"` with `{T: "Key"}` → `"Key"`; `"[]T"` is handled by
+    /// the caller, which passes the bare element type). Only an exact match is
+    /// substituted — composite element types are rare for record list fields, so
+    /// this keeps the rewrite token-precise rather than risking a substring hit.
+    fn apply_type_subst(elem: &str, subst: &HashMap<String, String>) -> String {
+        subst.get(elem).cloned().unwrap_or_else(|| elem.to_string())
+    }
+
     fn infer_go_expr_type(&self, node: &AIRNode) -> Option<String> {
         match &node.kind {
             NodeKind::Literal { lit } => match lit {
@@ -2129,7 +2249,12 @@ impl GoEmitCtx {
                 let NodeKind::Identifier { name } = &callee.kind else {
                     return None;
                 };
-                let (gp_names, param_tys, ret_ty) = self.fn_signatures.get(&name.name)?;
+                // A non-generic fn (`key`) resolves directly to its recorded Go
+                // return type — no type-param binding needed. This is what types a
+                // `[key(3), key(1)]` literal as `[]Key`.
+                let Some((gp_names, param_tys, ret_ty)) = self.fn_signatures.get(&name.name) else {
+                    return self.fn_return_go_types.get(&name.name).cloned();
+                };
                 let ret = ret_ty.as_ref()?;
                 let bindings = self.bind_fn_type_params(gp_names, param_tys, args);
                 let mut rendered = self.type_to_go(ret);
@@ -2627,7 +2752,24 @@ impl GoEmitCtx {
             .flatten()
             .chain(ret_ty)
             .any(Self::type_mentions_container);
-        if !touches_container && !force {
+        // A type param that appears in *no* value parameter cannot be inferred by
+        // Go from the arguments — it is pinned only by the return type (e.g.
+        // `fn empty[T]() -> SortedSet[T]`, a zero-arg generic constructor, or any
+        // return-only param). Such a call always needs an explicit turbofish,
+        // synthesised below from the expected destination type. (A param that
+        // *does* appear in a value parameter is left to Go's own inference unless
+        // a container/sealed-bound reason forces the turbofish.)
+        let param_go_types: Vec<String> = param_tys
+            .iter()
+            .flatten()
+            .map(|p| self.type_to_go(p))
+            .collect();
+        let has_return_only_param = gp_names.iter().any(|g| {
+            !param_go_types
+                .iter()
+                .any(|p| Self::contains_type_token(p, g))
+        });
+        if !touches_container && !force && !has_return_only_param {
             return None;
         }
         let mut bindings: HashMap<String, String> = HashMap::new();
@@ -4903,6 +5045,15 @@ impl GoEmitCtx {
                             .insert(self.pattern_to_binding_name(pattern), record_args);
                     }
                     let type_str = self.type_to_go(t);
+                    // Record the binding's rendered Go type so a later use as a
+                    // call argument (`max_of(noKeys)` where `noKeys: List[Key]`)
+                    // resolves to `[]Key`, letting a generic callee bind its
+                    // element type from the argument rather than collapsing to
+                    // `[any]`. Function-scoped: params save/restore `var_go_type`.
+                    if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                        self.var_go_type
+                            .insert(go_value_ident(&name.name), type_str.clone());
+                    }
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}var {binding} {type_str} = ");
                     // When the binding *value* is itself a collection literal,
@@ -5706,6 +5857,19 @@ impl GoEmitCtx {
                     }
                     self.buf.push_str("return __s }()");
                 } else {
+                    // A field whose declared type is `List[..]` (registered in
+                    // `record_field_list_elem`) supplies the expected element type
+                    // for a list-literal value, so an empty `[]` / under-inferred
+                    // literal field emits `[]<elem>{}` matching the struct's `[]T`
+                    // field rather than the erased `[]interface{}{}` Go rejects.
+                    // The element type is the field's declared param (`T`),
+                    // substituted with the construct's resolved concrete args
+                    // (`SortedSet[Key]` → `T` ↦ `Key`).
+                    let record_name = path.segments.last().map(|s| s.name.clone());
+                    let param_subst = record_name
+                        .as_deref()
+                        .map(|rn| self.record_param_substitution(rn, &type_args))
+                        .unwrap_or_default();
                     self.buf.push_str(&format!("{type_name}{type_args}{{"));
                     for (i, f) in fields.iter().enumerate() {
                         if i > 0 {
@@ -5713,7 +5877,24 @@ impl GoEmitCtx {
                         }
                         let _ = write!(self.buf, "{}: ", to_pascal_case(&f.name.name));
                         if let Some(val) = &f.value {
+                            let field_elem = record_name.as_deref().and_then(|rn| {
+                                self.record_field_list_elem
+                                    .get(rn)
+                                    .and_then(|m| m.get(&f.name.name))
+                                    .map(|e| Self::apply_type_subst(e, &param_subst))
+                            });
+                            let prev_expected = self.expected_collection_elem.take();
+                            if let (Some(elem), true) = (
+                                field_elem,
+                                matches!(
+                                    val.kind,
+                                    NodeKind::ListLiteral { .. } | NodeKind::SetLiteral { .. }
+                                ),
+                            ) {
+                                self.expected_collection_elem = Some((elem, None));
+                            }
                             self.emit_expr(val)?;
+                            self.expected_collection_elem = prev_expected;
                         } else {
                             self.buf.push_str(&to_camel_case(&f.name.name));
                         }
@@ -6566,8 +6747,25 @@ impl GoEmitCtx {
                     NodeKind::MatchArm { pattern, .. } if matches!(pattern.kind, NodeKind::BindPat { .. })
                 )
             });
+        // The user-enum type-switch binds `__v` only when something reads it:
+        // an arm that extracts a payload field (`__v.Radius`) or the trailing
+        // `default: panic(... __v)` added for a non-exhaustive (catch-all-free)
+        // match. A payload-less, catch-all-bearing match (e.g. `match ord {
+        // Greater => …  _ => {} }`) binds nothing — emit a non-binding
+        // `switch s.(type)` so Go does not reject an unused `__v`. Mirrors the
+        // expression-position IIFE path (see `emit_match` expr lowering).
+        let user_enum_default_panic = user_enum && !go_match_has_default_arm(arms);
+        let user_enum_binds_v =
+            user_enum && (Self::go_user_enum_match_binds_payload(arms) || user_enum_default_panic);
         let ind = self.indent_str();
-        if user_enum {
+        if user_enum && !user_enum_binds_v {
+            // Non-binding type-switch: no arm reads `__v` and no `__v`-consuming
+            // default panic follows, so binding it would be "declared and not
+            // used".
+            let _ = write!(self.buf, "{ind}switch ");
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str(".(type) {\n");
+        } else if user_enum {
             // A *narrowing* type-switch: `switch __v := s.(type)` rebinds `__v`
             // to the concrete variant struct in each case, so the arm can read
             // its payload fields (`__v.Radius`). (The non-narrowing
