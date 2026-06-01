@@ -322,7 +322,7 @@ impl<'src> Parser<'src> {
         // Continue consuming `.segment` pairs.
         while self.at(TokenKind::Dot) {
             match self.peek_kind_at(1) {
-                Some(TokenKind::Ident) | Some(TokenKind::TypeIdent) => {
+                Some(kind) if Self::is_path_segment_token(&kind) => {
                     let _ = self.advance(); // consume `.`
                     if let Some(seg) = self.try_parse_path_segment() {
                         segments.push(seg);
@@ -339,12 +339,41 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// Try to consume a single path segment (Ident or TypeIdent); emit an error on failure.
+    /// Whether `kind` may appear as a segment of a module/import path.
+    ///
+    /// Beyond plain `Ident` / `TypeIdent`, the effect-family contextual keywords
+    /// (`effect` / `handle` / `handling`) are accepted as path segments: the spec
+    /// names the stdlib module `core.effect` (§18.3), so `effect` must be a legal
+    /// path segment even though it is a reserved keyword in item/expression
+    /// position. This is scoped to module-path / import-path parsing only — it does
+    /// not affect `effect Log { ... }` declarations or `obj.effect` field access,
+    /// which never reach this code path.
+    fn is_path_segment_token(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Ident
+                | TokenKind::TypeIdent
+                | TokenKind::Effect
+                | TokenKind::Handle
+                | TokenKind::Handling
+        )
+    }
+
+    /// Try to consume a single path segment; emit an error on failure.
+    ///
+    /// Accepts `Ident` / `TypeIdent` and the effect-family keywords (see
+    /// [`Self::is_path_segment_token`]). For keyword tokens — which carry no
+    /// `literal` text — the segment name is the keyword's textual spelling
+    /// (e.g. `effect`), taken from its [`TokenKind`] `Display`.
     fn try_parse_path_segment(&mut self) -> Option<Ident> {
-        if matches!(self.peek().kind, TokenKind::Ident | TokenKind::TypeIdent) {
+        if Self::is_path_segment_token(&self.peek().kind) {
             let tok = self.advance();
+            // Plain identifiers carry their text in `literal`; keyword segments
+            // (effect/handle/handling) carry none, so fall back to the keyword's
+            // textual spelling.
+            let name = tok.literal.unwrap_or_else(|| tok.kind.to_string());
             Some(Ident {
-                name: tok.literal.unwrap_or_default(),
+                name,
                 span: tok.span,
             })
         } else {
@@ -405,7 +434,7 @@ impl<'src> Parser<'src> {
                 // Stop: import list follows.
                 Some(TokenKind::LBrace) | Some(TokenKind::Star) => break,
                 // Continue consuming path segments.
-                Some(TokenKind::Ident) | Some(TokenKind::TypeIdent) => {
+                Some(kind) if Self::is_path_segment_token(&kind) => {
                     let _ = self.advance(); // consume `.`
                     if let Some(seg) = self.try_parse_path_segment() {
                         segments.push(seg);
@@ -4556,6 +4585,62 @@ mod tests {
             }
             other => panic!("expected Named, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_module_path_with_effect_keyword_segment() {
+        // §18.3 names the stdlib module `core.effect`; the `effect` reserved
+        // keyword must be accepted as a module-path segment.
+        let (m, diags) = parse("module core.effect\n");
+        assert!(!diags.has_errors(), "unexpected errors: {diags:?}");
+        let path = m.path.expect("module decl should be present");
+        let names: Vec<&str> = path.segments.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["core", "effect"]);
+    }
+
+    #[test]
+    fn parse_module_path_with_handle_and_handling_segments() {
+        // For symmetry, the other effect-family keywords are also valid segments.
+        let (m, diags) = parse("module core.handle.handling\n");
+        assert!(!diags.has_errors(), "unexpected errors: {diags:?}");
+        let path = m.path.expect("module decl should be present");
+        let names: Vec<&str> = path.segments.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["core", "handle", "handling"]);
+    }
+
+    #[test]
+    fn parse_import_named_list_with_effect_keyword_segment() {
+        // `use core.effect.{Log, console_log}` — the `effect` keyword segment must
+        // not swallow or desync the `.{...}` import list.
+        let (m, diags) = parse("use core.effect.{Log, console_log}\n");
+        assert!(!diags.has_errors(), "unexpected errors: {diags:?}");
+        assert_eq!(m.imports.len(), 1);
+        let imp = &m.imports[0];
+        let path_segs: Vec<&str> = imp.path.segments.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(path_segs, ["core", "effect"]);
+        match &imp.items {
+            ImportItems::Named(names) => {
+                let ns: Vec<&str> = names.iter().map(|n| n.name.name.as_str()).collect();
+                assert_eq!(ns, ["Log", "console_log"]);
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_keyword_still_parses_as_effect_declaration_at_item_position() {
+        // Regression: the path-segment relaxation must NOT turn an item-position
+        // `effect Log { ... }` into a path. It must still parse as an effect decl.
+        let (m, diags) = parse("effect Log {\n  fn log() -> Void\n}\n");
+        assert!(!diags.has_errors(), "unexpected errors: {diags:?}");
+        assert!(m.path.is_none(), "no module decl expected");
+        assert_eq!(m.items.len(), 1);
+        let Item::Effect(e) = &m.items[0] else {
+            panic!("expected Item::Effect, got {:?}", m.items[0]);
+        };
+        assert_eq!(e.name.name, "Log");
+        assert_eq!(e.operations.len(), 1);
+        assert_eq!(e.operations[0].name.name, "log");
     }
 
     #[test]
