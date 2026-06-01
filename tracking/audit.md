@@ -1392,3 +1392,57 @@ Notes: core.iter remained a sensitive probe to the very end — its v5 STOP surf
   core.effect: floor build gated ONLY on Design/owner DQ25 Q1/Q2 (the §10.4 form now works ×5, so Q2 is strongly
     YES — executable Log shippable via the canonical surface). Recommendation: primitives-only + a single Log effect.
   NEXT: operator/Design to answer DQ25 Q1/Q2 → then build core.effect. P4-hygiene still available as parallel work.
+
+[2026-06-01 03:39 UTC] core.effect SHIPPED — 5/11 (#157); DQ25 decided by owner; + worktree permission-config fix
+  Input: operator answered the DQ25 floor question (AskUserQuestion) — **"Update config for worktrees, then [floor
+    option] 1"** (primitives + an executable `Log` effect).
+  ACTION 0 — CONFIG FIX (operator-requested; recurring 3× friction): engineer sub-agents' Read/Edit/Write were denied
+    on worktree + /tmp paths because the worktrees (`/opt/claude-projects/bock-worktrees/`) are a SIBLING of the
+    primary working dir, outside the permission scope (the relative `Edit(compiler/**)` rules never matched worktree
+    absolute paths). Fixed via `update-config` skill: added `permissions.additionalDirectories`
+    (`/opt/claude-projects/bock-worktrees`, `/tmp`) + absolute Read/Edit/Write allow rules (consistent with the
+    already-open `Bash(*)`, so no real posture change). JSON validated; gitignored + symlinked into worktrees.
+    **CONFIRMED WORKING** — both subsequent engineer sessions reported structured tools worked in the worktree, no
+    Bash fallback.
+  ACTION 1 — DQ25 decided by owner (core-spec, owner is authority alongside Design): floor = primitives-only + a `Log`
+    effect. Reconciled (design-questions DQ25 → decided; escalations DQ25 → resolved; the module's changelog).
+  BUILD (3 engineer dispatches on feat/core-effect, opus):
+    - Dispatch A authored the module surface but hit a BLOCKER (FOUND): `effect` is a reserved keyword the parser
+      rejects as a module-path segment → `module core.effect` / `use core.effect.{...}` fail E2000, and since the
+      embedded stdlib parses on every invocation, a live module would BRICK the compiler. Handled well — staged all
+      artifacts as inert `*.bock.blocked` (gate stayed green), pinpointed the fix. (The #155 probe used module names
+      main/logging, never `core.effect`, so it missed the keyword/path collision.)
+    - Dispatch B (continuation on the same branch) fixed `bock-parser` (`is_path_segment_token` accepts
+      effect/handle/handling in module/import path contexts only — field-access + effect-decl parsing untouched,
+      regression-tested; 4 new tests, 280/280) + activated the staged module (`git mv` live). FOUND/ripple it
+      disclosed candidly: activating embedded core.effect exposed a LATENT interpreter bug — `bock-cli/src/run.rs`
+      registered modules in nondeterministic `HashMap` order, so a user effect op sharing a name with a core op
+      (`log`) resolved flakily under `bock run` (the existing `test_multifile_cross_module_effect_handler` failed
+      ~1/5). Fixed by registering in topological order (deps before dependents, entry last) → user effects shadow
+      core deterministically. It touched run.rs (outside its declared owned set) as a gate-blocking ripple — a
+      justified, disclosed scope expansion.
+  VERIFY before merge (independently re-ran the FULL gate on #157): fmt/clippy/test/doc clean; conformance
+    REQUIRE=all **0 failed/0 skipped**; both core.effect exec fixtures ×5; reviewed the parser diff (precisely
+    scoped) + the run.rs reorder (correct: deps→entry-last); and re-ran the formerly-flaky test **10/10** to confirm
+    the determinism fix independently. **MERGED #157 (b1030bc→e9204ab).**
+  RESULT: **core.effect SHIPPED — 5/11 stdlib modules; R1 COMPLETE.** Floor = `Log` effect + `ConsoleLog` handler +
+    `console_log()`. Two latent gaps fixed along the way (parser keyword-path; interpreter registration determinism).
+    Filed: Q-interp-effect-op-collision (the interpreter flat op-map can't disambiguate same-named ops across effects
+    — deterministic-shadow is sufficient for v1; codegen unaffected; low-pri).
+  NEXT: **R2** (option/result/string/time) — the next stdlib batch; OR P4-hygiene (design-gated DQ18/DQ22). R1 done.
+
+═══ DAILY DIGEST — 2026-06-01 ═══
+Merged (7 code + 4 tracking PRs since the night pause at b59b42e): **core.iter R1 ×5** (#151 module + for→Iterable
+  checker desugar, #152 Rust/Go generic-combinator codegen); **effect-foundation hardening** (#155 — §10.2/§10.4
+  bare-op forms + the previously-INERT effects/ suite now execute ×5); **core.effect** (#157 — Log effect + the
+  `effect`-keyword parser fix + an interpreter determinism fix). Tracking: #153, #154, #156, #158(this).
+Stdlib: **5/11 v1 modules landed; R1 COMPLETE** (error/compare/convert/iter/effect). Codegen substrate complete;
+  ~340 exec pairs ×5, 0 failed under REQUIRE=all.
+Decisions (AskUserQuestion): post-iter "scope core.effect"; "harden effect foundation first"; floor "primitives + Log"
+  (DQ25 decided by owner); "fix worktree config first". Each checkpointed cleanly.
+Probes/findings: core.iter exposed a 6th generic-codegen gap (#152, routine). core.effect's feasibility probe
+  surfaced DV16 (the effect bare-op surface was non-functional + the effects/ suite was INERT — both RESOLVED #155).
+  Building core.effect surfaced + fixed the parser keyword-path gap + an interpreter HashMap-order flakiness (#157).
+Ops: fixed the recurring worktree permission-config friction (additionalDirectories) — confirmed working.
+Escalations: DQ25 resolved (owner). Standing non-blocking Design queue unchanged (DQ10-DQ24 + Bool-interp spelling).
+Blocked: none. 0 open PRs, main e9204ab, worktrees == main only. CLEAN. Next: R2 stdlib (or P4-hygiene).

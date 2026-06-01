@@ -222,7 +222,11 @@ decided→link)`
   exec fixture — requires (2) feasible.*
 - **§:** §18.3 / §10 · **context:** surfaced by the core.effect plan (`plans/2026-05-31-core-effect-r1-plan.md`).
   Non-blocking the QUEUE (the feasibility probe + scoping proceed), but the floor BUILD waits on Q1/Q2.
-- **Status:** escalated → Design (escalations.md)
+- **Status:** **DECIDED 2026-06-01 (owner): Q1 = primitives-only floor; Q2 = YES, ship an executable `Log` effect**
+  (`fn log(message: String) -> Void` + `ConsoleLog` record handler + `console_log()` constructor) via the canonical
+  §10.4 surface. Q3 (ambient effects no surface), Q4 (Clock/Cancel out), Q5 (no utility traits), Q6 (no composite),
+  Q7/Q8 per recommendation. Reconciled in **#157** (module + `spec/changelogs/...core-effect-v1-surface.md`); §18.3
+  body unchanged (the surface realizes its "minimum-useful subset" latitude). core.effect = 5/11.
 
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 

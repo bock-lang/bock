@@ -330,3 +330,10 @@ surface (no `with`-clause-only constraint anymore). **The core.effect floor BUIL
 answering Q1/Q2** (primitives-only floor + an executable `Log`?). Orchestrator recommendation stands: primitives-
 only + a single `Log` effect (`fn log(message: String) -> Void`) + a `ConsoleLog` record handler + constructor.
 Residue (non-blocking): Q-effect-op-node-lowering (E1001-vs-E8020), Q-effect-import-unused (cosmetic W1001).
+
+**RESOLVED (2026-06-01 03:39 UTC):** the owner DECIDED the floor = **primitives + a `Log` effect** (the orchestrator's
+recommendation). Reconciled in **#157** (the module + `spec/changelogs/...core-effect-v1-surface.md`); DQ25 marked
+decided in design-questions.md. core.effect = 5/11; R1 COMPLETE. (Building it surfaced + fixed two latent gaps in
+#157: the `effect`-keyword module-path parser rejection, and a nondeterministic interpreter module-registration order
+— both fixed ×5-clean; the residual interpreter flat-op-map limitation → Q-interp-effect-op-collision, low-pri.)
+**Status:** resolved.

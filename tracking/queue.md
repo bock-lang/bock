@@ -12,8 +12,8 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-05-31 vs main 9f1a2bd (core.iter R1 COMPLETE on all 5: #151 module + for→Iterable
-desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged; repo wins). See audit.md._
+_Last reconciled: 2026-06-01 vs main e9204ab (core.iter [#151/#152] + the effect-foundation hardening [#155] +
+**core.effect [#157]** all landed ×5; 5/11 stdlib modules. #123-#157 merged; repo wins). See audit.md._
 
 ---
 
@@ -92,6 +92,13 @@ desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged;
   references as uses.
   (DONE this block → #155: Q-effect-interp-rust [Rust interpolation effect-op rewrite] + Q-effect-conformance-wiring
   [the inert effects/ suite now executes ×5]; DV16 RESOLVED.)
+- **[Q-interp-effect-op-collision] Interpreter flat op-name→effect map can't disambiguate same-named ops** — bug ·
+  ready (low-pri) · interpreter / `bock-cli/src/run.rs` · — · links #157 · note: the interpreter resolves bare effect
+  ops through a FLAT op-name→effect-name map, so two effects sharing an op name (e.g. a user `effect Logger { fn log }`
+  + the embedded `core.effect.Log { fn log }`) collide — only last-writer-wins. #157 made registration deterministic
+  (topological order → user effects shadow core), which is correct + sufficient for v1, but full qualification (a
+  program using BOTH same-named ops) is unsupported on the interpreter. Codegen (all 5 targets) is UNAFFECTED (each
+  program compiles in isolation with proper module scoping). Low-pri interpreter-only limitation.
 
 ## v1-blocking
 
@@ -122,10 +129,11 @@ desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged;
   DQ18 (mutating lowering), DQ20 (`expr?`), DQ22, DQ21, Bool-interp spelling; (d) Go nested-runtime-payload arith
   [#142 residual] + Rust by-value-reuse [#149 OPEN]. NONE of these gate the R1 effect floor.
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (4/11 landed; the codegen substrate is COMPLETE [#131-#149] and the landed modules
-  execute cross-module on all 5. **R1 `iter` COMPLETE on all 5** [#151 module + for→Iterable checker desugar;
-  #152 Rust/Go generic-combinator codegen — 5 iter exec fixtures green ×5]. **Next: P4-hygiene then `core.effect`**,
-  then R2/R3) ·
+  **v1-BLOCKING** (**5/11 landed**; the codegen substrate is COMPLETE [#131-#149] and the landed modules
+  execute cross-module on all 5. **R1 `iter` COMPLETE** [#151/#152]; **the effect FOUNDATION hardened** [#155 —
+  §10 forms execute ×5]; **`core.effect` COMPLETE** [#157 — Log effect + the `effect`-keyword module-path parser
+  fix + the interpreter topological-registration determinism fix; ×5]. **R1 DONE.** Next: **R2**
+  (option/result/string/time), R3 (collections/test); P4-hygiene available in parallel) ·
   `stdlib/`, `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: v1 = **11 core modules** at minimum-useful surface (option, result,
   collections, string, iter, compare, convert, error, effect, time, test). Each =
@@ -133,15 +141,15 @@ desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged;
   on every target. **Landed:** loading mechanism + `core.error` (#103); `core.compare`
   (#104); the primitive-conformance bridge (#108); `core.convert` + parameterized
   traits (#110); **`core.iter`** (#151 generic `Iterator[T]`/`Iterable[T]` + concrete `ListIterator[T]`
-  + 6 eager List-returning combinators + the for→Iterable checker desugar; #152 Rust/Go codegen — all 5×5).
+  + 6 eager List-returning combinators + the for→Iterable checker desugar; #152 Rust/Go codegen — all 5×5);
+  **`core.effect`** (#157 `Log` effect + `ConsoleLog` handler + `console_log()`; the effect foundation #155 + the
+  `effect`-keyword module-path parser fix + the interpreter determinism fix — all 5×5).
   **Codegen gate CLEARED:** Q-fconf execution conformance (#114/#115)
   + Q-codegen-fixes (#121, DV9) + the codegen-completeness milestone (#131-#152) — 5-target parity real + tested.
-  **R1 REMAINING:** `effect` — **SCOPED + FOUNDATION HARDENED** (plan `plans/2026-05-31-core-effect-r1-plan.md`;
-  DQ25 8 surface questions → Design; the feasibility probe is DONE and the effect foundation is HARDENED [#155]:
-  §10.2/§10.4 bare-op forms + the effect suite now EXECUTE ×5, so the canonical effect surface is fully proven).
-  The core.effect floor BUILD is UNBLOCKED on the engineering side — gated ONLY on Design/owner answering DQ25
-  Q1/Q2 (the floor CONTENTS: primitives-only + an executable `Log`?). Then R2 (option/result/string/time), R3
-  (collections/test). Plans: `plans/2026-05-31-core-iter-r1-plan.md`, `plans/2026-05-31-effect-foundation-plan.md` (done).
+  **R1 COMPLETE** (`iter` #151/#152 · effect-foundation #155 · `effect` #157 — DQ25 decided by owner: primitives +
+  Log floor). **Next: R2** (option/result/string/time), then R3 (collections/test). Plans (all executed):
+  `plans/2026-05-31-core-iter-r1-plan.md`, `plans/2026-05-31-effect-foundation-plan.md`,
+  `plans/2026-05-31-core-effect-r1-plan.md`.
   `core.types/math/memory/concurrency` Reserved for v1.x.
   Plans: `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`,
   `plans/2026-05-30-primitive-conformance-bridge-plan.md`,
