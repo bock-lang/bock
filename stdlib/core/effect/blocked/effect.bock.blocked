@@ -1,0 +1,83 @@
+//! `core.effect` — the effect-system foundation for the Bock standard library.
+//!
+//! This module ships the v1 floor for Bock's algebraic-effect surface (§10): the
+//! effect-system **primitives** (the `effect`/`handler`/`handling` machinery is a
+//! language feature, so this module exercises rather than re-declares it) plus one
+//! canonical, executable standard effect — [`Log`] — together with a concrete
+//! record handler [`ConsoleLog`] and its [`console_log`] constructor. `Log`
+//! declares a single operation, `log(message: String) -> Void`, and `ConsoleLog`
+//! is the one v1 handler form: a `record` with an `impl Log for ConsoleLog`
+//! (§10.4). A caller installs it with a `handling (Log with console_log()) { ... }`
+//! block (§10.3 Layer 1) or a module-level `handle Log with console_log()`
+//! declaration (§10.3 Layer 2), then invokes the bare `log(...)` op.
+//!
+//! Like `core.compare`/`core.iter`, this module is pure Bock — an effect, a
+//! record, an impl, and a constructor — so it compiles to every target with no
+//! per-target runtime shim; the effect dispatch lowering is the compiler's
+//! (hardened across all five targets in #155, realizing the §10.2/§10.4 bare-op
+//! forms end to end).
+//!
+//! ## Intentionally OUT of the v1 surface
+//!
+//! - **Ambient effects (`Panic`, `Allocate`, §10.5)** are compiler-intrinsic:
+//!   always available without declaration, so they need no stdlib surface.
+//! - **`Clock` (§10.2 / §18.3.1)** is owned by `core.time`, not this module;
+//!   `std.time` ships its default `SystemClock` handler. It is named here only to
+//!   point at its home.
+//! - **`Cancel` (§13.5)** — the ambient cancellation effect — is Reserved for
+//!   v1.x along with the broader cancellation surface.
+//! - **Adaptive effect handlers (`Effect.adaptive(...)`, §10.8)** — runtime
+//!   strategy selection via the AI provider — are Reserved for v1.x.
+//! - **Lambda-based handler constructors (`Effect.handler(...)`, §10.4)** — the
+//!   stateless-handler shorthand — are Reserved for v1.x; the v1 handler form is
+//!   the record + `impl` form [`ConsoleLog`] demonstrates.
+//! - **Layer-3 project-default handlers (`bock.project [effects]`, §10.3)** are
+//!   Reserved for v1.x; v1 resolves handlers through Layer 1 (`handling` blocks)
+//!   and Layer 2 (module-level `handle`) only.
+
+module core.effect
+
+/// The canonical logging effect: a single operation that records a textual
+/// message somewhere chosen by the installed handler.
+///
+/// `Log` is the v1 standard effect. A function that needs to log declares
+/// `with Log` (§10.2) and invokes the bare [`log`](Log::log) operation; the
+/// concrete destination is deferred to whatever handler the caller installs —
+/// for example [`ConsoleLog`] via [`console_log`]. Install a handler with a
+/// `handling (Log with console_log()) { ... }` block (§10.3 Layer 1) or a
+/// module-level `handle Log with console_log()` declaration (§10.3 Layer 2).
+public effect Log {
+  /// Records `message` through the installed [`Log`] handler.
+  ///
+  /// This is the effect operation: at the call site it is invoked as a bare
+  /// `log("...")` call wherever a `Log` handler is in scope. [`ConsoleLog`]
+  /// satisfies it by printing the message to standard output.
+  fn log(message: String) -> Void
+}
+
+/// The v1 standard [`Log`] handler: writes each logged message to standard
+/// output, prefixed with `[log] `.
+///
+/// `ConsoleLog` is the one v1 handler form — a stateless `record` paired with an
+/// `impl Log for ConsoleLog` (§10.4). Construct it with [`console_log`] and
+/// install it with a `handling (Log with console_log()) { ... }` block.
+public record ConsoleLog {}
+
+/// `ConsoleLog` satisfies the [`Log`] effect by printing to standard output.
+impl Log for ConsoleLog {
+  /// Prints `message` to standard output as `[log] <message>`.
+  ///
+  /// This is the executable body the bare `log(...)` op dispatches to once a
+  /// `ConsoleLog` handler is installed for [`Log`].
+  public fn log(message: String) -> Void {
+    println("[log] ${message}")
+  }
+}
+
+/// Constructs a [`ConsoleLog`] handler for the [`Log`] effect.
+///
+/// This is the ergonomic way to obtain the standard handler:
+/// `handling (Log with console_log()) { log("hi") }`.
+public fn console_log() -> ConsoleLog {
+  ConsoleLog {}
+}

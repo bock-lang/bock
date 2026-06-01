@@ -1,0 +1,20 @@
+// TEST: stdlib_effect_module_no_errors
+// EXPECT: no_errors
+//
+// A user file importing the `core.effect` effect, its concrete record handler,
+// and the constructor resolves cleanly through the embedded stdlib: `Log` is the
+// canonical logging effect, `ConsoleLog` is its record handler, and
+// `console_log()` builds one. Installing the handler with a
+// `handling (Log with console_log()) { ... }` block (§10.3 Layer 1) brings the
+// `Log` op `log` into scope, so the bare `log("hi")` call type-checks against the
+// imported effect's operation. Proves the module, its imports, and the effect
+// dispatch all resolve and check.
+module userapp
+
+use core.effect.{Log, ConsoleLog, console_log}
+
+public fn run() -> Void {
+  handling (Log with console_log()) {
+    log("hi")
+  }
+}
