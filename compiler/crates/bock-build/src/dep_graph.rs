@@ -89,7 +89,11 @@ impl DepGraph {
         let mut visited = HashSet::new();
         let mut in_stack = HashSet::new();
 
-        for module_id in self.edges.keys() {
+        // Iterate roots in a stable (sorted) order. The result of `has_cycle`
+        // does not depend on iteration order, but iterating the `HashMap` keys
+        // directly is needless non-determinism; sorting keeps behavior
+        // independent of the per-process hash seed.
+        for module_id in self.sorted_module_ids() {
             if self.dfs_cycle_check(module_id, &mut visited, &mut in_stack) {
                 return true;
             }
@@ -100,13 +104,20 @@ impl DepGraph {
     /// Returns a topological ordering of modules (dependencies before dependents).
     ///
     /// Returns `None` if the graph contains a cycle.
+    ///
+    /// The ordering is **deterministic**: it does not depend on the per-process
+    /// `HashMap`/`HashSet` random seed. Root modules are visited in sorted
+    /// (module-id) order, and each node's dependencies are visited in sorted
+    /// order, so for mutually-independent modules ties are broken by module id.
+    /// This makes the order — and every downstream consumer that registers or
+    /// emits modules in this order — byte-stable run-to-run.
     #[must_use]
     pub fn topological_order(&self) -> Option<Vec<ModuleId>> {
         let mut visited = HashSet::new();
         let mut in_stack = HashSet::new();
         let mut order = Vec::new();
 
-        for module_id in self.edges.keys() {
+        for module_id in self.sorted_module_ids() {
             if !self.topo_dfs(module_id, &mut visited, &mut in_stack, &mut order) {
                 return None;
             }
@@ -115,6 +126,16 @@ impl DepGraph {
         // Post-order DFS with edges pointing dependent→dependency
         // naturally produces dependencies before dependents.
         Some(order)
+    }
+
+    /// Returns all module ids as a snapshot sorted by id.
+    ///
+    /// Used as the iteration order for the DFS roots so that the topological
+    /// order (and cycle detection) is independent of the `HashMap` hash seed.
+    fn sorted_module_ids(&self) -> Vec<&ModuleId> {
+        let mut ids: Vec<&ModuleId> = self.edges.keys().collect();
+        ids.sort_unstable();
+        ids
     }
 
     fn dfs_cycle_check(
@@ -133,11 +154,9 @@ impl DepGraph {
         visited.insert(node.to_string());
         in_stack.insert(node.to_string());
 
-        if let Some(deps) = self.edges.get(node) {
-            for dep in deps {
-                if self.dfs_cycle_check(dep, visited, in_stack) {
-                    return true;
-                }
+        for dep in sorted_deps(self.edges.get(node)) {
+            if self.dfs_cycle_check(dep, visited, in_stack) {
+                return true;
             }
         }
 
@@ -162,11 +181,13 @@ impl DepGraph {
         visited.insert(node.to_string());
         in_stack.insert(node.to_string());
 
-        if let Some(deps) = self.edges.get(node) {
-            for dep in deps {
-                if !self.topo_dfs(dep, visited, in_stack, order) {
-                    return false;
-                }
+        // Visit dependencies in sorted order so that, for a node with multiple
+        // independent dependencies, the post-order emission (and thus the
+        // overall topological order) is stable run-to-run rather than tied to
+        // the `HashSet` hash seed.
+        for dep in sorted_deps(self.edges.get(node)) {
+            if !self.topo_dfs(dep, visited, in_stack, order) {
+                return false;
             }
         }
 
@@ -174,6 +195,18 @@ impl DepGraph {
         order.push(node.to_string());
         true
     }
+}
+
+/// Returns the dependency ids of a node as a snapshot sorted by id.
+///
+/// Iterating a `HashSet` directly yields the per-process hash-seed order, which
+/// would make the DFS — and therefore the topological order — non-deterministic
+/// whenever a node has multiple independent dependencies. Sorting a snapshot
+/// breaks ties by module id for a stable, reproducible traversal.
+fn sorted_deps(deps: Option<&HashSet<ModuleId>>) -> Vec<&ModuleId> {
+    let mut deps: Vec<&ModuleId> = deps.into_iter().flatten().collect();
+    deps.sort_unstable();
+    deps
 }
 
 /// Extracts a module ID string from a parsed module.
@@ -309,5 +342,106 @@ mod tests {
         let base_pos = order.iter().position(|m| m == "Base").unwrap();
         let app_pos = order.iter().position(|m| m == "App").unwrap();
         assert!(base_pos < app_pos);
+    }
+
+    /// Builds a graph from `(id, deps)` pairs in the given input order.
+    fn build_graph(modules: &[(&str, &[&str])]) -> DepGraph {
+        let mut graph = DepGraph::new();
+        for (id, deps) in modules {
+            let dep_set: HashSet<ModuleId> = deps.iter().map(|d| (*d).to_string()).collect();
+            graph.add_module_with_deps((*id).to_string(), dep_set);
+        }
+        graph
+    }
+
+    #[test]
+    fn topological_order_is_stable_across_repeated_calls() {
+        // Seven mutually-independent modules — the case that previously yielded a
+        // different `HashMap`-seed-dependent order on each call. Repeated calls on
+        // the same graph must now return byte-identical orders.
+        let graph = build_graph(&[
+            ("core.iter", &[]),
+            ("core.option", &[]),
+            ("core.result", &[]),
+            ("core.cmp", &[]),
+            ("core.convert", &[]),
+            ("core.num", &[]),
+            ("core.str", &[]),
+        ]);
+
+        let first = graph.topological_order().unwrap();
+        for _ in 0..64 {
+            assert_eq!(graph.topological_order().unwrap(), first);
+        }
+        // Independent modules are emitted in sorted id order.
+        let mut sorted = first.clone();
+        sorted.sort();
+        assert_eq!(first, sorted);
+    }
+
+    #[test]
+    fn topological_order_is_independent_of_input_permutation() {
+        // The same logical graph, fed in several different insertion orders, must
+        // produce the same topological order. This is the property that makes
+        // module-registration / diagnostics / codegen order reproducible
+        // regardless of the order files happen to be discovered.
+        let permutations: &[&[(&str, &[&str])]] = &[
+            &[
+                ("a", &[]),
+                ("b", &[]),
+                ("c", &[]),
+                ("d", &["a", "b"]),
+                ("e", &["b", "c"]),
+            ],
+            &[
+                ("e", &["c", "b"]),
+                ("d", &["b", "a"]),
+                ("c", &[]),
+                ("b", &[]),
+                ("a", &[]),
+            ],
+            &[
+                ("c", &[]),
+                ("a", &[]),
+                ("e", &["b", "c"]),
+                ("b", &[]),
+                ("d", &["a", "b"]),
+            ],
+            &[
+                ("b", &[]),
+                ("d", &["b", "a"]),
+                ("a", &[]),
+                ("e", &["c", "b"]),
+                ("c", &[]),
+            ],
+        ];
+
+        let expected = build_graph(permutations[0]).topological_order().unwrap();
+        for perm in permutations {
+            let order = build_graph(perm).topological_order().unwrap();
+            assert_eq!(
+                order, expected,
+                "topological order changed with input permutation {perm:?}"
+            );
+            // Topological correctness: every dependency precedes its dependent.
+            let pos = |m: &str| order.iter().position(|x| x == m).unwrap();
+            assert!(pos("a") < pos("d"));
+            assert!(pos("b") < pos("d"));
+            assert!(pos("b") < pos("e"));
+            assert!(pos("c") < pos("e"));
+        }
+    }
+
+    #[test]
+    fn has_cycle_is_stable_across_permutations() {
+        // `has_cycle` must give the same answer regardless of insertion order or
+        // hash seed — both for an acyclic graph and one with a cycle.
+        let acyclic: &[(&str, &[&str])] = &[("a", &[]), ("b", &["a"]), ("c", &["a", "b"])];
+        let cyclic: &[(&str, &[&str])] = &[("a", &["c"]), ("b", &["a"]), ("c", &["b"])];
+
+        for _ in 0..16 {
+            assert!(!build_graph(acyclic).has_cycle());
+            assert!(build_graph(cyclic).has_cycle());
+        }
     }
 }
