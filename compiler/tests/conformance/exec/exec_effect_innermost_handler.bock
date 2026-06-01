@@ -1,0 +1,41 @@
+// TEST: exec_effect_innermost_handler
+// EXPECT: output "[audit] processing"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §10.3 resolution order: Local > Module, innermost handler wins (dynamic
+// scoping). A Layer-2 module handler (`handle Log with ConsoleLog {}`) is in
+// scope, but the Layer-1 `handling` block binds `Log` to `AuditLog {}`, which
+// is innermost and therefore the handler the bare `log(...)` resolves to. The
+// observed output is the audit (innermost) handler's, NOT the console one's.
+// End to end on all five targets. `main` is intentionally NOT `public`.
+module main
+
+effect Log {
+  fn log(message: String) -> Void
+}
+
+record ConsoleLog {}
+
+impl Log for ConsoleLog {
+  fn log(message: String) -> Void {
+    println("[console] ${message}")
+  }
+}
+
+record AuditLog {}
+
+impl Log for AuditLog {
+  fn log(message: String) -> Void {
+    println("[audit] ${message}")
+  }
+}
+
+// Layer 2 — module-level default handler.
+handle Log with ConsoleLog {}
+
+fn main() -> Void {
+  // Layer 1 — local handler is innermost and wins over the module handler.
+  handling (Log with AuditLog {}) {
+    log("processing")
+  }
+}

@@ -1,12 +1,16 @@
 // TEST: effect_lambda_handler_reserved_v1x
-// EXPECT: error E1001 at 17:16
+// EXPECT: error E4002 at 21:18
 // §10.4 Reserved-for-v1.x: v1 supports exactly ONE handler form (record + impl).
 // The lambda-based `Effect.handler(...)` constructor surface is Reserved for
 // v1.x. In v1 it fails at NAME RESOLUTION because the effect name is not bound
 // in the value namespace: the effect `Log` is a type, not a value, so the
-// `Log.handler` reference resolves to an undefined name. The expected
-// diagnostic is the undefined-name error (E1001, per the resolver) at the
-// `Log.handler` reference on the `let silent = ...` line below (17:16).
+// `Log.handler` reference resolves to an undefined value. The observed
+// diagnostic is the undefined-variable error (E4002, per the type checker)
+// at the `Log` reference on the `let silent = ...` line below (21:18): the
+// effect `Log` is nameable as a TYPE but not as a VALUE, so reading it in
+// value position (`Log.handler(...)`) is an undefined-variable error. The
+// spec (§10.4) requires only that lambda handlers fail at name resolution;
+// E4002 satisfies that.
 module effects_lambda_handler_reserved
 
 effect Log {

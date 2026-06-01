@@ -123,6 +123,14 @@ fn conformance_exec_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/exec")
 }
 
+/// Resolve the conformance directory that holds effect-system fixtures whose
+/// expectation is a *diagnostic* (an `// EXPECT: error E<code> at <l>:<c>`),
+/// not runnable output. These are driven through `bock check`, not the
+/// per-target execution path.
+fn conformance_effects_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/effects")
+}
+
 /// Build `case`'s source for `target` into `project_dir`, returning the
 /// directory containing the emitted `main.<ext>` (i.e. `project_dir/build/<target>`).
 fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
@@ -308,5 +316,88 @@ fn conformance_fixtures_execute_on_every_present_target() {
         failures.is_empty(),
         "conformance execution failures:\n\n{}",
         failures.join("\n\n")
+    );
+}
+
+/// The effect-system *diagnostic* fixtures under `conformance/effects/` are
+/// driven through `bock check` (they have no runnable output): each declares
+/// an `// EXPECT: error E<code> at <line>:<col>` directive for an effect-system
+/// error path the spec (§10) defines — a genuinely-unhandled bare op (E1001),
+/// and the v1.x-reserved lambda handler surface (E4002). This test wires the
+/// previously-inert suite into the harness: every such fixture must `bock
+/// check`-fail and surface its declared error code.
+///
+/// (The *positive* effect forms — §10.4 bare-op-in-`handling`, §10.3 Layer-1/2
+/// resolution, innermost-shadow, `with`-clause propagation, cross-module — are
+/// covered end to end on every target by the `exec_effect_*` execution fixtures
+/// above; those assert real runtime output, which a diagnostic fixture cannot.)
+#[test]
+fn conformance_effect_diagnostic_fixtures_check_as_declared() {
+    let dir = conformance_effects_dir();
+    let discovered = discover_tests(&dir);
+    assert!(
+        !discovered.is_empty(),
+        "no effect diagnostic fixtures discovered under {}",
+        dir.display()
+    );
+
+    let mut checked = 0usize;
+    for result in discovered {
+        let case = result.expect("effect diagnostic fixture failed to load");
+
+        // Pull the single `error E<code> at <l>:<c>` expectation.
+        let Some((code, location)) = case.expectations.iter().find_map(|e| match e {
+            Expectation::ErrorAt { code, location } => Some((code.clone(), location.clone())),
+            _ => None,
+        }) else {
+            panic!(
+                "effect diagnostic fixture `{}` declares no `// EXPECT: error ...` directive",
+                case.name
+            );
+        };
+
+        // Run `bock check` on the ORIGINAL fixture path (not the
+        // directive-stripped `case.source`): the directive's `<line>:<col>`
+        // refers to the file as written on disk, including the leading
+        // `// TEST:` / `// EXPECT:` comment lines.
+        let output = Command::new(bock_binary())
+            .arg("check")
+            .arg(&case.path)
+            .output()
+            .expect("failed to spawn bock check");
+
+        // A diagnostic fixture must FAIL to check.
+        assert!(
+            !output.status.success(),
+            "effect diagnostic fixture `{}` checked clean but expected `{code}`:\nstdout:\n{}\nstderr:\n{}",
+            case.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        // The expected error code must appear in the combined output, and the
+        // reported location must match the `<line>:<col>` the directive names.
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            combined.contains(&code),
+            "effect diagnostic fixture `{}` did not surface `{code}`:\n{combined}",
+            case.name,
+        );
+        let loc_str = format!("{}:{}", location.line, location.col);
+        assert!(
+            combined.contains(&loc_str),
+            "effect diagnostic fixture `{}` did not report location `{loc_str}`:\n{combined}",
+            case.name,
+        );
+        checked += 1;
+    }
+
+    assert!(
+        checked >= 2,
+        "expected >= 2 effect diagnostic fixtures, checked {checked}"
     );
 }

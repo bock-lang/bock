@@ -1,0 +1,29 @@
+// TEST: exec_effect_handling_block
+// EXPECT: output "service started"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §10.4 canonical bare-op form: the effect op `log` is invoked as a BARE call
+// DIRECTLY inside the `handling (Log with ConsoleLog {}) { ... }` block, with
+// no enclosing `with`-clause function. The handling block installs the
+// record+impl handler and brings the effect's operations into scope, so the
+// bare `log(...)` resolves to the installed handler. End to end on all five
+// targets. `main` is intentionally NOT `public` (Go entry-point rationale).
+module main
+
+effect Log {
+  fn log(message: String) -> Void
+}
+
+record ConsoleLog {}
+
+impl Log for ConsoleLog {
+  fn log(message: String) -> Void {
+    println(message)
+  }
+}
+
+fn main() -> Void {
+  handling (Log with ConsoleLog {}) {
+    log("service started")
+  }
+}

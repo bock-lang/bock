@@ -1,0 +1,31 @@
+// TEST: exec_effect_module_handler
+// EXPECT: output "module-level handler resolves this"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §10.3 Layer 2 (Module): an effect op is satisfied by a module-level
+// `handle <Effect> with <handler>` declaration alone, with NO enclosing
+// Layer-1 `handling` block. The module installs `Log` via
+// `handle Log with ConsoleLog {}`, and `main` invokes the bare `log(...)` op
+// directly; resolution falls through Local (absent) to Module and finds the
+// installed handler. End to end on all five targets. `main` is intentionally
+// NOT `public` (Go entry-point rationale).
+module main
+
+effect Log {
+  fn log(message: String) -> Void
+}
+
+record ConsoleLog {}
+
+impl Log for ConsoleLog {
+  fn log(message: String) -> Void {
+    println(message)
+  }
+}
+
+// Layer 2 — module-level handler; no local `handling` block is needed.
+handle Log with ConsoleLog {}
+
+fn main() -> Void {
+  log("module-level handler resolves this")
+}

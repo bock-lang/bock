@@ -1,0 +1,40 @@
+// TEST: exec_effect_multiple_effects
+// EXPECT: output "tick=7 logged"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §10.2 / §10.3: one `handling` block installs handlers for TWO effects at
+// once (comma-separated bindings). Both `Clock.now` and `Log.log` are invoked
+// as bare ops inside the single block; each resolves to its own record+impl
+// handler. End to end on all five targets.
+module main
+
+effect Log {
+  fn log(message: String) -> Void
+}
+
+effect Clock {
+  fn now() -> Int
+}
+
+record ConsoleLog {}
+
+impl Log for ConsoleLog {
+  fn log(message: String) -> Void {
+    println(message)
+  }
+}
+
+record FixedClock {}
+
+impl Clock for FixedClock {
+  fn now() -> Int {
+    7
+  }
+}
+
+fn main() -> Void {
+  handling (Log with ConsoleLog {}, Clock with FixedClock {}) {
+    let t: Int = now()
+    log("tick=${t} logged")
+  }
+}
