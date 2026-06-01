@@ -376,7 +376,11 @@ pub trait CodeGenerator {
 }
 
 /// Restrict `modules` to those **reachable** from the entry module via real
-/// `use` edges, preserving the input (dependency) order.
+/// `use` edges, returned in a *deterministic* dependency-before-dependent order
+/// (a post-order DFS of the `use` graph with `use` targets visited in declared
+/// module-path order). The result is independent of the input slice's order, so
+/// the emitted single-file bundle is byte-stable across the per-process topo-sort
+/// shuffling described below.
 ///
 /// `bock build` prepends the entire embedded `core.*` stdlib and makes every
 /// user module implicitly depend on all of it (the §18.2 prelude, so core
@@ -453,27 +457,65 @@ pub fn reachable_modules<'a>(
         return vec![];
     };
 
-    // BFS the explicit-`use` graph from the entry module.
-    let mut reachable = vec![false; modules.len()];
-    let mut stack = vec![entry_idx];
-    reachable[entry_idx] = true;
-    while let Some(idx) = stack.pop() {
-        for target in use_targets(modules[idx].0) {
-            if let Some(&t) = by_path.get(&target) {
-                if !reachable[t] {
-                    reachable[t] = true;
-                    stack.push(t);
+    // A *deterministic* post-order DFS of the explicit-`use` graph from the
+    // entry module: this both prunes to reachable modules and orders them
+    // dependencies-before-dependents (the order bundling concatenates in), with
+    // a canonical, input-order-independent result.
+    //
+    // Determinism matters because `bock build` runs in a fresh process per
+    // invocation, and the upstream module list (`air_modules`) is produced by a
+    // topological sort whose internal `HashMap`/`HashSet` iteration is seeded
+    // randomly per process — so the *same* program's `modules` slice can arrive
+    // in different (all valid) topological orders on different runs. Relying on
+    // that input order made the emitted single-file bundle's module order vary
+    // run-to-run, which surfaced as a rare, random `bock build` failure once
+    // several independent embedded `core.*` modules were reachable (a shifted
+    // concatenation occasionally collides). Visiting each module's `use` targets
+    // in a fixed order (declared module path, then index) pins the output.
+    let mut visited = vec![false; modules.len()];
+    let mut order: Vec<usize> = Vec::new();
+    // Iterative post-order DFS (recursion-free to avoid deep-graph stack use):
+    // `Enter(i)` schedules children then a matching `Exit(i)`; `Exit(i)` appends
+    // `i` after all its dependencies, giving dependency-before-dependent order.
+    enum Step {
+        Enter(usize),
+        Exit(usize),
+    }
+    let mut stack = vec![Step::Enter(entry_idx)];
+    while let Some(step) = stack.pop() {
+        match step {
+            Step::Enter(idx) => {
+                if visited[idx] {
+                    continue;
+                }
+                visited[idx] = true;
+                stack.push(Step::Exit(idx));
+                // Resolve this module's `use` targets to indices and visit them
+                // in a deterministic order: by declared module path (stable
+                // across runs), then by index as a final tiebreak.
+                let mut child_indices: Vec<usize> = use_targets(modules[idx].0)
+                    .iter()
+                    .filter_map(|target| by_path.get(target).copied())
+                    .collect();
+                child_indices.sort_by(|&a, &b| {
+                    path_of(modules[a].0)
+                        .cmp(&path_of(modules[b].0))
+                        .then(a.cmp(&b))
+                });
+                child_indices.dedup();
+                // Push in reverse so the smallest-keyed child is processed first
+                // (the stack pops LIFO), keeping the emitted order ascending.
+                for child in child_indices.into_iter().rev() {
+                    if !visited[child] {
+                        stack.push(Step::Enter(child));
+                    }
                 }
             }
+            Step::Exit(idx) => order.push(idx),
         }
     }
 
-    modules
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| reachable[*i])
-        .map(|(_, &pair)| pair)
-        .collect()
+    order.into_iter().map(|i| modules[i]).collect()
 }
 
 /// Choose the output path for a **single-file bundle** of `modules`.
@@ -2231,6 +2273,65 @@ mod tests {
         let pos = |name: &str| paths.iter().position(|x| x == name).unwrap();
         assert!(pos("helper") < pos("util"));
         assert!(pos("util") < pos("main"));
+    }
+
+    #[test]
+    fn reachable_modules_order_is_input_order_independent() {
+        // The bundle order must be deterministic regardless of the order the
+        // `modules` slice arrives in — the upstream topological sort iterates a
+        // `HashMap`/`HashSet` with a per-process random seed, so independent
+        // modules can be presented in any (valid) order. `main` uses three
+        // mutually-independent cores plus a transitive chain; whatever the input
+        // permutation, the reachable order must be byte-identical (and still
+        // dependency-before-dependent). This is the guard for the random
+        // `bock build` failure once several embedded `core.*` were reachable.
+        let leaf = module_named("z.leaf", &[], vec![fn_decl("l")]);
+        let a = module_named("core.a", &["z.leaf"], vec![fn_decl("a")]);
+        let b = module_named("core.b", &[], vec![fn_decl("b")]);
+        let c = module_named("core.c", &[], vec![fn_decl("c")]);
+        let main_m = module_named(
+            "main",
+            &["core.a", "core.b", "core.c"],
+            vec![fn_decl("main")],
+        );
+        let p = std::path::Path::new("x.bock");
+
+        let names = |got: &[(&AIRModule, &std::path::Path)]| -> Vec<String> {
+            got.iter()
+                .filter_map(|(m, _)| {
+                    if let NodeKind::Module { path: Some(pp), .. } = &m.kind {
+                        Some(
+                            pp.segments
+                                .iter()
+                                .map(|s| s.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join("."),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        // Several distinct input permutations of the same module set.
+        let perm1 = [(&leaf, p), (&a, p), (&b, p), (&c, p), (&main_m, p)];
+        let perm2 = [(&c, p), (&main_m, p), (&b, p), (&leaf, p), (&a, p)];
+        let perm3 = [(&main_m, p), (&c, p), (&b, p), (&a, p), (&leaf, p)];
+        let o1 = names(&reachable_modules(&perm1));
+        let o2 = names(&reachable_modules(&perm2));
+        let o3 = names(&reachable_modules(&perm3));
+        assert_eq!(o1, o2, "bundle order must not depend on input order");
+        assert_eq!(o1, o3, "bundle order must not depend on input order");
+        // All five reachable, dependency-before-dependent, ties canonical.
+        assert_eq!(o1.len(), 5, "got: {o1:?}");
+        let pos = |name: &str| o1.iter().position(|x| x == name).unwrap();
+        assert!(pos("z.leaf") < pos("core.a"), "got: {o1:?}");
+        assert!(pos("core.a") < pos("main"), "got: {o1:?}");
+        assert!(pos("core.b") < pos("main"), "got: {o1:?}");
+        assert!(pos("core.c") < pos("main"), "got: {o1:?}");
+        // `main` (the dependent) is emitted last.
+        assert_eq!(o1.last().map(String::as_str), Some("main"), "got: {o1:?}");
     }
 
     #[test]
