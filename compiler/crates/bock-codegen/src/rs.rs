@@ -265,6 +265,18 @@ struct RsEmitCtx {
     /// `filter[T](.., pred: Fn(T) -> Bool)`), and concrete v1 element types are
     /// `Clone`. Saved/restored around each arm so it never leaks across arms.
     reused_match_bindings: std::collections::HashSet<String>,
+    /// Snake-cased names of `let`-bound variables in the current block that are
+    /// read by-value more than once (a non-`Copy` value passed by value to a
+    /// free function is *moved* by the first consumer, so a later by-value pass
+    /// is `E0382`). A bare-identifier free-function argument naming such a
+    /// binding is emitted as `x.clone()`. Mirrors [`Self::reused_match_bindings`]
+    /// for `let` bindings rather than match-arm bindings: the same move-reuse
+    /// hazard arises whenever a query helper (`size(s)`, `contains(s, x)`,
+    /// `to_list(s)`) takes a record by value and the binding is queried again.
+    /// The clone is sound: a concrete v1 record/collection derives `Clone`, and a
+    /// generic such binding lives in a fn already carrying the matching `T:
+    /// Clone` bound. Seeded per-block (saved/restored) so it never leaks.
+    reused_let_bindings: std::collections::HashSet<String>,
     /// The bundle's user-declared traits (keyed by name). Used to distinguish a
     /// `T: Equatable` bound that is a real user trait (it has an `impl`, so the
     /// bound and the `.eq` call dispatch normally) from the compiler-provided
@@ -293,6 +305,7 @@ impl RsEmitCtx {
             in_clone_self_method: false,
             self_operand_methods: std::collections::HashSet::new(),
             reused_match_bindings: std::collections::HashSet::new(),
+            reused_let_bindings: std::collections::HashSet::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
         }
     }
@@ -3451,9 +3464,11 @@ impl RsEmitCtx {
     /// `x + 1`) produces a fresh value with no move hazard.
     fn arg_is_reused_binding(&self, arg: &AIRNode) -> bool {
         match &arg.kind {
-            NodeKind::Identifier { name } => self
-                .reused_match_bindings
-                .contains(&to_snake_case(&name.name)),
+            NodeKind::Identifier { name } => {
+                let snake = to_snake_case(&name.name);
+                self.reused_match_bindings.contains(&snake)
+                    || self.reused_let_bindings.contains(&snake)
+            }
             _ => false,
         }
     }
@@ -3749,9 +3764,27 @@ impl RsEmitCtx {
             // each binding would serialise the work.
             let task_bindings = Self::collect_task_bindings(stmts);
             let prev = std::mem::replace(&mut self.task_bound_names, task_bindings);
+            // Seed the move-reuse clone set for this block's `let` bindings: a
+            // non-`Copy` binding read by value more than once is moved by its
+            // first by-value consumer, so later free-fn arg passes must clone
+            // (`E0382`). Unioned into (not replacing) any outer-block set so a
+            // reused binding from an enclosing block stays cloned in nested
+            // blocks; saved/restored so the additions never leak outward.
+            let prev_reused_let = self.reused_let_bindings.clone();
+            for s in stmts {
+                if let NodeKind::LetBinding { pattern, .. } = &s.kind {
+                    if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                        let rs_name = to_snake_case(&name.name);
+                        if Self::count_identifier_uses(node, &rs_name) > 1 {
+                            self.reused_let_bindings.insert(rs_name);
+                        }
+                    }
+                }
+            }
             for s in stmts {
                 self.emit_node(s)?;
             }
+            self.reused_let_bindings = prev_reused_let;
             self.task_bound_names = prev;
             if let Some(t) = tail {
                 // A statement tail (`return`/`break`/`continue`/assignment) is
