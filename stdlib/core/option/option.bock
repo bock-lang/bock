@@ -1,0 +1,100 @@
+//! `core.option` — free-function utilities over the built-in `Optional[T]`.
+//!
+//! Like `core.iter`/`core.compare`, this module is pure Bock (a set of generic
+//! free functions, each driven by the proven `match o { Some(x) => ...; None =>
+//! ... }` shape), so it compiles to every target with no per-target runtime
+//! shim. `Optional[T]`/`Some`/`None` are built-in prelude types, and a small set
+//! of *methods* already lowers on the tagged value (`is_some`/`is_none`/
+//! `unwrap`/`unwrap_or`/`map`/`flat_map`, landed #138). This module deliberately
+//! ships only the free-function utilities that **complement** that method set
+//! rather than duplicate it:
+//!
+//!   * `or_else` — fall back to an alternative `Optional` (no method equivalent).
+//!   * `filter` — keep the payload only when a predicate holds (no method
+//!     equivalent on `Optional`; the built-in `filter` is a `List`/`Map`/`Set`
+//!     method).
+//!   * `to_list` — view an `Optional[T]` as a 0-or-1-element `List[T]`.
+//!   * `count` — `1` when present, `0` when empty.
+//!   * `get_or` — extract the payload or a supplied default (an *eager* default;
+//!     a free-function sibling of the built-in `unwrap_or` method, kept because
+//!     the method form is not always reachable on every expression position and
+//!     the free form composes uniformly with the rest of this module).
+//!
+//! The duplicating utilities suggested for the v1 floor are intentionally
+//! **dropped** because they already exist as built-in methods that lower on
+//! every target: `is_some`/`is_none` (tag tests), `map` (`Fn(T) -> U`),
+//! `and_then` (the built-in `flat_map`, `Fn(T) -> Optional[U]`), and the method
+//! `unwrap_or`. Use `o.is_some()`, `o.map(f)`, `o.flat_map(f)`, `o.unwrap_or(d)`
+//! directly on the value. An `unwrap_or_else(o, f: Fn() -> T)` was also
+//! considered and dropped: zero-argument closures (`Fn() -> T` / `() => ...`)
+//! are not yet exercised by any conformance fixture or stdlib module, so a
+//! lazy-default helper is outside the proven cross-target surface for v1.
+
+module core.option
+
+/// Returns `o` when it is `Some`, otherwise the alternative `alt`.
+///
+/// The free-function complement to a "default `Optional`": where the built-in
+/// `unwrap_or` method collapses to a bare `T`, `or_else` keeps the result an
+/// `Optional[T]`, so fallbacks can be chained (`or_else(or_else(a, b), c)`)
+/// before a final extraction. Both operands are evaluated eagerly.
+public fn or_else[T](o: Optional[T], alt: Optional[T]) -> Optional[T] {
+  match o {
+    Some(x) => Some(x)
+    None => alt
+  }
+}
+
+/// Keeps the payload of `o` only when `pred` returns `true` for it.
+///
+/// Returns `Some(x)` when `o` is `Some(x)` and `pred(x)` holds, else `None`.
+/// There is no built-in `filter` *method* on `Optional` (the built-in `filter`
+/// is a `List`/`Map`/`Set` method), so this is a genuine addition.
+public fn filter[T](o: Optional[T], pred: Fn(T) -> Bool) -> Optional[T] {
+  match o {
+    Some(x) => {
+      if (pred(x)) {
+        Some(x)
+      } else {
+        None
+      }
+    }
+    None => None
+  }
+}
+
+/// Views `o` as a list: `[x]` when `Some(x)`, `[]` when `None`.
+///
+/// The single-element / empty-list bridge between the `Optional` and `List`
+/// worlds, built from the read-only `List` literal forms (no `List.push`, per
+/// DQ18), mirroring `core.iter`'s list construction.
+public fn to_list[T](o: Optional[T]) -> List[T] {
+  match o {
+    Some(x) => [x]
+    None => []
+  }
+}
+
+/// Counts the payloads in `o`: `1` when `Some`, `0` when `None`.
+///
+/// The `Optional` analogue of `core.iter.count` — useful for tallying presence
+/// across a collection of options by summing their counts.
+public fn count[T](o: Optional[T]) -> Int {
+  match o {
+    Some(_) => 1
+    None => 0
+  }
+}
+
+/// Extracts the payload of `o`, or returns `default` when `o` is `None`.
+///
+/// A free-function sibling of the built-in `unwrap_or` method with an *eager*
+/// default. Kept (not dropped as a pure duplicate) because the free form
+/// composes uniformly with the rest of this module and is reachable in
+/// expression positions where the method form on a complex receiver is awkward.
+public fn get_or[T](o: Optional[T], default: T) -> T {
+  match o {
+    Some(x) => x
+    None => default
+  }
+}
