@@ -1,0 +1,44 @@
+// TEST: exec_core_option
+// EXPECT: output "or=7;filt=8;cnt=1;list=1;def=-1"
+// EXPECT: targets js, ts, python, rust, go
+//
+// THE PAYOFF FIXTURE for `core.option`: a user program that `use`s the embedded
+// `core.option` stdlib module — a real `Optional[T]`-utilities module — and
+// compiles + runs it on every target.
+//
+// It exercises, end to end and cross-module, the free-function utilities that
+// *complement* the built-in `Optional` methods (which lower separately, #138):
+//   * `or_else(empty, Some(7))` falls back to the present alternative -> `Some(7)`.
+//   * `filter(Some(8), x > 5)` keeps the payload (predicate holds) -> `Some(8)`.
+//   * `count(filter(Some(8), ...))` tallies the kept payload -> `1`.
+//   * `to_list(Some(9))` is the 1-element list view -> `len == 1`.
+//   * `get_or(None, -1)` returns the eager default on an empty option -> `-1`.
+//
+// Each utility is driven by the proven `match o { Some(x) => ...; None => ... }`
+// shape, and `Some`/`None`/`get_or`'s extraction are resolved cross-module from
+// the embedded `core.option` module concatenated into the entry file. The final
+// `println` emits a single deterministic line (the exec harness compares one
+// trimmed line).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.option.{or_else, filter, count, to_list, get_or}
+
+fn main() -> Void {
+  let empty: Optional[Int] = None
+  let chosen: Optional[Int] = or_else(empty, Some(7))
+  let chosenVal: Int = get_or(chosen, -1)
+
+  let kept: Optional[Int] = filter(Some(8), (x) => x > 5)
+  let keptVal: Int = get_or(kept, -1)
+  let keptCount: Int = count(kept)
+
+  let listed: List[Int] = to_list(Some(9))
+  let listLen: Int = listed.len()
+
+  let def: Int = get_or(empty, -1)
+
+  println("or=${chosenVal};filt=${keptVal};cnt=${keptCount};list=${listLen};def=${def}")
+}

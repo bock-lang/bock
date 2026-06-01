@@ -1,0 +1,24 @@
+// TEST: stdlib_option_no_errors
+// EXPECT: no_errors
+//
+// Every `core.option` free-function utility type-checks against an
+// `Optional[Int]`: `or_else`/`filter`/`to_list`/`count`/`get_or`. The
+// higher-order utility (`filter`) receives a Bock lambda, exercising the
+// `Fn(T) -> Bool` function-typed parameter. The duplicating helpers
+// (`is_some`/`map`/`flat_map`/method `unwrap_or`) are deliberately absent from
+// this module — they are built-in `Optional` methods — so this fixture imports
+// only the complementing free functions.
+module userapp
+
+use core.option.{or_else, filter, to_list, count, get_or}
+
+public fn all_utilities() -> Int {
+  let present: Optional[Int] = Some(7)
+  let empty: Optional[Int] = None
+  let chosen: Optional[Int] = or_else(empty, present)
+  let kept: Optional[Int] = filter(present, (x) => x > 3)
+  let listed: List[Int] = to_list(present)
+  let n: Int = count(kept)
+  let value: Int = get_or(chosen, -1)
+  n + value
+}
