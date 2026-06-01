@@ -1556,3 +1556,22 @@ Milestone: **★ v1 STANDARD LIBRARY COMPLETE — 11/11 modules ×5 ★** (Q-std
 Decisions (operator): scope core.collections + Plan core.test; DQ26 "both free + fluent APIs"; "chase collections to ×5".
 Incident: disk-full crisis (110GB stale caches) — recovered; standing lesson: prune branch caches per-merge.
 Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next phase: docs (D4) / project-mode (ItemB).**
+
+[2026-06-01 17:58 UTC] D4 — v1 stdlib reference docs DONE (#172); D5 unblocked
+  Input: operator "jump onto the next" → D4 (the next critical-path item after the stdlib milestone).
+  Investigated `bock doc` (it extracts `///`/`//!` → per-module markdown). One self-inflicted hiccup: an
+    investigation command accidentally ran `bock doc` repo-wide, dumping 177 stray .md into ./docs/ — caught +
+    `git clean`'d (working tree verified clean; docs/src untouched). Learned the correct invocation: `bock doc
+    stdlib/core --output <tmp>` (targets just the stdlib).
+  DISPATCH — docs/stdlib-reference (docs engineer): generated the 10 stdlib modules' reference via `bock doc
+    stdlib/core`, hand-wrote core.time (a builtin — no source file), CURATED heavily (the raw `///` output carried
+    engineer-internal rationale — DQ refs, codegen-gap notes, borrow-check asides — all stripped to user-facing
+    prose), replaced the outdated `std.*` stub, wired SUMMARY. **MERGED #172.**
+  VERIFY before merge: diff scope docs/src-only; NO leaked tool-artifact tags (the engineer self-caught + fixed a
+    closing-tag leak); re-ran `mdbook build docs` MYSELF → clean (EXIT 0, no warnings; `create-missing=false` so every
+    link/SUMMARY entry must resolve); fmt/clippy/doc green. 11 per-module pages + landing.
+  RESULT: the v1 stdlib reference is live. D4 DONE → **D5 (contributor docs) unblocked, next critical path** → ItemB.
+  Note: the docs reflect the pre-existing compiler FOUNDs (statement-assert tail-lowering, generic-trait-over-primitives
+    on static targets, `bock test` core-loading [now FIXED #167], the `assert` optional-message checker gap) as
+    user-facing caveats, not as available behavior — no stdlib source touched (no /// inaccuracies found).
+  NEXT: D5 (contributor docs buildout) OR pause — surfaced to operator (enormous session: v1 stdlib + D4).
