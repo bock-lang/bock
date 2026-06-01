@@ -1,0 +1,62 @@
+// TEST: stdlib_time_no_errors
+// EXPECT: no_errors
+//
+// Type-check coverage for the §18.3.1 `core.time` surface. Unlike `core.error`/
+// `core.compare`/`core.iter`, `core.time` ships as a set of COMPILER BUILTINS,
+// not an embedded `core.*` Bock module: `Duration`, `Instant`, the `Clock`
+// effect, and the `sleep` prelude function are registered by the CLI's builtin
+// seeding (and lowered inline by every backend), so this fixture names them
+// WITHOUT a `use` — exactly the prelude-builtin path a user program takes.
+//
+// What this pins (all per §18.3.1):
+//   * Duration constructors: `zero`/`nanos`/`millis`/`seconds` (and, by the same
+//     associated-fn path, `micros`/`minutes`/`hours`).
+//   * Duration methods: `as_nanos`/`as_millis`/`as_seconds`/`is_zero`/
+//     `is_negative`/`abs`.
+//   * Duration arithmetic operators: `+` (Duration+Duration) and `*`
+//     (Duration*Int) — the `Add`/`Mul` operator overloads.
+//   * Duration as `Comparable` + `Equatable`: the `>` relational operator and the
+//     `compare`/`eq` trait methods type-check on a `Duration`.
+//   * The `Clock` effect surface: a `with Clock` function may call
+//     `Instant.now()`, `sleep(...)`, `instant.elapsed()`, and
+//     `instant.duration_since(earlier)`, with `Instant`/`Duration` flowing
+//     through as builtin named types.
+//
+// This is a *type-check* fixture; the deterministic runtime behaviour of the
+// pure-`Duration` subset is proven cross-target by
+// `exec/exec_core_time_duration.bock`. `Instant`/`now`/`sleep` are exercised here
+// only at the type level (they read the host monotonic clock, so they have no
+// fixed output and cannot appear in an execution fixture).
+module userapp
+
+/// Free helper: proves a bare `Duration` parameter accepts the `is_zero` method.
+fn classify(d: Duration) -> Bool {
+  d.is_zero()
+}
+
+/// Exercises the pure-`Duration` surface: constructors, arithmetic operators,
+/// the `Comparable`/`Equatable` operators and methods, and every accessor.
+fn durations() -> Bool {
+  let a = Duration.seconds(1)
+  let b = Duration.millis(500)
+  let lt = a > b
+  let _cmp = a.compare(b)
+  let same = a.eq(b)
+  let s = a + b
+  let scaled = b * 3
+  let _ = s.as_nanos()
+  let _2 = s.as_millis()
+  let _3 = scaled.as_seconds()
+  let _4 = a.abs().is_negative()
+  classify(Duration.zero()) && lt && same
+}
+
+/// Exercises the `Clock` effect surface: a `with Clock` function may read the
+/// monotonic clock (`Instant.now`), `sleep`, and measure elapsed `Duration`s.
+fn timed() -> Duration with Clock {
+  let start = Instant.now()
+  sleep(Duration.millis(1))
+  let later = Instant.now()
+  let _e = start.elapsed()
+  later.duration_since(start)
+}
