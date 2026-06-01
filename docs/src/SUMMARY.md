@@ -30,6 +30,17 @@
 - [Build & Tooling](./reference/tooling.md)
 - [Project Schema](./reference/project-schema.md)
 - [Standard Library](./reference/stdlib.md)
+  - [core.option](./reference/stdlib/core-option.md)
+  - [core.result](./reference/stdlib/core-result.md)
+  - [core.collections](./reference/stdlib/core-collections.md)
+  - [core.string](./reference/stdlib/core-string.md)
+  - [core.iter](./reference/stdlib/core-iter.md)
+  - [core.compare](./reference/stdlib/core-compare.md)
+  - [core.convert](./reference/stdlib/core-convert.md)
+  - [core.error](./reference/stdlib/core-error.md)
+  - [core.effect](./reference/stdlib/core-effect.md)
+  - [core.time](./reference/stdlib/core-time.md)
+  - [core.test](./reference/stdlib/core-test.md)
 - [Specification](./reference/spec.md)
 
 # Project
