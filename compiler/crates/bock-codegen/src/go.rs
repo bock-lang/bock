@@ -2371,6 +2371,246 @@ impl GoEmitCtx {
         }
     }
 
+    /// The Go payload type of an *argument expression* whose static type is
+    /// `Optional[T]`, when structurally recoverable. Extends
+    /// [`Self::scrutinee_optional_elem`] (identifiers via `var_optional_elem`,
+    /// calls via the fn/method return-element maps) with the bare-constructor
+    /// case `Some(<expr>)` / `None`, whose payload type is inferred from the
+    /// payload expression. Used to pin a generic free-fn's `Optional[T]`
+    /// type-parameter at the call site (Go cannot infer it: the runtime
+    /// `__bockOption` struct carries no `[T]`).
+    fn arg_optional_elem(&self, arg: &AIRNode) -> Option<String> {
+        if let NodeKind::Call { callee, args, .. } = &arg.kind {
+            if let NodeKind::Identifier { name } = &callee.kind {
+                match name.name.as_str() {
+                    "Some" => return args.first().and_then(|a| self.infer_go_expr_type(&a.value)),
+                    // `None` carries no payload type; nothing to bind.
+                    "None" => return None,
+                    _ => {}
+                }
+            }
+        }
+        self.scrutinee_optional_elem(arg)
+    }
+
+    /// The `(ok, err)` Go payload types of an *argument expression* whose static
+    /// type is `Result[T, E]`, when recoverable. The `Result` analogue of
+    /// [`Self::arg_optional_elem`]: identifiers / calls via
+    /// [`Self::scrutinee_result_elems`], plus the bare `Ok(<expr>)` / `Err(<expr>)`
+    /// constructors (only the present arm's type is inferable from a bare
+    /// constructor, so the other stays `None`).
+    fn arg_result_elems(&self, arg: &AIRNode) -> (Option<String>, Option<String>) {
+        if let NodeKind::Call { callee, args, .. } = &arg.kind {
+            if let NodeKind::Identifier { name } = &callee.kind {
+                match name.name.as_str() {
+                    "Ok" => {
+                        return (
+                            args.first().and_then(|a| self.infer_go_expr_type(&a.value)),
+                            None,
+                        )
+                    }
+                    "Err" => {
+                        return (
+                            None,
+                            args.first().and_then(|a| self.infer_go_expr_type(&a.value)),
+                        )
+                    }
+                    _ => {}
+                }
+            }
+        }
+        match self.scrutinee_result_elems(arg) {
+            Some((ok, err)) => (Some(ok), Some(err)),
+            None => (None, None),
+        }
+    }
+
+    /// The `Optional[T]` inner / `Result[T, E]` arg type-param names of a
+    /// declared parameter (or return) AIR type, when the type is one of those
+    /// containers. Returns the param-name tokens (`["T"]` for `Optional[T]`,
+    /// `["T", "E"]` for `Result[T, E]`) so the caller can pair them with the
+    /// argument's recovered element types. `None` for any other type.
+    fn container_type_param_names(node: &AIRNode) -> Option<(&'static str, Vec<&str>)> {
+        match &node.kind {
+            NodeKind::TypeOptional { inner } => {
+                Some(("Optional", vec![Self::type_param_token(inner)?]))
+            }
+            NodeKind::TypeNamed { path, args } => {
+                let name = path.segments.last().map(|s| s.name.as_str())?;
+                match name {
+                    "Optional" => Some(("Optional", vec![Self::type_param_token(args.first()?)?])),
+                    "Result" => {
+                        let t = Self::type_param_token(args.first()?)?;
+                        let e = Self::type_param_token(args.get(1)?)?;
+                        Some(("Result", vec![t, e]))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The bare type-parameter name a type node names, if it is a single
+    /// unparameterised `TypeNamed` segment (`T` → `Some("T")`). `None` for any
+    /// composite or primitive type — only a bare name can be bound positionally
+    /// from a container's recovered element type.
+    fn type_param_token(node: &AIRNode) -> Option<&str> {
+        if let NodeKind::TypeNamed { path, args } = &node.kind {
+            if args.is_empty() && path.segments.len() == 1 {
+                return path.segments.first().map(|s| s.name.as_str());
+            }
+        }
+        None
+    }
+
+    /// Synthesise the explicit Go type-arguments (`[int64]`, `[int64, string]`)
+    /// for a call to a generic free function whose source omits them, so a Go
+    /// type-parameter that the runtime cannot infer is pinned without a
+    /// turbofish at the Bock level.
+    ///
+    /// Go can only infer a type-parameter from a value argument's static type.
+    /// A parameter declared `Optional[T]` / `Result[T, E]` lowers to the
+    /// *monomorphic* runtime struct `__bockOption` / `__bockResult` (payload
+    /// `interface{}`), so its `T`/`E` are invisible to Go inference and a call
+    /// like `or_else(empty, Some(7))` fails `cannot infer T`. This recovers each
+    /// type-parameter's concrete Go type from, in order:
+    ///
+    /// 1. an `Optional[T]` / `Result[T, E]` argument's recovered element type
+    ///    ([`Self::arg_optional_elem`] / [`Self::arg_result_elems`]),
+    /// 2. an ordinary (non-container, non-lambda) argument unified against its
+    ///    declared param type ([`Self::bind_fn_type_params`] — pins e.g.
+    ///    `get_or`'s `fallback: T`),
+    /// 3. the call's *expected* result type ([`Self::current_expected_type`],
+    ///    a typed `let x: Ty = …`) unified against the declared return type.
+    ///
+    /// Returns `Some([go-type, …])` in declaration order, with any
+    /// type-parameter still unresolved after the three sources filled with `any`
+    /// (such a parameter appears *only* behind the erased runtime, so `any` is
+    /// its only consistent type — e.g. `and_then`'s mapped `U`). Returns `None`
+    /// — emitting no turbofish, so ordinary Go inference runs — when the
+    /// signature names no `Optional`/`Result` container at all (the `core.iter`
+    /// generic-record combinators, which Go already infers and must not change).
+    fn synthesize_go_type_args(
+        &self,
+        gp_names: &[String],
+        param_tys: &[Option<AIRNode>],
+        ret_ty: Option<&AIRNode>,
+        args: &[bock_air::AirArg],
+    ) -> Option<Vec<String>> {
+        if gp_names.is_empty() {
+            return None;
+        }
+        // Only intervene for a fn whose signature involves the monomorphic
+        // `Optional`/`Result` runtime — the case Go's own inference cannot
+        // handle (`__bockOption`/`__bockResult` carry no `[T]`). A purely
+        // record/collection-generic fn (`core.iter`'s `ListIterator[T]`
+        // combinators) is left bare so Go infers it as before — no regression.
+        let touches_container = param_tys
+            .iter()
+            .flatten()
+            .chain(ret_ty)
+            .any(Self::type_mentions_container);
+        if !touches_container {
+            return None;
+        }
+        let mut bindings: HashMap<String, String> = HashMap::new();
+
+        // (2) Ordinary argument unification (bare `T`, `List[T]`, etc.).
+        for (k, v) in self.bind_fn_type_params(gp_names, param_tys, args) {
+            bindings.entry(k).or_insert(v);
+        }
+
+        // (1) Container arguments: pair each declared `Optional[T]`/`Result[T,E]`
+        // param's type-param tokens with the argument's recovered element types.
+        for (i, arg) in args.iter().enumerate() {
+            let Some(pty) = param_tys.get(i).and_then(|p| p.as_ref()) else {
+                continue;
+            };
+            let Some((container, tokens)) = Self::container_type_param_names(pty) else {
+                continue;
+            };
+            match container {
+                "Optional" => {
+                    if let (Some(token), Some(elem)) =
+                        (tokens.first(), self.arg_optional_elem(&arg.value))
+                    {
+                        if gp_names.iter().any(|g| g == *token) {
+                            bindings.entry((*token).to_string()).or_insert(elem);
+                        }
+                    }
+                }
+                "Result" => {
+                    let (ok, err) = self.arg_result_elems(&arg.value);
+                    if let (Some(token), Some(ty)) = (tokens.first(), ok) {
+                        if gp_names.iter().any(|g| g == *token) {
+                            bindings.entry((*token).to_string()).or_insert(ty);
+                        }
+                    }
+                    if let (Some(token), Some(ty)) = (tokens.get(1), err) {
+                        if gp_names.iter().any(|g| g == *token) {
+                            bindings.entry((*token).to_string()).or_insert(ty);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // (3) Expected result type unified against the declared return type. The
+        // typed-`let` binding sets `current_expected_type` to the rendered Go
+        // type of the destination, e.g. `[]int64` for `let xs: List[Int] =
+        // to_list(...)`, which unifies against `List[T]` → `[]T` to pin `T`.
+        if let (Some(ret), Some(expected)) = (ret_ty, self.current_expected_type.as_deref()) {
+            if expected != "interface{}" {
+                let pattern = self.type_to_go(ret);
+                Self::unify_go_pattern(&pattern, expected, gp_names, &mut bindings);
+            }
+        }
+
+        // Every type-parameter is filled: a pinned one with its concrete Go
+        // type, an unresolved one with `any`. An unresolved param appears *only*
+        // behind the erased `Optional`/`Result` runtime (a bare `T`, `List[T]`,
+        // `Fn(T) -> …`, etc. would have been bound above from an argument or the
+        // return), so `any` is the only type it can take and never conflicts —
+        // e.g. `and_then`'s `U` (the mapped `Ok` type) is invisible to the call
+        // and harmlessly erased, while its `E` is pinned from the `Result[T, E]`
+        // argument so Go no longer fails `cannot infer E`.
+        let out: Vec<String> = gp_names
+            .iter()
+            .map(|g| {
+                bindings
+                    .get(g)
+                    .cloned()
+                    .unwrap_or_else(|| "any".to_string())
+            })
+            .collect();
+        Some(out)
+    }
+
+    /// True if a declared AIR type *mentions* the monomorphic `Optional` /
+    /// `Result` runtime anywhere within it (directly, or nested inside a
+    /// collection / function type). Gates [`Self::synthesize_go_type_args`] —
+    /// only such a signature defeats Go's own type-parameter inference.
+    fn type_mentions_container(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::TypeOptional { .. } => true,
+            NodeKind::TypeNamed { path, args } => {
+                let is_container = path
+                    .segments
+                    .last()
+                    .is_some_and(|s| matches!(s.name.as_str(), "Optional" | "Result"));
+                is_container || args.iter().any(Self::type_mentions_container)
+            }
+            NodeKind::TypeFunction { params, ret, .. } => {
+                params.iter().any(Self::type_mentions_container)
+                    || Self::type_mentions_container(ret)
+            }
+            NodeKind::TypeTuple { elems } => elems.iter().any(Self::type_mentions_container),
+            _ => false,
+        }
+    }
+
     /// Returns `true` if the AIR type node represents `Void` or `Unit`.
     fn is_void_type(node: &AIRNode) -> bool {
         if let NodeKind::TypeNamed { path, .. } = &node.kind {
@@ -2439,6 +2679,51 @@ impl GoEmitCtx {
         Ok(s)
     }
 
+    /// The Go string for an `Optional`/`Result` constructor's payload, casting a
+    /// *numeric literal* payload to its concrete Go type (`int64` / `float64`).
+    ///
+    /// The runtime boxes the payload as `interface{}`. A bare Go integer literal
+    /// (`__bockSome(7)`) is an *untyped constant* whose default boxed dynamic
+    /// type is Go `int`, not `int64` — so a later `.(int64)` payload assertion
+    /// (or a generic `.(T)` with `T` instantiated as `int64`) panics
+    /// `interface {} is int, not int64`. The read-side widening helpers
+    /// (`__bockAsInt64`) mask this for *concrete* `int64` assertions, but a
+    /// generic free fn's body asserts the bare type parameter `T`, which has no
+    /// widening. Boxing the literal as `int64(7)` / `float64(..)` makes the
+    /// dynamic type match the instantiation, so both assertion forms succeed.
+    /// Non-literal and non-numeric payloads are passed through unchanged.
+    fn box_payload_str(&self, arg: Option<&bock_air::AirArg>, arg_strs: &[String]) -> String {
+        let rendered = arg_strs
+            .first()
+            .map_or_else(|| "nil".to_string(), |s| s.clone());
+        let Some(arg) = arg else {
+            return rendered;
+        };
+        match Self::numeric_literal_go_type(&arg.value) {
+            Some(go_ty) => format!("{go_ty}({rendered})"),
+            None => rendered,
+        }
+    }
+
+    /// The Go numeric type (`int64`/`float64`) of an expression that is a numeric
+    /// literal — directly, or under a unary negation (`-1`) — else `None`. Used
+    /// to box an `Optional`/`Result` payload literal at its concrete dynamic type
+    /// (see [`Self::box_payload_str`]).
+    fn numeric_literal_go_type(node: &AIRNode) -> Option<&'static str> {
+        match &node.kind {
+            NodeKind::Literal { lit } => match lit {
+                Literal::Int(_) => Some("int64"),
+                Literal::Float(_) => Some("float64"),
+                _ => None,
+            },
+            NodeKind::UnaryOp {
+                op: UnaryOp::Neg,
+                operand,
+            } => Self::numeric_literal_go_type(operand),
+            _ => None,
+        }
+    }
+
     /// Map Bock prelude functions to Go equivalents.
     fn map_prelude_call(
         &mut self,
@@ -2484,24 +2769,18 @@ impl GoEmitCtx {
             }
             // Optional constructors → tagged runtime struct.
             "Some" => {
-                let a = arg_strs
-                    .first()
-                    .map_or_else(|| "nil".to_string(), |s| s.clone());
+                let a = self.box_payload_str(args.first(), &arg_strs);
                 format!("__bockSome({a})")
             }
             "None" => "__bockNone".to_string(),
             // Result constructors → tagged runtime struct (see
             // `RESULT_RUNTIME_GO`), mirroring `Some`/`None`.
             "Ok" => {
-                let a = arg_strs
-                    .first()
-                    .map_or_else(|| "nil".to_string(), |s| s.clone());
+                let a = self.box_payload_str(args.first(), &arg_strs);
                 format!("__bockOk({a})")
             }
             "Err" => {
-                let a = arg_strs
-                    .first()
-                    .map_or_else(|| "nil".to_string(), |s| s.clone());
+                let a = self.box_payload_str(args.first(), &arg_strs);
                 format!("__bockErr({a})")
             }
             _ => return Ok(None),
@@ -5012,26 +5291,49 @@ impl GoEmitCtx {
                 } else {
                     self.emit_expr(callee)?;
                 }
-                let type_arg_str = self.format_generic_args(type_args);
-                self.buf.push_str(&type_arg_str);
-                self.buf.push('(');
-                // When the callee is a known generic fn, bind its type params
-                // from the non-lambda args so each untyped lambda argument can
-                // be specialised to the concrete Go param type (`func(int64)
-                // bool` for `filter(it, (x) => x > 2)`), rather than the
-                // `interface{}` default that breaks the body and mismatches the
-                // typed callee param.
+                // When the callee is a known generic fn, recover its signature so
+                // we can (a) synthesise explicit Go type-arguments the source
+                // omits but Go cannot infer (a `Optional[T]`/`Result[T, E]` param
+                // erases `T`/`E` from the monomorphic runtime struct), and (b)
+                // specialise each untyped lambda argument to the concrete Go param
+                // type (`func(int64) bool` for `filter(it, (x) => x > 2)`).
                 let fn_sig = if let NodeKind::Identifier { name } = &callee.kind {
                     self.fn_signatures.get(&name.name).cloned()
                 } else {
                     None
                 };
+                // Synthesise the turbofish only when the source carried none.
+                // An explicit source `f[Ty](..)` (`type_args`) always wins.
+                let synthesized_type_args = if type_args.is_empty() {
+                    fn_sig.as_ref().and_then(|(gp, ptys, ret)| {
+                        self.synthesize_go_type_args(gp, ptys, ret.as_ref(), args)
+                    })
+                } else {
+                    None
+                };
+                let type_arg_str = if let Some(syn) = &synthesized_type_args {
+                    format!("[{}]", syn.join(", "))
+                } else {
+                    self.format_generic_args(type_args)
+                };
+                self.buf.push_str(&type_arg_str);
+                self.buf.push('(');
+                // Bind the callee's type params from the (synthesised args, when
+                // available, else the non-lambda arguments) so each untyped lambda
+                // argument can be specialised to the concrete Go param type rather
+                // than the `interface{}` default that breaks the body and
+                // mismatches the typed callee param. The synthesised binding is
+                // strictly more complete than the arg-only one — it also pins a
+                // `T` that only appears behind `Optional[T]`/`Result[T, E]`, which
+                // is exactly the `filter`/`and_then` lambda case.
                 let lambda_bindings = fn_sig.as_ref().map(|(gp, ptys, _)| {
-                    (
-                        gp.clone(),
-                        ptys.clone(),
-                        self.bind_fn_type_params(gp, ptys, args),
-                    )
+                    let binds = match (&synthesized_type_args, gp.len()) {
+                        (Some(syn), n) if syn.len() == n => {
+                            gp.iter().cloned().zip(syn.iter().cloned()).collect()
+                        }
+                        _ => self.bind_fn_type_params(gp, ptys, args),
+                    };
+                    (gp.clone(), ptys.clone(), binds)
                 });
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -5377,7 +5679,16 @@ impl GoEmitCtx {
                 };
                 let _ = write!(self.buf, "{ctor}(");
                 if let Some(v) = value {
-                    self.emit_expr(v)?;
+                    // Box a numeric-literal payload at its concrete Go type (see
+                    // `box_payload_str`) so a later `.(int64)` / generic `.(T)`
+                    // payload assertion does not panic on the `int` default.
+                    if let Some(go_ty) = Self::numeric_literal_go_type(v) {
+                        let _ = write!(self.buf, "{go_ty}(");
+                        self.emit_expr(v)?;
+                        self.buf.push(')');
+                    } else {
+                        self.emit_expr(v)?;
+                    }
                 } else {
                     self.buf.push_str("nil");
                 }
@@ -5618,12 +5929,98 @@ impl GoEmitCtx {
         arms: &[AIRNode],
     ) -> Result<(), CodegenError> {
         let elem = self.scrutinee_optional_elem(scrutinee);
-        self.buf.push_str("func() interface{} { __opt := ");
+        // Type the IIFE with the binding's *expected* type (a typed `let x: T =
+        // match …` or a function-return `return match …`, both surfaced through
+        // `current_expected_type`) when concrete, so the IIFE result is
+        // assignable to the destination — a bare `interface{}` IIFE is not
+        // assignable to a named `__bockOption` / `[]T` / `int64` / `T` return.
+        // When no concrete expected type is in scope (e.g. the match is nested
+        // in a string interpolation, whose `%v` consumes `interface{}`), fall
+        // back to the untyped IIFE, preserving the existing behavior.
+        let iife_ret = self.typed_match_iife_type();
+        let iife_ty = iife_ret.as_deref().unwrap_or("interface{}");
+        let prev_expected = self.current_expected_type.take();
+        // A collection-typed IIFE (`func() []T { … }`) propagates its element
+        // type to the arm bodies' collection literals, so `to_list`'s `[x]`/`[]`
+        // arms emit `[]T{x}` / `[]T{}` rather than the `[]interface{}` default
+        // (which is not assignable to the `[]T` return). Re-applied per arm
+        // inside the arms emitter (a literal `take()`s the hint, so a single
+        // top-level set would only reach the first arm).
+        let iife_coll = iife_ret.as_deref().and_then(Self::rendered_collection_elem);
+        let _ = write!(self.buf, "func() {iife_ty} {{ __opt := ");
         self.emit_expr(scrutinee)?;
         self.buf.push_str("; ");
-        self.emit_optional_match_arms(arms, /*as_expr=*/ true, elem.as_deref())?;
+        self.emit_optional_match_arms(
+            arms,
+            /*as_expr=*/ true,
+            elem.as_deref(),
+            iife_ret.is_some(),
+            iife_coll.as_ref(),
+        )?;
         self.buf.push_str(" }()");
+        self.current_expected_type = prev_expected;
         Ok(())
+    }
+
+    /// Parse a rendered Go collection type string into its element Go type(s) for
+    /// [`Self::expected_collection_elem`]: `[]int64` → `("int64", None)`,
+    /// `map[string]int64` → `("string", Some("int64"))`. `None` for a
+    /// non-collection rendering. Used to propagate a collection-typed IIFE
+    /// return into the arm bodies' literals.
+    fn rendered_collection_elem(ty: &str) -> Option<(String, Option<String>)> {
+        let ty = ty.trim();
+        if let Some(elem) = ty.strip_prefix("[]") {
+            return Some((elem.to_string(), None));
+        }
+        if let Some(rest) = ty.strip_prefix("map[") {
+            // Split on the matching close bracket of the key type (top-level).
+            let mut depth = 0i32;
+            for (i, ch) in rest.char_indices() {
+                match ch {
+                    '[' => depth += 1,
+                    ']' if depth == 0 => {
+                        let key = rest[..i].to_string();
+                        let val = rest[i + 1..].to_string();
+                        return Some((key, Some(val)));
+                    }
+                    ']' => depth -= 1,
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// The Go type a typed expression-position `Optional`/`Result` match IIFE
+    /// should return: the binding's *expected* type ([`Self::current_expected_type`],
+    /// set around a typed `let x: T = …` value emit or a function-return tail)
+    /// when known and concrete. Unlike [`Self::expected_iife_type`] this does
+    /// **not** fall back to the enclosing function's return type: an
+    /// `Optional`/`Result` match nested in a non-return position (a string
+    /// interpolation argument, say) must stay the untyped `interface{}` IIFE its
+    /// `%v` consumer expects, never adopt the function's unrelated return type.
+    /// `None` ⇒ the caller emits the `interface{}` fallback.
+    fn typed_match_iife_type(&self) -> Option<String> {
+        match self.current_expected_type.as_deref() {
+            Some(t) if t != "interface{}" => Some(t.to_string()),
+            _ => None,
+        }
+    }
+
+    /// True when `node` is an *expression-position* `Optional`/`Result` match —
+    /// a `match` over `Some`/`None` or `Ok`/`Err` whose arms are all
+    /// value-producing (no statement arm). Such a match lowers to a typed IIFE
+    /// (`func() __bockOption { … }()`) whose return must be assignable to the
+    /// enclosing return/binding type; the callers use this to propagate the
+    /// expected type into [`Self::current_expected_type`], mirroring the
+    /// generic-record-construction case.
+    fn is_expr_optional_or_result_match(node: &AIRNode) -> bool {
+        if let NodeKind::Match { arms, .. } = &node.kind {
+            !crate::generator::match_has_statement_arm(arms)
+                && (go_match_is_optional(arms) || go_match_is_result(arms))
+        } else {
+            false
+        }
     }
 
     /// Emit an `Optional` `match` in statement position as an if/else chain on
@@ -5639,7 +6036,7 @@ impl GoEmitCtx {
         self.emit_expr(scrutinee)?;
         self.buf.push('\n');
         self.write_indent();
-        self.emit_optional_match_arms(arms, /*as_expr=*/ false, elem.as_deref())?;
+        self.emit_optional_match_arms(arms, /*as_expr=*/ false, elem.as_deref(), false, None)?;
         self.buf.push('\n');
         Ok(())
     }
@@ -5653,7 +6050,13 @@ impl GoEmitCtx {
         arms: &[AIRNode],
         as_expr: bool,
         some_elem_ty: Option<&str>,
+        typed_iife: bool,
+        iife_coll: Option<&(String, Option<String>)>,
     ) -> Result<(), CodegenError> {
+        // Save the caller's pending collection-element hint: the arm bodies
+        // re-set it per-arm (`iife_coll`), so it must be restored on exit rather
+        // than clobbered (a match-expr may itself be a collection-literal element).
+        let saved_coll = self.expected_collection_elem.take();
         let mut first = true;
         let arm_count = arms.len();
         for (idx, arm) in arms.iter().enumerate() {
@@ -5734,6 +6137,11 @@ impl GoEmitCtx {
             }
             if as_expr {
                 self.buf.push_str("return ");
+                // Re-apply the IIFE's collection element per arm: a list/map/set
+                // literal `take()`s the hint, so without re-setting it only the
+                // first arm's literal would adopt the `[]T` element (`to_list`'s
+                // `Some` arm), leaving the `None` arm's `[]` as `[]interface{}`.
+                self.expected_collection_elem = iife_coll.cloned();
                 self.emit_block_as_expr(body)?;
                 self.buf.push(' ');
             } else {
@@ -5745,10 +6153,18 @@ impl GoEmitCtx {
             }
             self.buf.push('}');
         }
+        self.expected_collection_elem = saved_coll;
         // Expression mode needs a trailing value if no arm matched. A `;`
-        // separates it from the preceding `}` (Go requires a terminator).
+        // separates it from the preceding `}` (Go requires a terminator). A
+        // *typed* IIFE has no `nil` of its concrete return type, so it closes
+        // with `panic` (a Bock match is exhaustive, so this is unreachable);
+        // the untyped form keeps `return nil`.
         if as_expr {
-            self.buf.push_str("; return nil");
+            if typed_iife {
+                self.buf.push_str("; panic(\"unreachable\")");
+            } else {
+                self.buf.push_str("; return nil");
+            }
         }
         Ok(())
     }
@@ -5762,11 +6178,24 @@ impl GoEmitCtx {
         arms: &[AIRNode],
     ) -> Result<(), CodegenError> {
         let elems = self.scrutinee_result_elems(scrutinee);
-        self.buf.push_str("func() interface{} { __res := ");
+        // Type the IIFE with the expected destination type when concrete (see
+        // [`Self::emit_optional_match_expr`]); else the untyped fallback.
+        let iife_ret = self.typed_match_iife_type();
+        let iife_ty = iife_ret.as_deref().unwrap_or("interface{}");
+        let prev_expected = self.current_expected_type.take();
+        let iife_coll = iife_ret.as_deref().and_then(Self::rendered_collection_elem);
+        let _ = write!(self.buf, "func() {iife_ty} {{ __res := ");
         self.emit_expr(scrutinee)?;
         self.buf.push_str("; ");
-        self.emit_result_match_arms(arms, /*as_expr=*/ true, elems.as_ref())?;
+        self.emit_result_match_arms(
+            arms,
+            /*as_expr=*/ true,
+            elems.as_ref(),
+            iife_ret.is_some(),
+            iife_coll.as_ref(),
+        )?;
         self.buf.push_str(" }()");
+        self.current_expected_type = prev_expected;
         Ok(())
     }
 
@@ -5783,7 +6212,7 @@ impl GoEmitCtx {
         self.emit_expr(scrutinee)?;
         self.buf.push('\n');
         self.write_indent();
-        self.emit_result_match_arms(arms, /*as_expr=*/ false, elems.as_ref())?;
+        self.emit_result_match_arms(arms, /*as_expr=*/ false, elems.as_ref(), false, None)?;
         self.buf.push('\n');
         Ok(())
     }
@@ -5797,7 +6226,12 @@ impl GoEmitCtx {
         arms: &[AIRNode],
         as_expr: bool,
         elems: Option<&(String, String)>,
+        typed_iife: bool,
+        iife_coll: Option<&(String, Option<String>)>,
     ) -> Result<(), CodegenError> {
+        // See `emit_optional_match_arms`: preserve the caller's pending
+        // collection-element hint across the per-arm re-application.
+        let saved_coll = self.expected_collection_elem.take();
         let mut first = true;
         let arm_count = arms.len();
         for (idx, arm) in arms.iter().enumerate() {
@@ -5867,6 +6301,10 @@ impl GoEmitCtx {
             }
             if as_expr {
                 self.buf.push_str("return ");
+                // See `emit_optional_match_arms`: re-apply the IIFE collection
+                // element per arm so every arm's literal adopts it, not just the
+                // first.
+                self.expected_collection_elem = iife_coll.cloned();
                 self.emit_block_as_expr(body)?;
                 self.buf.push(' ');
             } else {
@@ -5878,8 +6316,13 @@ impl GoEmitCtx {
             }
             self.buf.push('}');
         }
+        self.expected_collection_elem = saved_coll;
         if as_expr {
-            self.buf.push_str("; return nil");
+            if typed_iife {
+                self.buf.push_str("; panic(\"unreachable\")");
+            } else {
+                self.buf.push_str("; return nil");
+            }
         }
         Ok(())
     }
@@ -6706,7 +7149,10 @@ impl GoEmitCtx {
                 // ... }` rather than the field-inference `[any]` fallback (Go
                 // requires explicit type args on a generic struct literal).
                 let prev_expected_type = self.current_expected_type.take();
-                if should_return && matches!(t.kind, NodeKind::RecordConstruct { .. }) {
+                if should_return
+                    && (matches!(t.kind, NodeKind::RecordConstruct { .. })
+                        || Self::is_expr_optional_or_result_match(t))
+                {
                     self.current_expected_type = self.current_fn_ret_type.clone();
                 }
                 if should_return {
@@ -6746,10 +7192,15 @@ impl GoEmitCtx {
             {
                 self.expected_collection_elem = self.current_fn_ret_collection_elem.clone();
             }
-            // See the block-tail arm: a generic-record construction as the sole
-            // body expression adopts the function's return type for its args.
+            // See the block-tail arm: a generic-record construction — or an
+            // expression-position `Optional`/`Result` match — as the sole body
+            // expression adopts the function's return type, so its IIFE result
+            // is assignable to the declared return type.
             let prev_expected_type = self.current_expected_type.take();
-            if should_return && matches!(node.kind, NodeKind::RecordConstruct { .. }) {
+            if should_return
+                && (matches!(node.kind, NodeKind::RecordConstruct { .. })
+                    || Self::is_expr_optional_or_result_match(node))
+            {
                 self.current_expected_type = self.current_fn_ret_type.clone();
             }
             if should_return {
@@ -7980,9 +8431,13 @@ mod tests {
 
     #[test]
     fn result_construct_ok() {
-        // `ResultConstruct` now lowers to the tagged Result-runtime constructor
+        // `ResultConstruct` lowers to the tagged Result-runtime constructor
         // `__bockOk(..)` — the same shape the surface `Ok(..)` construction emits
-        // and the `Result` match reads — reconciling construction with match.
+        // and the `Result` match reads — reconciling construction with match. A
+        // numeric-*literal* payload is boxed at its concrete Go type
+        // (`int64(42)`), so the `interface{}` box's dynamic type is `int64`, not
+        // the untyped-constant default `int` — a later `.(int64)` / generic
+        // `.(T)` payload assertion would otherwise panic (`box_payload_str`).
         let rc = node(
             1,
             NodeKind::ResultConstruct {
@@ -7991,7 +8446,7 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![rc]));
-        assert!(out.contains("__bockOk(42)"), "got: {out}");
+        assert!(out.contains("__bockOk(int64(42))"), "got: {out}");
     }
 
     #[test]
@@ -8004,7 +8459,65 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![rc]));
+        // A string payload is *not* boxed — only numeric literals are cast.
         assert!(out.contains("__bockErr(\"failed\")"), "got: {out}");
+    }
+
+    #[test]
+    fn numeric_literal_go_type_recognises_int_float_and_negation() {
+        // Bare int / float literals carry their concrete Go boxing type; a unary
+        // negation is transparent; a string / identifier is not numeric.
+        assert_eq!(
+            GoEmitCtx::numeric_literal_go_type(&int_lit(1, "7")),
+            Some("int64")
+        );
+        let flt = node(
+            2,
+            NodeKind::Literal {
+                lit: Literal::Float("1.5".into()),
+            },
+        );
+        assert_eq!(GoEmitCtx::numeric_literal_go_type(&flt), Some("float64"));
+        let neg = node(
+            3,
+            NodeKind::UnaryOp {
+                op: UnaryOp::Neg,
+                operand: Box::new(int_lit(4, "1")),
+            },
+        );
+        assert_eq!(GoEmitCtx::numeric_literal_go_type(&neg), Some("int64"));
+        assert_eq!(
+            GoEmitCtx::numeric_literal_go_type(&str_lit(5, "x")),
+            None,
+            "a string literal is not a numeric payload"
+        );
+        assert_eq!(
+            GoEmitCtx::numeric_literal_go_type(&id_node(6, "v")),
+            None,
+            "a variable reference is not a numeric literal"
+        );
+    }
+
+    #[test]
+    fn rendered_collection_elem_parses_slice_and_map() {
+        // A collection-typed IIFE return propagates its element type(s) to the
+        // arm-body literals; the rendering is parsed back from the Go type string.
+        assert_eq!(
+            GoEmitCtx::rendered_collection_elem("[]int64"),
+            Some(("int64".to_string(), None))
+        );
+        assert_eq!(
+            GoEmitCtx::rendered_collection_elem("map[string]int64"),
+            Some(("string".to_string(), Some("int64".to_string())))
+        );
+        // A nested map value keeps its inner brackets balanced.
+        assert_eq!(
+            GoEmitCtx::rendered_collection_elem("map[string][]int64"),
+            Some(("string".to_string(), Some("[]int64".to_string())))
+        );
+        // A non-collection type yields nothing (the IIFE stays scalar-typed).
+        assert_eq!(GoEmitCtx::rendered_collection_elem("__bockOption"), None);
+        assert_eq!(GoEmitCtx::rendered_collection_elem("int64"), None);
     }
 
     #[test]
