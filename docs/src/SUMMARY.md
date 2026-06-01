@@ -45,4 +45,7 @@
 
 # Project
 
-- [Contributing](./contributing.md)
+- [Contributing](./contributing/index.md)
+  - [Architecture](./contributing/architecture.md)
+  - [Development Workflow](./contributing/workflow.md)
+  - [Spec Changes & Changelog](./contributing/spec-changes.md)
