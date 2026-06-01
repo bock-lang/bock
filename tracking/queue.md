@@ -12,10 +12,12 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-01 vs main 40efebb (v1 stdlib COMPLETE 11/11 ×5; **D4 stdlib reference docs DONE [#172]**
-→ D5 contributor docs next. — earlier: ★ v1 STDLIB COMPLETE — 11/11 modules ×5 ★; R3 done: test
-[#169], collections [#170]; + #167 bock-test core-loading, #168 R3 generic codegen. Q-stdlib DONE → D4 unblocked.
-#123-#170 merged; repo wins). See audit.md._
+_Last reconciled: 2026-06-01 vs main 6a48848 (**D5 contributor docs DONE [#174]** → next critical path = ItemB
+project-mode codegen, now UNBLOCKED. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
+[#175]**; **Q-r2-codegen-residue (c) builtin-vs-user-method shadowing [#176, ×5]** + pinned Q-go-list-literal /
+Q-r2-(b) / Q-ts-generic-impl (verified already-fixed). New FOUND triaged: Q-allcaps-record-parse (parser),
+Q-arch-doc-drift (ARCHITECTURE.md/compiler-CLAUDE.md/CONTRIBUTING.md crate-name drift). Q-match-exprpos still
+deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #123-#176 merged; repo wins). See audit.md._
 
 ---
 
@@ -53,25 +55,23 @@ _Last reconciled: 2026-06-01 vs main 40efebb (v1 stdlib COMPLETE 11/11 ×5; **D4
   treat a primitive type name as an expression value, so `Float.from(3)` doesn't
   resolve (`.into()` is the working primitive path). Minor usability gap.
 - **[Q-match-exprpos] Expression-position statement-arm match lowering** — impl ·
-  ready · `compiler/crates/bock-codegen/` · — · links #121, #127 · note: #121 fixed
+  ready (deferred — deep) · `compiler/crates/bock-codegen/` · — · links #121, #127, #176 · note: #121 fixed
   statement-POSITION matches with statement arms (all 5). The expression-position case
   (`let x = match … { _ => return }` yielding a value) needs a temp-hoist desugar on
-  Go/Py/JS/TS. #127 found the Go variant: an expr-position Optional/`if` lowers to a
-  `func() interface{}{…}()` IIFE whose `interface{}` result can't be assigned to a
-  concrete type (incl. block-tail `Some` in an `if` branch). Off the for-desugar path.
+  Go/Py/JS/TS. **#176 re-confirmed** it is genuinely broken on go/py/js/ts (Rust correct): an expr-position match/if
+  bound to a `let` with a control-flow arm captures the transfer inside the IIFE/lambda. The correct fix threads an
+  "assign-to-target" mode through each backend's match-arm emitter — **cross-cutting across 4 backends**, so deferred
+  (too deep for the residue sweep). Off the for-desugar path.
 - **[Q-stdlib-fmtcheck] Enable `fmt --check` on stdlib `.bock`** — chore · ready ·
   `.github/workflows/`, `stdlib/` · — · links #119 · note: now that `bock fmt`
   emits valid Bock (#119), the stdlib `.bock` files (hand-authored to avoid the old
   mangling) can be `bock fmt`'d + `--check`'d in CI. Format them once + add a check.
-- **[Q-go-list-literal] Go native `for x in [literal]` element typing** — bug · ready ·
-  `compiler/crates/bock-codegen/` (go.rs) · — · links #127, DV11 · note: `for x in [1,2,3]`
-  emits `for _, x := range []interface{}{...}`, so `x` is `interface{}` and typed use fails.
-  Emit a typed slice + typed range var. Same `interface{}` family as #127's Optional fixes;
-  js/python/rust fine. Found by core.iter v3.
-- **[Q-ts-generic-impl] TS generic impl-target `self` typing drops generic args** — bug · ready ·
-  `compiler/crates/bock-codegen/` (ts.rs) · — · links #124 · note: `impl Box[T]` types `self` as
-  `Box` not `Box<T>` (`type_expr_to_string` drops generic args) — imprecise, not implicit-any; no
-  fixture exercises it. Minor follow-up from #124.
+- **[Q-go-list-literal] Go `for x in [literal]` element typing** — bug · **DONE (#176)** · note: verified
+  already-fixed — Go emits `for _, x := range []int64{...}` (typed slice + typed range var); pinned by the existing
+  `go_typed_list_iter.bock` fixture. (No code change; #176 confirmed + pinned.)
+- **[Q-ts-generic-impl] TS generic impl-target `self` typing** — bug · **DONE (#176)** · note: verified
+  already-fixed — TS emits `self: Box<T>` / `-> Box<T>`, compiles `--strict` clean; pinned by new
+  `ts_generic_impl_self.bock` fixture. (No code change; #176 confirmed + pinned.)
 - **[Q-iter-interp-mutself] Interpreter hangs on a `mut self` iterator drive** — bug · ready ·
   interpreter crate · — · links #151, #152 · note: a `loop { match it.next() }` drive over a
   `ListIterator` HANGS under the tree-walking interpreter — `mut self` cursor mutations don't persist
@@ -107,20 +107,32 @@ _Last reconciled: 2026-06-01 vs main 40efebb (v1 stdlib COMPLETE 11/11 ×5; **D4
   elapsed through the `Clock` handler. Codegen change; the time SURFACE works ×5 (core.time done) — this is the
   testability gap. Pairs with Q-time-shim-path.
 - **[Q-conformance-clean-rebuild] Conformance harness doesn't force a clean `bock` rebuild** — chore/test-infra ·
-  ready · `tools/scripts/run-conformance.sh`, `compiler/tests/` · — · note: after a `git merge`, the incremental
-  build does NOT reliably recompile `bock-codegen` / re-embed new stdlib subdirs (build.rs `rerun-if-changed` on the
-  stdlib DIR misses new nested subdirs) — only an explicit `cargo build -p bock` + `touch build.rs` forces it. Caused
-  TWO stale-binary false-REDs (real state green). CI (fresh build) unaffected, but local verification is unreliable.
-  Make the harness force a clean bock build (or build.rs rerun-if-changed per-file for additions).
-- **[Q-r2-codegen-residue] R2 surfaced minor codegen/parser gaps** — bug · ready · `bock-codegen`/`bock-parser` · — ·
-  links #163 · note (grouped, low-pri, all worked-around in-stdlib): (a) ALLCAPS (≥2-letter) record name `SB {` not
-  parsed as a struct literal → E1001 (parser); (b) `List[String]` RECORD FIELD on Go: `record.field.concat` emits
-  `[]interface{}` vs the `[]string` field (go.rs); (c) built-in `len`/`is_empty` collection lowering shadows
-  same-named user-record methods (codegen); (d) String `reverse`/`char_at`/`slice` deferred — no cross-target
-  char-access primitive, `split("")` diverges (Python raises). None block R2 (string ships ×5 around them).
-- **[Q-time-int64] §18.3.1 `Int64` realized as `Int`** — docs/spec · ready · `spec/` · — · links #160 · note: time
-  signatures use `Int` at the Bock surface (i64-backed storage); §18.3.1 says `Int64`. Internally consistent (i64
-  range); a one-line spec clarification (no behavior change). Low-pri.
+  **DONE (#175)** · note: `run-conformance.sh` now `touch`es `compiler/crates/bock-cli/build.rs` + runs
+  `cargo build -p bock --bin bock` before the tests, forcing a stdlib re-embed so `execution.rs::bock_binary()` can't
+  reuse a stale sibling binary. Root cause confirmed: the build.rs `rerun-if-changed` on the stdlib tree misses a
+  newly-added nested subdir. Local-verification false-REDs resolved.
+- **[Q-r2-codegen-residue] R2 surfaced minor codegen/parser gaps** — bug · **mostly DONE** · links #163, #176 · note:
+  (b) `List[String]` RECORD FIELD on Go → **DONE** (already-fixed by #168; pinned by `record_field_collection_concat.bock`
+  in #176); (c) built-in `len`/`is_empty` lowering shadowing same-named user-record methods → **DONE (#176, ×5)** — was
+  genuinely broken on all 5; root cause was `desugared_list_method` matching by name alone, fixed by gating on the
+  checker's `recv_kind` stamp (+ `raw_recv_kind` reader, 2 unit tests, `user_method_shadows_builtin.bock`). (a) split out
+  → **Q-allcaps-record-parse** (parser, separate). (d) String `reverse`/`char_at`/`slice` remain design-deferred (no
+  cross-target char primitive; `s.reverse()` checks clean today) — tracked here, → DQ.
+- **[Q-time-int64] §18.3.1 `Int64` realized as `Int`** — docs/spec · **DONE (#175)** · note: §18.3.1 prose now
+  clarifies the time surface uses `Int` (i64-backed, full `Int64` range; no separate `Int64` surface type), reconciling
+  the storage-width wording with the `Int` signatures. Verified wording-only (not a behavioral divergence). Changelog
+  `spec/changelogs/20260601-1940-impl-changes.md`.
+- **[Q-allcaps-record-parse] ALLCAPS record name not parsed as struct literal** — bug · ready ·
+  `compiler/crates/bock-parser/` · — · links #163, #176 · note: an ALLCAPS (≥2-letter) record name in struct-literal
+  position (`SB { ... }`) is not parsed as a struct literal → `E1001`. Split from Q-r2-codegen-residue (a); confirmed
+  still present by #176 (out of that PR's codegen scope). Parser fix.
+- **[Q-arch-doc-drift] ARCHITECTURE.md / compiler-CLAUDE.md / CONTRIBUTING.md crate-name drift** — docs/chore · ready ·
+  `ARCHITECTURE.md`, `compiler/CLAUDE.md`, `CONTRIBUTING.md` · — · links #174 · note: D5 (#174) found the root
+  `ARCHITECTURE.md` and `compiler/CLAUDE.md` name crates that **don't exist** (`bock-checker`, `bock-codegen-{js,ts,py,rs,go}`)
+  and omit the real ones (type-checking is `bock-types`; all codegen is the single `bock-codegen`). Root `CONTRIBUTING.md`
+  also describes conformance as `<name>.bock`/`<name>.expected` pairs, but the harness is `// TEST:`/`// EXPECT:`
+  directive-driven. The D5 docs page documents reality + notes the divergence; reconcile these three source files to the
+  real 17-crate workspace. (CLAUDE.md files are orchestrator/merge-coordinator territory.)
 
 ## v1-blocking
 
@@ -187,14 +199,16 @@ _Last reconciled: 2026-06-01 vs main 40efebb (v1 stdlib COMPLETE 11/11 ×5; **D4
   reference — landing (`reference/stdlib.md`, replacing the outdated `std.*` stub) + 11 per-module pages
   (`reference/stdlib/core-*.md`) generated from the `///`/`//!` comments via `bock doc stdlib/core` then curated to
   user-facing prose; `core.time` (builtin) hand-written from §18.3.1. SUMMARY wired; `mdbook build docs` clean.
-- **[D5] Contributor docs + cleanup** — docs · **READY (UNBLOCKED 2026-06-01 — D4 done)** · `docs/`,
-  `docs/src/contributing.md` · — · note: its INVENTORY/SPEC-ALIGNMENT deletion scope is ABSORBED by the tracking
-  consolidation; remaining = contributor-doc buildout. **Next critical-path item** (→ ItemB project-mode codegen).
+- **[D5] Contributor docs + cleanup** — docs · **DONE → #174** · `docs/src/contributing/` · note: shipped a proper
+  nested Contributing section — `index` (overview/where-to-look/reviews), `architecture` (real 17-crate workspace +
+  pipeline), `workflow` (canonical 4-command pre-PR gate + directive-driven conformance), `spec-changes` (spec process +
+  generated changelog/STATUS/ROADMAP). Replaced the thin flat `contributing.md`; SUMMARY rewired; `mdbook build docs`
+  clean. FOUNDs filed → Q-arch-doc-drift. **D5 was the last gate before ItemB → ItemB now UNBLOCKED.**
 - **[D2-polish] D2 language-reference final polish** — docs · blocked ·
   `docs/src/language/` · blocked-by: (D2-FOUND mostly resolved — verify)
   · note: most D2-FOUND rows resolved per spec revision; confirm residue.
-- **[ItemB] Project-mode codegen (Phases 1-6)** — impl · blocked ·
-  `compiler/crates/bock-codegen/` · blocked-by: D5 · links #28 · note:
+- **[ItemB] Project-mode codegen (Phases 1-6)** — impl · **READY (UNBLOCKED 2026-06-01 — D5 done)** ·
+  `compiler/crates/bock-codegen/` · — · links #28 · note: **next critical-path item.**
   Phase 1 then per-target Phases 2-5 (sub-agent fan-out), Phase 6.
   Unblocks the §20.1-Reserved build flags (--deliverable/--no-tests).
 - **[ItemD] /get-started project-mode evolution** — docs · blocked ·

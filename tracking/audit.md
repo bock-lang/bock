@@ -1575,3 +1575,45 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
     on static targets, `bock test` core-loading [now FIXED #167], the `assert` optional-message checker gap) as
     user-facing caveats, not as available behavior — no stdlib source touched (no /// inaccuracies found).
   NEXT: D5 (contributor docs buildout) OR pause — surfaced to operator (enormous session: v1 stdlib + D4).
+
+[2026-06-01 20:28 UTC] D5 DONE + quality-sweep Wave 1 (#174/#175/#176); background-subagent-write limitation found
+  Input: operator "pick up where we left off" → chose **both** the non-blocking quality sweep AND D5, "in parallel if
+    possible." Scoped 3 disjoint sessions (no file overlap, one compiler-crate session per the single-fixer norm):
+    A=D5 docs (`docs/`), B=codegen residue (`bock-codegen` + conformance), C=conformance harness + spec (`tools/scripts`,
+    `spec/`). Created 3 worktrees from origin/main d030c19.
+  ★ FAILURE-MODE DISCOVERY: the first dispatch used `run_in_background: true` engineer sub-agents — ALL THREE hit a hard
+    block: **Write/Edit/NotebookEdit are DENIED for background sub-agents**, even on allowlisted paths (a probe Write to
+    `/tmp/` — explicitly in the allowlist + additionalDirectories — was denied). Read/Bash still work. Settings have no
+    deny rules / hooks; the main session writes fine. Ran a CONTROLLED experiment: a **foreground** probe agent (same
+    model, same allowlist, same worktree paths) wrote/edited with NO denial. Sole variable = `run_in_background`. Root
+    cause: a detached/non-interactive background agent can't surface a permission prompt and the auto-approving allowlist
+    isn't taking effect for it, so mutating tools fall through to deny. NOT a collision/worktree/ownership issue (those
+    work perfectly). Operator flagged this as important to not silently limit sub-agent work. → saved to project memory
+    (`background-subagents-cannot-write`). STANDING RULE: parallel **file-mutating** sessions → **concurrent foreground**
+    agents (multiple Agent calls in one message run concurrently — real parallelism, just blocks until the batch
+    returns); reserve `run_in_background` for read-only fan-out. Do NOT use `bypassPermissions` (unsafe; worktrees
+    already prevent collisions).
+  PIVOT: stopped the 3 background agents (B/C confirmed the same denial). Did **D5 directly** (orchestrator, write-capable)
+    — research had been done by the blocked A agent. Re-dispatched **B + C as concurrent FOREGROUND sub-agents**; both
+    wrote, ran their gates, pushed, and opened PRs cleanly — fix validated end-to-end.
+  RESULTS (all gate-clean, CI confirmed where applicable, merged; main 6a48848):
+    - **#174 D5** — nested Contributing section (index/architecture/workflow/spec-changes), real 17-crate workspace,
+      canonical 4-cmd pre-PR gate, directive-driven conformance; `mdbook build docs` clean. NOTE: docs-only PRs get **no
+      pre-merge CI by design** — `ci.yml` `paths-ignore`s `docs/**`/`spec/**`/`**.md`; `docs.yml` is push-to-main only.
+      So local `mdbook build` is the applicable gate (ran it, clean) → contract-compliant merge.
+    - **#175** — Q-conformance-clean-rebuild DONE (harness force-rebuilds `bock`: touch `bock-cli/build.rs` +
+      `cargo build -p bock` before tests; root cause = build.rs rerun-if-changed misses a new nested stdlib subdir,
+      `execution.rs::bock_binary()` reuses the stale sibling) + Q-time-int64 DONE (§18.3.1 Int64→Int wording-only
+      clarification + changelog). Full CI green.
+    - **#176** — Q-r2-codegen-residue **(c) builtin-vs-user-method shadowing: the real bug, broken on all 5**, fixed by
+      gating `desugared_list_method` on the checker's `recv_kind` stamp (+ `raw_recv_kind`, 2 unit tests, ×5 fixture).
+      (b)/Q-go-list-literal/Q-ts-generic-impl verified **already-fixed** (by #168/prior) and **pinned** with 3 new
+      fixtures. Q-match-exprpos re-confirmed broken on go/py/js/ts (Rust ok) → **deferred (deep — needs an assign-to-target
+      temp-hoist threaded through 4 backends' emit_match)**. Full CI green across ubuntu/macos/windows × stable/beta;
+      conformance 420 pairs / 0 failed.
+  TRIAGE: new queue items **Q-allcaps-record-parse** (parser; was Q-r2 (a)) and **Q-arch-doc-drift** (ARCHITECTURE.md +
+    compiler/CLAUDE.md name nonexistent crates `bock-checker`/`bock-codegen-{js..}`; root CONTRIBUTING.md describes
+    `.expected` pairs vs the real directive harness — reconcile to the 17-crate reality). Fixed the now-dangling root
+    CLAUDE.md "Contributing guide" pointer (`docs/src/contributing.md` → `docs/src/contributing/index.md`).
+  Blocked: none. 0 open PRs; worktrees == main; caches pruned (disk healthy). **NEXT critical path: ItemB (project-mode
+    codegen) — UNBLOCKED now that D5 is done.**
