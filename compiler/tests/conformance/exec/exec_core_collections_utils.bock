@@ -1,0 +1,53 @@
+// TEST: exec_core_collections_utils
+// EXPECT: output "60;321;2;-1"
+// EXPECT: targets js, ts, python, rust
+//
+// The concrete-utility half of `core.collections`: the free functions that carry
+// no `T: Comparable` bound and so lower on rust as well as js/ts/python.
+//
+// TARGETS — js, ts, python, rust (NOT go). Go is excluded because *any*
+// `use core.collections` pulls the whole embedded module, which contains
+// generic-`List[T]` functions that do not codegen on Go (see
+// `exec_core_collections` and the module header). On rust these three concrete
+// functions are callable — `sum` is `List[Int]` -> `Int`, `reversed[T]` carries
+// no `Clone`-forcing comparison, and `get_or` is a concrete `Map[String, Int]`
+// lookup — so this fixture proves the rust path the `Comparable`-generic
+// `exec_core_collections` fixture cannot reach.
+//
+// Fields, in output order:
+//   * sum([10, 20, 30])                 -> 60
+//   * reversed([1, 2, 3]) values        -> "321"
+//   * get_or({"a":1,"b":2}, "b", -1)    -> 2   (present key)
+//   * get_or({"a":1}, "z", -1)          -> -1  (absent key -> eager default)
+//
+// `main` is intentionally not `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.collections.{sum, reversed, get_or}
+
+fn ints_str(xs: List[Int]) -> String {
+  let mut out: String = ""
+  let mut i: Int = 0
+  loop {
+    if (i >= xs.len()) {
+      break
+    }
+    match xs.get(i) {
+      Some(v) => {
+        out = "${out}${v}"
+      }
+      None => break
+    }
+    i = i + 1
+  }
+  return out
+}
+
+fn main() -> Void {
+  let total: Int = sum([10, 20, 30])
+  let backwards: String = ints_str(reversed([1, 2, 3]))
+  let present: Int = get_or({"a": 1, "b": 2}, "b", -1)
+  let absent: Int = get_or({"a": 1}, "z", -1)
+  println("${total};${backwards};${present};${absent}")
+}

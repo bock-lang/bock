@@ -1,0 +1,100 @@
+// TEST: exec_core_collections
+// EXPECT: output "0123;4;yes;no;yes;147;23;9;2;none;528"
+// EXPECT: targets js, ts, python
+//
+// THE PAYOFF FIXTURE for `core.collections`'s `SortedSet` + `Comparable`-generic
+// utilities: a user program that `use`s the embedded `core.collections` module
+// and exercises the sorted-set surface and the `T: Comparable` list helpers,
+// end to end, on every target where they run.
+//
+// TARGETS — js, ts, python (NOT rust/go). This surface is generic over
+// `List[T]` with a `T: Comparable` bound, which exposes two pre-existing,
+// compiler-side codegen gaps (each reproduced with a minimal non-collections
+// program; both are out of stdlib scope and tracked as FOUND):
+//
+//   * Go: a `[T]` free function / record over a `List[T]` lowers `T` to
+//     `interface{}`, the call site emits `f[any](...)` rather than recovering
+//     the element type, and the `Optional`-producing `get` helper (`[]interface{}`)
+//     does not agree with a `[]T` slice — so the whole module fails `go build`.
+//   * Rust: the backend adds a `T: Clone` bound (from `List.get(..).cloned()`)
+//     but does not `#[derive(Clone)]` user records, so calling these functions
+//     with a user `Comparable` type (`Key`) fails `Key: Clone`.
+//
+// The concrete `sum`/`reversed`/`get_or` utilities — which carry no `Comparable`
+// bound — additionally run on rust; they are covered by the sibling
+// `exec_core_collections_utils` fixture (js/ts/python/rust).
+//
+// Fields, in output order (`Key` from `core.compare` is the sample `Comparable`
+// receiver, ordered by its `Int` `value`):
+//   * from_list([3,1,2,1]) then add(_, 0), to_list -> "0123" (sorted + dedup)
+//   * size of that set                               -> 4
+//   * contains(set, key(2)) -> yes ; contains(set, key(9)) -> no
+//   * is_empty(empty())                              -> yes
+//   * union([1,4],[4,7]) to_list                     -> "147"
+//   * intersection([1,2,3],[2,3,5]) to_list          -> "23"
+//   * max_of([2,9,4]).value -> 9 ; min_of -> 2 ; max_of([]) -> none
+//   * unique([5,5,2,2,8]) values                     -> "528" (first-seen order)
+//
+// Bools are mapped to `yes`/`no` (raw `Bool` interpolation diverges:
+// Python `True`/`False` vs the rest's `true`/`false`). `main` is intentionally
+// not `public` (the Go entry-point rationale in hello_world.bock; moot here
+// since Go is excluded, but kept for fixture consistency).
+module main
+
+use core.collections.{empty, from_list, add, contains, size, is_empty, to_list, union, intersection, SortedSet}
+use core.collections.{max_of, min_of, unique}
+use core.compare.{Key, key}
+
+fn yn(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn keys_str(xs: List[Key]) -> String {
+  let mut out: String = ""
+  let mut i: Int = 0
+  loop {
+    if (i >= xs.len()) {
+      break
+    }
+    match xs.get(i) {
+      Some(k) => {
+        out = "${out}${k.value}"
+      }
+      None => break
+    }
+    i = i + 1
+  }
+  return out
+}
+
+fn opt_key(o: Optional[Key]) -> String {
+  match o {
+    Some(k) => return "${k.value}"
+    None => return "none"
+  }
+}
+
+fn main() -> Void {
+  let ss: SortedSet[Key] = from_list([key(3), key(1), key(2), key(1)])
+  let ss2: SortedSet[Key] = add(ss, key(0))
+  let listed: String = keys_str(to_list(ss2))
+  let n: Int = size(ss2)
+  let has2: String = yn(contains(ss2, key(2)))
+  let has9: String = yn(contains(ss2, key(9)))
+  let blank: String = yn(is_empty(empty()))
+
+  let un: SortedSet[Key] = union(from_list([key(1), key(4)]), from_list([key(4), key(7)]))
+  let unStr: String = keys_str(to_list(un))
+  let ix: SortedSet[Key] = intersection(from_list([key(1), key(2), key(3)]), from_list([key(2), key(3), key(5)]))
+  let ixStr: String = keys_str(to_list(ix))
+
+  let mx: String = opt_key(max_of([key(2), key(9), key(4)]))
+  let mn: String = opt_key(min_of([key(2), key(9), key(4)]))
+  let emptyMax: String = opt_key(max_of([]))
+  let uq: String = keys_str(unique([key(5), key(5), key(2), key(2), key(8)]))
+
+  println("${listed};${n};${has2};${has9};${blank};${unStr};${ixStr};${mx};${mn};${emptyMax};${uq}")
+}
