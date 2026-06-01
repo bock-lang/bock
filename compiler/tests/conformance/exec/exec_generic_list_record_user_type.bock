@@ -1,0 +1,70 @@
+// TEST: exec_generic_list_record_user_type
+// EXPECT: output "3;1;2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Generic record over `List[T]` whose element is a USER record type — the
+// GAP-A (Go `List[T]` element typing + generic call-site type recovery) +
+// GAP-B (Rust `#[derive(Clone)]` on the generated user record) reproduction.
+//
+//   * `record Box[T] { items: List[T] }` — a generic container whose only field
+//     is a `List[T]` (no field typed exactly `T`). It is constructed with a list
+//     LITERAL of user records: `[Item { id: 1 }, Item { id: 2 }]`.
+//   * Go (GAP-A): the field-value list literal must emit `[]Item{...}`, not
+//     `[]interface{}{...}`, and the construction must carry the recovered type
+//     arg `Box[Item]{...}`, not `Box[any]{...}` — otherwise `go build` rejects
+//     `cannot use []interface{}{…} as []Item value in struct literal`. The fix
+//     adds a `RecordConstruct` arm to `infer_go_expr_type` so a list literal of
+//     record-constructs infers the homogeneous element type `Item`. With the
+//     construction typed `Box[Item]`, the `count_items(bx)` / `at_or(bx, ..)`
+//     generic call sites infer `T = Item` (rather than `T = any`), so the
+//     `Box[Item]`-typed third arg `Item { id: 0 }` matches and `.items.get(..)`
+//     reads `[]Item`, not `[]interface{}`.
+//   * Rust (GAP-B): `at_or[T]` reads an element back BY VALUE from the borrowed
+//     `List` (`get(i).cloned()`), which clones the `T` out — requiring
+//     `#[derive(Clone)]` on the generated `Item` struct.
+//
+// `count_items` returns the list length (3) generically; `at_or` reads an
+// element back BY VALUE through a generic getter and `id_of` reads its id.
+// Output `3;1;2`: the count is 3, the index-0 element's id is 1, the index-1
+// element's id is 2.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Item {
+  id: Int
+}
+
+record Box[T] {
+  items: List[T]
+}
+
+fn count_items[T](b: Box[T]) -> Int {
+  return b.items.len()
+}
+
+fn at_or[T](b: Box[T], i: Int, dflt: T) -> T {
+  match b.items.get(i) {
+    Some(x) => return x
+    None => return dflt
+  }
+}
+
+fn id_of(it: Item) -> Int {
+  return it.id
+}
+
+fn mk_box() -> Box[Item] {
+  return Box { items: [Item { id: 1 }, Item { id: 2 }, Item { id: 3 }] }
+}
+
+fn main() -> Void {
+  // Each generic call consumes a fresh box (a single by-value use per value), so
+  // the program does not trip Rust's orthogonal by-value-reuse ownership gap (see
+  // generic_container_concat.bock / bounded_dispatch.bock's OPEN note).
+  let n: Int = count_items(mk_box())
+  let first: Int = id_of(at_or(mk_box(), 0, Item { id: 0 }))
+  let second: Int = id_of(at_or(mk_box(), 1, Item { id: 0 }))
+  println("${n};${first};${second}")
+}

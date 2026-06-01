@@ -1229,6 +1229,38 @@ impl EmitCtx {
         else {
             return Ok(false);
         };
+        self.emit_bridge_method(recv, method, rest)
+    }
+
+    /// Lower a sealed-core-trait bridge method on a *bounded generic type
+    /// variable* (`a.eq(b)` / `a.compare(b)` inside `eq_check[T: Equatable]`) to
+    /// its JS form (GAP-C). JS generics are erased, so only the method call needs
+    /// lowering — `a.eq(b)` becomes `a === b`, etc. — and the body is identical to
+    /// the `Primitive:<Ty>` bridge. Fires only when the bound trait is sealed-core
+    /// and NOT a user-declared trait (a user trait's `impl` provides the method).
+    fn try_emit_trait_bound_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, _tr)) =
+            crate::generator::trait_bound_bridge_call(node, callee, args, &self.trait_decls)
+        else {
+            return Ok(false);
+        };
+        self.emit_bridge_method(recv, method, rest)
+    }
+
+    /// Shared body of the primitive / trait-bound bridges: emit the native JS form
+    /// of `compare` (the `Ordering` ternary), `eq` (`===`), or `to_string`/
+    /// `display` (`String(..)`).
+    fn emit_bridge_method(
+        &mut self,
+        recv: &AIRNode,
+        method: &str,
+        rest: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
         let recv_str = self.expr_to_string(recv)?;
         match method {
             "compare" => {
@@ -2141,6 +2173,9 @@ impl EmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_trait_bound_bridge(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_container_method(node, callee, args)? {
