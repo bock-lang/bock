@@ -12,33 +12,27 @@
 //!
 //! Unlike the all-concrete `core.string`, this module is unavoidably **generic
 //! over `List[T]`** (the spec mandates `SortedSet[T]`, and a `T: Comparable`
-//! comparison surface). Generic-`List[T]` traversal exposes two pre-existing
-//! codegen gaps (reproduced with minimal non-collections programs; both are
-//! compiler-side and out of stdlib scope — see the FOUND notes in the PR):
+//! comparison surface). Generic-`List[T]` traversal once exposed compiler-side
+//! codegen gaps on Go and Rust; those have been closed (the broad
+//! generic-container fix plus the Go/Rust residue the `exec_core_collections`
+//! payoff fixture drove out — see its header). Concretely:
 //!
-//!   * **Go — the whole module does not compile.** A `[T]` free function over a
-//!     `List[T]` lowers `T` to `any`/`interface{}`; the call site emits
-//!     `f[any](...)` instead of recovering the element type, the
-//!     `Optional`-producing `get` helper is typed `[]interface{}` and does not
-//!     agree with a `[]T` / monomorphic `[]int64` slice, and an empty match arm
-//!     leaves a `__v` declared-and-unused. (The same `List`-record-field /
-//!     get-helper mismatch `core.string`'s `StringBuilder` dodged by using a
-//!     `String` buffer.) Because the embedded module is emitted whole when a user
-//!     `use`s it, *any* `use core.collections` fails to build on Go — including
-//!     a program that only calls the concrete [`sum`]/[`reversed`]/[`get_or`].
-//!   * **Rust — `T: Comparable` over user records does not link.** The Rust
-//!     backend adds a `T: Clone` bound (from `List.get(..).cloned()`) but does
-//!     not emit `#[derive(Clone)]` on user records, so calling [`SortedSet`] /
-//!     [`max_of`] / [`min_of`] / [`unique`] with a user `Comparable` type fails
-//!     `K: Clone`. The module *compiles* on Rust, and the concrete
-//!     [`sum`]/[`reversed`]/[`get_or`] are callable; the `Comparable`-generic
-//!     surface is not.
+//!   * **Go** — a list literal of constructor calls (`[key(3), …]`) now infers
+//!     its homogeneous element type (`[]Key`, not `[]interface{}`), so a generic
+//!     callee over a `List[T]` (`from_list`/`max_of`/`unique`) recovers `T`; a
+//!     `List[T]` record-field literal emits `[]T{}`; a zero-arg / return-only
+//!     generic constructor (`empty[T]()`) gets an explicit turbofish from its
+//!     expected type; and a payload-less user-enum (`Ordering`) match no longer
+//!     leaves an unused `__v`. The whole module builds and runs on Go.
+//!   * **Rust** — user `Comparable` records `#[derive(Clone)]`, satisfying the
+//!     `T: Clone` bound the backend adds (from `List.get(..).cloned()`), and a
+//!     `let`-bound record reused across query helpers (`size(s)`/`contains(s,
+//!     x)`) clones at each by-value pass rather than moving. The full surface is
+//!     callable on Rust.
 //!
-//! Net, verified by building + running each op on each target:
-//!
-//!   * [`sum`], [`reversed`], [`get_or`] — js, ts, python, rust.
-//!   * [`SortedSet`] and [`max_of`]/[`min_of`]/[`unique`] — js, ts, python.
-//!   * Go — none (the module does not compile there; tracked as a FOUND).
+//! Net, verified by building + running each op on **all five targets** (js, ts,
+//! python, rust, go): [`sum`], [`max_of`], [`min_of`], [`unique`], [`reversed`],
+//! [`get_or`], and the entire [`SortedSet`] surface.
 //!
 //! ## What is built-in (and therefore NOT shipped here)
 //!

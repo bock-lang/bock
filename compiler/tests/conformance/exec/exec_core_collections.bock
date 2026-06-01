@@ -1,38 +1,43 @@
 // TEST: exec_core_collections
 // EXPECT: output "0123;4;yes;no;yes;147;23;9;2;none;528"
-// EXPECT: targets js, ts, python
+// EXPECT: targets js, ts, python, rust, go
 //
 // THE PAYOFF FIXTURE for `core.collections`'s `SortedSet` + `Comparable`-generic
 // utilities: a user program that `use`s the embedded `core.collections` module
 // and exercises the sorted-set surface and the `T: Comparable` list helpers,
 // end to end, on every target where they run.
 //
-// TARGETS — js, ts, python (NOT rust/go). This surface is generic over
-// `List[T]` with a `T: Comparable` bound, which exposes two pre-existing,
-// compiler-side codegen gaps (each reproduced with a minimal non-collections
-// program; both are out of stdlib scope and tracked as FOUND):
+// TARGETS — all five (js, ts, python, rust, go). This surface is generic over
+// `List[T]` with a `T: Comparable` bound. Earlier it exposed compiler-side
+// generic-codegen gaps that have since been closed (the broad generic-container
+// fix plus the Go/Rust residue this fixture drove out):
 //
-//   * Go: a `[T]` free function / record over a `List[T]` lowers `T` to
-//     `interface{}`, the call site emits `f[any](...)` rather than recovering
-//     the element type, and the `Optional`-producing `get` helper (`[]interface{}`)
-//     does not agree with a `[]T` slice — so the whole module fails `go build`.
-//   * Rust: the backend adds a `T: Clone` bound (from `List.get(..).cloned()`)
-//     but does not `#[derive(Clone)]` user records, so calling these functions
-//     with a user `Comparable` type (`Key`) fails `Key: Clone`.
+//   * Go: a list literal of constructor calls (`[key(3), …]`) now infers its
+//     homogeneous element type (`[]Key`, not `[]interface{}`), so a generic
+//     callee over a `List[T]` (`from_list`, `max_of`, `unique`) recovers `T`; a
+//     `List[T]` record-field literal emits `[]T{}` (not `[]interface{}{}`); a
+//     zero-arg / return-only generic constructor (`empty[T]()`) gets an explicit
+//     turbofish from its expected type; and a payload-less user-enum match
+//     (`Ordering`) no longer leaves an unused `__v`.
+//   * Rust: user `Comparable` records `#[derive(Clone)]`, so the `T: Clone`
+//     bound the backend adds (from `List.get(..).cloned()`) is satisfied.
 //
-// The concrete `sum`/`reversed`/`get_or` utilities — which carry no `Comparable`
-// bound — additionally run on rust; they are covered by the sibling
-// `exec_core_collections_utils` fixture (js/ts/python/rust).
+// Two empty-collection sites are bound to typed `let`s (`empty(): SortedSet[Key]`
+// and the empty `List[Key]` fed to `max_of`) so the element type is explicit at
+// the construction — the natural way a five-target user writes a fresh empty
+// container, and what lets Go/Rust pin `T` without backward inference through an
+// erased `Optional`. The concrete `sum`/`reversed`/`get_or` utilities are
+// covered by the sibling `exec_core_collections_utils` fixture.
 //
 // Fields, in output order (`Key` from `core.compare` is the sample `Comparable`
 // receiver, ordered by its `Int` `value`):
 //   * from_list([3,1,2,1]) then add(_, 0), to_list -> "0123" (sorted + dedup)
 //   * size of that set                               -> 4
 //   * contains(set, key(2)) -> yes ; contains(set, key(9)) -> no
-//   * is_empty(empty())                              -> yes
+//   * is_empty(empty()) via a typed `SortedSet[Key]` binding -> yes
 //   * union([1,4],[4,7]) to_list                     -> "147"
 //   * intersection([1,2,3],[2,3,5]) to_list          -> "23"
-//   * max_of([2,9,4]).value -> 9 ; min_of -> 2 ; max_of([]) -> none
+//   * max_of([2,9,4]).value -> 9 ; min_of -> 2 ; max_of(empty List[Key]) -> none
 //   * unique([5,5,2,2,8]) values                     -> "528" (first-seen order)
 //
 // Bools are mapped to `yes`/`no` (raw `Bool` interpolation diverges:
@@ -84,7 +89,8 @@ fn main() -> Void {
   let n: Int = size(ss2)
   let has2: String = yn(contains(ss2, key(2)))
   let has9: String = yn(contains(ss2, key(9)))
-  let blank: String = yn(is_empty(empty()))
+  let emptySet: SortedSet[Key] = empty()
+  let blank: String = yn(is_empty(emptySet))
 
   let un: SortedSet[Key] = union(from_list([key(1), key(4)]), from_list([key(4), key(7)]))
   let unStr: String = keys_str(to_list(un))
@@ -93,7 +99,8 @@ fn main() -> Void {
 
   let mx: String = opt_key(max_of([key(2), key(9), key(4)]))
   let mn: String = opt_key(min_of([key(2), key(9), key(4)]))
-  let emptyMax: String = opt_key(max_of([]))
+  let noKeys: List[Key] = []
+  let emptyMax: String = opt_key(max_of(noKeys))
   let uq: String = keys_str(unique([key(5), key(5), key(2), key(2), key(8)]))
 
   println("${listed};${n};${has2};${has9};${blank};${unStr};${ixStr};${mx};${mn};${emptyMax};${uq}")

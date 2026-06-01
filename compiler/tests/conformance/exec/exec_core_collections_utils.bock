@@ -1,6 +1,6 @@
 // TEST: exec_core_collections_utils
 // EXPECT: output "60;321;2;-1"
-// EXPECT: targets js, ts, python, rust
+// EXPECT: targets js, ts, python, rust, go
 //
 // The concrete-utility half of `core.collections`: the free functions that carry
 // no `T: Comparable` bound and so lower on rust as well as js/ts/python.
