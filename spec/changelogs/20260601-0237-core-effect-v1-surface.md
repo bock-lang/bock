@@ -1,28 +1,22 @@
-# core.effect — v1 surface decided (build BLOCKED on a parser fix)
+# core.effect — v1 surface ships
 
 **Date:** 2026-06-01
 **Affects:** §18.3 (`core.effect`), references §10 (Algebraic Effects)
 **Type:** addition
 
-> **Status: surface decided, build BLOCKED.** The v1 `core.effect` surface
-> below is authored and reviewed, but the module **cannot ship yet**: the
-> module name `core.effect` collides with the `effect` reserved keyword, which
-> the parser does not accept as a module-path segment. `module core.effect` and
-> `use core.effect.{...}` both fail to parse (E2000), and because the embedded
-> stdlib is parsed on every `bock` invocation, embedding the module bricks the
-> whole compiler. This is a compiler-crate fix (out of scope for the authoring
-> session) — see the FOUND note at the end of this entry. The authored module,
-> fixtures, and a turnkey reproduction are staged under `blocked/` directories
-> (as `*.bock.blocked`, invisible to the embed glob and the test harness)
-> pending that fix.
+> **Status: shipped.** The v1 `core.effect` surface below is authored,
+> reviewed, and now **builds and runs end to end on all five targets** (js, ts,
+> python, rust, go). Shipping it required one parser fix — letting the `effect`
+> reserved keyword appear as a module-path segment, so `module core.effect` and
+> `use core.effect.{...}` parse — which lands in the same PR. See the
+> "Enablement" note at the end of this entry.
 
 ## Change
 
-The v1 surface of the `core.effect` standard-library module is hereby fixed
-(pending the parser fix that lets it build). §18.3 lists it as "Effect system
-primitives"; this realizes that "minimum-useful subset" as **effect-system
-primitives plus one executable standard effect**. The decided `module
-core.effect` public surface is:
+The v1 surface of the `core.effect` standard-library module ships. §18.3 lists
+it as "Effect system primitives"; this realizes that "minimum-useful subset" as
+**effect-system primitives plus one executable standard effect**. The shipped
+`module core.effect` public surface is:
 
 - `effect Log { fn log(message: String) -> Void }` — the canonical logging
   effect, a single operation taking a `String` message and returning `Void`.
@@ -40,9 +34,8 @@ effect above. The module is pure Bock and needs no per-target runtime shim; its
 effect dispatch lowers and executes identically on all five v1 targets (js, ts,
 python, rust, go) — the underlying §10.2/§10.4 forms are proven ×5 by the
 `exec_effect_*` fixtures landed in #155. The `core.effect`-specific
-`exec_core_effect_log` / `exec_core_effect_log_propagation` fixtures that would
-prove the *module* end to end are authored but cannot run until the parser fix
-below lands; they are staged under `conformance/exec/blocked/`.
+`exec_core_effect_log` / `exec_core_effect_log_propagation` fixtures prove the
+*module* end to end and pass on all five targets.
 
 **Reserved for v1.x** (explicitly OUT of the v1 `core.effect` surface):
 
@@ -80,47 +73,36 @@ None. This is purely additive: a new `core.effect` module with no prior surface.
 Users opt in with `use core.effect.{Log, ConsoleLog, console_log}`. No effect
 name is added to the §18.2 prelude, so existing programs are unaffected.
 
-## FOUND — blocker: `effect` keyword cannot be a module-path segment
+## Enablement — `effect` is now a legal module-path segment
 
-Building `core.effect` requires the parser to accept `effect` (a reserved
-keyword, `TokenKind::Effect`) as a segment of a dotted module path. It does not.
-Two surfaces break:
+Building `core.effect` required the parser to accept `effect` (a reserved
+keyword, `TokenKind::Effect`) as a segment of a dotted module path. The spec
+(§18.3) names the module `core.effect`, so this was a parser bug, now fixed.
 
-- **Module declaration** `module core.effect` — `parse_module_path`
-  (`compiler/crates/bock-parser/src/lib.rs`) only continues a `.segment` when
-  the lookahead is `Ident` or `TypeIdent` (it `break`s on `TokenKind::Effect`),
-  so the path parses as just `core`, then the stray `.effect` desyncs the parser
-  (observed: `E2000 expected '{', found 'public'`).
-- **Import** `use core.effect.{...}` — `parse_import_base_path` (same file) has
-  the identical `Ident | TypeIdent`-only continuation, so it stops before
-  `.effect`, leaving `.effect.{...}` → `E2000 expected '{', found '.'`.
+The fix is scoped to module-path / import-path parsing only, in
+`compiler/crates/bock-parser/src/lib.rs`:
 
-Because `compiler/crates/bock-cli/build.rs` embeds every `stdlib/core/**/*.bock`
-and the embedded sources are parsed on **every** `bock` invocation, placing
-`effect.bock` at its live path bricks the whole compiler (every `bock check`
-fails, and ~all stdlib conformance tests fail). The feasibility probe in #155
-used module names `main`/`logging`, so it never exercised `module core.effect`
-or `use core.effect.{...}` — the collision was not caught there.
+- A new `is_path_segment_token` predicate accepts `Ident` / `TypeIdent` plus the
+  effect-family contextual keywords `Effect` / `Handle` / `Handling` as path
+  segments. `parse_module_path`, `parse_import_base_path`, and
+  `try_parse_path_segment` use it. A keyword segment carries no `literal` text,
+  so its segment name is the keyword's textual spelling (e.g. `effect`), taken
+  from `TokenKind`'s `Display`.
+- The change does **not** touch expression/field-access parsing (`obj.effect`
+  field access is unchanged) or item-position effect-declaration parsing
+  (`effect Log { ... }` still parses as an `Item::Effect`); those code paths
+  never reach the module/import path-parsing functions. Parser unit tests cover
+  `module core.effect`, `use core.effect.{Log, console_log}`, and a regression
+  that `effect Log { ... }` at item position still parses as an effect decl.
 
-**Fix (compiler-crate change, out of the authoring session's scope):** allow the
-effect-family contextual keywords as module-path segments. Minimal change: in
-both `parse_module_path` and `parse_import_base_path`, extend the `.segment`
-continuation match (and `try_parse_path_segment`) to accept `TokenKind::Effect`
-(and, for symmetry / future-proofing, `Handle` / `Handling`), treating them as
-ordinary path segments — emitting their textual spelling via
-`TokenKind::display` rather than `literal`. A scoped alternative is a general
-"keywords are valid module-path segments" rule. Either way it needs parser
-tests for `module core.effect` and `use core.effect.{...}`.
-
-Until that lands, the authored artifacts are staged (non-embedded, non-discovered
-`*.bock.blocked`) at:
-
-- `stdlib/core/effect/blocked/effect.bock.blocked` — the module source.
-- `compiler/tests/conformance/stdlib/effect/blocked/effect_module_no_errors.bock.blocked`
-- `compiler/tests/conformance/exec/blocked/exec_core_effect_log.bock.blocked`
-- `compiler/tests/conformance/exec/blocked/exec_core_effect_log_propagation.bock.blocked`
-
-The follow-up: land the parser fix, then `git mv` each `*.bock.blocked` back to
-its live path (dropping the `.blocked` suffix and the `blocked/` dir), rebuild
-(re-embeds `effect.bock`), and run the conformance gate — the fixtures are
-written to pass as-is.
+Activating the embedded module (it now compiles into every `bock` invocation)
+surfaced one ripple in the interpreter's module-registration order
+(`compiler/crates/bock-cli/src/run.rs`): non-entry modules were registered into
+the interpreter by iterating a `HashMap`, whose nondeterministic order made the
+flat effect-operation map (`op-name → effect-name`) resolve a user effect op
+that shares a name with a core op (e.g. `log`) inconsistently. Registration now
+iterates the already-computed topological order (dependencies — including the
+embedded core modules — before dependents, entry module last), so user effect
+ops deterministically shadow core's. This removes the nondeterminism and is
+independently correct (HashMap iteration order should never drive runtime
+behavior).
