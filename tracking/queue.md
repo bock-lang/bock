@@ -12,9 +12,9 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-01 vs main a4c0237 (**R2 COMPLETE ×5** — option [#159/#162/#165], result [#161/#165],
-string [#162/#163], time [#160 builtin floor]; + codegen #162/#164/#165. **9/11 v1 modules; R1+R2 done.** #123-#165
-merged; repo wins). See audit.md._
+_Last reconciled: 2026-06-01 vs main 53df918 (**★ v1 STDLIB COMPLETE — 11/11 modules ×5 ★**; R3 done: test
+[#169], collections [#170]; + #167 bock-test core-loading, #168 R3 generic codegen. Q-stdlib DONE → D4 unblocked.
+#123-#170 merged; repo wins). See audit.md._
 
 ---
 
@@ -150,12 +150,13 @@ merged; repo wins). See audit.md._
   DQ18 (mutating lowering), DQ20 (`expr?`), DQ22, DQ21, Bool-interp spelling; (d) Go nested-runtime-payload arith
   [#142 residual] + Rust by-value-reuse [#149 OPEN]. NONE of these gate the R1 effect floor.
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (**9/11 landed; R1+R2 COMPLETE on all 5**). R1: iter [#151/#152], effect-foundation [#155],
-  effect [#157]. **R2: option [#159/#162/#165], result [#161/#165], string [#162/#163], time [#160 — already a
-  builtin; pinned with a conformance floor]** — all ×5. Enabling codegen: #162 (String-method layer + reserved-keyword
-  escaping + Rust Optional-payload T:Clone + bundle determinism), #164 (dep_graph determinism root cause), #165 (Go
-  generic free-fns over Optional/Result + expr-position match IIFE typing). **Next: R3** (core.collections,
-  core.test) — the last v1 stdlib batch; P4-hygiene (DQ18/DQ22) available in parallel ·
+  **★ DONE — v1 STDLIB COMPLETE, 11/11 modules ×5 ★** (was v1-BLOCKING; now satisfied). R1: iter [#151/#152],
+  effect-foundation [#155], effect [#157]. R2: option [#159/#162/#165], result [#161/#165], string [#162/#163], time
+  [#160 builtin]. **R3: test [#169 — both free + fluent assert APIs, DQ26], collections [#170 — SortedSet + utils].**
+  All ×5. Enabling codegen across the batch: #162 (String methods + keyword escaping + Optional-T:Clone + bundle
+  determinism), #164 (dep_graph determinism), #165 (Go generic Optional/Result), #167 (bock test core-loading),
+  #168 (generic List[T]-over-user-types + sealed-trait bounds on primitives), #170 (collections Go/Rust residue).
+  405 exec pairs ×5. **UNBLOCKS D4** (stdlib reference docs). NO further stdlib work for v1 ·
   `stdlib/`, `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: v1 = **11 core modules** at minimum-useful surface (option, result,
   collections, string, iter, compare, convert, error, effect, time, test). Each =
@@ -171,9 +172,8 @@ merged; repo wins). See audit.md._
   **`core.time`** (already a compiler builtin — Duration/Instant/Clock/sleep; #160 conformance floor pins §18.3.1 ×5).
   **Codegen gate CLEARED:** Q-fconf execution conformance (#114/#115)
   + Q-codegen-fixes (#121, DV9) + the codegen-completeness milestone (#131-#152) — 5-target parity real + tested.
-  **R1+R2 COMPLETE** (R1: iter #151/#152 · effect-foundation #155 · effect #157. R2: option/result/string ×5
-  [#159/#161/#162/#163/#165] · time builtin-floor #160). **Next: R3** (core.collections, core.test) — the last v1
-  stdlib batch. Plans (all executed): `plans/2026-05-31-core-iter-r1-plan.md`,
+  **R1+R2+R3 ALL COMPLETE — v1 stdlib DONE (11/11 ×5).** R3: test #169 (DQ26 both-API floor), collections #170
+  (SortedSet + utils). No remaining stdlib work for v1. Plans (all executed): `plans/2026-05-31-core-iter-r1-plan.md`,
   `plans/2026-05-31-effect-foundation-plan.md`, `plans/2026-05-31-core-effect-r1-plan.md`.
   `core.types/math/memory/concurrency` Reserved for v1.x.
   Plans: `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`,
@@ -182,9 +182,11 @@ merged; repo wins). See audit.md._
 
 ## Blocked
 
-- **[D4] Stdlib reference docs** — docs · blocked · `docs/src/reference/`
-  · blocked-by: Q-stdlib · note: scaffolding-only until stdlib lands
-  (a stub exists); the real reference cycle follows the implementation.
+- **[D4] Stdlib reference docs** — docs · **READY (UNBLOCKED 2026-06-01 — Q-stdlib DONE, 11/11 ×5)** ·
+  `docs/src/reference/` · — · note: the v1 stdlib is complete (#103-#170); the reference cycle now follows. Each
+  module's `///` doc comments are the reference source. **This is the next critical-path item** (→ D5 → ItemB). The
+  per-module surface to document: error/compare/convert/iter/effect/option/result/string/test/collections + time
+  (builtin). Note the Reserved-v1.x items per module (per the spec + the changelogs).
 - **[D5] Contributor docs + cleanup** — docs · blocked · `docs/`,
   `docs/src/contributing.md` · blocked-by: D4 · note: its
   INVENTORY/SPEC-ALIGNMENT deletion scope is now ABSORBED by the

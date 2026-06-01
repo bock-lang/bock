@@ -138,6 +138,14 @@ status(open | resolved→link)`
   Q-effect-conformance-wiring both DONE). RESIDUE → queue Q-effect-op-node-lowering (unhandled bare op surfaces
   E1001 not E8020 — `EffectOp` AIR nodes are only built in test code; non-urgent; diagnostic code non-normative).
 
+### DV17 — §18.3 lists "benchmarking" for `core.test`, but §15.4/§20.4 removed/delegated it
+- **§:** §18.3 vs §15.4/§20.4 · **spec-internal inconsistency:** §18.3's `core.test` line lists "Assertions, BDD
+  grouping, mocking, **benchmarking**", but §15.4 REMOVED `@benchmark` entirely (not Reserved) and §20.4 delegates
+  benchmarking to target-native tools (`cargo bench`/`pytest-benchmark`/…). So core.test ships NO benchmarking surface
+  (DQ26). · **Disposition:** **OPEN → Design** — amend §18.3's core.test line to read "benchmarking delegated to
+  native tools (§20.4), not shipped" (one-line spec clarification; no behavior change; the impl is correct). Surfaced
+  by the core.test build (#169 changelog). Non-blocking (v1 stdlib is complete). · **Status:** OPEN.
+
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)
