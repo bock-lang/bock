@@ -1,0 +1,86 @@
+// TEST: exec_core_test
+// EXPECT: output "all_passed"
+// EXPECT: targets js, ts, python, rust, go
+//
+// THE PAYOFF FIXTURE for `core.test`: a user program that `use`s the embedded
+// `core.test` stdlib module — the assertion surface for `@test` functions — and
+// compiles + runs it on every target. Every assertion below is a *passing*
+// assertion, so a clean run prints the single sentinel `all_passed`; if any
+// assertion's lowering were wrong it would `panic`/`throw`/`raise` instead of
+// reaching the `println`.
+//
+// It exercises, end to end and cross-module, BOTH overlapping APIs (DQ26):
+//
+//   * Free functions over the prelude `assert`: `assert_true`/`assert_false`
+//     (booleans), `assert_eq`/`assert_ne` (equality over the user `Equatable`
+//     type `Key`), `assert_some`/`assert_none` (Optional), `assert_ok`/
+//     `assert_err` (Result). Each lowers because its body calls `assert(...)` in
+//     statement position followed by an explicit `return` (a bare `assert(...)`
+//     in tail position is wrapped in `return` by codegen, invalid for the
+//     statement-form `assert`).
+//   * Fluent matchers powered by the free functions: `expect(key)` ->
+//     `Expectation` with `to_equal`/`to_not_equal`, `expect_bool(b)` ->
+//     `BoolExpectation` with `to_be_true`/`to_be_false`.
+//
+// AUTHORING NOTES (route around proven cross-target gaps, all documented in the
+// `core.test` module header — none are `core.test` defects):
+//   1. `assert_eq`/`assert_ne` and the fluent `to_equal`/`to_not_equal` are
+//      exercised on the user `Equatable` type `Key` (not a primitive): the
+//      `Equatable`-bounded helpers lower across all five targets for a user type
+//      that implements `Equatable`, but a *primitive* reached through the generic
+//      bound does not lower on the static targets (the primitive bridge fires
+//      only for a concrete primitive receiver). Primitive equality is asserted
+//      with `assert_true(a == b)` over concrete operands instead.
+//   2. Each fluent expectation is bound to a `let` before the matcher is called.
+//      Go method receivers are pointers and cannot be called on the
+//      non-addressable result of a function call (`expect(k).to_equal(k2)`); the
+//      other four targets accept the direct chain, but the `let`-bound form
+//      lowers on all five.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.test.{assert_true, assert_false, assert_eq, assert_ne, assert_some, assert_none, assert_ok, assert_err, expect, expect_bool}
+use core.compare.{Key, key}
+
+fn main() -> Void {
+  let two: Int = 2
+  let three: Int = 3
+
+  // free-function: booleans (primitive equality via the operator, concrete operands)
+  assert_true(true)
+  assert_false(false)
+  assert_true(two == two)
+  assert_false(two == three)
+
+  // free-function: equality over a user Equatable type (Key)
+  assert_eq(key(3), key(3))
+  assert_ne(key(3), key(4))
+
+  // free-function: Optional
+  let present: Optional[Int] = Some(5)
+  let empty: Optional[Int] = None
+  assert_some(present)
+  assert_none(empty)
+
+  // free-function: Result
+  let good: Result[Int, String] = Ok(7)
+  let bad: Result[Int, String] = Err("boom")
+  assert_ok(good)
+  assert_err(bad)
+
+  // fluent: equality (let-bound for Go addressability)
+  let e1: Expectation[Key] = expect(key(3))
+  e1.to_equal(key(3))
+  let e2: Expectation[Key] = expect(key(3))
+  e2.to_not_equal(key(4))
+
+  // fluent: booleans
+  let bt: BoolExpectation = expect_bool(true)
+  bt.to_be_true()
+  let bf: BoolExpectation = expect_bool(false)
+  bf.to_be_false()
+
+  println("all_passed")
+}

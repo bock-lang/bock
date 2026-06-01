@@ -1,0 +1,308 @@
+//! `core.test` — the assertion surface for Bock's `@test` functions.
+//!
+//! Like `core.option`/`core.iter`/`core.compare`, this module is **pure Bock**
+//! (free functions plus one generic record and its `impl`s), so it compiles to
+//! every target with no per-target runtime shim. Every assertion is built over
+//! the §18.2 prelude builtin `assert(cond)` — which lowers on all five targets
+//! and, under `bock test`, raises the assertion-failure path that the runner
+//! reports as a failing test. Building the whole surface over `assert` means it
+//! is `bock test`-integrated and cross-target for free.
+//!
+//! The single-argument `assert(cond)` form is used throughout: the optional
+//! message parameter (`assert(cond, msg)`) that the interpreter and codegen
+//! accept is **not** in the type checker's `assert` signature in the v1 surface
+//! (it is typed `(Bool) -> Void`), so a two-argument call fails to type-check.
+//! Assertions therefore fail with the generic "assertion failed" text; the
+//! *which* assertion is conveyed by the failing test's name, which `bock test`
+//! reports. (Widening the checker's `assert` to accept the optional message is
+//! a FOUND, recorded for the compiler chain.)
+//!
+//! ## Two overlapping APIs (DQ26)
+//!
+//! The v1 surface ships **both** a free-function assertion API and a fluent
+//! matcher API, fully overlapping, with the fluent layer **powered by the free
+//! functions**: the free `assert_*` functions are the primitives, and every
+//! fluent `Expectation` method delegates to the matching free function. This
+//! keeps duplication minimal — the matcher methods are one-line forwarders.
+//!
+//!   * Free functions: `assert_true`, `assert_false`, `assert_eq`, `assert_ne`,
+//!     `assert_some`, `assert_none`, `assert_ok`, `assert_err`, `fail`.
+//!   * Fluent matchers: `expect(x).to_equal(y)` / `.to_not_equal(y)` (equality
+//!     over an `Equatable` `T`) and `expect_bool(b).to_be_true()` /
+//!     `.to_be_false()` (booleans) — `expect`/`expect_bool` wrap a value in an
+//!     [`Expectation`]/[`BoolExpectation`], whose matcher methods forward to the
+//!     free `assert_*` functions.
+//!
+//! ## Equality assertions dispatch through `Equatable` (not `==`)
+//!
+//! `assert_eq`/`assert_ne` are bounded `[T: Equatable]` and compare with the
+//! `eq` **method** (`a.eq(b)`), exactly as `core.compare`'s `max[T: Comparable]`
+//! dispatches through `a.compare(b)`. This is the proven cross-target shape for
+//! **user `Equatable` types**: trait-method dispatch through a bound lowers on
+//! all five targets when `T` is a record implementing `Equatable`.
+//!
+//! **Primitives are a known limitation.** The `==` operator and the `eq`/
+//! `to_string` methods on a *bare/bounded type variable* monomorphised to a
+//! primitive do **not** lower on the static targets (Rust/Go reject `T == T`,
+//! `T: Equatable`, `T: Display`; the dynamic targets erase the bound but then
+//! fail at run time because the primitive has no `.eq`/`.toString` method). The
+//! primitive bridge that lowers `(1).eq(2)` only fires for a *concrete* primitive
+//! receiver, never for a primitive reached through a generic. So `assert_eq`
+//! over `Int`/`String` is **not** in the cross-target surface — use
+//! `assert_true(a == b)` with concrete operands for primitive equality. (Under
+//! `bock test`'s interpreter, generic `assert_eq` works for primitives too.)
+//! Widening generic trait dispatch over primitives across the static targets is
+//! a codegen FOUND.
+//!
+//! ## Conditional matchers use dedicated entry points
+//!
+//! A method on `Expectation[T]` cannot constrain `T` to be `Optional[U]` or
+//! `Result[U, E]` in the way `to_be_some`/`to_be_ok` would need (Bock's v1 type
+//! system has no `where T = Optional[U]` method-level refinement), and a generic
+//! `Expectation[T]` cannot hold a `Bool` for `to_be_true`/`to_be_false` because
+//! `Bool` is not `Equatable` behind a generic on the static targets (Rust/Go/TS
+//! reject `bool: Equatable`). Rather than ship a matcher whose typing does not
+//! hold on every target, the conditional matchers are split:
+//!
+//!   * `Optional`/`Result` ⇒ the free functions `assert_some`/`assert_none`/
+//!     `assert_ok`/`assert_err`.
+//!   * Booleans ⇒ a **non-generic** [`BoolExpectation`] (concrete `Bool` field)
+//!     via [`expect_bool`], carrying `to_be_true`/`to_be_false`.
+//!   * Equality ⇒ the generic [`Expectation`] (`T: Equatable`) via [`expect`],
+//!     carrying `to_equal`/`to_not_equal`.
+//!
+//! ## `assert` is called in statement position
+//!
+//! Every free assertion calls `assert(...)` as a *statement*, then `return`s
+//! explicitly. A bare `assert(...)` in the tail (value) position of a `Void`
+//! function is wrapped by codegen in `return ...` — but `assert` lowers to a
+//! statement form (`assert cond` on Python, `if !cond { panic }` on Go/Rust),
+//! and `return <statement>` is invalid syntax on those targets. The trailing
+//! `return` keeps `assert` in statement position so the module lowers ×5. (This
+//! is a pre-existing codegen gap for statement-form prelude builtins in tail
+//! position, FOUND — it also affects a bare `assert(...)`-tailed user function.)
+
+module core.test
+
+use core.compare.{Equatable}
+
+/// Asserts that `cond` is `true`, failing the test otherwise.
+///
+/// The thinnest wrapper over the prelude `assert`: a `false` `cond` raises the
+/// assertion-failure path that `bock test` reports as a failing test.
+public fn assert_true(cond: Bool) -> Void {
+  assert(cond)
+  return
+}
+
+/// Asserts that `cond` is `false`, failing the test otherwise.
+public fn assert_false(cond: Bool) -> Void {
+  assert(!cond)
+  return
+}
+
+/// Asserts that `actual` equals `expected`, failing the test otherwise.
+///
+/// Generic over any `T: Equatable`, comparing with the `eq` method
+/// (`actual.eq(expected)`) so it dispatches through the `Equatable` bound — the
+/// same trait-method-dispatch shape `core.compare.max[T: Comparable]` uses with
+/// `a.compare(b)` (rather than the `==` operator over a bare type variable,
+/// which is outside the v1 cross-target surface on the static targets).
+///
+/// Cross-target reach: `assert_eq` lowers on all five targets when `T` is a
+/// **user type that implements `Equatable`** (the bound is honoured and the
+/// `eq` impl is dispatched). For **primitive** equality (`Int`/`String`/…),
+/// prefer `assert_true(a == b)` with concrete operands: the primitive bridge
+/// that lowers `a.eq(b)` only fires for a *concrete* primitive receiver, not for
+/// a primitive reached through a generic `T: Equatable` (a codegen gap, FOUND).
+/// Under `bock test`'s interpreter, `assert_eq` works for primitives too.
+public fn assert_eq[T: Equatable](actual: T, expected: T) -> Void {
+  assert(actual.eq(expected))
+  return
+}
+
+/// Asserts that `actual` does **not** equal `expected`, failing otherwise.
+///
+/// The negation of [`assert_eq`], dispatching through the same `Equatable.eq`
+/// method; the same cross-target reach applies (user `Equatable` types ×5;
+/// primitives via `assert_false(a == b)` on the static targets).
+public fn assert_ne[T: Equatable](actual: T, expected: T) -> Void {
+  assert(!actual.eq(expected))
+  return
+}
+
+/// Asserts that `o` is `Some(_)`, failing the test otherwise.
+///
+/// Driven by the proven `match o { Some(_) => …; None => … }` shape; the `None`
+/// arm fails via `assert(false)`. Each arm ends with an explicit `return` so the
+/// `assert` lands in statement position (a bare `assert(...)` in the tail/value
+/// position of a `Void` function is wrapped in `return` by codegen, which is
+/// invalid for the statement-form `assert` — a codegen gap, FOUND).
+public fn assert_some[T](o: Optional[T]) -> Void {
+  match o {
+    Some(_) => {
+      assert(true)
+      return
+    }
+    None => {
+      assert(false)
+      return
+    }
+  }
+}
+
+/// Asserts that `o` is `None`, failing the test otherwise.
+public fn assert_none[T](o: Optional[T]) -> Void {
+  match o {
+    Some(_) => {
+      assert(false)
+      return
+    }
+    None => {
+      assert(true)
+      return
+    }
+  }
+}
+
+/// Asserts that `r` is `Ok(_)`, failing the test otherwise.
+public fn assert_ok[T, E](r: Result[T, E]) -> Void {
+  match r {
+    Ok(_) => {
+      assert(true)
+      return
+    }
+    Err(_) => {
+      assert(false)
+      return
+    }
+  }
+}
+
+/// Asserts that `r` is `Err(_)`, failing the test otherwise.
+public fn assert_err[T, E](r: Result[T, E]) -> Void {
+  match r {
+    Ok(_) => {
+      assert(false)
+      return
+    }
+    Err(_) => {
+      assert(true)
+      return
+    }
+  }
+}
+
+/// Unconditionally fails the current test.
+///
+/// The escape hatch for reaching a branch that should never execute: `fail`
+/// always raises the assertion-failure path. The `message` documents intent at
+/// the call site (the v1 checker's `assert` signature takes no message, so the
+/// text is not threaded into the runtime panic — see the module header).
+public fn fail(message: String) -> Void {
+  assert(false)
+  return
+}
+
+/// A value captured for fluent equality assertion via [`expect`].
+///
+/// `Expectation` wraps a single `value` of an `Equatable` type `T`; its matcher
+/// methods ([`Expectation.to_equal`]/[`Expectation.to_not_equal`]) forward to
+/// the free [`assert_eq`]/[`assert_ne`] functions, so the fluent layer adds no
+/// new assertion logic — it is sugar over the free primitives. The `T: Equatable`
+/// bound is required so the matchers can delegate to the bounded free functions;
+/// it also fixes the cross-target reach to **user `Equatable` types** (the same
+/// reason `assert_eq` does — primitives are not `Equatable` behind a generic on
+/// the static targets). For primitive equality use `assert_true(a == b)`; for
+/// boolean assertions use [`expect_bool`]. Construct via [`expect`].
+public record Expectation[T: Equatable] {
+  /// The value under assertion.
+  value: T
+}
+
+/// The equality matchers on an [`Expectation`], each forwarding to a free
+/// assertion over `self.value` (the fluent layer is a thin forwarder).
+///
+/// Modeled on `core.iter`'s `impl ListIterator` and the `impl Box` generic-record
+/// shape: the impl is written `impl Expectation` (no params on the impl/method),
+/// and the method body uses the record's `T` directly.
+///
+/// The matchers forward to [`assert_true`]/[`assert_false`] over the *borrowed*
+/// comparison `self.value.eq(other)` rather than calling [`assert_eq`] directly:
+/// passing `self.value` into `assert_eq` would **move** it out of the `&self`
+/// receiver, which Rust rejects for a non-`Copy` `T` (the codegen clones a
+/// returned field but not a field passed as an argument — a Rust-ownership
+/// codegen gap, FOUND). `self.value.eq(other)` borrows `self.value` (Rust emits
+/// `self.value.eq(&other)`), so the matchers lower on all five targets. The
+/// `eq` trait-method dispatched is the same primitive the free [`assert_eq`]
+/// uses, so the equality logic is shared, not duplicated.
+impl Expectation {
+  /// Asserts `self.value` equals `other` (the equality holds ⇒ [`assert_true`]).
+  public fn to_equal(self, other: T) -> Void {
+    assert_true(self.value.eq(other))
+    return
+  }
+
+  /// Asserts `self.value` does **not** equal `other` (the equality is false ⇒
+  /// [`assert_false`]).
+  public fn to_not_equal(self, other: T) -> Void {
+    assert_false(self.value.eq(other))
+    return
+  }
+}
+
+/// A `Bool` captured for fluent boolean assertion via [`expect_bool`].
+///
+/// `BoolExpectation` is a **non-generic** record over a concrete `Bool` field:
+/// a `Bool` is not `Equatable` behind a generic on the static targets (the same
+/// primitive-bridge gap), so the boolean matchers cannot live on the generic
+/// [`Expectation`]. Keeping the field a concrete `Bool` sidesteps every
+/// generic/bound issue, so [`BoolExpectation.to_be_true`]/
+/// [`BoolExpectation.to_be_false`] lower on all five targets. Construct via
+/// [`expect_bool`].
+public record BoolExpectation {
+  /// The boolean under assertion.
+  value: Bool
+}
+
+/// The boolean matchers on a [`BoolExpectation`], forwarding to the free
+/// [`assert_true`]/[`assert_false`] functions.
+impl BoolExpectation {
+  /// Asserts `self.value` is `true` (delegates to [`assert_true`]).
+  public fn to_be_true(self) -> Void {
+    assert_true(self.value)
+    return
+  }
+
+  /// Asserts `self.value` is `false` (delegates to [`assert_false`]).
+  public fn to_be_false(self) -> Void {
+    assert_false(self.value)
+    return
+  }
+}
+
+/// Captures `value` for fluent equality assertion, returning an [`Expectation`].
+///
+/// The fluent entry point for equality: `expect(x).to_equal(y)` /
+/// `expect(x).to_not_equal(y)`. `T` is bounded `Equatable` so the matchers can
+/// delegate to the free [`assert_eq`]/[`assert_ne`]. Boolean assertions use
+/// [`expect_bool`]; the `Optional`/`Result` cases are the free functions
+/// `assert_some`/`assert_none`/`assert_ok`/`assert_err` (see the module header).
+///
+/// On Go, bind the expectation to a `let` before calling a matcher
+/// (`let e = expect(k); e.to_equal(k2)`) — Go method receivers are pointers and
+/// cannot be called on the non-addressable result of a function call. The other
+/// four targets accept the direct `expect(x).to_equal(y)` chain.
+public fn expect[T: Equatable](value: T) -> Expectation[T] {
+  Expectation { value: value }
+}
+
+/// Captures a `Bool` for fluent boolean assertion, returning a [`BoolExpectation`].
+///
+/// The fluent entry point for booleans: `expect_bool(b).to_be_true()` /
+/// `expect_bool(b).to_be_false()`. Separate from [`expect`] because `Bool` is
+/// not `Equatable` behind a generic on the static targets (see [`BoolExpectation`]).
+/// The same Go let-binding note as [`expect`] applies.
+public fn expect_bool(value: Bool) -> BoolExpectation {
+  BoolExpectation { value: value }
+}

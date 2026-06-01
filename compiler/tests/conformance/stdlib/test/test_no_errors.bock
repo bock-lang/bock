@@ -1,0 +1,63 @@
+// TEST: stdlib_test_no_errors
+// EXPECT: no_errors
+//
+// Every `core.test` public item type-checks: the free-function assertions
+// (`assert_true`/`assert_false`/`assert_eq`/`assert_ne`/`assert_some`/
+// `assert_none`/`assert_ok`/`assert_err`/`fail`) and the fluent matcher layer
+// (`expect` -> `Expectation` with `to_equal`/`to_not_equal`, `expect_bool` ->
+// `BoolExpectation` with `to_be_true`/`to_be_false`).
+//
+// The generic `assert_eq`/`assert_ne` and the fluent `to_equal`/`to_not_equal`
+// are exercised on a user `Equatable` type (`Key` from `core.compare`), which is
+// the cross-target reach of those bounded helpers (a primitive behind the
+// `Equatable` bound does not lower on the static targets — see the module docs).
+// Primitive equality is asserted with `assert_true(a == b)` over concrete
+// operands. This is the type-checking counterpart of `exec_core_test.bock`.
+module userapp
+
+use core.test.{assert_true, assert_false, assert_eq, assert_ne, assert_some, assert_none, assert_ok, assert_err, fail, expect, expect_bool}
+use core.compare.{Key, key}
+
+public fn all_assertions() -> Void {
+  let two: Int = 2
+  let three: Int = 3
+
+  // free-function: booleans
+  assert_true(true)
+  assert_false(false)
+  assert_true(two == two)
+  assert_false(two == three)
+
+  // free-function: equality over a user Equatable type
+  assert_eq(key(3), key(3))
+  assert_ne(key(3), key(4))
+
+  // free-function: Optional / Result
+  let present: Optional[Int] = Some(5)
+  let empty: Optional[Int] = None
+  assert_some(present)
+  assert_none(empty)
+  let good: Result[Int, String] = Ok(7)
+  let bad: Result[Int, String] = Err("boom")
+  assert_ok(good)
+  assert_err(bad)
+
+  // free-function: unconditional failure helper
+  if (false) {
+    fail("never reached")
+  }
+
+  // fluent: equality (let-bound so the Go receiver is addressable)
+  let e1: Expectation[Key] = expect(key(3))
+  e1.to_equal(key(3))
+  let e2: Expectation[Key] = expect(key(3))
+  e2.to_not_equal(key(4))
+
+  // fluent: booleans
+  let bt: BoolExpectation = expect_bool(true)
+  bt.to_be_true()
+  let bf: BoolExpectation = expect_bool(false)
+  bf.to_be_false()
+
+  return
+}
