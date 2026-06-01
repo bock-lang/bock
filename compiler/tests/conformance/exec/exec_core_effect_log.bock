@@ -1,0 +1,26 @@
+// TEST: exec_core_effect_log
+// EXPECT: output "[log] service started"
+// EXPECT: targets js, ts, python, rust, go
+//
+// THE PAYOFF FIXTURE for `core.effect`: a user program that `use`s the embedded
+// `core.effect` stdlib module — the canonical `Log` effect with its `ConsoleLog`
+// record handler and `console_log()` constructor — and compiles + runs it on
+// every target. This is the §10.4 canonical bare-op form against the SHIPPED
+// stdlib: `console_log()` builds the standard handler, the
+// `handling (Log with console_log()) { ... }` block installs it (§10.3 Layer 1)
+// and brings `Log`'s `log` op into scope, and the bare `log("service started")`
+// dispatches to `ConsoleLog.log`, which prints `[log] service started`. End to
+// end on all five targets, proving the embedded module's effect + handler lower
+// and execute identically everywhere.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.effect.{Log, console_log}
+
+fn main() -> Void {
+  handling (Log with console_log()) {
+    log("service started")
+  }
+}

@@ -370,12 +370,33 @@ async fn run_project(
     let mut interp = Interpreter::new();
     bock_core::register_core(&mut interp.builtins);
 
-    // Register all non-entry modules in the interpreter first
-    for (idx, air_module) in &air_modules {
-        register_module_in_interpreter(&mut interp, air_module, &parsed_files[*idx].filename).await;
+    // Register all non-entry modules in the interpreter first, in dependency
+    // (topological) order so dependencies register before dependents. This must
+    // be deterministic: effect operations share a flat op-name → effect map in
+    // the interpreter, so a program that declares a user effect whose operation
+    // name (e.g. `log`) coincides with an embedded core effect's operation (e.g.
+    // `core.effect.Log`'s `log`) relies on last-writer-wins to resolve the bare
+    // op to the right effect. `air_modules` is a `HashMap`, so iterating it
+    // directly would register modules in nondeterministic order and make that
+    // resolution — and thus `bock run` — flaky. Iterating `topo_order` (core
+    // modules sort before the user modules that implicitly depend on them) makes
+    // user effect ops deterministically shadow core's. The entry module is
+    // registered last (below), so its declarations win over all others.
+    for module_id in &topo_order {
+        let Some(&idx) = id_to_index.get(module_id) else {
+            continue;
+        };
+        if idx == entry_idx {
+            continue;
+        }
+        if let Some(air_module) = air_modules.get(&idx) {
+            register_module_in_interpreter(&mut interp, air_module, &parsed_files[idx].filename)
+                .await;
+        }
     }
 
-    // Register entry module declarations
+    // Register entry module declarations last so they shadow any same-named
+    // declarations from dependencies (see the ordering note above).
     register_module_in_interpreter(&mut interp, &entry_air, entry_filename).await;
 
     // Look for `main` function and call it

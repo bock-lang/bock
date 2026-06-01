@@ -1,0 +1,32 @@
+// TEST: exec_core_effect_log_propagation
+// EXPECT: output "[log] work done"
+// EXPECT: targets js, ts, python, rust, go
+//
+// The §10.2 effect-propagation form against the SHIPPED `core.effect` module: a
+// helper `emit` declares `with Log` and invokes the bare `log(...)` op WITHOUT
+// installing any handler — deferring the handler choice to its caller. `main`
+// installs the embedded `ConsoleLog` handler with one
+// `handling (Log with console_log()) { ... }` block (§10.3 Layer 1) and calls
+// `emit` inside it; the propagated `log` op dispatches to `ConsoleLog.log`,
+// printing `[log] work done`. End to end on all five targets, proving
+// propagation through a `with`-clause function resolves against the imported
+// effect's operation. (Single line: the exec harness compares trimmed stdout
+// literally, with no `\n` decoding, so the fixture emits exactly one line.)
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.effect.{Log, console_log}
+
+fn emit(message: String) -> Void
+  with Log
+{
+  log(message)
+}
+
+fn main() -> Void {
+  handling (Log with console_log()) {
+    emit("work done")
+  }
+}
