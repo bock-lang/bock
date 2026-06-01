@@ -321,6 +321,13 @@ const (
 	Greater
 )
 
+// __bockOrdered is the Go constraint a `[T: Comparable]` sealed-core bound lowers
+// to (GAP-C): the ordered primitive type-set, so a generic fn's `a.compare(b)`
+// can use `<`/`==`. Self-contained (no `cmp` import), matching __bockCompare's set.
+type __bockOrdered interface {
+	~int64 | ~float64 | ~string | ~rune | ~int | ~uint64 | ~float32
+}
+
 func __bockCompare[T int64 | float64 | string | rune | int | uint64 | float32](a, b T) __bockOrdering {
 	if a < b {
 		return Less
@@ -442,9 +449,12 @@ impl CodeGenerator for GoGenerator {
         ctx.collect_methods(module);
         ctx.collect_optional_returns(module);
         ctx.collect_method_optional_returns(module);
-        ctx.collect_fn_and_type_names(module);
+        // `trait_decls` must precede `collect_fn_and_type_names` so the latter can
+        // record which generic fns carry a *sealed-core* bound lowered to a Go
+        // built-in constraint (GAP-C — `fn_sealed_bound`).
         ctx.trait_decls =
             crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
+        ctx.collect_fn_and_type_names(module);
         ctx.derive_self_param_traits();
         ctx.emit_node(module)?;
         let content = ctx.finish();
@@ -836,6 +846,14 @@ struct GoEmitCtx {
     /// parameter). Only generic fns are recorded (a non-generic fn's lambda arg
     /// already types correctly). Pre-scanned across the bundle.
     fn_signatures: HashMap<String, GoFnSig>,
+    /// Names of generic fns whose bound was lowered to a Go built-in constraint
+    /// from a sealed-core trait (`[T: Comparable]` → `[T __bockOrdered]`, GAP-C).
+    /// Under such a constraint Go infers `T` from an *untyped* constant arg as the
+    /// default type (`int`, not `int64`), mismatching an `int64`-typed
+    /// destination, so the call site must synthesise an explicit type arg
+    /// (`max2[int64](9, 7)`) even though the signature touches no container. Set
+    /// during the same pre-scan as [`Self::fn_signatures`].
+    fn_sealed_bound: std::collections::HashSet<String>,
     /// The concrete Go parameter types an *untyped lambda argument* should adopt
     /// at its current call site, derived from the callee's generic signature
     /// specialised by the other arguments ([`Self::fn_signatures`]). A lambda's
@@ -957,6 +975,7 @@ impl GoEmitCtx {
             current_expected_type: None,
             current_fn_ret_collection_elem: None,
             fn_signatures: HashMap::new(),
+            fn_sealed_bound: std::collections::HashSet::new(),
             expected_lambda_param_types: None,
             expected_collection_elem: None,
         }
@@ -1066,6 +1085,27 @@ impl GoEmitCtx {
                         } else {
                             None
                         };
+                        // A generic param whose sealed-core bound was lowered to a
+                        // Go built-in constraint defeats Go's untyped-constant
+                        // inference (GAP-C), so the call site must synthesise an
+                        // explicit type arg — record the fn.
+                        let has_sealed_bound = generic_params.iter().any(|p| {
+                            p.bounds.iter().any(|b| {
+                                let bn = b
+                                    .segments
+                                    .iter()
+                                    .map(|s| s.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(".");
+                                crate::generator::is_unimplemented_sealed_core_trait(
+                                    &bn,
+                                    &self.trait_decls,
+                                )
+                            })
+                        });
+                        if has_sealed_bound {
+                            self.fn_sealed_bound.insert(name.name.clone());
+                        }
                         self.fn_signatures
                             .insert(name.name.clone(), (gp_names, param_tys, ret_ty));
                     }
@@ -1732,8 +1772,37 @@ impl GoEmitCtx {
                     .and_then(|m| m.get(&field.name))
                     .cloned()
             }
+            // A `value.field` list receiver where `value` is a variable of a known
+            // record type (`b.items.get(i)` for `b: Box[T]`, `record Box[T] {
+            // items: List[T] }`). The variable's Go type (`Box[T]`) names the
+            // record; the field's recorded `List[...]` element type (`T`, in scope
+            // as the enclosing generic fn's type param) gives the closure's `[]T`
+            // element rather than the `[]interface{}` default — which a `[]T`
+            // field-access argument does not satisfy under Go's type rules. (GAP-A:
+            // a generic free fn reading `b.items.get(i)` previously emitted the
+            // `.get` closure with a `[]interface{}` parameter and bound the `Some`
+            // payload as `interface{}`, both rejected against `[]T`/`T`.)
+            NodeKind::FieldAccess { object, field } => {
+                let NodeKind::Identifier { name } = &object.kind else {
+                    return None;
+                };
+                let obj_go_ty = self.var_go_type.get(&go_value_ident(&name.name))?;
+                let record = Self::go_type_record_head(obj_go_ty);
+                self.record_field_list_elem
+                    .get(record)
+                    .and_then(|m| m.get(&field.name))
+                    .cloned()
+            }
             _ => None,
         }
+    }
+
+    /// The record/type head of a Go type rendering: the identifier before any
+    /// generic `[...]` arg list (`Box[T]` → `Box`, `Box[int64]` → `Box`, `Box` →
+    /// `Box`). Used to key [`Self::record_field_list_elem`] from a variable's
+    /// recorded Go type when resolving a `value.field` list receiver.
+    fn go_type_record_head(go_ty: &str) -> &str {
+        go_ty.split('[').next().unwrap_or(go_ty).trim()
     }
 
     /// True when `node` is (or contains, in operand position) an identifier
@@ -1939,6 +2008,28 @@ impl GoEmitCtx {
         b.is_ascii_alphanumeric() || b == b'_'
     }
 
+    /// The Go type-name a `RecordConstruct` lowers its struct literal to: the
+    /// record/struct-variant name (`Item`, or `ShapeCircle` for a struct-variant
+    /// construction). Mirrors the `type_name` computation in the `RecordConstruct`
+    /// emission so [`Self::infer_go_expr_type`] can type a list literal of
+    /// record-constructs (`[Item{...}, Item{...}]` → `[]Item`) instead of erasing
+    /// it to `[]interface{}` (the GAP-A defect: `infer_go_expr_type` had no
+    /// `RecordConstruct` arm, so the homogeneous-element inference failed and the
+    /// `Box[T] { items: List[T] }` field literal became `[]interface{}{…}`, which
+    /// `go build` rejects against the struct's `[]Item` field).
+    fn record_construct_go_type_name(&self, path: &bock_ast::TypePath) -> String {
+        if let Some(info) = self.user_variant_for_path(path) {
+            let variant = path.segments.last().map_or("", |s| s.name.as_str());
+            format!("{}{variant}", info.enum_name)
+        } else {
+            path.segments
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        }
+    }
+
     fn infer_go_expr_type(&self, node: &AIRNode) -> Option<String> {
         match &node.kind {
             NodeKind::Literal { lit } => match lit {
@@ -2012,6 +2103,23 @@ impl GoEmitCtx {
                     (Some(k), Some(v)) => Some(format!("map[{k}]{v}")),
                     _ => None,
                 }
+            }
+            // A record/struct-variant construction (`Item { id: 1 }`,
+            // `Box[Item] { items: … }`) types to its Go struct name plus the
+            // explicit type-arg suffix the emission would write (`Item`, or
+            // `Box[int64]` when a param is recoverable from a directly-typed
+            // field). This lets a list literal of record-constructs
+            // (`[Item{…}, Item{…}]`) infer the homogeneous element type `Item` so
+            // the `Box[T] { items: List[T] }` field literal emits `[]Item{…}`
+            // rather than the erased `[]interface{}{…}` (GAP-A). Type args are
+            // inferred from field values only (the `current_expected_type` used by
+            // `expected_construct_type_args` names the *outer* binding, not the
+            // per-element record); a generic param not directly typed by a field
+            // falls back to `any`, matching the emission's loose-but-valid form.
+            NodeKind::RecordConstruct { path, fields, .. } => {
+                let type_name = self.record_construct_go_type_name(path);
+                let type_args = self.infer_construct_type_args(&type_name, fields);
+                Some(format!("{type_name}{type_args}"))
             }
             // A call to a known generic fn (`list_iter([]int64{...})`) resolves
             // to its return type with the type params bound from the arguments
@@ -2306,11 +2414,15 @@ impl GoEmitCtx {
                     crate::generator::desugared_list_method(callee, args)
                 {
                     if matches!(method, "get" | "first" | "last") {
-                        if let NodeKind::Identifier { name } = &recv.kind {
-                            if let Some(elem) = self.var_list_elem.get(&go_value_ident(&name.name))
-                            {
-                                return Some(elem.clone());
-                            }
+                        // The same receiver-element resolver the `.get` closure
+                        // uses: a `List[T]` identifier (via `var_list_elem`), a
+                        // homogeneous list literal, `self.field`, or a generic
+                        // record param's `value.field` (`b.items.get(i)` for
+                        // `b: Box[T]`). Without the last case the `Some(x)` payload
+                        // stayed `interface{}` and a `return x` of a `[]T`-typed
+                        // field element failed `go build` (GAP-A).
+                        if let Some(elem) = self.list_receiver_elem_go_type(recv) {
+                            return Some(elem);
                         }
                     }
                 }
@@ -2497,21 +2609,25 @@ impl GoEmitCtx {
         param_tys: &[Option<AIRNode>],
         ret_ty: Option<&AIRNode>,
         args: &[bock_air::AirArg],
+        force: bool,
     ) -> Option<Vec<String>> {
         if gp_names.is_empty() {
             return None;
         }
         // Only intervene for a fn whose signature involves the monomorphic
         // `Optional`/`Result` runtime — the case Go's own inference cannot
-        // handle (`__bockOption`/`__bockResult` carry no `[T]`). A purely
-        // record/collection-generic fn (`core.iter`'s `ListIterator[T]`
-        // combinators) is left bare so Go infers it as before — no regression.
+        // handle (`__bockOption`/`__bockResult` carry no `[T]`) — or one whose
+        // sealed-core bound was lowered to a built-in constraint (`force`), under
+        // which Go infers an untyped constant as the default type (`int`, not
+        // `int64`). A purely record/collection-generic fn (`core.iter`'s
+        // `ListIterator[T]` combinators) is left bare so Go infers it as before —
+        // no regression.
         let touches_container = param_tys
             .iter()
             .flatten()
             .chain(ret_ty)
             .any(Self::type_mentions_container);
-        if !touches_container {
+        if !touches_container && !force {
             return None;
         }
         let mut bindings: HashMap<String, String> = HashMap::new();
@@ -3583,6 +3699,45 @@ impl GoEmitCtx {
         else {
             return Ok(false);
         };
+        // A concrete primitive receiver uses the typed `__bockCompare` helper.
+        self.emit_bridge_method(recv, method, rest, false)
+    }
+
+    /// Lower a sealed-core-trait bridge method on a *bounded generic type
+    /// variable* (`a.eq(b)` / `a.compare(b)` inside `eq_check[T: Equatable]`) to
+    /// its Go form (GAP-C). The generic analogue of
+    /// [`Self::try_emit_primitive_bridge`]: the `[T Equatable]` bound is rewritten
+    /// to Go's built-in constraint (`comparable` / `__bockOrdered`) at the
+    /// signature, so `==` and the inline ordering comparison type-check. `compare`
+    /// uses an inline comparison (not the typed `__bockCompare` helper, whose
+    /// named constraint a `T __bockOrdered` does not satisfy). Fires only when the
+    /// bound trait is sealed-core and NOT a user-declared trait.
+    fn try_emit_trait_bound_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, _tr)) =
+            crate::generator::trait_bound_bridge_call(node, callee, args, &self.trait_decls)
+        else {
+            return Ok(false);
+        };
+        self.emit_bridge_method(recv, method, rest, true)
+    }
+
+    /// Shared body of the primitive / trait-bound bridges. `generic` selects the
+    /// generic-bound lowering for `compare`: an inline `if a < b … ` expression
+    /// producing an `__bockOrdering` (the typed `__bockCompare` helper's named
+    /// constraint is not satisfied by a `T __bockOrdered`-bounded type var). `eq`
+    /// (`==`) and `to_string`/`display` (`fmt.Sprintf`) are identical either way.
+    fn emit_bridge_method(
+        &mut self,
+        recv: &AIRNode,
+        method: &str,
+        rest: &[bock_air::AirArg],
+        generic: bool,
+    ) -> Result<bool, CodegenError> {
         let recv_str = self.expr_to_string(recv)?;
         let code = match method {
             "compare" => {
@@ -3590,7 +3745,17 @@ impl GoEmitCtx {
                     return Ok(false);
                 };
                 let other = self.expr_to_string(&other.value)?;
-                format!("__bockCompare({recv_str}, {other})")
+                if generic {
+                    // The Ordering runtime (gated on `"compare"` appearing in the
+                    // module AST) is already emitted at module top, so `Less`/
+                    // `Equal`/`Greater`/`__bockOrdering` are in scope here.
+                    format!(
+                        "func() __bockOrdering {{ if ({recv_str}) < ({other}) {{ return Less }}; \
+                         if ({recv_str}) == ({other}) {{ return Equal }}; return Greater }}()"
+                    )
+                } else {
+                    format!("__bockCompare({recv_str}, {other})")
+                }
             }
             "eq" => {
                 let Some(other) = rest.first() else {
@@ -4202,9 +4367,24 @@ impl GoEmitCtx {
                                 .map(|s| s.name.as_str())
                                 .collect::<Vec<_>>()
                                 .join(".");
-                            // An F-bounded self-param trait constraint is applied
-                            // to the type var itself: `[T Comparable[T]]`.
-                            if self.self_param_traits.contains(&bound_name) {
+                            // A compiler-provided sealed-core bound (`Equatable`/…)
+                            // with no user `impl` maps to Go's built-in constraint
+                            // (GAP-C): `comparable` for equality/hashing, the
+                            // self-contained `__bockOrdered` set for ordering, `any`
+                            // for stringable. There is no `Equatable` type in Go, so
+                            // the verbatim bound would be `undefined`.
+                            if crate::generator::is_unimplemented_sealed_core_trait(
+                                &bound_name,
+                                &self.trait_decls,
+                            ) {
+                                match bound_name.as_str() {
+                                    "Equatable" | "Hashable" => "comparable".to_string(),
+                                    "Comparable" => "__bockOrdered".to_string(),
+                                    _ => "any".to_string(),
+                                }
+                            } else if self.self_param_traits.contains(&bound_name) {
+                                // An F-bounded self-param trait constraint is applied
+                                // to the type var itself: `[T Comparable[T]]`.
                                 format!("{bound_name}[{}]", p.name.name)
                             } else {
                                 bound_name
@@ -4293,6 +4473,12 @@ impl GoEmitCtx {
             saved_map_scope,
             saved_set_scope,
         ) = self.enter_param_optional_scope(params);
+        // Record each typed param's Go type (`b: Box[T]` → `var_go_type["b"] =
+        // "Box[T]"`) so a `value.field.get(i)` list receiver inside the body can
+        // recover the field's `[]T` element type (GAP-A). `current_self_record`
+        // already covers `self.field`; this covers a non-self generic-record
+        // param. Restored alongside the other param scopes on exit.
+        let saved_go_types = self.enter_param_go_types_with_expected(params, None);
         if name == "main" || is_void {
             self.emit_block_body(body)?;
         } else {
@@ -4310,6 +4496,7 @@ impl GoEmitCtx {
         self.var_result_elem = saved_result_scope;
         self.var_map_kv = saved_map_scope;
         self.var_set_elem = saved_set_scope;
+        self.var_go_type = saved_go_types;
         self.var_record_type_args = saved_record_args;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
@@ -5246,6 +5433,9 @@ impl GoEmitCtx {
                 if self.try_emit_primitive_bridge(node, callee, args)? {
                     return Ok(());
                 }
+                if self.try_emit_trait_bound_bridge(node, callee, args)? {
+                    return Ok(());
+                }
                 if self.try_emit_container_method(node, callee, args)? {
                     return Ok(());
                 }
@@ -5304,9 +5494,21 @@ impl GoEmitCtx {
                 };
                 // Synthesise the turbofish only when the source carried none.
                 // An explicit source `f[Ty](..)` (`type_args`) always wins.
+                let callee_sealed_bound = matches!(&callee.kind, NodeKind::Identifier { name }
+                    if self.fn_sealed_bound.contains(&name.name));
                 let synthesized_type_args = if type_args.is_empty() {
                     fn_sig.as_ref().and_then(|(gp, ptys, ret)| {
-                        self.synthesize_go_type_args(gp, ptys, ret.as_ref(), args)
+                        // A container-touching signature defeats Go's own inference
+                        // (the `Optional`/`Result` runtime erases `T`); a
+                        // sealed-core-bound fn defeats untyped-constant inference
+                        // (GAP-C). Either forces explicit type args.
+                        self.synthesize_go_type_args(
+                            gp,
+                            ptys,
+                            ret.as_ref(),
+                            args,
+                            callee_sealed_bound,
+                        )
                     })
                 } else {
                     None
@@ -5469,16 +5671,7 @@ impl GoEmitCtx {
                 // A struct-variant construction (`Circle { radius: .. }`) → the
                 // `{enum}{variant}` struct literal `ShapeCircle{Radius: ..}`
                 // (field name `to_pascal_case`d). Plain records keep their path.
-                let type_name = if let Some(info) = self.user_variant_for_path(path) {
-                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
-                    format!("{}{variant}", info.enum_name)
-                } else {
-                    path.segments
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(".")
-                };
+                let type_name = self.record_construct_go_type_name(path);
                 // Go requires an explicit type-argument list on a generic
                 // struct literal (`Box[int64]{...}`); it does NOT infer the args
                 // from the field values. Prefer the declared/expected binding
@@ -8000,8 +8193,12 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
+        // GAP-C: `Comparable` is a sealed-core trait with no user `impl` in this
+        // module, so the bound lowers to Go's self-contained ordered constraint
+        // `__bockOrdered` (there is no `Comparable` type in Go). A user-declared
+        // `Comparable` trait would keep its name (see `use_core_compare` exec).
         assert!(
-            out.contains("func Constrained[T Comparable](value T) T {"),
+            out.contains("func Constrained[T __bockOrdered](value T) T {"),
             "got: {out}"
         );
     }

@@ -1,0 +1,49 @@
+// TEST: exec_generic_equatable_primitive
+// EXPECT: output "ii:yes;ii2:no;ss:yes;ss2:no"
+// EXPECT: targets js, ts, python, rust, go
+//
+// GAP-C (Equatable half): a generic free fn bounded by the SEALED CORE trait
+// `Equatable` — `fn eq_check[T: Equatable](a: T, b: T) -> Bool { a.eq(b) }` —
+// instantiated with PRIMITIVE element types (`Int`, `String`).
+//
+// The checker resolves `a.eq(b)` on the bounded type var `T` and stamps the call
+// `recv_kind = "TraitBound:Equatable"`. For a USER Equatable type this is a real
+// trait dispatch, but for a primitive (`Int`/`String`/`Bool`) the primitives do
+// NOT `impl Equatable` in any target — `Equatable` is the compiler-provided
+// sealed conformance, not a user trait. Before the fix, codegen passed the
+// `TraitBound:Equatable` bound + `a.eq(b)` through verbatim: Rust emitted
+// `fn eq_check<T: Equatable>` / `a.eq(&b)` against an undefined trait/method, and
+// Go emitted `[T Equatable]` / `a.Eq(b)` against an undefined interface/method.
+//
+// The fix mirrors the existing `Primitive:<Ty>` bridge for the generic-bound
+// case: a `TraitBound:<SealedCoreTrait>` whose trait is in `SEALED_CORE_TRAITS`
+// and is NOT a user-declared trait is lowered NATIVELY per target — the bound
+// becomes a built-in constraint (`comparable` on Go for Equatable; dropped on
+// Rust in favour of the native `==`) and `a.eq(b)` becomes `a == b`.
+//
+// `eq_check` is called with `Int` and `String` operands (both equal and
+// unequal), routed through `yesno` so the printed booleans are
+// target-independent. Output `ii:yes;ii2:no;ss:yes;ss2:no`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn eq_check[T: Equatable](a: T, b: T) -> Bool {
+  return a.eq(b)
+}
+
+fn yesno(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn main() -> Void {
+  let ii: String = yesno(eq_check(7, 7))
+  let ii2: String = yesno(eq_check(7, 8))
+  let ss: String = yesno(eq_check("hi", "hi"))
+  let ss2: String = yesno(eq_check("hi", "yo"))
+  println("ii:${ii};ii2:${ii2};ss:${ss};ss2:${ss2}")
+}
