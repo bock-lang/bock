@@ -1,0 +1,189 @@
+//! `core.string` — free-function string utilities and a value-semantics
+//! `StringBuilder`, complementing the built-in `String` methods.
+//!
+//! Like `core.option`/`core.iter`, this module is pure Bock (free functions
+//! plus one record, an `impl`, and two constructors), so it compiles to every
+//! target with no per-target runtime shim. Per spec §18.3 the *transformation*
+//! and *predicate* operations on a `String` are built-in **methods** that lower
+//! to each target's native string op (`s.to_upper()`, `s.trim()`,
+//! `s.contains(p)`, `s.starts_with(p)`/`s.ends_with(p)`, `s.replace(from, to)`,
+//! `s.split(sep) -> List[String]`, the scalar `s.len()` and byte-counting
+//! `s.byte_len()`, and the `Bool` `s.is_empty()`). This module deliberately
+//! ships only the utilities that **complement** that method set rather than
+//! duplicate it:
+//!
+//!   * `repeat` — concatenate `s` with itself `n` times (no built-in method).
+//!   * `pad_left` / `pad_right` — grow `s` to a minimum display width with a
+//!     `fill` prefix/suffix (no built-in method).
+//!   * `lines` — split on `"\n"`, a named convenience over the built-in
+//!     `split` for the common newline case.
+//!   * `is_blank` — `true` when `s` is empty *after trimming* surrounding
+//!     whitespace (composes the built-in `trim`/`is_empty` into a named
+//!     predicate).
+//!   * [`StringBuilder`] — a value-semantics accumulator (see below).
+//!
+//! Duplicating helpers are intentionally **dropped** because they already exist
+//! as operations that lower on every target: a `join(parts, sep)` is the
+//! built-in `parts.join(sep)` *method* on a `List[String]`; case-mapping,
+//! trimming, membership/edge tests, replacement, splitting, and length are all
+//! built-in `String` methods (use `s.to_upper()`, `s.contains(p)`, … directly
+//! on the value). A `reverse(s)` was also considered and **dropped**: reversing
+//! needs per-character access, and the v1 surface has no cross-target
+//! character-access primitive (`chars()`/indexing is deferred in codegen, and
+//! the empty-separator `split("")` diverges across targets — it yields scalars
+//! on JS/TS/Go, raises on Python, and yields boundary-empties on Rust), so a
+//! correct `reverse` is outside the proven cross-target surface for v1.
+//!
+//! ## `StringBuilder` naming
+//!
+//! [`StringBuilder`] backs its accumulation with a single `String` `buffer`
+//! field (not a `List[String]`): a `List[String]` *record field* trips a Go
+//! codegen gap — its `concat` helper is typed `[]interface{}` and does not
+//! agree with the field's monomorphic `[]string`, so a list-backed builder
+//! fails to compile on Go. A `String` buffer concatenated with the built-in
+//! interpolation lowers cleanly on all five targets.
+//!
+//! Its query methods are named [`StringBuilder.char_count`] and
+//! [`StringBuilder.blank`] rather than the conventional `len`/`is_empty`:
+//! `len`/`is_empty` are the names of the built-in *collection* method lowering,
+//! which fires on **any** receiver (it emits `b.length`/`len(b)` and the
+//! Python/Go `len(...)` built-in), shadowing a same-named user-record method and
+//! mis-compiling on TS/Python/Go. The clear names sidestep that collision while
+//! reading naturally. The [`StringBuilder.render`] method extracts the
+//! accumulated `String`.
+//!
+//! Accumulation is *value-semantics*: [`append`] returns a **new**
+//! `StringBuilder` whose buffer is the receiver's buffer followed by the
+//! appended text, rather than mutating in place (the same thin-floor pattern
+//! `core.iter`'s value-returning combinators use, sidestepping the Design DQ18
+//! in-place-mutation gap). Chain appends as
+//! `append(append(builder(), "a"), "b")`.
+
+module core.string
+
+/// Returns `s` concatenated with itself `n` times.
+///
+/// `repeat("ab", 3)` is `"ababab"`; a non-positive `n` yields the empty string.
+/// Built from the proven `loop`/interpolation shape — there is no built-in
+/// `repeat` *method* on `String`, so this is a genuine addition.
+public fn repeat(s: String, n: Int) -> String {
+  let mut out: String = ""
+  let mut i: Int = 0
+  loop {
+    if (i >= n) {
+      break
+    }
+    out = "${out}${s}"
+    i = i + 1
+  }
+  return out
+}
+
+/// Left-pads `s` with `fill` until it is at least `width` scalars wide.
+///
+/// `pad_left("7", 4, "0")` is `"0007"`; an `s` already at least `width` wide is
+/// returned unchanged. Each iteration prepends one `fill` (so a multi-scalar
+/// `fill` may overshoot `width` by up to `fill.len() - 1`). Width is measured in
+/// Unicode scalars via the built-in scalar `len` (spec §18.3).
+public fn pad_left(s: String, width: Int, fill: String) -> String {
+  let mut out: String = s
+  loop {
+    if (out.len() >= width) {
+      break
+    }
+    out = "${fill}${out}"
+  }
+  return out
+}
+
+/// Right-pads `s` with `fill` until it is at least `width` scalars wide.
+///
+/// `pad_right("7", 4, ".")` is `"7..."`; the right-hand mirror of [`pad_left`],
+/// with the same width semantics (Unicode scalars) and the same possible
+/// overshoot for a multi-scalar `fill`.
+public fn pad_right(s: String, width: Int, fill: String) -> String {
+  let mut out: String = s
+  loop {
+    if (out.len() >= width) {
+      break
+    }
+    out = "${out}${fill}"
+  }
+  return out
+}
+
+/// Splits `s` into its newline-separated lines.
+///
+/// `lines("a\nb\nc")` is `["a", "b", "c"]`. A named convenience over the
+/// built-in `split` for the common `"\n"` case (it does not strip a trailing
+/// empty line, matching the built-in `split` exactly).
+public fn lines(s: String) -> List[String] {
+  return s.split("\n")
+}
+
+/// Returns `true` when `s` is empty after trimming surrounding whitespace.
+///
+/// `is_blank("   ")` is `true`, `is_blank(" x ")` is `false`. Composes the
+/// built-in `trim` and `is_empty` methods into the common "blank line"
+/// predicate; distinct from the bare built-in `s.is_empty()`, which is `false`
+/// for an all-whitespace string.
+public fn is_blank(s: String) -> Bool {
+  return s.trim().is_empty()
+}
+
+/// A value-semantics accumulator for building a `String` piece by piece.
+///
+/// Construct an empty builder with [`builder`], grow it with [`append`] (which
+/// returns a *new* builder rather than mutating in place), and extract the
+/// accumulated text with [`StringBuilder.render`]. The accumulation is backed
+/// by a single `String` `buffer` (see the module header for why not a
+/// `List[String]`).
+public record StringBuilder {
+  /// The text accumulated so far.
+  buffer: String
+}
+
+/// `StringBuilder` exposes its accumulated length, emptiness, and final text.
+impl StringBuilder {
+  /// Returns the accumulated text.
+  ///
+  /// `render(append(builder(), "hi"))` is `"hi"`. This is the builder's
+  /// terminal operation — the `String` it has been accumulating.
+  public fn render(self) -> String {
+    self.buffer
+  }
+
+  /// Returns the number of Unicode scalars accumulated so far.
+  ///
+  /// Named `char_count` (not `len`) to avoid the built-in collection-length
+  /// method lowering, which would shadow a `len` method on this record; see the
+  /// module header. Measured via the built-in scalar `String.len` (spec §18.3).
+  public fn char_count(self) -> Int {
+    self.buffer.len()
+  }
+
+  /// Returns `true` when nothing has been accumulated yet.
+  ///
+  /// Named `blank` (not `is_empty`) to avoid the built-in collection-emptiness
+  /// method lowering; see the module header. Equivalent to `char_count` being
+  /// `0`.
+  public fn blank(self) -> Bool {
+    self.buffer.is_empty()
+  }
+}
+
+/// Constructs an empty [`StringBuilder`].
+///
+/// The ergonomic starting point for accumulation: `append(builder(), "a")`.
+public fn builder() -> StringBuilder {
+  StringBuilder { buffer: "" }
+}
+
+/// Returns a new [`StringBuilder`] whose buffer is `b`'s buffer followed by `s`.
+///
+/// `append` does not mutate `b`; it returns a fresh builder (value semantics,
+/// the same DQ18-sidestepping pattern as `core.iter`'s combinators), so appends
+/// chain as `append(append(builder(), "a"), "b")`.
+public fn append(b: StringBuilder, s: String) -> StringBuilder {
+  StringBuilder { buffer: "${b.buffer}${s}" }
+}

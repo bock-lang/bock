@@ -1,0 +1,33 @@
+// TEST: stdlib_string_no_errors
+// EXPECT: no_errors
+//
+// Every `core.string` public item type-checks from a user module: the
+// free-function utilities (`repeat`/`pad_left`/`pad_right`/`lines`/`is_blank`),
+// the `StringBuilder` constructor (`builder`) and value-semantics accumulator
+// (`append`), and the builder's query/terminal methods (`render`/`char_count`/
+// `blank`). The duplicating helpers are deliberately absent from this module —
+// case-mapping, trimming, membership/edge tests, replacement, splitting, and
+// length are built-in `String` methods, and `join` is the built-in
+// `List.join(sep)` method — so this fixture imports only the complementing free
+// functions and the builder surface.
+module userapp
+
+use core.string.{repeat, pad_left, pad_right, lines, is_blank, builder, append}
+
+public fn all_utilities() -> String {
+  let banner: String = repeat("=", 8)
+  let padded: String = pad_left(pad_right("x", 4, "."), 6, " ")
+  let rows: List[String] = lines("a\nb\nc")
+  let rowCount: Int = rows.len()
+  let blankCheck: Bool = is_blank("   ")
+
+  let sb: StringBuilder = append(append(builder(), banner), padded)
+  let text: String = sb.render()
+  let size: Int = sb.char_count()
+  let empty: Bool = builder().blank()
+
+  if (blankCheck && empty && rowCount > 0 && size > 0) {
+    return text
+  }
+  return banner
+}
