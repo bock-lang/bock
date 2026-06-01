@@ -1686,12 +1686,20 @@ impl RsEmitCtx {
             } => {
                 let vis = vis_str(*visibility);
                 let generics = self.generic_params_to_rs(generic_params);
-                // A generic record whose `impl` returns a `self` field by value
-                // needs `Clone` (the field read is lowered to `.clone()` because
-                // a `&self` method cannot move a non-`Copy` field out).
-                if self.clone_target_records.contains(&name.name) {
-                    self.writeln("#[derive(Clone)]");
-                }
+                // Derive `Clone` on every generated record. Bock value types are
+                // freely copyable, so a generated struct must be `Clone` to be
+                // usable as the type argument of a generic fn carrying a
+                // `T: Clone` bound — e.g. a user `record Item` passed to
+                // `first_or[T](xs: List[T], dflt: T)`, whose `List.get(i).cloned()`
+                // synthesizes `where T: Clone` (GAP-B). `#[derive(Clone)]` adds
+                // the standard per-field bound (a generic `Box<T>` derives
+                // `Clone where T: Clone`), so this never over-constrains a
+                // concrete instantiation whose fields are all `Clone`. It is the
+                // only derive the backend emits, so there is no conflicting-derive
+                // risk. `clone_target_records`/`clone_bound_records` continue to
+                // govern the *impl bound* + `self.field.clone()` rewrite, which is
+                // independent of the struct derive.
+                self.writeln("#[derive(Clone)]");
                 self.writeln(&format!("{vis}struct {}{generics} {{", name.name));
                 self.indent += 1;
                 for f in fields {
@@ -1711,6 +1719,10 @@ impl RsEmitCtx {
             } => {
                 let vis = vis_str(*visibility);
                 let generics = self.generic_params_to_rs(generic_params);
+                // Derive `Clone` on every generated enum, for the same reason as
+                // records (GAP-B): a user enum used as the type argument of a
+                // generic fn with a synthesized `T: Clone` bound must be `Clone`.
+                self.writeln("#[derive(Clone)]");
                 self.writeln(&format!("{vis}enum {}{generics} {{", name.name));
                 self.indent += 1;
                 for variant in variants {
@@ -1731,6 +1743,10 @@ impl RsEmitCtx {
                 // Rust has no classes; emit as struct + impl block.
                 let vis = vis_str(*visibility);
                 let generics = self.generic_params_to_rs(generic_params);
+                // Derive `Clone` for the same reason as records/enums (GAP-B): a
+                // class value used as a `T: Clone`-bounded generic argument must
+                // be `Clone`.
+                self.writeln("#[derive(Clone)]");
                 self.writeln(&format!("{vis}struct {}{generics} {{", name.name));
                 self.indent += 1;
                 for f in fields {
@@ -6258,9 +6274,12 @@ mod tests {
     }
 
     #[test]
-    fn generic_impl_no_clone_when_field_not_returned() {
+    fn generic_impl_no_clone_bound_when_field_not_returned() {
         // A generic impl whose method does NOT return a `self` field by value
-        // must NOT be over-constrained with `Clone` or get a `#[derive(Clone)]`.
+        // must NOT be over-constrained with a `T: Clone` *impl bound*. (The
+        // struct itself now always `#[derive(Clone)]`s — GAP-B — but the derive's
+        // own per-field bound is independent of and does not over-constrain the
+        // inherent impl.)
         let self_param = node(
             40,
             NodeKind::Param {
@@ -6315,11 +6334,7 @@ mod tests {
         );
         assert!(
             !out.contains("T: Clone"),
-            "must NOT over-constrain with Clone, got: {out}"
-        );
-        assert!(
-            !out.contains("#[derive(Clone)]"),
-            "must NOT derive Clone when no field is moved out, got: {out}"
+            "must NOT over-constrain the impl with a `T: Clone` bound, got: {out}"
         );
     }
 
