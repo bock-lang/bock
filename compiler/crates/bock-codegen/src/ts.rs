@@ -1262,6 +1262,82 @@ impl TsEmitCtx {
     /// Mirrors the JS lowering, but uses `as const` tags so the ternary's type
     /// is the discriminated `Ordering` union `tsc` can narrow on `._tag` in the
     /// match. `eq` → `===`; `to_string`/`display` → `String(x)`.
+    /// Lower a desugared `String` built-in method call (`recv_kind =
+    /// "Primitive:String"`) to its native TypeScript string op. Wired into the
+    /// `Call` arm *before* `try_emit_list_method` so a String receiver's
+    /// `len`/`contains`/`is_empty` dispatch here, not through the List path.
+    ///
+    /// `len` is the Unicode SCALAR count (`[...s].length`, iterating by code
+    /// point) per spec §18.3 — not `s.length` (UTF-16 code units). `byte_len` is
+    /// the UTF-8 byte count via `TextEncoder`. `replace` replaces ALL occurrences
+    /// (`replaceAll`). `split` returns a TS array, the List runtime rep.
+    fn try_emit_string_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_string_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
+            rest.first()
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match method {
+            "len" | "length" | "count" => format!("[...({recv_str})].length"),
+            "byte_len" => format!("new TextEncoder().encode({recv_str}).length"),
+            "is_empty" => format!("(({recv_str}).length === 0)"),
+            "to_upper" => format!("({recv_str}).toUpperCase()"),
+            "to_lower" => format!("({recv_str}).toLowerCase()"),
+            "trim" => format!("({recv_str}).trim()"),
+            "contains" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).includes({p})")
+            }
+            "starts_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).startsWith({p})")
+            }
+            "ends_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).endsWith({p})")
+            }
+            "replace" => {
+                let Some(from) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(to) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).replaceAll({from}, {to})")
+            }
+            "split" => {
+                let Some(sep) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).split({sep})")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     fn try_emit_primitive_bridge(
         &mut self,
         node: &AIRNode,
@@ -2130,7 +2206,7 @@ impl TsEmitCtx {
             let effect_names = self.expand_effect_names(effect_clause);
             self.fn_effects.insert(name.to_string(), effect_names);
         }
-        let ts_name = to_camel_case(name);
+        let ts_name = ts_value_ident(name);
         self.writeln(&format!(
             "{export}{async_kw}function {ts_name}{generics}({}){ret_str} {{",
             all_params.join(", "),
@@ -2748,7 +2824,7 @@ impl TsEmitCtx {
                     // `{enum}_{variant}` const.
                     let _ = write!(self.buf, "{enum_name}_{}", name.name);
                 } else {
-                    self.buf.push_str(&to_camel_case(&name.name));
+                    self.buf.push_str(&ts_value_ident(&name.name));
                 }
                 Ok(())
             }
@@ -2814,6 +2890,12 @@ impl TsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_set_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // String method dispatch runs *before* the List recogniser so the
+                // overlapping `len`/`contains`/`is_empty` names route by the
+                // checker's `recv_kind = "Primitive:String"`, not by name alone.
+                if self.try_emit_string_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {
@@ -2977,7 +3059,7 @@ impl TsEmitCtx {
                         let supplied = fields.iter().find(|f| &f.name.name == fname);
                         match supplied.and_then(|f| f.value.as_ref()) {
                             Some(val) => self.emit_expr(val)?,
-                            None => self.buf.push_str(&to_camel_case(fname)),
+                            None => self.buf.push_str(&ts_value_ident(fname)),
                         }
                     }
                     self.buf.push(')');
@@ -3640,7 +3722,7 @@ impl TsEmitCtx {
                 let _ = writeln!(
                     self.buf,
                     "{ind}const {} = {access};",
-                    to_camel_case(&name.name)
+                    ts_value_ident(&name.name)
                 );
             }
             NodeKind::ConstructorPat { fields, .. } => {
@@ -3687,7 +3769,7 @@ impl TsEmitCtx {
     fn collect_binds_ts(&self, pat: &AIRNode, access: &str, out: &mut String) {
         match &pat.kind {
             NodeKind::BindPat { name, .. } => {
-                let _ = write!(out, "const {} = {access}; ", to_camel_case(&name.name));
+                let _ = write!(out, "const {} = {access}; ", ts_value_ident(&name.name));
             }
             NodeKind::ConstructorPat { fields, .. } => {
                 for (i, field) in fields.iter().enumerate() {
@@ -3806,7 +3888,7 @@ impl TsEmitCtx {
 
     fn pattern_to_binding_name(&self, pat: &AIRNode) -> String {
         match &pat.kind {
-            NodeKind::BindPat { name, .. } => to_camel_case(&name.name),
+            NodeKind::BindPat { name, .. } => ts_value_ident(&name.name),
             NodeKind::WildcardPat => "_".into(),
             NodeKind::TuplePat { elems } => {
                 format!(
@@ -3881,6 +3963,19 @@ fn is_time_method_name(name: &str) -> bool {
 }
 
 /// Convert a name to `camelCase` (handles `snake_case`, `PascalCase`, and already `camelCase`).
+/// Convert a Bock *value* identifier (a param, local binding, or free-function
+/// name) to its TS form: `camelCase`, then escaped against the TS reserved-word
+/// set so a binding named e.g. `default`/`type` emits `default_`/`type_` rather
+/// than the illegal bare keyword. Apply at every value declaration and reference
+/// site so the escaped name is used uniformly; member/method names use bare
+/// [`to_camel_case`]. See [`crate::generator::escape_target_keyword`].
+fn ts_value_ident(name: &str) -> String {
+    crate::generator::escape_target_keyword(
+        &to_camel_case(name),
+        crate::generator::KeywordTarget::Ts,
+    )
+}
+
 fn to_camel_case(s: &str) -> String {
     if s.is_empty() || s == "_" {
         return s.to_string();

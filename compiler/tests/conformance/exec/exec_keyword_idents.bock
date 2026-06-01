@@ -1,0 +1,47 @@
+// TEST: exec_keyword_idents
+// EXPECT: output "default=3;def=4;new=5;var=6"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression guard for the reserved-keyword identifier sanitizer
+// (`generator::escape_target_keyword`). A Bock value identifier the user chose
+// may collide with a *target* language's reserved word; before the sanitizer
+// such a name emitted verbatim and the target rejected it at compile/parse time
+// (`function pick(flag, default)` is a JS/TS/Go SyntaxError, `def = …` a Python
+// one). The sanitizer mangles a colliding case-converted name with a trailing
+// `_`, consistently at the declaration and every reference site, so the program
+// compiles and runs on every target.
+//
+// Each identifier below is a legal *Bock* identifier (Bock keywords like `type`
+// / `match` can never appear here) that collides with a reserved word on at
+// least one target, and is exercised end to end — declared, referenced in
+// arithmetic, and string-interpolated into the output (the interpolation path is
+// a *reference* site, so a mismatched escape there would corrupt the output even
+// if it compiled):
+//   * `default` — reserved in JS / TS / Go.
+//   * `def`     — reserved in Python.
+//   * `new`     — reserved in JS / TS.
+//   * `var`     — reserved in Go.
+// The literal field labels in the output (`default=`, `def=`, …) are string
+// data, not identifiers, and must survive unescaped — proving the sanitizer
+// touches identifiers only, never string content.
+//
+// `pick` is a free function whose own parameter (`default`) collides, so its
+// signature, body reference, and every call site must agree on the escaped
+// name. `main` is intentionally NOT `public` (see hello_world.bock).
+module main
+
+fn pick(flag: Bool, default: Int) -> Int {
+  if (flag) {
+    default
+  } else {
+    0
+  }
+}
+
+fn main() -> Void {
+  let default: Int = pick(true, 3)
+  let def: Int = 4
+  let new: Int = 5
+  let var: Int = 6
+  println("default=${default};def=${def};new=${new};var=${var}")
+}

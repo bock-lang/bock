@@ -544,6 +544,52 @@ impl RsEmitCtx {
         scan.found
     }
 
+    /// True when some `match` arm in `body` binds a pattern variable the arm
+    /// reads **more than once** — the case the runtime move-reuse analysis
+    /// ([`Self::reused_match_bindings`]) lowers by emitting `<x>.clone()` on each
+    /// by-value use after the first (the Rust pattern binds by value, so the
+    /// first by-value consumer moves it; later uses would be `E0382`). When the
+    /// reused binding is a *generic* element (`filter[T](o: Optional[T], pred:
+    /// Fn(T) -> Bool)` doing `match o { Some(x) => if pred(x) { Some(x) } … }`),
+    /// the emitted `x.clone()` needs `T: Clone` in scope, so the enclosing
+    /// generic fn must carry the bound — otherwise `E0599`/`E0277`.
+    ///
+    /// Conservative: it fires on the *shape* (a match arm with a reused binding)
+    /// rather than typing each binding, mirroring
+    /// [`Self::body_clones_collection_element`]. A `T: Clone` bound on a generic
+    /// param that turns out not to need it is harmless (every concrete v1
+    /// element type — Int/Float/String/Bool/nested — is `Clone`), and the scan
+    /// never fires for a body whose match arms each use their bindings at most
+    /// once (`or_else`/`to_list`/`count`/`get_or` over `Optional` all stay
+    /// unconstrained, matching the pre-existing behaviour). The caller gates this
+    /// on `!generic_params.is_empty()` so a non-generic fn is never touched.
+    fn body_reuses_match_binding(body: &AIRNode) -> bool {
+        struct ReuseScan {
+            found: bool,
+        }
+        impl bock_air::visitor::Visitor for ReuseScan {
+            fn visit_node(&mut self, node: &AIRNode) {
+                if self.found {
+                    return;
+                }
+                if let NodeKind::MatchArm { pattern, body, .. } = &node.kind {
+                    let mut bound = Vec::new();
+                    RsEmitCtx::collect_pattern_binding_names(pattern, &mut bound);
+                    for name in &bound {
+                        if RsEmitCtx::count_identifier_uses(body, name) > 1 {
+                            self.found = true;
+                            return;
+                        }
+                    }
+                }
+                bock_air::visitor::walk_node(self, node);
+            }
+        }
+        let mut scan = ReuseScan { found: false };
+        bock_air::visitor::Visitor::visit_node(&mut scan, body);
+        scan.found
+    }
+
     /// True when a *generic* free function takes a parameter whose base type is
     /// a clone-bound record ([`Self::clone_bound_records`] — a record whose
     /// `impl` carries a `T: Clone` bound, e.g. `ListIterator[T]`) and drives it
@@ -1069,6 +1115,120 @@ impl RsEmitCtx {
     /// which the construction/match sides also use). `compare` on a float maps
     /// to `partial_cmp(...).unwrap()` (floats are only `PartialOrd`). `eq`
     /// becomes `==`; `to_string`/`display` become `.to_string()`.
+    /// Best-effort detection that `node` evaluates to a Rust `String` (or
+    /// `&str`), used to route `+` to `format!` concat. Recognises the syntactic
+    /// shapes that unambiguously produce a string: a string literal, a
+    /// `format!`-lowered interpolation, and the desugared `String` built-in
+    /// methods whose return type is `String` (`to_upper`/`to_lower`/`trim`/
+    /// `replace`) or the `to_string`/`display` bridge. This is intentionally
+    /// conservative — a false negative leaves a non-string `+` untouched (still
+    /// correct for numbers); the recognised shapes cover the string-concat code
+    /// that arises in practice. A nested `+` whose own operands are strings is
+    /// itself a `String`, so the recursion threads through chained concat.
+    fn expr_is_string_rs(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::Literal {
+                lit: Literal::String(_),
+            } => true,
+            NodeKind::Interpolation { .. } => true,
+            NodeKind::BinaryOp {
+                op: BinOp::Add,
+                left,
+                right,
+            } => Self::expr_is_string_rs(left) || Self::expr_is_string_rs(right),
+            NodeKind::Call { callee, .. } => {
+                let NodeKind::FieldAccess { field, .. } = &callee.kind else {
+                    return false;
+                };
+                matches!(
+                    field.name.as_str(),
+                    "to_upper" | "to_lower" | "trim" | "replace" | "to_string" | "display"
+                )
+            }
+            _ => false,
+        }
+    }
+
+    /// Lower a desugared `String` built-in method call (`recv_kind =
+    /// "Primitive:String"`) to its native Rust string op. Wired into the `Call`
+    /// arm *before* `try_emit_list_method` so a String receiver's
+    /// `len`/`contains`/`is_empty` dispatch here, not through the List path.
+    ///
+    /// `len` is the Unicode SCALAR count (`(s).chars().count() as i64`) per spec
+    /// §18.3 — Rust's `str::len` is the BYTE length, so `byte_len` maps to it
+    /// (`(s).len() as i64`). String args (literals emit as owned `String`) are
+    /// passed by reference (`&(..)`), which derefs to the `&str`/`Pattern` the
+    /// `str` methods expect. `replace` replaces ALL occurrences (Rust's default).
+    /// `split` collects to a `Vec<String>`, the List runtime rep.
+    fn try_emit_string_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_string_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
+            rest.first()
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match method {
+            "len" | "length" | "count" => format!("(({recv_str}).chars().count() as i64)"),
+            "byte_len" => format!("(({recv_str}).len() as i64)"),
+            "is_empty" => format!("({recv_str}).is_empty()"),
+            "to_upper" => format!("({recv_str}).to_uppercase()"),
+            "to_lower" => format!("({recv_str}).to_lowercase()"),
+            "trim" => format!("({recv_str}).trim().to_string()"),
+            "contains" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).contains(&({p}) as &str)")
+            }
+            "starts_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).starts_with(&({p}) as &str)")
+            }
+            "ends_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).ends_with(&({p}) as &str)")
+            }
+            "replace" => {
+                let Some(from) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(to) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).replace(&({from}) as &str, &({to}) as &str)")
+            }
+            "split" => {
+                let Some(sep) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!(
+                    "({recv_str}).split(&({sep}) as &str).map(|__p| __p.to_string()).collect::<Vec<String>>()"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     fn try_emit_primitive_bridge(
         &mut self,
         node: &AIRNode,
@@ -1904,6 +2064,7 @@ impl RsEmitCtx {
         // `E0599`). See `params_drive_clone_bound_record`.
         let add_clone_bound = !generic_params.is_empty()
             && (Self::body_clones_collection_element(body)
+                || Self::body_reuses_match_binding(body)
                 || self.params_drive_clone_bound_record(params, body));
         let generics = self.generic_params_to_rs_with_clone(generic_params, add_clone_bound);
         let param_strs = self.collect_param_strs(params);
@@ -2528,6 +2689,19 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::BinaryOp { op, left, right } => {
+                // `String + String` concat: Rust's `String + String` does not
+                // compile (`Add<String>` is not implemented; only `String +
+                // &str`). When either operand is a detectably-`String` expression
+                // emit `format!("{}{}", l, r)`, which concatenates regardless of
+                // whether each side is an owned `String` or a `&str`.
+                if *op == BinOp::Add
+                    && (Self::expr_is_string_rs(left) || Self::expr_is_string_rs(right))
+                {
+                    let l = self.expr_to_string(left)?;
+                    let r = self.expr_to_string(right)?;
+                    let _ = write!(self.buf, "format!(\"{{}}{{}}\", {l}, {r})");
+                    return Ok(());
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {
@@ -2626,6 +2800,12 @@ impl RsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_set_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // String method dispatch runs *before* the List recogniser so the
+                // overlapping `len`/`contains`/`is_empty` names route by the
+                // checker's `recv_kind = "Primitive:String"`, not by name alone.
+                if self.try_emit_string_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {

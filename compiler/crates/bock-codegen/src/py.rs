@@ -1126,6 +1126,83 @@ impl PyEmitCtx {
     /// Ordering-runtime singleton (`_bock_less` / `_bock_equal` /
     /// `_bock_greater`) via a conditional expression, matching the
     /// construction/`case` sides. `eq` → `==`; `to_string`/`display` → `str(x)`.
+    /// Lower a desugared `String` built-in method call (`recv_kind =
+    /// "Primitive:String"`) to its native Python string op. Wired into the
+    /// `Call` arm *before* `try_emit_list_method` so a String receiver's
+    /// `len`/`contains`/`is_empty` dispatch here, not through the List path.
+    ///
+    /// `len` is the Unicode SCALAR count: Python `str` is a sequence of code
+    /// points, so `len(s)` already yields the scalar count (spec §18.3).
+    /// `byte_len` encodes to UTF-8 first (`len(s.encode())`). `replace` replaces
+    /// ALL occurrences (Python's default). `split` returns a Python list, the
+    /// List runtime rep.
+    fn try_emit_string_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_string_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
+            rest.first()
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match method {
+            "len" | "length" | "count" => format!("len({recv_str})"),
+            "byte_len" => format!("len(({recv_str}).encode())"),
+            "is_empty" => format!("(len({recv_str}) == 0)"),
+            "to_upper" => format!("({recv_str}).upper()"),
+            "to_lower" => format!("({recv_str}).lower()"),
+            "trim" => format!("({recv_str}).strip()"),
+            "contains" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("(({p}) in ({recv_str}))")
+            }
+            "starts_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).startswith({p})")
+            }
+            "ends_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).endswith({p})")
+            }
+            "replace" => {
+                let Some(from) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(to) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).replace({from}, {to})")
+            }
+            "split" => {
+                let Some(sep) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).split({sep})")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     fn try_emit_primitive_bridge(
         &mut self,
         node: &AIRNode,
@@ -1731,7 +1808,11 @@ impl PyEmitCtx {
             } => {
                 let type_hint = format!(": {}", self.type_to_py(ty));
                 let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}{}{type_hint} = ", to_snake_case(&name.name));
+                let _ = write!(
+                    self.buf,
+                    "{ind}{}{type_hint} = ",
+                    py_value_ident(&name.name)
+                );
                 self.emit_expr(value)?;
                 self.buf.push('\n');
                 Ok(())
@@ -1860,7 +1941,7 @@ impl PyEmitCtx {
             let effect_names = self.expand_effect_names(effect_clause);
             self.fn_effects.insert(name.to_string(), effect_names);
         }
-        let fn_name = to_snake_case(name);
+        let fn_name = py_value_ident(name);
         self.writeln(&format!(
             "{async_kw}def {fn_name}({}){}:",
             all_params.join(", "),
@@ -2425,6 +2506,12 @@ impl PyEmitCtx {
                 if self.try_emit_set_method(node, callee, args)? {
                     return Ok(());
                 }
+                // String method dispatch runs *before* the List recogniser so the
+                // overlapping `len`/`contains`/`is_empty` names route by the
+                // checker's `recv_kind = "Primitive:String"`, not by name alone.
+                if self.try_emit_string_method(node, callee, args)? {
+                    return Ok(());
+                }
                 if self.try_emit_list_method(callee, args)? {
                     return Ok(());
                 }
@@ -2900,7 +2987,7 @@ impl PyEmitCtx {
                 self.buf.push('_');
             }
             NodeKind::BindPat { name, .. } => {
-                self.buf.push_str(&to_snake_case(&name.name));
+                self.buf.push_str(&py_value_ident(&name.name));
             }
             NodeKind::LiteralPat { lit } => match lit {
                 Literal::Int(s) => self.buf.push_str(s),
@@ -3179,7 +3266,7 @@ impl PyEmitCtx {
             }
             // A bind pattern (`x => …`) captures the whole scrutinee.
             NodeKind::BindPat { name, .. } if whole_scrutinee_bind => {
-                let bind = to_snake_case(&name.name);
+                let bind = py_value_ident(&name.name);
                 let _ = write!(self.buf, "(lambda {bind}: ");
                 self.emit_block_as_expr(body)?;
                 self.buf.push_str(")(__v)");
@@ -3372,7 +3459,7 @@ impl PyEmitCtx {
         for s in stmts {
             if let NodeKind::LetBinding { pattern, value, .. } = &s.kind {
                 if let NodeKind::BindPat { name, .. } = &pattern.kind {
-                    let py_name = to_snake_case(&name.name);
+                    let py_name = py_value_ident(&name.name);
                     if matches!(&value.kind, NodeKind::Call { .. }) && awaited.contains(&py_name) {
                         out.insert(py_name);
                     }
@@ -3390,7 +3477,7 @@ impl PyEmitCtx {
         match &node.kind {
             NodeKind::Await { expr } => {
                 if let NodeKind::Identifier { name } = &expr.kind {
-                    out.insert(to_snake_case(&name.name));
+                    out.insert(py_value_ident(&name.name));
                 }
                 Self::collect_awaited_identifiers(expr, out);
             }
@@ -3536,7 +3623,7 @@ impl PyEmitCtx {
 
     fn pattern_to_binding_name(&self, pat: &AIRNode) -> String {
         match &pat.kind {
-            NodeKind::BindPat { name, .. } => to_snake_case(&name.name),
+            NodeKind::BindPat { name, .. } => py_value_ident(&name.name),
             NodeKind::WildcardPat => "_".into(),
             NodeKind::TuplePat { elems } => {
                 format!(
@@ -3598,8 +3685,21 @@ fn identifier_to_py(s: &str) -> String {
     if s.chars().next().is_some_and(char::is_uppercase) {
         s.to_string()
     } else {
-        to_snake_case(s)
+        py_value_ident(s)
     }
+}
+
+/// Convert a Bock *value* identifier (a param, local binding, or free-function
+/// name) to its Python form: `snake_case`, then escaped against the Python
+/// keyword set so a binding named e.g. `def` emits `def_` rather than the
+/// illegal bare keyword. Apply at every value declaration and reference site so
+/// the escaped name is used uniformly; member/method names use bare
+/// [`to_snake_case`]. See [`crate::generator::escape_target_keyword`].
+fn py_value_ident(name: &str) -> String {
+    crate::generator::escape_target_keyword(
+        &to_snake_case(name),
+        crate::generator::KeywordTarget::Python,
+    )
 }
 
 /// Returns true if `name` is the identifier of a Duration or Instant instance

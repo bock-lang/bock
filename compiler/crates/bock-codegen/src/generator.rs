@@ -376,7 +376,11 @@ pub trait CodeGenerator {
 }
 
 /// Restrict `modules` to those **reachable** from the entry module via real
-/// `use` edges, preserving the input (dependency) order.
+/// `use` edges, returned in a *deterministic* dependency-before-dependent order
+/// (a post-order DFS of the `use` graph with `use` targets visited in declared
+/// module-path order). The result is independent of the input slice's order, so
+/// the emitted single-file bundle is byte-stable across the per-process topo-sort
+/// shuffling described below.
 ///
 /// `bock build` prepends the entire embedded `core.*` stdlib and makes every
 /// user module implicitly depend on all of it (the §18.2 prelude, so core
@@ -453,27 +457,65 @@ pub fn reachable_modules<'a>(
         return vec![];
     };
 
-    // BFS the explicit-`use` graph from the entry module.
-    let mut reachable = vec![false; modules.len()];
-    let mut stack = vec![entry_idx];
-    reachable[entry_idx] = true;
-    while let Some(idx) = stack.pop() {
-        for target in use_targets(modules[idx].0) {
-            if let Some(&t) = by_path.get(&target) {
-                if !reachable[t] {
-                    reachable[t] = true;
-                    stack.push(t);
+    // A *deterministic* post-order DFS of the explicit-`use` graph from the
+    // entry module: this both prunes to reachable modules and orders them
+    // dependencies-before-dependents (the order bundling concatenates in), with
+    // a canonical, input-order-independent result.
+    //
+    // Determinism matters because `bock build` runs in a fresh process per
+    // invocation, and the upstream module list (`air_modules`) is produced by a
+    // topological sort whose internal `HashMap`/`HashSet` iteration is seeded
+    // randomly per process — so the *same* program's `modules` slice can arrive
+    // in different (all valid) topological orders on different runs. Relying on
+    // that input order made the emitted single-file bundle's module order vary
+    // run-to-run, which surfaced as a rare, random `bock build` failure once
+    // several independent embedded `core.*` modules were reachable (a shifted
+    // concatenation occasionally collides). Visiting each module's `use` targets
+    // in a fixed order (declared module path, then index) pins the output.
+    let mut visited = vec![false; modules.len()];
+    let mut order: Vec<usize> = Vec::new();
+    // Iterative post-order DFS (recursion-free to avoid deep-graph stack use):
+    // `Enter(i)` schedules children then a matching `Exit(i)`; `Exit(i)` appends
+    // `i` after all its dependencies, giving dependency-before-dependent order.
+    enum Step {
+        Enter(usize),
+        Exit(usize),
+    }
+    let mut stack = vec![Step::Enter(entry_idx)];
+    while let Some(step) = stack.pop() {
+        match step {
+            Step::Enter(idx) => {
+                if visited[idx] {
+                    continue;
+                }
+                visited[idx] = true;
+                stack.push(Step::Exit(idx));
+                // Resolve this module's `use` targets to indices and visit them
+                // in a deterministic order: by declared module path (stable
+                // across runs), then by index as a final tiebreak.
+                let mut child_indices: Vec<usize> = use_targets(modules[idx].0)
+                    .iter()
+                    .filter_map(|target| by_path.get(target).copied())
+                    .collect();
+                child_indices.sort_by(|&a, &b| {
+                    path_of(modules[a].0)
+                        .cmp(&path_of(modules[b].0))
+                        .then(a.cmp(&b))
+                });
+                child_indices.dedup();
+                // Push in reverse so the smallest-keyed child is processed first
+                // (the stack pops LIFO), keeping the emitted order ascending.
+                for child in child_indices.into_iter().rev() {
+                    if !visited[child] {
+                        stack.push(Step::Enter(child));
+                    }
                 }
             }
+            Step::Exit(idx) => order.push(idx),
         }
     }
 
-    modules
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| reachable[*i])
-        .map(|(_, &pair)| pair)
-        .collect()
+    order.into_iter().map(|i| modules[i]).collect()
 }
 
 /// Choose the output path for a **single-file bundle** of `modules`.
@@ -1180,6 +1222,287 @@ pub fn desugared_set_method<'a>(
         Some((recv, method, rest))
     } else {
         None
+    }
+}
+
+// ─── String built-in method dispatch ─────────────────────────────────────────
+//
+// `String` exposes a set of built-in methods (`len`/`to_upper`/`trim`/
+// `contains`/`split`/…) that the checker resolves to a concrete return type
+// (`checker.rs`, the `Type::Primitive(PrimitiveType::String)` method table). But
+// codegen sees only the desugared `Call(FieldAccess(recv, m), [recv, …])`, and
+// several of these method names overlap with `List` (`len`/`length`/`count`,
+// `is_empty`, `contains`, `index_of`): without disambiguation a String
+// receiver's `contains`/`len` is routed through the `List` path (e.g. Go's
+// `[]interface{}` linear scan), which fails to compile against a `string`. The
+// remaining String-only methods (`to_upper`/`trim`/`replace`/…) fall through to
+// the generic desugared-self-call and emit `s.to_upper(s)` — undefined on every
+// target. The checker's `recv_kind` annotation (`RECV_KIND_META_KEY`, value
+// `"Primitive:String"`) records the resolved receiver category on the call node,
+// so each backend reads it here to pick the native string lowering and —
+// crucially — runs this recogniser *before* `desugared_list_method` so the
+// overlapping names dispatch by receiver kind, not by method name alone.
+
+/// The built-in `String` methods this codegen lowers to each target's native
+/// string ops.
+///
+/// Mirrors the checker's `String` method resolution
+/// (`checker.rs`, `Type::Primitive(PrimitiveType::String)`): `len`/`byte_len`
+/// return `Int` (scalar count vs byte count, per spec §18.3); `is_empty`/
+/// `contains`/`starts_with`/`ends_with` a `Bool`; `to_upper`/`to_lower`/`trim`/
+/// `replace` a `String`; `split` a `List[String]`. The set is intentionally the
+/// *minimum-useful* subset that lowers cleanly to a native op on all five
+/// targets — methods needing nontrivial index/Unicode semantics (`char_at`,
+/// `slice`, `chars`, …) are deferred and fall through to the generic path.
+pub const STRING_METHODS: &[&str] = &[
+    "len",
+    "length",
+    "count",
+    "byte_len",
+    "is_empty",
+    "to_upper",
+    "to_lower",
+    "trim",
+    "contains",
+    "starts_with",
+    "ends_with",
+    "replace",
+    "split",
+];
+
+/// Recognise a *desugared `String` built-in method call*.
+///
+/// Building on [`desugared_self_call`], this additionally requires that (a) the
+/// `call_node` carries the checker's `recv_kind = "Primitive:String"` annotation
+/// and (b) the method is one of [`STRING_METHODS`]. Returns the receiver node,
+/// the method name, and the remaining (non-self) arguments — everything a
+/// backend needs to lower the call to the target's native string op
+/// (`s.toUpperCase()` / `s.upper()` / `s.to_uppercase()` / `strings.ToUpper(s)`,
+/// `[...s].length` / `len(s)` / `s.chars().count()` / `utf8.RuneCountInString(s)`,
+/// …). Each backend wires this into its `Call` arm *before*
+/// [`desugared_list_method`] so a String receiver's `len`/`contains` no longer
+/// hits the `List` path (the Go `[]interface{}` scan).
+///
+/// `call_node` is the full `Call` AIR node (it holds the annotation); `callee`
+/// and `args` are its `callee`/`args` fields, passed separately so a backend can
+/// call this from inside its `NodeKind::Call { callee, args, .. }` arm.
+#[must_use]
+pub fn desugared_string_method<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    if primitive_recv_kind(call_node) != Some("String") {
+        return None;
+    }
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if STRING_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
+// ─── Reserved-keyword escaping ───────────────────────────────────────────────
+//
+// A Bock value identifier (a parameter, local `let`, or free-function name) is a
+// plain word the user chose; nothing stops it colliding with a *target*
+// language's reserved word. Before this layer codegen emitted such an identifier
+// verbatim, producing source the target rejects at compile/parse time —
+// `function getOr(o, default)` (JS/TS/Go reserve `default`), `def: int = …`
+// (Python reserves `def`), and so on. Because each backend funnels its
+// value-binding names through a single case-conversion (`to_camel_case` for
+// JS/TS/Go, `to_snake_case` for Python/Rust), one post-conversion escape step
+// per target closes the whole class: a converted name that equals a target
+// keyword is suffixed with `_` (`default` → `default_`, `def` → `def_`),
+// applied *consistently* at the declaration site, every reference site, and —
+// for Go — the type-inference scope-map keys, so they always agree.
+//
+// Scope: only *value* identifiers are escaped. Member/field/method names (a
+// `obj.default` access, a host-method call) are NOT — `default` is a perfectly
+// legal member name on every target, and escaping it would break the access.
+// Type names are not escaped either (no v1 keyword collides with a Bock type
+// name, and they live in a different namespace). The suffix-`_` mangle is
+// stable and idempotent (`escape` of an already-escaped name is itself), and
+// the chosen suffix never itself reintroduces a keyword.
+
+/// The codegen target whose reserved-word set an identifier is being escaped
+/// against. Mirrors the five v1 backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordTarget {
+    /// JavaScript (`js`).
+    Js,
+    /// TypeScript (`ts`) — a superset of the JS reserved set.
+    Ts,
+    /// Python (`python`).
+    Python,
+    /// Rust (`rust`).
+    Rust,
+    /// Go (`go`).
+    Go,
+}
+
+/// JavaScript reserved words and future-reserved words (ES2015+), plus the
+/// literal keywords. A value binding named any of these must be escaped.
+const JS_KEYWORDS: &[&str] = &[
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+    "enum",
+    "await",
+    "implements",
+    "interface",
+    "let",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "static",
+];
+
+/// TypeScript reserves everything JS does plus a handful of type-level words
+/// that are also illegal as plain bindings in value positions the backend emits.
+const TS_EXTRA_KEYWORDS: &[&str] = &[
+    "abstract",
+    "as",
+    "any",
+    "boolean",
+    "constructor",
+    "declare",
+    "get",
+    "infer",
+    "is",
+    "keyof",
+    "module",
+    "namespace",
+    "never",
+    "readonly",
+    "require",
+    "number",
+    "object",
+    "set",
+    "string",
+    "symbol",
+    "type",
+    "undefined",
+    "unique",
+    "unknown",
+    "from",
+    "of",
+    "async",
+];
+
+/// Python 3 keywords (`keyword.kwlist`) plus the soft keywords that are unsafe
+/// as bindings in the positions the backend emits.
+const PYTHON_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield", "match", "case",
+];
+
+/// Rust strict and reserved keywords (2018/2021 editions). Rust *could* use the
+/// raw-identifier form (`r#match`) for most of these, but a uniform `_` suffix
+/// keeps the escape identical across all targets and avoids the handful of words
+/// (`crate`/`self`/`super`/`Self`) that cannot be raw identifiers at all.
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
+    "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+    "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+    "use", "where", "while", "async", "await", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "union",
+];
+
+/// Go keywords (the Go spec's 25 reserved words).
+const GO_KEYWORDS: &[&str] = &[
+    "break",
+    "case",
+    "chan",
+    "const",
+    "continue",
+    "default",
+    "defer",
+    "else",
+    "fallthrough",
+    "for",
+    "func",
+    "go",
+    "goto",
+    "if",
+    "import",
+    "interface",
+    "map",
+    "package",
+    "range",
+    "return",
+    "select",
+    "struct",
+    "switch",
+    "type",
+    "var",
+];
+
+/// True when `name` is a reserved word in the given target's keyword set.
+#[must_use]
+pub fn is_target_keyword(name: &str, target: KeywordTarget) -> bool {
+    match target {
+        KeywordTarget::Js => JS_KEYWORDS.contains(&name),
+        KeywordTarget::Ts => JS_KEYWORDS.contains(&name) || TS_EXTRA_KEYWORDS.contains(&name),
+        KeywordTarget::Python => PYTHON_KEYWORDS.contains(&name),
+        KeywordTarget::Rust => RUST_KEYWORDS.contains(&name),
+        KeywordTarget::Go => GO_KEYWORDS.contains(&name),
+    }
+}
+
+/// Escape `name` (an already case-converted *value* identifier) against the
+/// target's reserved-word set: a name that collides with a keyword gets a
+/// trailing `_`, otherwise it is returned unchanged.
+///
+/// Idempotent — the suffixed form is never itself a keyword, so re-escaping is a
+/// no-op. Apply this at every site that emits or keys on a Bock value binding
+/// (declaration, reference, and the Go scope-inference maps) so the escaped name
+/// is used uniformly. Do **not** apply it to member/field/method names or to
+/// type names (see the section comment).
+#[must_use]
+pub fn escape_target_keyword(name: &str, target: KeywordTarget) -> String {
+    if is_target_keyword(name, target) {
+        format!("{name}_")
+    } else {
+        name.to_string()
     }
 }
 
@@ -1953,6 +2276,65 @@ mod tests {
     }
 
     #[test]
+    fn reachable_modules_order_is_input_order_independent() {
+        // The bundle order must be deterministic regardless of the order the
+        // `modules` slice arrives in — the upstream topological sort iterates a
+        // `HashMap`/`HashSet` with a per-process random seed, so independent
+        // modules can be presented in any (valid) order. `main` uses three
+        // mutually-independent cores plus a transitive chain; whatever the input
+        // permutation, the reachable order must be byte-identical (and still
+        // dependency-before-dependent). This is the guard for the random
+        // `bock build` failure once several embedded `core.*` were reachable.
+        let leaf = module_named("z.leaf", &[], vec![fn_decl("l")]);
+        let a = module_named("core.a", &["z.leaf"], vec![fn_decl("a")]);
+        let b = module_named("core.b", &[], vec![fn_decl("b")]);
+        let c = module_named("core.c", &[], vec![fn_decl("c")]);
+        let main_m = module_named(
+            "main",
+            &["core.a", "core.b", "core.c"],
+            vec![fn_decl("main")],
+        );
+        let p = std::path::Path::new("x.bock");
+
+        let names = |got: &[(&AIRModule, &std::path::Path)]| -> Vec<String> {
+            got.iter()
+                .filter_map(|(m, _)| {
+                    if let NodeKind::Module { path: Some(pp), .. } = &m.kind {
+                        Some(
+                            pp.segments
+                                .iter()
+                                .map(|s| s.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join("."),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        // Several distinct input permutations of the same module set.
+        let perm1 = [(&leaf, p), (&a, p), (&b, p), (&c, p), (&main_m, p)];
+        let perm2 = [(&c, p), (&main_m, p), (&b, p), (&leaf, p), (&a, p)];
+        let perm3 = [(&main_m, p), (&c, p), (&b, p), (&a, p), (&leaf, p)];
+        let o1 = names(&reachable_modules(&perm1));
+        let o2 = names(&reachable_modules(&perm2));
+        let o3 = names(&reachable_modules(&perm3));
+        assert_eq!(o1, o2, "bundle order must not depend on input order");
+        assert_eq!(o1, o3, "bundle order must not depend on input order");
+        // All five reachable, dependency-before-dependent, ties canonical.
+        assert_eq!(o1.len(), 5, "got: {o1:?}");
+        let pos = |name: &str| o1.iter().position(|x| x == name).unwrap();
+        assert!(pos("z.leaf") < pos("core.a"), "got: {o1:?}");
+        assert!(pos("core.a") < pos("main"), "got: {o1:?}");
+        assert!(pos("core.b") < pos("main"), "got: {o1:?}");
+        assert!(pos("core.c") < pos("main"), "got: {o1:?}");
+        // `main` (the dependent) is emitted last.
+        assert_eq!(o1.last().map(String::as_str), Some("main"), "got: {o1:?}");
+    }
+
+    #[test]
     fn module_declares_main_detects_top_level_main() {
         let m = module_with(vec![fn_decl("helper"), fn_decl("main")]);
         assert!(module_declares_main_fn(&m));
@@ -2631,6 +3013,48 @@ mod tests {
                 assert!(desugared_set_method(&call_m, &callee_m, &args_m).is_none());
             }
         }
+    }
+
+    #[test]
+    fn desugared_string_method_matches_string_methods_on_primitive_string() {
+        for &m in STRING_METHODS {
+            // `replace` takes two extra args, the rest take zero or one; the
+            // recogniser is arity-agnostic, so a single placeholder suffices.
+            let extra = vec![n(7, NodeKind::Identifier { name: ident("x") })];
+            let (call, callee, args) = annotated_call(m, "Primitive:String", extra);
+            let (recv, got, rest) =
+                desugared_string_method(&call, &callee, &args).expect("should match");
+            assert_eq!(got, m);
+            assert_eq!(rest.len(), 1);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+            // A non-String primitive receiver must NOT match (e.g. `Int`).
+            let (call_i, callee_i, args_i) = annotated_call(m, "Primitive:Int", vec![]);
+            assert!(desugared_string_method(&call_i, &callee_i, &args_i).is_none());
+        }
+    }
+
+    #[test]
+    fn desugared_string_method_rejects_unknown_methods_and_missing_annotation() {
+        // A String receiver, but a method the recogniser does not cover.
+        let (call, callee, args) = annotated_call("frobnicate", "Primitive:String", vec![]);
+        assert!(desugared_string_method(&call, &callee, &args).is_none());
+
+        // The right method name + receiver shape, but no `recv_kind` annotation
+        // → not matched, so a bare `xs.contains(x)` (a `List`) still falls
+        // through to the List recogniser rather than the String one.
+        let (callee, args) = desugared_call(
+            "contains",
+            vec![n(7, NodeKind::Identifier { name: ident("x") })],
+        );
+        let bare = n(
+            105,
+            NodeKind::Call {
+                callee: Box::new(callee.clone()),
+                args: args.clone(),
+                type_args: vec![],
+            },
+        );
+        assert!(desugared_string_method(&bare, &callee, &args).is_none());
     }
 
     #[test]

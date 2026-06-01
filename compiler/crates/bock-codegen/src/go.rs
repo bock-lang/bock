@@ -531,31 +531,11 @@ impl CodeGenerator for GoGenerator {
             }
             ctx.emit_node(module)?;
         }
-        let (body, needs_fmt, needs_sync, needs_time) = ctx.into_parts();
+        let (body, needs) = ctx.into_parts();
 
         // One `package main`, one merged/deduped `import (...)` block.
         let mut content = "package main\n".to_string();
-        let mut imports = Vec::new();
-        if needs_fmt {
-            imports.push("\"fmt\"");
-        }
-        if needs_sync {
-            imports.push("\"sync\"");
-        }
-        if needs_time {
-            imports.push("\"time\"");
-        }
-        if !imports.is_empty() {
-            if imports.len() == 1 {
-                content.push_str(&format!("\nimport {}\n", imports[0]));
-            } else {
-                content.push_str("\nimport (\n");
-                for imp in &imports {
-                    content.push_str(&format!("\t{imp}\n"));
-                }
-                content.push_str(")\n");
-            }
-        }
+        content.push_str(&needs.render_block());
         content.push('\n');
         content.push_str(&body);
 
@@ -590,6 +570,10 @@ struct GoEmitCtx {
     needs_sync_import: bool,
     /// Track whether we need `"time"` import.
     needs_time_import: bool,
+    /// Track whether we need `"strings"` import (String built-in methods).
+    needs_strings_import: bool,
+    /// Track whether we need `"unicode/utf8"` import (`String.len` scalar count).
+    needs_utf8_import: bool,
     /// Package name (defaults to "main").
     package_name: String,
     /// Maps effect operation name → effect type name (e.g., "log" → "Logger").
@@ -863,6 +847,57 @@ struct GoEmitCtx {
     expected_lambda_param_types: Option<Vec<String>>,
 }
 
+/// The set of Go stdlib packages the emitted body needs imported, gathered as
+/// it is generated. Rendered into a single deduped `import (...)` block by
+/// [`GoImportNeeds::render_block`]. Shared by the two emission entry points
+/// ([`GoEmitCtx::into_parts`] for the multi-module bundle and
+/// [`GoEmitCtx::finish`] for the single-module path) so the import logic lives
+/// in one place.
+#[derive(Default, Clone, Copy)]
+struct GoImportNeeds {
+    fmt: bool,
+    sync: bool,
+    time: bool,
+    strings: bool,
+    utf8: bool,
+}
+
+impl GoImportNeeds {
+    /// Render the needed packages as a Go `import` clause (`import "x"` for a
+    /// single package, an `import (...)` block for several), or the empty string
+    /// when nothing is needed. The order matches `gofmt`'s lexical sort.
+    fn render_block(self) -> String {
+        let mut imports = Vec::new();
+        if self.fmt {
+            imports.push("\"fmt\"");
+        }
+        if self.strings {
+            imports.push("\"strings\"");
+        }
+        if self.sync {
+            imports.push("\"sync\"");
+        }
+        if self.time {
+            imports.push("\"time\"");
+        }
+        if self.utf8 {
+            imports.push("\"unicode/utf8\"");
+        }
+        if imports.is_empty() {
+            return String::new();
+        }
+        if imports.len() == 1 {
+            return format!("\nimport {}\n", imports[0]);
+        }
+        let mut block = String::from("\nimport (\n");
+        for imp in &imports {
+            block.push_str(&format!("\t{imp}\n"));
+        }
+        block.push_str(")\n");
+        block
+    }
+}
+
 /// A recorded generic-function signature ([`GoEmitCtx::fn_signatures`]): the
 /// declared generic-param names, each value param's declared type node, and the
 /// return type node. Used to specialise an untyped lambda argument at a call
@@ -878,6 +913,8 @@ impl GoEmitCtx {
             needs_fmt_import: false,
             needs_sync_import: false,
             needs_time_import: false,
+            needs_strings_import: false,
+            needs_utf8_import: false,
             package_name: "main".into(),
             effect_ops: HashMap::new(),
             current_handler_vars: HashMap::new(),
@@ -970,7 +1007,11 @@ impl GoEmitCtx {
                 pascal
             }
         } else {
-            to_camel_case(name)
+            // Private fns and bare value references both route here; escape so a
+            // `camelCase` name colliding with a Go keyword (`default`, `range`,
+            // `type`, …) is mangled identically at the declaration and every
+            // reference, keeping them in sync.
+            go_value_ident(name)
         }
     }
 
@@ -1475,7 +1516,7 @@ impl GoEmitCtx {
     fn map_receiver_kv_go_types(&self, recv: &AIRNode) -> Option<(String, String)> {
         match &recv.kind {
             NodeKind::Identifier { name } => {
-                self.var_map_kv.get(&to_camel_case(&name.name)).cloned()
+                self.var_map_kv.get(&go_value_ident(&name.name)).cloned()
             }
             NodeKind::MapLiteral { entries } => {
                 let keys: Vec<&AIRNode> = entries.iter().map(|e| &e.key).collect();
@@ -1499,7 +1540,7 @@ impl GoEmitCtx {
     fn set_receiver_elem_go_type(&self, recv: &AIRNode) -> Option<String> {
         match &recv.kind {
             NodeKind::Identifier { name } => {
-                self.var_set_elem.get(&to_camel_case(&name.name)).cloned()
+                self.var_set_elem.get(&go_value_ident(&name.name)).cloned()
             }
             NodeKind::SetLiteral { elems } => self.infer_homogeneous_elem_type(elems),
             _ => None,
@@ -1658,7 +1699,7 @@ impl GoEmitCtx {
     fn for_loop_elem_go_type(&self, iterable: &AIRNode) -> Option<String> {
         match &iterable.kind {
             NodeKind::Identifier { name } => {
-                self.var_list_elem.get(&to_camel_case(&name.name)).cloned()
+                self.var_list_elem.get(&go_value_ident(&name.name)).cloned()
             }
             NodeKind::ListLiteral { elems } => self.infer_homogeneous_elem_type(elems),
             NodeKind::Range { .. } => Some("int64".to_string()),
@@ -1676,7 +1717,7 @@ impl GoEmitCtx {
     fn list_receiver_elem_go_type(&self, recv: &AIRNode) -> Option<String> {
         match &recv.kind {
             NodeKind::Identifier { name } => {
-                self.var_list_elem.get(&to_camel_case(&name.name)).cloned()
+                self.var_list_elem.get(&go_value_ident(&name.name)).cloned()
             }
             NodeKind::ListLiteral { elems } => self.infer_homogeneous_elem_type(elems),
             // A `self.field` list receiver inside an impl method (`self.xs.get(i)`
@@ -1701,7 +1742,7 @@ impl GoEmitCtx {
     /// type-inference conservative (untyped lambda params stay `interface{}`).
     fn has_unresolved_operand(node: &AIRNode, scope: &HashMap<String, String>) -> bool {
         match &node.kind {
-            NodeKind::Identifier { name } => !scope.contains_key(&to_camel_case(&name.name)),
+            NodeKind::Identifier { name } => !scope.contains_key(&go_value_ident(&name.name)),
             NodeKind::UnaryOp { operand, .. } => Self::has_unresolved_operand(operand, scope),
             NodeKind::BinaryOp { left, right, .. } => {
                 Self::has_unresolved_operand(left, scope)
@@ -1909,7 +1950,7 @@ impl GoEmitCtx {
                 Literal::Unit => None,
             },
             NodeKind::Identifier { name } => {
-                self.var_go_type.get(&to_camel_case(&name.name)).cloned()
+                self.var_go_type.get(&go_value_ident(&name.name)).cloned()
             }
             NodeKind::Interpolation { .. } => Some("string".to_string()),
             NodeKind::UnaryOp { op, operand } => match op {
@@ -2117,7 +2158,7 @@ impl GoEmitCtx {
                 ..
             } = &p.kind
             {
-                let name = to_camel_case(&self.pattern_to_binding_name(pattern));
+                let name = self.pattern_to_binding_name(pattern);
                 if let Some(elem) = self.optional_elem_go_type(t) {
                     self.var_optional_elem.insert(name.clone(), elem);
                 }
@@ -2166,7 +2207,7 @@ impl GoEmitCtx {
         let saved = self.var_go_type.clone();
         for (i, p) in params.iter().enumerate() {
             if let NodeKind::Param { pattern, ty, .. } = &p.kind {
-                let name = to_camel_case(&self.pattern_to_binding_name(pattern));
+                let name = self.pattern_to_binding_name(pattern);
                 let go_ty = ty
                     .as_deref()
                     .map(|t| self.type_to_go(t))
@@ -2189,7 +2230,7 @@ impl GoEmitCtx {
             .enumerate()
             .filter_map(|(i, p)| {
                 if let NodeKind::Param { pattern, ty, .. } = &p.kind {
-                    let name = to_camel_case(&self.pattern_to_binding_name(pattern));
+                    let name = self.pattern_to_binding_name(pattern);
                     let type_str = ty
                         .as_ref()
                         .map(|t| self.type_to_go(t))
@@ -2226,7 +2267,7 @@ impl GoEmitCtx {
         let NodeKind::Identifier { name } = &receiver.kind else {
             return elem.to_string();
         };
-        let Some((base, args)) = self.var_record_type_args.get(&to_camel_case(&name.name)) else {
+        let Some((base, args)) = self.var_record_type_args.get(&go_value_ident(&name.name)) else {
             return elem.to_string();
         };
         let Some(params) = self.generic_decls.get(base) else {
@@ -2245,7 +2286,7 @@ impl GoEmitCtx {
         match &scrutinee.kind {
             NodeKind::Identifier { name } => self
                 .var_optional_elem
-                .get(&to_camel_case(&name.name))
+                .get(&go_value_ident(&name.name))
                 .cloned(),
             // A direct method call (`it.next()`).
             NodeKind::MethodCall {
@@ -2266,7 +2307,8 @@ impl GoEmitCtx {
                 {
                     if matches!(method, "get" | "first" | "last") {
                         if let NodeKind::Identifier { name } = &recv.kind {
-                            if let Some(elem) = self.var_list_elem.get(&to_camel_case(&name.name)) {
+                            if let Some(elem) = self.var_list_elem.get(&go_value_ident(&name.name))
+                            {
                                 return Some(elem.clone());
                             }
                         }
@@ -2314,7 +2356,7 @@ impl GoEmitCtx {
         match &scrutinee.kind {
             NodeKind::Identifier { name } => self
                 .var_result_elem
-                .get(&to_camel_case(&name.name))
+                .get(&go_value_ident(&name.name))
                 .cloned(),
             NodeKind::Call { callee, args, .. } => match &callee.kind {
                 NodeKind::Identifier { name } => self.fn_result_ret_elem.get(&name.name).cloned(),
@@ -2343,38 +2385,29 @@ impl GoEmitCtx {
     }
 
     /// Returns the emitted body and import flags without building the preamble.
-    fn into_parts(self) -> (String, bool, bool, bool) {
+    fn into_parts(self) -> (String, GoImportNeeds) {
         (
             self.buf,
-            self.needs_fmt_import,
-            self.needs_sync_import,
-            self.needs_time_import,
+            GoImportNeeds {
+                fmt: self.needs_fmt_import,
+                sync: self.needs_sync_import,
+                time: self.needs_time_import,
+                strings: self.needs_strings_import,
+                utf8: self.needs_utf8_import,
+            },
         )
     }
 
     fn finish(self) -> String {
         let mut header = format!("package {}\n", self.package_name);
-        let mut imports = Vec::new();
-        if self.needs_fmt_import {
-            imports.push("\"fmt\"");
-        }
-        if self.needs_sync_import {
-            imports.push("\"sync\"");
-        }
-        if self.needs_time_import {
-            imports.push("\"time\"");
-        }
-        if !imports.is_empty() {
-            if imports.len() == 1 {
-                header.push_str(&format!("\nimport {}\n", imports[0]));
-            } else {
-                header.push_str("\nimport (\n");
-                for imp in &imports {
-                    header.push_str(&format!("\t{imp}\n"));
-                }
-                header.push_str(")\n");
-            }
-        }
+        let needs = GoImportNeeds {
+            fmt: self.needs_fmt_import,
+            sync: self.needs_sync_import,
+            time: self.needs_time_import,
+            strings: self.needs_strings_import,
+            utf8: self.needs_utf8_import,
+        };
+        header.push_str(&needs.render_block());
         header.push('\n');
         header.push_str(&self.buf);
         header
@@ -3165,6 +3198,101 @@ impl GoEmitCtx {
     /// generic Ordering-runtime helper `__bockCompare`, returning a
     /// `__bockOrdering` constant the value-switch / construction sides use. `eq`
     /// → `==`; `to_string`/`display` → `fmt.Sprintf("%v", x)`.
+    /// Lower a desugared `String` built-in method call (`recv_kind =
+    /// "Primitive:String"`) to its native Go string op. Wired into the `Call`
+    /// arm *before* `try_emit_list_method` so a String receiver's
+    /// `len`/`contains`/`is_empty` dispatch here, not through the List path —
+    /// which is the misrouting that broke `String.contains` (the `[]interface{}`
+    /// `fmt.Sprintf("%v", …)` linear scan failed to compile against a `string`).
+    ///
+    /// `len` is the Unicode SCALAR count (`utf8.RuneCountInString(s)`) per spec
+    /// §18.3 — Go's `len(s)` is the BYTE length, so `byte_len` maps to it.
+    /// `replace` replaces ALL occurrences (`strings.ReplaceAll`). `split` returns
+    /// `[]string`, which the read-only `List` built-ins (`len`/…) accept.
+    fn try_emit_string_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_string_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
+            rest.first()
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match method {
+            "len" | "length" | "count" => {
+                self.needs_utf8_import = true;
+                format!("int64(utf8.RuneCountInString({recv_str}))")
+            }
+            "byte_len" => format!("int64(len({recv_str}))"),
+            "is_empty" => format!("(len({recv_str}) == 0)"),
+            "to_upper" => {
+                self.needs_strings_import = true;
+                format!("strings.ToUpper({recv_str})")
+            }
+            "to_lower" => {
+                self.needs_strings_import = true;
+                format!("strings.ToLower({recv_str})")
+            }
+            "trim" => {
+                self.needs_strings_import = true;
+                format!("strings.TrimSpace({recv_str})")
+            }
+            "contains" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.Contains({recv_str}, {p})")
+            }
+            "starts_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.HasPrefix({recv_str}, {p})")
+            }
+            "ends_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.HasSuffix({recv_str}, {p})")
+            }
+            "replace" => {
+                let Some(from) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(to) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.ReplaceAll({recv_str}, {from}, {to})")
+            }
+            "split" => {
+                let Some(sep) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.Split({recv_str}, {sep})")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     fn try_emit_primitive_bridge(
         &mut self,
         node: &AIRNode,
@@ -3965,7 +4093,7 @@ impl GoEmitCtx {
             .iter()
             .filter_map(|p| {
                 if let NodeKind::Param { pattern, .. } = &p.kind {
-                    Some(to_camel_case(&self.pattern_to_binding_name(pattern)))
+                    Some(self.pattern_to_binding_name(pattern))
                 } else {
                     None
                 }
@@ -4141,7 +4269,7 @@ impl GoEmitCtx {
             .iter()
             .filter_map(|p| {
                 if let NodeKind::Param { pattern, ty, .. } = &p.kind {
-                    let name = to_camel_case(&self.pattern_to_binding_name(pattern));
+                    let name = self.pattern_to_binding_name(pattern);
                     let type_str = ty
                         .as_ref()
                         .map(|t| format!(" {}", self.type_to_go(t)))
@@ -4271,14 +4399,14 @@ impl GoEmitCtx {
                     // `match binding { Some(x) => ... }` can type-assert `x`.
                     if let Some(elem) = self.optional_elem_go_type(t) {
                         self.var_optional_elem
-                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
+                            .insert(self.pattern_to_binding_name(pattern), elem);
                     }
                     // Record a `List[T]` binding's element type so a later
                     // `match binding.get(i) { Some(x) => ... }` can type-assert
                     // the `interface{}` payload.
                     if let Some(elem) = self.list_elem_go_type(t) {
                         self.var_list_elem
-                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
+                            .insert(self.pattern_to_binding_name(pattern), elem);
                     }
                     // Record a `Map[K, V]` / `Set[E]` binding's element Go types
                     // so a later built-in method (`m.get(k)`, `s.contains(x)`,
@@ -4286,18 +4414,18 @@ impl GoEmitCtx {
                     // receiver `map[K]V` / `map[E]struct{}`.
                     if let Some(kv) = self.map_kv_go_types(t) {
                         self.var_map_kv
-                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), kv);
+                            .insert(self.pattern_to_binding_name(pattern), kv);
                     }
                     if let Some(elem) = self.set_elem_go_type(t) {
                         self.var_set_elem
-                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
+                            .insert(self.pattern_to_binding_name(pattern), elem);
                     }
                     // Record a `Result[T, E]` binding's Ok/Err types so a later
                     // `match binding { Ok(v) => ...; Err(e) => ... }` can
                     // type-assert the bound payload.
                     if let Some(elems) = self.result_elem_go_types(t) {
                         self.var_result_elem
-                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elems);
+                            .insert(self.pattern_to_binding_name(pattern), elems);
                     }
                     // Record a generic-record binding's concrete instantiation
                     // (`let c: ListIter[Int]` → `("ListIter", ["int64"])`) so a
@@ -4305,10 +4433,8 @@ impl GoEmitCtx {
                     // generic `Optional[T]` payload to the concrete arg (`int64`)
                     // rather than the undefined-in-caller `T`.
                     if let Some(record_args) = self.record_type_args(t) {
-                        self.var_record_type_args.insert(
-                            to_camel_case(&self.pattern_to_binding_name(pattern)),
-                            record_args,
-                        );
+                        self.var_record_type_args
+                            .insert(self.pattern_to_binding_name(pattern), record_args);
                     }
                     let type_str = self.type_to_go(t);
                     let ind = self.indent_str();
@@ -4348,11 +4474,11 @@ impl GoEmitCtx {
                     // `map[K]V` / `map[E]struct{}` rather than `interface{}`.
                     if let Some(kv) = self.value_map_kv_go_types(value) {
                         self.var_map_kv
-                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), kv);
+                            .insert(self.pattern_to_binding_name(pattern), kv);
                     }
                     if let Some(elem) = self.value_set_elem_go_type(value) {
                         self.var_set_elem
-                            .insert(to_camel_case(&self.pattern_to_binding_name(pattern)), elem);
+                            .insert(self.pattern_to_binding_name(pattern), elem);
                     }
                     // Record an untyped binding's concrete generic-record args
                     // when its value is a call returning one (`__it := bag.Iter()`
@@ -4361,10 +4487,8 @@ impl GoEmitCtx {
                     // to the concrete arg. This is the `for x in <Iterable>`
                     // desugar case, whose gensym binding carries no annotation.
                     if let Some(record_args) = self.value_record_type_args(value) {
-                        self.var_record_type_args.insert(
-                            to_camel_case(&self.pattern_to_binding_name(pattern)),
-                            record_args,
-                        );
+                        self.var_record_type_args
+                            .insert(self.pattern_to_binding_name(pattern), record_args);
                     }
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}{binding} := ");
@@ -4439,7 +4563,7 @@ impl GoEmitCtx {
                 if let (NodeKind::BindPat { name, .. }, Some(elem)) =
                     (&pattern.kind, self.for_loop_elem_go_type(iterable))
                 {
-                    self.var_go_type.insert(to_camel_case(&name.name), elem);
+                    self.var_go_type.insert(go_value_ident(&name.name), elem);
                 }
                 self.emit_block_body(body)?;
                 self.var_go_type = saved_go_types;
@@ -4828,6 +4952,13 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_set_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // String method dispatch runs *before* the List recogniser so the
+                // overlapping `len`/`contains`/`is_empty` names route by the
+                // checker's `recv_kind = "Primitive:String"`, not by name alone —
+                // the fix for `String.contains` being misrouted to the List scan.
+                if self.try_emit_string_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {
@@ -6086,7 +6217,7 @@ impl GoEmitCtx {
     fn collect_binds_go(&self, pat: &AIRNode, access: &str, out: &mut String) {
         match &pat.kind {
             NodeKind::BindPat { name, .. } => {
-                let n = to_camel_case(&name.name);
+                let n = go_value_ident(&name.name);
                 let _ = write!(out, "{n} := {access}; _ = {n}; ");
             }
             NodeKind::ConstructorPat { path, fields } => {
@@ -6183,7 +6314,7 @@ impl GoEmitCtx {
             // so the body's references resolve (the Go binding-drop fix).
             if value_switch_binds {
                 if let NodeKind::BindPat { name, .. } = &pattern.kind {
-                    let n = to_camel_case(&name.name);
+                    let n = go_value_ident(&name.name);
                     self.writeln(&format!("{n} := __v; _ = {n}"));
                 }
             }
@@ -6669,7 +6800,13 @@ impl GoEmitCtx {
 
     fn pattern_to_binding_name(&self, pat: &AIRNode) -> String {
         match &pat.kind {
-            NodeKind::BindPat { name, .. } => to_camel_case(&name.name),
+            // A bound value name, keyword-escaped. This is the single Go
+            // value-binding funnel: params, `let` bindings, and the
+            // scope-inference map keys all derive from it, so the escape lands
+            // identically everywhere and never strips back to a bare keyword (the
+            // outer callers no longer re-run `to_camel_case`, which would drop a
+            // trailing escape `_`).
+            NodeKind::BindPat { name, .. } => go_value_ident(&name.name),
             NodeKind::WildcardPat => "_".into(),
             NodeKind::TuplePat { elems } => {
                 // Go doesn't have tuple destructuring; use first element.
@@ -6711,6 +6848,23 @@ impl GoEmitCtx {
 /// the runtime prelude's `Some`/`None`/`Ok`/`Err` types.
 fn is_prelude_ctor(s: &str) -> bool {
     matches!(s, "Some" | "None" | "Ok" | "Err")
+}
+
+/// Convert a Bock *value* identifier (a param, local binding, or private
+/// free-function name) to its Go form: `camelCase`, then escaped against the Go
+/// keyword set so a binding named e.g. `default`/`range`/`type` emits
+/// `default_`/`range_`/`type_` rather than the illegal bare keyword. Apply at
+/// every value declaration and reference site **and** the type-inference
+/// scope-map keys, so the escaped name is used uniformly and the maps stay
+/// aligned with the emitted name. Member/field/method names and exported
+/// (PascalCased) names use bare casing — a keyword is legal as a Go field name,
+/// and PascalCasing already lifts a name out of the lowercase keyword set.
+/// See [`crate::generator::escape_target_keyword`].
+fn go_value_ident(name: &str) -> String {
+    crate::generator::escape_target_keyword(
+        &to_camel_case(name),
+        crate::generator::KeywordTarget::Go,
+    )
 }
 
 /// Convert a name to `camelCase` (Go unexported).

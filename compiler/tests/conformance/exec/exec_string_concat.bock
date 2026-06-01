@@ -1,0 +1,20 @@
+// TEST: exec_string_concat
+// EXPECT: output "abc;hello world;XY"
+// EXPECT: targets js, ts, python, rust, go
+//
+// `String + String` concatenation via the `+` operator. JS/TS/Python/Go all
+// concat strings with `+` natively; Rust's `String + String` does NOT compile
+// (`Add<String>` is unimplemented — only `String + &str`), so the Rust backend
+// rewrites a string-operand `+` to `format!("{}{}", l, r)`. This fixture is the
+// regression guard for that rewrite, including a chained `a + b + c` (whose
+// nested `+` is itself a String) and a concat of a string-method result.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn main() -> Void {
+  let a = "a" + "b" + "c"
+  let greeting = "hello" + " " + "world"
+  let mixed = "x".to_upper() + "y".to_upper()
+  println("${a};${greeting};${mixed}")
+}
