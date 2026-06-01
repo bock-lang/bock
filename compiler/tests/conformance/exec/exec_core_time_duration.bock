@@ -1,0 +1,41 @@
+// TEST: exec_core_time_duration
+// EXPECT: output "2500;1500;1500;60;-60000000000"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Cross-target proof that the §18.3.1 `Duration` surface — the builtin span type
+// stored as signed nanoseconds — constructs, does arithmetic, and reports its
+// components identically on every target. `Duration`, its constructors, methods,
+// and `+`/`-`/`*` operators are compiler builtins (registered in `bock-core`'s
+// primitive registry and lowered inline by every backend), NOT a `core.*` Bock
+// module — so this fixture exercises the prelude-builtin `Duration` directly,
+// with no `use`.
+//
+// The five printed fields are integer-only on every target (Python `/` is float
+// division, so `Duration / Int` and `Bool` interpolation are deliberately
+// avoided — see exec_iter_combinators.bock for the same integer-only discipline):
+//   * sum     = 2s + 500ms                  -> as_millis() == 2500
+//   * diff    = 2s - 500ms                  -> as_millis() == 1500
+//   * scaled  = 500ms * 3                    -> as_millis() == 1500
+//   * absd    = (0 - 1min).abs()            -> as_seconds() == 60
+//   * neg     = 0 - 1min                     -> as_nanos()  == -60000000000
+// => "2500;1500;1500;60;-60000000000". This exercises the `seconds`/`millis`/
+// `minutes`/`zero` constructors, the `+`/`-`/`*` operator overloads, `abs`, and
+// the `as_millis`/`as_seconds`/`as_nanos` accessors — the deterministic subset of
+// §18.3.1. `Instant`/`now`/`sleep` are intentionally excluded: they read the host
+// monotonic clock and are non-deterministic (and shim-gated), so they cannot have
+// a fixed expected output.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let a = Duration.seconds(2)
+  let b = Duration.millis(500)
+  let sum = a + b
+  let diff = a - b
+  let scaled = b * 3
+  let neg = Duration.zero() - Duration.minutes(1)
+  let absd = neg.abs()
+  println("${sum.as_millis()};${diff.as_millis()};${scaled.as_millis()};${absd.as_seconds()};${neg.as_nanos()}")
+}
