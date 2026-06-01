@@ -1,0 +1,29 @@
+// TEST: stdlib_result_no_errors
+// EXPECT: no_errors
+//
+// A user file importing every `core.result` utility resolves cleanly through
+// the embedded stdlib and type-checks. Each free function is exercised against
+// a concrete `Result[Int, String]`:
+//
+//   * and_then(r, f)       — f: Fn(Int) -> Result[Int, String], chaining
+//   * unwrap_or_else(r, f) — f: Fn(String) -> Int, lazy fallback from the error
+//   * unwrap_err(r, fb)    — extract the String error, fb on Ok
+//   * ok(r) / err(r)       — project to Optional[Int] / Optional[String]
+//
+// The higher-order utilities (`and_then`/`unwrap_or_else`) receive Bock
+// lambdas, exercising the function-typed parameters. None of these duplicate a
+// built-in `Result` method (`is_ok`/`is_err`/`unwrap`/`unwrap_or`/`map`/
+// `map_err`), so they are pure stdlib additions.
+module userapp
+
+use core.result.{and_then, unwrap_or_else, unwrap_err, ok, err}
+
+public fn all_utilities() -> Int {
+  let r: Result[Int, String] = Ok(7)
+  let chained: Result[Int, String] = and_then(r, (x) => Ok(x + 1))
+  let recovered: Int = unwrap_or_else(Err("boom"), (e) => 0)
+  let extracted: String = unwrap_err(Err("boom"), "none")
+  let some_ok: Optional[Int] = ok(r)
+  let some_err: Optional[String] = err(Err("boom"))
+  recovered
+}

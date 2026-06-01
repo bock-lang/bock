@@ -1,0 +1,74 @@
+// TEST: exec_core_result
+// EXPECT: output "chain=14;rec=42;errp=boom;ok=11;err=oops"
+// EXPECT: targets js, ts, python, rust
+//
+// Cross-target proof that the pure-Bock `core.result` utilities run, each driven
+// by a `match r { Ok(x) => …; Err(e) => … }`. These are the complement of the
+// built-in `Result` method set (`is_ok`/`is_err`/`unwrap`/`unwrap_or`/`map`/
+// `map_err`), which the runtime already lowers ×5.
+//
+// Fields (all integer arithmetic; Python `/` is float division so no `/` used):
+//   * chain: and_then(ok7, dbl) = Ok(14); unwrap_or 0                      => 14
+//   * rec:   unwrap_or_else(boom1, forty_two)        (lazy fallback)       => 42
+//   * errp:  unwrap_err(boom2, "none")               (extract Err payload) => boom
+//   * ok:    ok(ok11) = Some(11); Optional.unwrap_or 0                     => 11
+//   * err:   err(oops) = Some("oops"); Optional.unwrap_or "none"          => oops
+//
+// `ok`/`err` return prelude `Optional`, finished with the built-in
+// `Optional.unwrap_or` — exercising both the new free functions and the hand-off
+// to the built-in container methods.
+//
+// TARGETS — js, ts, python, rust (NOT go). FOUND: Go codegen cannot resolve the
+// generic type parameters of a free function over the built-in `Result`/
+// `Optional` containers — those runtimes are emitted as the *monomorphic* Go
+// structs `__bockResult`/`__bockOption`, so a Bock `fn f[T, E](r: Result[T, E])`
+// emits `func f[T any, E any](r __bockResult)` with `T`/`E` disconnected from
+// the (non-generic) argument, and `go build` fails with `cannot infer T`/`E`.
+// Bock has no call-site type-argument (turbofish) syntax to pin them. This is a
+// pre-existing compiler-side gap (independent of this module), reported, not
+// fixed here (stdlib-only session). `core.iter`'s generics run on Go only
+// because they range over the *generic* record `ListIterator[T]`.
+//
+// AUTHORING NOTES (route around two further compiler-side gaps on the typed
+// backends, also FOUND, also not stdlib defects):
+//   1. Each `Result` argument is a TYPED `let` binding so its unused-arm type
+//      parameter is pinned (a bare `Ok(7)` leaves the `Err` type var
+//      unconstrained, which ts/rust then infer wrongly). Each *consuming* call
+//      gets its OWN binding (`boom1`/`boom2`/…) because the free functions take
+//      their `Result` by value and `Result` is not `Copy` in Rust — reusing one
+//      binding across two calls is an E0382 move error. `err` is exercised on an
+//      `Err` value (`oops`) so its `E` arm is present and inferable.
+//   2. The higher-order utilities (`and_then`/`unwrap_or_else`) are driven with
+//      NAMED callbacks (`dbl`/`forty_two`); an inline `(x) => Ok(x * 2)` whose
+//      body is a constructor literal mis-codegens on js/ts.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale — moot here as Go is excluded, but kept for parity).
+module main
+
+use core.result.{and_then, unwrap_or_else, unwrap_err, ok, err}
+
+fn dbl(x: Int) -> Result[Int, String] {
+  Ok(x * 2)
+}
+
+fn forty_two(e: String) -> Int {
+  42
+}
+
+fn main() -> Void {
+  let ok7: Result[Int, String] = Ok(7)
+  let boom1: Result[Int, String] = Err("boom")
+  let boom2: Result[Int, String] = Err("boom")
+  let ok11: Result[Int, String] = Ok(11)
+  let oops: Result[Int, String] = Err("oops")
+  let chained: Result[Int, String] = and_then(ok7, dbl)
+  let chain: Int = chained.unwrap_or(0)
+  let rec: Int = unwrap_or_else(boom1, forty_two)
+  let errp: String = unwrap_err(boom2, "none")
+  let ok_opt: Optional[Int] = ok(ok11)
+  let ok_val: Int = ok_opt.unwrap_or(0)
+  let err_opt: Optional[String] = err(oops)
+  let err_val: String = err_opt.unwrap_or("none")
+  println("chain=${chain};rec=${rec};errp=${errp};ok=${ok_val};err=${err_val}")
+}

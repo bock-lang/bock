@@ -1,0 +1,89 @@
+//! `core.result` — free-function utilities over the built-in `Result[T, E]`.
+//!
+//! `Result[T, E]`, `Ok`, and `Err` are part of the prelude, and a core set of
+//! methods already lowers on every target (`is_ok`/`is_err`/`unwrap`/
+//! `unwrap_or`/`map`/`map_err` — see the compiler's `RESULT_METHODS`). This
+//! module is pure Bock (no per-target runtime shim, like `core.compare`/
+//! `core.iter`) and ships the **complementary** combinators that the built-in
+//! method set does not cover, each driven by a `match r { Ok(x) => …; Err(e) =>
+//! … }`:
+//!
+//!   * [`and_then`] — monadic chaining (`Fn(T) -> Result[U, E]`), the
+//!     `Result` analogue of `Optional.flat_map`, which has no built-in method.
+//!   * [`unwrap_or_else`] — lazy fallback computed from the `Err` payload,
+//!     complementing the eager built-in `unwrap_or`.
+//!   * [`unwrap_err`] — extract the `Err` payload (the built-in `unwrap` only
+//!     extracts `Ok`); falls back to `fallback` on an `Ok`.
+//!   * [`ok`] / [`err`] — project a `Result` into an `Optional`, discarding the
+//!     other arm. `Optional` is prelude, so these return `Some`/`None` directly.
+//!
+//! The shapes that would duplicate a built-in method (`is_ok`/`is_err`/
+//! `unwrap`/`unwrap_or`/`map`/`map_err`) are intentionally **omitted** — call
+//! the built-in methods (`r.is_ok()`, `r.map(f)`, …) instead.
+
+module core.result
+
+/// Chains a fallible computation onto the `Ok` arm of `r`.
+///
+/// Returns `f(x)` when `r` is `Ok(x)`, and re-wraps the original `Err(e)`
+/// unchanged otherwise. This is the `Result` counterpart to `Optional.flat_map`
+/// (which the built-in method set provides for `Optional` but not `Result`):
+/// use it to sequence operations that each return a `Result`, short-circuiting
+/// on the first `Err`.
+public fn and_then[T, E, U](r: Result[T, E], f: Fn(T) -> Result[U, E]) -> Result[U, E] {
+  match r {
+    Ok(x) => return f(x)
+    Err(e) => return Err(e)
+  }
+}
+
+/// Returns the `Ok` payload of `r`, or computes a fallback from the `Err`
+/// payload.
+///
+/// The lazy companion to the built-in `r.unwrap_or(default)`: where `unwrap_or`
+/// takes an already-computed default, `unwrap_or_else` invokes `f(e)` on the
+/// `Err` payload only when `r` is `Err`, so an expensive fallback is built only
+/// when it is needed.
+public fn unwrap_or_else[T, E](r: Result[T, E], f: Fn(E) -> T) -> T {
+  match r {
+    Ok(x) => return x
+    Err(e) => return f(e)
+  }
+}
+
+/// Returns the `Err` payload of `r`, or `fallback` when `r` is `Ok`.
+///
+/// The `Err`-side mirror of the built-in `r.unwrap()` (which extracts the `Ok`
+/// payload): use it to read the error of a `Result` you expect to have failed,
+/// supplying a `fallback` for the `Ok` case rather than aborting.
+public fn unwrap_err[T, E](r: Result[T, E], fallback: E) -> E {
+  match r {
+    Ok(_) => return fallback
+    Err(e) => return e
+  }
+}
+
+/// Projects `r` onto its `Ok` arm, discarding any error.
+///
+/// Returns `Some(x)` when `r` is `Ok(x)`, and `None` when `r` is `Err(_)`.
+/// `Optional` is in the prelude, so the `Some`/`None` constructors are used
+/// directly. This is the idiomatic way to turn a `Result` into an `Optional`
+/// when the error is not needed.
+public fn ok[T, E](r: Result[T, E]) -> Optional[T] {
+  match r {
+    Ok(x) => return Some(x)
+    Err(_) => return None
+  }
+}
+
+/// Projects `r` onto its `Err` arm, discarding any success value.
+///
+/// Returns `Some(e)` when `r` is `Err(e)`, and `None` when `r` is `Ok(_)` — the
+/// complement of [`ok`]. Use it to extract the error of a `Result` as an
+/// `Optional` for the cases where the success value does not matter.
+public fn err[T, E](r: Result[T, E]) -> Optional[E] {
+  match r {
+    Ok(_) => return None
+    Err(e) => return Some(e)
+  }
+}
