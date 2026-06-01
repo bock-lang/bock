@@ -97,10 +97,10 @@ impl CodeGenerator for RsGenerator {
         ctx.generic_decls =
             crate::generator::collect_generic_decls(&[(module, std::path::Path::new(""))]);
         ctx.collect_clone_targets(module);
-        ctx.collect_self_operand_methods(&crate::generator::collect_trait_decls(&[(
-            module,
-            std::path::Path::new(""),
-        )]));
+        let trait_decls =
+            crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
+        ctx.collect_self_operand_methods(&trait_decls);
+        ctx.trait_decls = trait_decls;
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -147,7 +147,9 @@ impl CodeGenerator for RsGenerator {
         // the `<T>` declared on `record Box[T]` even across module boundaries,
         // and the clone-target set so `RecordDecl` emission can derive `Clone`.
         ctx.generic_decls = crate::generator::collect_generic_decls(modules);
-        ctx.collect_self_operand_methods(&crate::generator::collect_trait_decls(modules));
+        let trait_decls = crate::generator::collect_trait_decls(modules);
+        ctx.collect_self_operand_methods(&trait_decls);
+        ctx.trait_decls = trait_decls;
         for (module, _) in modules {
             ctx.collect_clone_targets(module);
         }
@@ -263,6 +265,12 @@ struct RsEmitCtx {
     /// `filter[T](.., pred: Fn(T) -> Bool)`), and concrete v1 element types are
     /// `Clone`. Saved/restored around each arm so it never leaks across arms.
     reused_match_bindings: std::collections::HashSet<String>,
+    /// The bundle's user-declared traits (keyed by name). Used to distinguish a
+    /// `T: Equatable` bound that is a real user trait (it has an `impl`, so the
+    /// bound and the `.eq` call dispatch normally) from the compiler-provided
+    /// sealed-core conformance, which must be lowered to the Rust std trait /
+    /// native operator (GAP-C). See [`crate::generator::is_unimplemented_sealed_core_trait`].
+    trait_decls: crate::generator::TraitDeclRegistry,
 }
 
 impl RsEmitCtx {
@@ -285,6 +293,7 @@ impl RsEmitCtx {
             in_clone_self_method: false,
             self_operand_methods: std::collections::HashSet::new(),
             reused_match_bindings: std::collections::HashSet::new(),
+            trait_decls: crate::generator::TraitDeclRegistry::new(),
         }
     }
 
@@ -1240,6 +1249,48 @@ impl RsEmitCtx {
         else {
             return Ok(false);
         };
+        // Floats are only `PartialOrd` in Rust; everything else is `Ord`.
+        let partial = prim.starts_with("Float") || prim == "BigFloat" || prim == "Decimal";
+        self.emit_bridge_method(recv, method, rest, partial)
+    }
+
+    /// Lower a sealed-core-trait bridge method on a *bounded generic type
+    /// variable* (`a.eq(b)` / `a.compare(b)` / `a.to_string()` inside
+    /// `eq_check[T: Equatable]`) to its Rust intrinsic. The generic analogue of
+    /// [`Self::try_emit_primitive_bridge`] (GAP-C): the receiver is `T`, whose
+    /// sealed-core bound is rewritten to the matching std trait
+    /// (`Equatable`→`PartialEq`, `Comparable`→`Ord`, `Displayable`→`Display`) at
+    /// the signature, so `==` / `.cmp(&…)` / `.to_string()` type-check. Only fires
+    /// when the bound trait is sealed-core and NOT a user-declared trait (a user
+    /// trait provides the method through its own `impl`).
+    fn try_emit_trait_bound_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, _tr)) =
+            crate::generator::trait_bound_bridge_call(node, callee, args, &self.trait_decls)
+        else {
+            return Ok(false);
+        };
+        // A generic `T: Ord` always uses the total-order `.cmp`; there is no
+        // partial-order generic bound (a `Float`-only bound is not expressible).
+        self.emit_bridge_method(recv, method, rest, false)
+    }
+
+    /// Shared body of the primitive / trait-bound bridges: emit the native Rust
+    /// form of `compare` (`Ordering` via `.cmp`/`.partial_cmp`), `eq` (`==`), or
+    /// `to_string`/`display` (`.to_string()`) for the receiver + remaining args.
+    /// `partial` selects `.partial_cmp(..).unwrap()` over `.cmp(..)` for the
+    /// `PartialOrd`-only float types.
+    fn emit_bridge_method(
+        &mut self,
+        recv: &AIRNode,
+        method: &str,
+        rest: &[bock_air::AirArg],
+        partial: bool,
+    ) -> Result<bool, CodegenError> {
         let recv_str = self.expr_to_string(recv)?;
         let code = match method {
             "compare" => {
@@ -1247,8 +1298,7 @@ impl RsEmitCtx {
                     return Ok(false);
                 };
                 let other = self.expr_to_string(&other.value)?;
-                // Floats are only `PartialOrd` in Rust; everything else is `Ord`.
-                if prim.starts_with("Float") || prim == "BigFloat" || prim == "Decimal" {
+                if partial {
                     format!("({recv_str}).partial_cmp(&({other})).unwrap()")
                 } else {
                     format!("({recv_str}).cmp(&({other}))")
@@ -1534,13 +1584,7 @@ impl RsEmitCtx {
                 let mut bounds: Vec<String> = p
                     .bounds
                     .iter()
-                    .map(|b| {
-                        b.segments
-                            .iter()
-                            .map(|s| s.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join("::")
-                    })
+                    .map(|b| self.rs_bound_to_string(b))
                     .collect();
                 if add_clone && !bounds.iter().any(|b| b == "Clone") {
                     bounds.push("Clone".to_string());
@@ -1571,6 +1615,34 @@ impl RsEmitCtx {
         }
     }
 
+    /// Render one generic-param bound to its Rust trait spelling, mapping a
+    /// compiler-provided sealed-core trait (`Equatable`/`Comparable`/`Displayable`/
+    /// `Hashable`) that has no user `impl` to its std-trait equivalent
+    /// (`PartialEq`/`Ord`/`std::fmt::Display`/`Hash`) — GAP-C. A `T: Equatable`
+    /// bound references a trait that does not exist in Rust, so a primitive (or
+    /// any) instantiation fails `E0405`; the std equivalent lets the native
+    /// `==`/`.cmp(..)`/`.to_string()` lowering type-check. A user-declared trait of
+    /// the same name (a real `impl` exists) keeps its name.
+    fn rs_bound_to_string(&self, b: &bock_ast::TypePath) -> String {
+        let name = b
+            .segments
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join("::");
+        if crate::generator::is_unimplemented_sealed_core_trait(&name, &self.trait_decls) {
+            match name.as_str() {
+                "Equatable" => "PartialEq".to_string(),
+                "Comparable" => "Ord".to_string(),
+                "Displayable" => "std::fmt::Display".to_string(),
+                "Hashable" => "std::hash::Hash".to_string(),
+                _ => name,
+            }
+        } else {
+            name
+        }
+    }
+
     fn generic_params_to_rs(&self, params: &[bock_ast::GenericParam]) -> String {
         if params.is_empty() {
             return String::new();
@@ -1584,13 +1656,7 @@ impl RsEmitCtx {
                     let bounds: Vec<String> = p
                         .bounds
                         .iter()
-                        .map(|b| {
-                            b.segments
-                                .iter()
-                                .map(|s| s.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join("::")
-                        })
+                        .map(|b| self.rs_bound_to_string(b))
                         .collect();
                     format!("{}: {}", p.name.name, bounds.join(" + "))
                 }
@@ -1610,13 +1676,7 @@ impl RsEmitCtx {
                 let bounds: Vec<String> = c
                     .bounds
                     .iter()
-                    .map(|b| {
-                        b.segments
-                            .iter()
-                            .map(|s| s.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join("::")
-                    })
+                    .map(|b| self.rs_bound_to_string(b))
                     .collect();
                 format!("{}: {}", c.param.name, bounds.join(" + "))
             })
@@ -2828,6 +2888,9 @@ impl RsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_trait_bound_bridge(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_container_method(node, callee, args)? {

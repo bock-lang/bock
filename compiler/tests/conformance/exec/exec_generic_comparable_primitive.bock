@@ -1,0 +1,41 @@
+// TEST: exec_generic_comparable_primitive
+// EXPECT: output "9;9;7"
+// EXPECT: targets js, ts, python, rust, go
+//
+// GAP-C (Comparable half): a generic free fn bounded by the SEALED CORE trait
+// `Comparable` — `fn max2[T: Comparable](a: T, b: T) -> T` — instantiated with a
+// PRIMITIVE element type (`Int`).
+//
+// The checker resolves `a.compare(b)` on the bounded type var `T` and stamps the
+// call `recv_kind = "TraitBound:Comparable"`. For a primitive the operands do
+// NOT `impl Comparable` in any target, so passing `T: Comparable` / `a.compare(b)`
+// through verbatim produced an undefined trait/interface and an undefined method.
+//
+// The fix mirrors the existing `Primitive:<Ty>` bridge for the generic-bound
+// case: a `TraitBound:Comparable` whose trait is in `SEALED_CORE_TRAITS` and is
+// NOT a user-declared trait lowers NATIVELY — `a.compare(b)` becomes the target's
+// native ordering (`Less`/`Equal`/`Greater` arms map to `<`/`==`/`>`), and the
+// bound becomes the target's built-in ordered constraint (`cmp.Ordered` on Go,
+// dropped on Rust in favour of native comparison operators).
+//
+// `max2` returns the larger of two `Int`s by matching `a.compare(b)`. Output
+// `9;9;7`: max2(9, 7) = 9, max2(7, 9) = 9, max2(7, 7) = 7.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn max2[T: Comparable](a: T, b: T) -> T {
+  match a.compare(b) {
+    Less => return b
+    Equal => return a
+    Greater => return a
+  }
+}
+
+fn main() -> Void {
+  let m1: Int = max2(9, 7)
+  let m2: Int = max2(7, 9)
+  let m3: Int = max2(7, 7)
+  println("${m1};${m2};${m3}")
+}

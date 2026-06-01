@@ -1349,6 +1349,38 @@ impl TsEmitCtx {
         else {
             return Ok(false);
         };
+        self.emit_bridge_method(recv, method, rest)
+    }
+
+    /// Lower a sealed-core-trait bridge method on a *bounded generic type
+    /// variable* (`a.eq(b)` / `a.compare(b)` inside `eq_check[T: Equatable]`) to
+    /// its TS form (GAP-C). The method body is identical to the `Primitive:<Ty>`
+    /// bridge; the `<T extends Equatable>` bound is separately dropped at the
+    /// signature (see `generic_params_to_ts`). Fires only when the bound trait is
+    /// sealed-core and NOT a user-declared trait.
+    fn try_emit_trait_bound_bridge(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest, _tr)) =
+            crate::generator::trait_bound_bridge_call(node, callee, args, &self.trait_decls)
+        else {
+            return Ok(false);
+        };
+        self.emit_bridge_method(recv, method, rest)
+    }
+
+    /// Shared body of the primitive / trait-bound bridges: emit the native TS form
+    /// of `compare` (the `Ordering` ternary), `eq` (`===`), or `to_string`/
+    /// `display` (`String(..)`).
+    fn emit_bridge_method(
+        &mut self,
+        recv: &AIRNode,
+        method: &str,
+        rest: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
         let recv_str = self.expr_to_string(recv)?;
         match method {
             "compare" => {
@@ -1547,20 +1579,32 @@ impl TsEmitCtx {
         let items: Vec<String> = params
             .iter()
             .map(|p| {
-                if p.bounds.is_empty() {
+                // Drop a compiler-provided sealed-core bound (`Equatable`/…) with no
+                // user `impl`: TS has no such type, so `<T extends Equatable>` fails
+                // `tsc` with TS2304 (GAP-C). The method is lowered to a native
+                // operator (`===`/comparison) by `try_emit_trait_bound_bridge`, so
+                // an unconstrained `<T>` is correct. A user-declared trait of the
+                // same name keeps its `extends` bound.
+                let bounds: Vec<String> = p
+                    .bounds
+                    .iter()
+                    .map(|b| {
+                        b.segments
+                            .iter()
+                            .map(|s| s.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(".")
+                    })
+                    .filter(|name| {
+                        !crate::generator::is_unimplemented_sealed_core_trait(
+                            name,
+                            &self.trait_decls,
+                        )
+                    })
+                    .collect();
+                if bounds.is_empty() {
                     p.name.name.clone()
                 } else {
-                    let bounds: Vec<String> = p
-                        .bounds
-                        .iter()
-                        .map(|b| {
-                            b.segments
-                                .iter()
-                                .map(|s| s.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(".")
-                        })
-                        .collect();
                     format!("{} extends {}", p.name.name, bounds.join(" & "))
                 }
             })
@@ -2902,6 +2946,9 @@ impl TsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_trait_bound_bridge(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_container_method(node, callee, args)? {
@@ -4355,7 +4402,14 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("T extends Comparable"), "got: {out}");
+        // GAP-C: `Comparable` is a sealed-core trait with no user `impl` in this
+        // module, so the `extends Comparable` bound (no such TS type) is dropped to
+        // a bare `<T>`; the `.compare` call is lowered to a native operator. A
+        // user-declared `Comparable` would keep its `extends` (see use_core_compare).
+        assert!(
+            out.contains("function sorted<T>(x: T): T {") && !out.contains("extends"),
+            "got: {out}"
+        );
     }
 
     // ── Traits → Interfaces ─────────────────────────────────────────────────
