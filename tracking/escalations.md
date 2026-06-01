@@ -319,3 +319,14 @@ correcting. **New question for Design alongside DQ25: is bare effect-op invocati
 is the `with`-clause the v1 form (→ correct the spec/fixtures)?** Sequencing of the effect-foundation fixes
 (DV16 / Q-effect-conformance-wiring / Q-effect-interp-rust) vs. shipping core.effect on the working subset is an
 operator call (surfaced in-chat).
+
+**Foundation hardened (2026-06-01 01:31 UTC) — strengthens Q2/Q8:** the operator chose "harden the effect
+foundation first"; a Plan pass confirmed the §10.4 gap was a fixable resolver/checker bug (NOT a v1-scope limit),
+and **#155 landed it: ALL §10 invocation forms now execute ×5** — §10.2 `with`-clause (incl. op-in-interpolation,
+the Rust fix), §10.4 canonical bare-op-in-`handling`, §10.3 Layer-1 innermost-shadow + Layer-2 module handler,
+cross-module — and the previously-inert `effects/` suite now runs (6 `exec_effect_*` fixtures ×5). DV16 RESOLVED.
+**So Q2 is now strongly YES** — an executable `core.effect` `Log` is shippable ×5 via the *canonical* §10.4 bare-op
+surface (no `with`-clause-only constraint anymore). **The core.effect floor BUILD is now gated ONLY on Design/owner
+answering Q1/Q2** (primitives-only floor + an executable `Log`?). Orchestrator recommendation stands: primitives-
+only + a single `Log` effect (`fn log(message: String) -> Void`) + a `ConsoleLog` record handler + constructor.
+Residue (non-blocking): Q-effect-op-node-lowering (E1001-vs-E8020), Q-effect-import-unused (cosmetic W1001).

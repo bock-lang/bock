@@ -11,7 +11,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 - Blocked: 5
 - Deferred: 1
 
-## Build status (as of main 9f1a2bd, 2026-05-31)
+## Build status (as of main 4881438, 2026-05-31)
 
 | What | State |
 |------|-------|
@@ -21,7 +21,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |
 | `mdbook build docs` | clean |
 | CI on `main` | green; cache via Swatinem/rust-cache@v2.9.1 (#116, faster) |
-| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **300 exec pairs (60 fixtures × 5 targets), 0 failed under `REQUIRE=all`** (incl. the full `core.iter` generic-combinator surface, #151/#152) |
+| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **330 exec pairs (66 fixtures × 5 targets), 0 failed under `REQUIRE=all`** (incl. the full `core.iter` generic-combinator surface [#151/#152] and the `core` **effect** invocation forms [#155 — §10.2/§10.4 bare-op, Layer-1/2 handlers, cross-module]) |
 | `bock check` on examples | 20/20 exit 0 |
 
 ## What works today
@@ -87,8 +87,12 @@ the 6th and final core.iter probe (the real combinator surface) exposed Rust/Go 
 generic-record-construct / typed concat-arg / generic-trait interface / lambda specialization), now fixed; ~300 exec
 pairs ×5. **4/11 stdlib modules landed; main 9f1a2bd (2026-05-31).** Remaining R1: (1) **P4-hygiene**
 (mutating-collection + `m.contains` guarding diagnostics, bock-types/checker.rs — both design-gated DQ18/DQ22); (2)
-**core.effect** (effect-system bridge — likely needs its own plan + a core-spec escalation), then R2
-(option/result/string/time), R3 (collections/test). Design-gated (non-blocking, → Design): DQ24 (core.iter surface —
+**core.effect** — SCOPED + the effect FOUNDATION is HARDENED (#155): the language effect system (§10) now
+EXECUTES on all 5 (the conformance/effects suite was previously INERT — never checked/run; #155 fixed the
+§10.2/§10.4 bare-op resolution + the Rust op-in-interpolation codegen + wired the suite into the exec lane, 6
+effect fixtures ×5). The core.effect floor BUILD is gated ONLY on Design/owner answering DQ25 Q1/Q2 (floor
+contents). Then R2 (option/result/string/time), R3 (collections/test). Design-gated (non-blocking, → Design): DQ25
+(core.effect surface), DQ24 (core.iter surface —
 combinator set / dropped Iterator-impl / omitted enumerate, NEW), DQ23 (Int/Int §3.6), DQ18/20/21/22,
 DQ10-DQ15/DQ19, Bool-interp spelling; + Go nested-runtime-payload arith (#142) & Rust by-value-reuse (#149)
 codegen follow-ups. Known interpreter gap: `mut self` iterator drive hangs under `bock run` (Q-iter-interp-mutself;

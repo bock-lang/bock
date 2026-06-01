@@ -78,20 +78,20 @@ desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged;
   hangs identically) — NOT introduced by core.iter; surfaced by it. The `stdlib_iter.rs` smoke uses a single
   `next()` to avoid it. Fix: persist `mut self` field mutations across interpreter method-call frames.
   Same family as Q-interp-enum.
-- **[Q-effect-interp-rust] Rust interpolation sub-context drops the effect-op rewrite** — bug · ready ·
-  `compiler/crates/bock-codegen/` (rs.rs:~2917) · — · links DV16, #152 · note: an effect op called inside a
-  `"${...}"` interpolation emits UNREWRITTEN on Rust only (`now()` not `clock.now()` → rustc E0425). The
-  `NodeKind::Interpolation` branch spawns a fresh `RsEmitCtx::new()` that copies `enum_variants`/`self_operand_methods`
-  but NOT `effect_ops`/`current_handler_vars` (the other 4 targets emit interpolated exprs inline, so they're fine).
-  Fix = ~4 lines: clone those maps into the sub-context — the SAME shape as the #152 iter sub-context fix. Confirmed
-  by the 2026-05-31 effect probe (P2). One site; add an `exec_effect_interpolation.bock` ×5 fixture.
-- **[Q-effect-conformance-wiring] The `conformance/effects/` suite is never checked or executed** — bug/test-infra ·
-  ready (couples to DV16/Design) · `compiler/tests/`, `compiler/tests/conformance/effects/` · — · links DV16 · note:
-  the `effects/` fixtures are parse-only (the directive harness only parses; the exec harness scans only `exec/`), so
-  `// EXPECT: no_errors`/`output` on them is inert and the effect system has never been checked/executed there. Wire
-  `effects/` into the execution harness (or move runnable effect fixtures under `exec/` with `targets` directives).
-  WILL EXPOSE the DV16 bare-op E1001 failures — so sequence with the §10 Design ruling (the fixtures may need
-  rewriting to the `with`-clause form, or the checker bare-op resolution fixed, depending on Design).
+- **[Q-effect-op-node-lowering] Unhandled bare effect-op surfaces E1001, not E8020** — bug/diagnostic-quality ·
+  ready (low-pri) · `compiler/crates/bock-air/` (lower.rs / verify_capabilities.rs) · — · links DV16, #155 · note:
+  a genuinely-unhandled bare op (no handler, no `with`) surfaces resolver **E1001** "undefined name" rather than the
+  capability-pass **E8020** "effect operation has no handler" — because `EffectOp` AIR nodes are constructed ONLY in
+  test code, so the E8020 check (`verify_capabilities.rs:476`) never fires on surface bare-op `Call`s. #155 kept
+  E1001 for v1 (correct compile-time error per §10.3; the code is non-normative). To unify: lower recognized bare
+  unhandled op `Call`s into `EffectOp` nodes so E8020 fires with the proper message. Non-urgent UX polish.
+- **[Q-effect-import-unused] Imported effect used only in `handling`/`with` position flagged W1001 unused** — bug ·
+  ready (cosmetic, low-pri) · `compiler/crates/bock-air|bock-types/` · — · links #155 · note: when an imported
+  effect (`use m.{Log}`) is referenced only in an effect position (`handling (Log with …)` / `fn … with Log`), the
+  import binding isn't marked used → cosmetic `W1001 unused import`. Doesn't fail check/exec. Mark effect-position
+  references as uses.
+  (DONE this block → #155: Q-effect-interp-rust [Rust interpolation effect-op rewrite] + Q-effect-conformance-wiring
+  [the inert effects/ suite now executes ×5]; DV16 RESOLVED.)
 
 ## v1-blocking
 
@@ -136,10 +136,12 @@ desugar, #152 Rust/Go combinator codegen; 4/11 stdlib modules. #123-#152 merged;
   + 6 eager List-returning combinators + the for→Iterable checker desugar; #152 Rust/Go codegen — all 5×5).
   **Codegen gate CLEARED:** Q-fconf execution conformance (#114/#115)
   + Q-codegen-fixes (#121, DV9) + the codegen-completeness milestone (#131-#152) — 5-target parity real + tested.
-  **R1 REMAINING:** `effect` — **SCOPED** (plan `plans/2026-05-31-core-effect-r1-plan.md`; surface UNDER-SPECIFIED
-  → DQ25 8 questions escalated to Design; cross-module effect-execution feasibility probe running [Rust/Go never
-  proven — the core.iter lesson]; the floor BUILD waits on Design Q1/Q2 + the probe). Then R2
-  (option/result/string/time), R3 (collections/test). Plan: `plans/2026-05-31-core-iter-r1-plan.md` (done).
+  **R1 REMAINING:** `effect` — **SCOPED + FOUNDATION HARDENED** (plan `plans/2026-05-31-core-effect-r1-plan.md`;
+  DQ25 8 surface questions → Design; the feasibility probe is DONE and the effect foundation is HARDENED [#155]:
+  §10.2/§10.4 bare-op forms + the effect suite now EXECUTE ×5, so the canonical effect surface is fully proven).
+  The core.effect floor BUILD is UNBLOCKED on the engineering side — gated ONLY on Design/owner answering DQ25
+  Q1/Q2 (the floor CONTENTS: primitives-only + an executable `Log`?). Then R2 (option/result/string/time), R3
+  (collections/test). Plans: `plans/2026-05-31-core-iter-r1-plan.md`, `plans/2026-05-31-effect-foundation-plan.md` (done).
   `core.types/math/memory/concurrency` Reserved for v1.x.
   Plans: `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`,
   `plans/2026-05-30-primitive-conformance-bridge-plan.md`,

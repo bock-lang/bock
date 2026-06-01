@@ -126,13 +126,17 @@ status(open | resolved→link)`
   (`compiler/tests/harness/mod.rs`) only parses directives; the execution harness (`execution.rs:122`) scans
   ONLY `conformance/exec/`. So `// EXPECT: no_errors`/`output` on `effects/` fixtures is inert; the effect
   system has never been checked or executed there (0 of 300 exec cases are `exec_effect_*`).
-- **Classification:** spec↔impl divergence (does §10.2 intend bare-op invocation in v1, making E1001 a checker
-  bug — likely — or is the `with`-clause the only v1 form, making the spec examples + fixtures wrong?) + a
-  test-coverage hole. · **Disposition:** **OPEN → Design** (the §10 invocation-form question — see DQ25 context /
-  escalations); the test-infra fix (wire `effects/` into the exec harness, or move runnable effect fixtures to
-  `exec/`) is actionable now (queue Q-effect-conformance-wiring) but will expose the bare-op failures, so it
-  couples to the Design ruling. · **Status:** OPEN — surfaced by the 2026-05-31 core.effect feasibility probe.
-  Linked: Q-effect-conformance-wiring, Q-effect-interp-rust (the narrower rs.rs interpolation drop), DQ25.
+- **Classification:** spec↔impl divergence — the spec (§10.2/§10.4) clearly establishes bare-op invocation as
+  the canonical form (the impl was wrong), NOT a Design question (a Plan pass confirmed: §10.4 codegen already
+  established the handler binding + rewrote the bare op; only resolver/checker name-injection was missing — no
+  v1-scope limitation). · **Disposition:** **RESOLVED → #155.** `resolve_handling` + a module-`handle` pass now
+  inject the handled effects' ops into scope (resolve.rs); the checker `HandlingBlock` arm mirrors it; the Rust
+  interpolation sub-context now propagates `effect_ops`/`current_handler_vars` (rs.rs). ALL §10 invocation forms
+  now work ×5 (with-clause incl. op-in-interpolation, §10.4 bare-op-in-handling, §10.3 Layer-1 innermost-shadow +
+  Layer-2 module handler, cross-module). The `effects/` suite was converted to 6 executable `exec_effect_*`
+  fixtures (run ×5; the suite was inert before). · **Status:** RESOLVED → #155 (Q-effect-interp-rust +
+  Q-effect-conformance-wiring both DONE). RESIDUE → queue Q-effect-op-node-lowering (unhandled bare op surfaces
+  E1001 not E8020 — `EffectOp` AIR nodes are only built in test code; non-urgent; diagnostic code non-normative).
 
 ---
 

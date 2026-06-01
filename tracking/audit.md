@@ -1356,3 +1356,39 @@ Notes: core.iter remained a sensitive probe to the very end — its v5 STOP surf
     Queue NOT blocked (probe + scoping done); only the floor build waits. main unchanged by this (tracking-only).
   NEXT: await operator on the sequencing fork + Design on Q1/Q2 + the §10 bare-op question. Q-effect-interp-rust is
     dispatchable independently (clear bug). P4-hygiene still available.
+
+[2026-06-01 01:31 UTC] Effect foundation HARDENED — §10.2/§10.4 bare-op forms + effect suite execute ×5 (#155); DV16 RESOLVED
+  Input: operator chose (AskUserQuestion) **"Harden the effect foundation first"** over building core.effect on the
+    with-clause subset / small-fixes-and-hold.
+  PRE-DISPATCH grounding: read §10.1-10.6. The spec is UNAMBIGUOUS that bare-op invocation is the canonical form
+    (§10.2 `log(Info, …)` inside `with Log`; §10.4 `log(Info, …)` directly inside `handling`). So the divergence is
+    "impl wrong, fix to match spec" — and the spec's OWN §10.2 example (`${now()}`) doesn't compile on Rust. Not a
+    Design question (spec already decided).
+  PLAN agent scoped it (saved `plans/2026-05-31-effect-foundation-plan.md`). Headline finding: §10.4 is a FIXABLE
+    resolver/checker name-injection bug — codegen already establishes the handler binding + rewrites the bare op;
+    only `resolve_handling`/`HandlingBlock`-checker op-injection was missing. No Design gate. One residual (E1001 vs
+    E8020, diagnostic-ergonomics, non-normative) → proceed on default + follow-up.
+  DISPATCH — fix/effect-foundation (engineer sub-agent, opus; owned: bock-air/resolve.rs, bock-types/checker.rs,
+    bock-codegen/rs.rs, conformance/exec/exec_effect_*, execution.rs, the effects/ fixture conversions). 3 phases:
+    A harness-wiring + 6 exec_effect fixtures · B resolver+checker bare-op injection · C Rust interpolation fix.
+  VERIFY before merge (independently re-ran the FULL gate): fmt/clippy/test/doc clean; conformance REQUIRE=all →
+    **330 exec pairs, 0 failed, 0 skipped**; all 6 effect fixtures confirmed on rust+go (30 effect exec pairs ×5).
+    Scrutinized the DELETIONS (the engineer removed pre-existing fixtures): confirmed they are CONVERSIONS — the
+    inert check-only effects/ fixtures (handler_record_impl/module_handler_resolves/multiple_effects/
+    handler_over_with_clause_fn) replaced by executable exec_effect_* covering the SAME scenarios ×5;
+    innermost_handler_wins renamed; coverage preserved + improved. `pure_function.bock` pure-deletion: VERIFIED
+    correct — `pure fn` is NOT in the grammar (grep), the fixture asserted no_errors for non-existent syntax + never
+    ran; no real gap (engineer's "§10.5 pure fn" FOUND reclassified — not a feature). Reviewed the resolver/checker
+    diff: clean, minimal, symmetric, correctly scoped (push/pop). Verified the §10.4 fixture is the canonical spec
+    form, not weakened. **MERGED #155 (9151547→4881438).**
+  RESULT: **DV16 RESOLVED.** The language effect system (§10) now EXECUTES ×5 for the first time (it was untested —
+    the effects/ suite was inert). The effect FOUNDATION is hardened; the core.effect floor build is now UNBLOCKED
+    on the engineering side. Filed residue: Q-effect-op-node-lowering (E8020 unification, low-pri), Q-effect-import-
+    unused (cosmetic W1001). Q-effect-interp-rust + Q-effect-conformance-wiring DONE.
+  RECURRING OPERATIONAL ISSUE (flag): for the 3rd time, the engineer sub-agent's Read/Edit/Write tools were DENIED
+    for worktree + /tmp paths (only `/opt/claude-projects/bock/` permitted), forcing Bash/Python editing. Diffs were
+    clean (verified each time) but it's friction on every dispatch. Worth adding the worktree path to the permission
+    allowlist (settings.local.json / update-config). Surfaced to the operator.
+  core.effect: floor build gated ONLY on Design/owner DQ25 Q1/Q2 (the §10.4 form now works ×5, so Q2 is strongly
+    YES — executable Log shippable via the canonical surface). Recommendation: primitives-only + a single Log effect.
+  NEXT: operator/Design to answer DQ25 Q1/Q2 → then build core.effect. P4-hygiene still available as parallel work.
