@@ -2923,6 +2923,20 @@ impl RsEmitCtx {
                             // interpolated `${a.compare(b)}` borrows its operand.
                             sub.enum_variants = self.enum_variants.clone();
                             sub.self_operand_methods = self.self_operand_methods.clone();
+                            // §10.2/§10.4: an effect op invoked inside an
+                            // interpolation (`"at ${now()}"`) must be rewritten
+                            // to its handler call (`__clock.now()`) just like one
+                            // in statement position. The sub-context therefore
+                            // needs the effect-op registry, the in-scope handler
+                            // vars, and the fn→effects / composite-effects maps
+                            // that drive the rewrite (rs.rs `rewrite_effect_op`).
+                            // Without these the op emits bare and rustc fails
+                            // with E0425. The other 4 backends emit interpolated
+                            // exprs on `self`, so they carry this state already.
+                            sub.effect_ops = self.effect_ops.clone();
+                            sub.current_handler_vars = self.current_handler_vars.clone();
+                            sub.fn_effects = self.fn_effects.clone();
+                            sub.composite_effects = self.composite_effects.clone();
                             sub.emit_expr(expr)?;
                             format_args.push(sub.buf);
                         }
