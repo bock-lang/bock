@@ -1732,8 +1732,37 @@ impl GoEmitCtx {
                     .and_then(|m| m.get(&field.name))
                     .cloned()
             }
+            // A `value.field` list receiver where `value` is a variable of a known
+            // record type (`b.items.get(i)` for `b: Box[T]`, `record Box[T] {
+            // items: List[T] }`). The variable's Go type (`Box[T]`) names the
+            // record; the field's recorded `List[...]` element type (`T`, in scope
+            // as the enclosing generic fn's type param) gives the closure's `[]T`
+            // element rather than the `[]interface{}` default — which a `[]T`
+            // field-access argument does not satisfy under Go's type rules. (GAP-A:
+            // a generic free fn reading `b.items.get(i)` previously emitted the
+            // `.get` closure with a `[]interface{}` parameter and bound the `Some`
+            // payload as `interface{}`, both rejected against `[]T`/`T`.)
+            NodeKind::FieldAccess { object, field } => {
+                let NodeKind::Identifier { name } = &object.kind else {
+                    return None;
+                };
+                let obj_go_ty = self.var_go_type.get(&go_value_ident(&name.name))?;
+                let record = Self::go_type_record_head(obj_go_ty);
+                self.record_field_list_elem
+                    .get(record)
+                    .and_then(|m| m.get(&field.name))
+                    .cloned()
+            }
             _ => None,
         }
+    }
+
+    /// The record/type head of a Go type rendering: the identifier before any
+    /// generic `[...]` arg list (`Box[T]` → `Box`, `Box[int64]` → `Box`, `Box` →
+    /// `Box`). Used to key [`Self::record_field_list_elem`] from a variable's
+    /// recorded Go type when resolving a `value.field` list receiver.
+    fn go_type_record_head(go_ty: &str) -> &str {
+        go_ty.split('[').next().unwrap_or(go_ty).trim()
     }
 
     /// True when `node` is (or contains, in operand position) an identifier
@@ -1939,6 +1968,28 @@ impl GoEmitCtx {
         b.is_ascii_alphanumeric() || b == b'_'
     }
 
+    /// The Go type-name a `RecordConstruct` lowers its struct literal to: the
+    /// record/struct-variant name (`Item`, or `ShapeCircle` for a struct-variant
+    /// construction). Mirrors the `type_name` computation in the `RecordConstruct`
+    /// emission so [`Self::infer_go_expr_type`] can type a list literal of
+    /// record-constructs (`[Item{...}, Item{...}]` → `[]Item`) instead of erasing
+    /// it to `[]interface{}` (the GAP-A defect: `infer_go_expr_type` had no
+    /// `RecordConstruct` arm, so the homogeneous-element inference failed and the
+    /// `Box[T] { items: List[T] }` field literal became `[]interface{}{…}`, which
+    /// `go build` rejects against the struct's `[]Item` field).
+    fn record_construct_go_type_name(&self, path: &bock_ast::TypePath) -> String {
+        if let Some(info) = self.user_variant_for_path(path) {
+            let variant = path.segments.last().map_or("", |s| s.name.as_str());
+            format!("{}{variant}", info.enum_name)
+        } else {
+            path.segments
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        }
+    }
+
     fn infer_go_expr_type(&self, node: &AIRNode) -> Option<String> {
         match &node.kind {
             NodeKind::Literal { lit } => match lit {
@@ -2012,6 +2063,23 @@ impl GoEmitCtx {
                     (Some(k), Some(v)) => Some(format!("map[{k}]{v}")),
                     _ => None,
                 }
+            }
+            // A record/struct-variant construction (`Item { id: 1 }`,
+            // `Box[Item] { items: … }`) types to its Go struct name plus the
+            // explicit type-arg suffix the emission would write (`Item`, or
+            // `Box[int64]` when a param is recoverable from a directly-typed
+            // field). This lets a list literal of record-constructs
+            // (`[Item{…}, Item{…}]`) infer the homogeneous element type `Item` so
+            // the `Box[T] { items: List[T] }` field literal emits `[]Item{…}`
+            // rather than the erased `[]interface{}{…}` (GAP-A). Type args are
+            // inferred from field values only (the `current_expected_type` used by
+            // `expected_construct_type_args` names the *outer* binding, not the
+            // per-element record); a generic param not directly typed by a field
+            // falls back to `any`, matching the emission's loose-but-valid form.
+            NodeKind::RecordConstruct { path, fields, .. } => {
+                let type_name = self.record_construct_go_type_name(path);
+                let type_args = self.infer_construct_type_args(&type_name, fields);
+                Some(format!("{type_name}{type_args}"))
             }
             // A call to a known generic fn (`list_iter([]int64{...})`) resolves
             // to its return type with the type params bound from the arguments
@@ -2306,11 +2374,15 @@ impl GoEmitCtx {
                     crate::generator::desugared_list_method(callee, args)
                 {
                     if matches!(method, "get" | "first" | "last") {
-                        if let NodeKind::Identifier { name } = &recv.kind {
-                            if let Some(elem) = self.var_list_elem.get(&go_value_ident(&name.name))
-                            {
-                                return Some(elem.clone());
-                            }
+                        // The same receiver-element resolver the `.get` closure
+                        // uses: a `List[T]` identifier (via `var_list_elem`), a
+                        // homogeneous list literal, `self.field`, or a generic
+                        // record param's `value.field` (`b.items.get(i)` for
+                        // `b: Box[T]`). Without the last case the `Some(x)` payload
+                        // stayed `interface{}` and a `return x` of a `[]T`-typed
+                        // field element failed `go build` (GAP-A).
+                        if let Some(elem) = self.list_receiver_elem_go_type(recv) {
+                            return Some(elem);
                         }
                     }
                 }
@@ -4293,6 +4365,12 @@ impl GoEmitCtx {
             saved_map_scope,
             saved_set_scope,
         ) = self.enter_param_optional_scope(params);
+        // Record each typed param's Go type (`b: Box[T]` → `var_go_type["b"] =
+        // "Box[T]"`) so a `value.field.get(i)` list receiver inside the body can
+        // recover the field's `[]T` element type (GAP-A). `current_self_record`
+        // already covers `self.field`; this covers a non-self generic-record
+        // param. Restored alongside the other param scopes on exit.
+        let saved_go_types = self.enter_param_go_types_with_expected(params, None);
         if name == "main" || is_void {
             self.emit_block_body(body)?;
         } else {
@@ -4310,6 +4388,7 @@ impl GoEmitCtx {
         self.var_result_elem = saved_result_scope;
         self.var_map_kv = saved_map_scope;
         self.var_set_elem = saved_set_scope;
+        self.var_go_type = saved_go_types;
         self.var_record_type_args = saved_record_args;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
@@ -5469,16 +5548,7 @@ impl GoEmitCtx {
                 // A struct-variant construction (`Circle { radius: .. }`) → the
                 // `{enum}{variant}` struct literal `ShapeCircle{Radius: ..}`
                 // (field name `to_pascal_case`d). Plain records keep their path.
-                let type_name = if let Some(info) = self.user_variant_for_path(path) {
-                    let variant = path.segments.last().map_or("", |s| s.name.as_str());
-                    format!("{}{variant}", info.enum_name)
-                } else {
-                    path.segments
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(".")
-                };
+                let type_name = self.record_construct_go_type_name(path);
                 // Go requires an explicit type-argument list on a generic
                 // struct literal (`Box[int64]{...}`); it does NOT infer the args
                 // from the field values. Prefer the declared/expected binding
