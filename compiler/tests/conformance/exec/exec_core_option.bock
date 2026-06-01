@@ -1,6 +1,6 @@
 // TEST: exec_core_option
 // EXPECT: output "or=7;filt=8;cnt=1;list=1;def=-1"
-// EXPECT: targets js, ts, python, rust
+// EXPECT: targets js, ts, python, rust, go
 //
 // THE PAYOFF FIXTURE for `core.option`: a user program that `use`s the embedded
 // `core.option` stdlib module — a real `Optional[T]`-utilities module — and
@@ -20,18 +20,19 @@
 // `println` emits a single deterministic line (the exec harness compares one
 // trimmed line).
 //
-// TARGETS — js, ts, python, rust (NOT go). FOUND (same pre-existing compiler
-// gap as `exec_core_result`): Go codegen cannot resolve the generic type
-// parameters of a free function over the built-in `Optional` container. The
-// `Optional` runtime is the *monomorphic* Go struct `__bockOption` (its payload
-// is `interface{}`), so a Bock `fn f[T](o: Optional[T])` emits
-// `func f[T any](o __bockOption)` with `T` disconnected from the (non-generic)
-// argument, and `go build` fails `cannot infer T`. By contrast `core.iter`'s
-// generic free fns DO run on Go because they range over the *generic record*
-// `ListIterator[T]` — its Go type carries `[T]`, so Go infers `T` from the
-// argument. Fixing the Optional/Result case needs the runtime structs made
-// generic (`__bockOption[T]`) or call-site type-args threaded in; that is a
-// Go-backend runtime change tracked separately, not this fixture's defect.
+// TARGETS — all five (js, ts, python, rust, go). Go was previously excluded:
+// its codegen could not resolve the generic type parameters of a free function
+// over the built-in `Optional` container, because the `Optional` runtime is the
+// *monomorphic* Go struct `__bockOption` (payload `interface{}`) — so a Bock
+// `fn f[T](o: Optional[T])` emitted `func f[T any](o __bockOption)` with `T`
+// disconnected from the (non-generic) argument and `go build` failed `cannot
+// infer T`. The Go backend now *threads explicit type-arguments at the call
+// site* (`OrElse[int64](..)`), recovered from the argument's `Optional[T]`
+// element type, the call's expected return type, and the ordinary arguments;
+// a type parameter that is genuinely free behind the erased runtime is filled
+// with `any`. (`core.iter`'s generic free fns already ran on Go because they
+// range over the *generic record* `ListIterator[T]`, whose Go type carries
+// `[T]`; the runtime structs are left monomorphic, so that path is unchanged.)
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).

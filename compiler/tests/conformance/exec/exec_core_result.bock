@@ -1,6 +1,6 @@
 // TEST: exec_core_result
 // EXPECT: output "chain=14;rec=42;errp=boom;ok=11;err=oops"
-// EXPECT: targets js, ts, python, rust
+// EXPECT: targets js, ts, python, rust, go
 //
 // Cross-target proof that the pure-Bock `core.result` utilities run, each driven
 // by a `match r { Ok(x) => …; Err(e) => … }`. These are the complement of the
@@ -18,16 +18,20 @@
 // `Optional.unwrap_or` — exercising both the new free functions and the hand-off
 // to the built-in container methods.
 //
-// TARGETS — js, ts, python, rust (NOT go). FOUND: Go codegen cannot resolve the
-// generic type parameters of a free function over the built-in `Result`/
-// `Optional` containers — those runtimes are emitted as the *monomorphic* Go
-// structs `__bockResult`/`__bockOption`, so a Bock `fn f[T, E](r: Result[T, E])`
-// emits `func f[T any, E any](r __bockResult)` with `T`/`E` disconnected from
-// the (non-generic) argument, and `go build` fails with `cannot infer T`/`E`.
-// Bock has no call-site type-argument (turbofish) syntax to pin them. This is a
-// pre-existing compiler-side gap (independent of this module), reported, not
-// fixed here (stdlib-only session). `core.iter`'s generics run on Go only
-// because they range over the *generic* record `ListIterator[T]`.
+// TARGETS — all five (js, ts, python, rust, go). Go was previously excluded:
+// its codegen could not resolve the generic type parameters of a free function
+// over the built-in `Result`/`Optional` containers — those runtimes are the
+// *monomorphic* Go structs `__bockResult`/`__bockOption`, so a Bock
+// `fn f[T, E](r: Result[T, E])` emitted `func f[T any, E any](r __bockResult)`
+// with `T`/`E` disconnected from the (non-generic) argument and `go build`
+// failed `cannot infer T`/`E`. Bock has no surface turbofish, so the Go backend
+// now *synthesises* the type-arguments at the call site (`UnwrapErr[int64,
+// string](..)`) from the argument's `Result[T, E]` element types and the call's
+// expected return type; a parameter that is genuinely free behind the erased
+// runtime (e.g. `and_then`'s mapped `U`) is filled with `any`. `core.iter`'s
+// generics already ran on Go because they range over the *generic* record
+// `ListIterator[T]`; the runtime structs stay monomorphic, so that path is
+// untouched.
 //
 // AUTHORING NOTES (route around two further compiler-side gaps on the typed
 // backends, also FOUND, also not stdlib defects):
