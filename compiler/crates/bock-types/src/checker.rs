@@ -838,6 +838,22 @@ impl TypeChecker {
             self.collect_sig(item);
         }
 
+        // Pass 1b: §10.3 Layer-2 (Module) handlers. A module-level
+        // `handle <Effect> with <handler>` installs that effect's operation
+        // types into the module env so a bare op call anywhere in the module
+        // type-checks without an enclosing `handling` block. Mirrors the
+        // resolver's `inject_module_handle_operations`. Runs after `collect_sig`
+        // (so `effect_op_types` is populated) and before item checking.
+        {
+            let mut visited = std::collections::HashSet::new();
+            for item in &items {
+                if let NodeKind::ModuleHandle { effect, .. } = &item.kind {
+                    let ename = type_path_to_name(effect);
+                    self.inject_effect_ops_into_env(&ename, &mut visited);
+                }
+            }
+        }
+
         // Pass 2: check items in place.
         // We re-borrow the items vec mutably.
         if let NodeKind::Module { items, .. } = &mut module.kind {
@@ -2374,7 +2390,23 @@ impl TypeChecker {
                     for hp in handlers.iter_mut() {
                         self.infer_node(&mut hp.handler);
                     }
-                    self.infer_node(body)
+                    // §10.4 bare-op form: inject the handled effects' operation
+                    // types into a fresh env scope so a bare op call inside the
+                    // block (`log(...)`) type-checks. Mirrors the resolver's
+                    // op injection in `resolve_handling`. The scope is popped
+                    // after the body so the ops do not leak past the block.
+                    let effect_names: Vec<String> = handlers
+                        .iter()
+                        .map(|hp| type_path_to_name(&hp.effect))
+                        .collect();
+                    self.env.push_scope();
+                    let mut visited = std::collections::HashSet::new();
+                    for ename in &effect_names {
+                        self.inject_effect_ops_into_env(ename, &mut visited);
+                    }
+                    let ty = self.infer_node(body);
+                    self.env.pop_scope();
+                    ty
                 } else {
                     unreachable!()
                 }
