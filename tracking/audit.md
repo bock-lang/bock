@@ -1446,3 +1446,63 @@ Probes/findings: core.iter exposed a 6th generic-codegen gap (#152, routine). co
 Ops: fixed the recurring worktree permission-config friction (additionalDirectories) — confirmed working.
 Escalations: DQ25 resolved (owner). Standing non-blocking Design queue unchanged (DQ10-DQ24 + Bool-interp spelling).
 Blocked: none. 0 open PRs, main e9204ab, worktrees == main only. CLEAN. Next: R2 stdlib (or P4-hygiene).
+
+[2026-06-01 07:41 UTC] R2 stdlib COMPLETE on all 5 (option/result/string/time) — 9/11 modules; fan-out + single-fixer cycle
+  Input: operator "let's fan out as much as possible tackling R2" + (mid-cycle) "maintain a single compiler-crate fixer
+    for this cycle" + (late) "pause for the night at the next clean stopping point."
+  APPROACH: parallel STDLIB-ONLY module fan-out (disjoint dirs; no compiler edits — STOP+FOUND on gaps) + serialized
+    single compiler-crate fixer(s) for the surfaced codegen gaps (the operator's model — conflict-avoidance requires
+    one bock-codegen owner at a time regardless). 4 modules dispatched in parallel, then the codegen fixes.
+  MODULES (7 PRs, #159-#165; each gate-clean, MOST re-verified by me):
+    - **option** #159 — 5 free-fn Optional utilities (complement the built-in methods #138).
+    - **result** #161 — 5 free-fn Result utilities; shipped 4/5 (Go FOUND).
+    - **time** #160 — its §18.3.1 surface (Duration/Instant/Clock/sleep) is ALREADY a compiler builtin (not a Bock
+      module); shipped the conformance floor that pins it ×5 (no duplicate module).
+    - **string** #163 — full module (repeat/pad/lines/is_blank + value-semantics StringBuilder) on the new
+      String-method codegen; ×5.
+  CODEGEN/BUILD FIXES (the single-fixer chain + follow-ups):
+    - **#162** (the consolidated fixer, on the String-method branch): String-method codegen layer ×5 (to_upper/trim/
+      contains/split/len-as-scalar/…); GENERAL reserved-keyword identifier escaping; Rust T:Clone on Optional-payload
+      clone; deterministic `reachable_modules` (codegen-side nondeterminism symptom).
+    - **#164** dep_graph determinism (root cause: `DepGraph::topological_order` iterated HashMap/HashSet in random
+      per-process order → the rare `bock build` failure; sorted-snapshot fix + 12-process proof).
+    - **#165** Go generic free-fns over Optional/Result → option+result ×5 (call-site type-arg threading, NOT the
+      ~86-site generic-struct rewrite; also fixed a latent expr-position Optional/Result match → untyped-IIFE bug).
+  ★ THE BIG MISS (candid): I merged **#159 (option) on a FALSE GREEN** — the option engineer reported ×5 but it
+    failed 4/5 (`default` reserved-keyword param on js/ts/go + `filter` Rust T:Clone); main went RED on the cross-target
+    lane. I had trusted the engineer's gate for "stdlib-only low-risk" modules WITHOUT re-running REQUIRE=all myself.
+    The String-method fixer caught it. ROOT of the false green: the nondeterministic build failure (#164) sometimes
+    aborted the suite before the option fixture's failure surfaced, so a "green" exit was sometimes luck. CI doesn't
+    catch it (its test job installs only Rust → the cross-target lane skips without REQUIRE). CORRECTED PRACTICE
+    (now standing): re-run REQUIRE=all MYSELF, MULTIPLE times, for anything touching the embedded stdlib or codegen —
+    not just compiler PRs — and trust the suite, not exit-code reports. Applied it to #162-#165 (multi-run each).
+  ★ BUILD-STALENESS (2 false-REDs tonight): the conformance script's incremental build does NOT reliably recompile
+    `bock-codegen` / re-embed new stdlib subdirs after a `git merge` — only an explicit `cargo build -p bock` +
+    `touch build.rs` forces it. Cost me two "failed" runs that were stale-binary artifacts (real state green). CI
+    (fresh build) is unaffected. → FOUND Q-conformance-clean-rebuild.
+  VERIFICATION: trial-merged each codegen branch onto current main and ran REQUIRE=all on the COMBINED state (the
+    coexistence lesson — individually-green branches can interact). Final main a4c0237: REQUIRE=all 0 failed,
+    option/result/string all on Go, stable across runs.
+  RESULT: **R2 COMPLETE ×5 (option/result/string/time); 9/11 v1 modules** (remaining: collections, test = R3). main
+    a4c0237; 0 open PRs; worktrees == main only.
+  FOUNDs filed (queue): Q-clock-handler-routing (time: now/sleep bypass the Clock handler → no MockClock virtual
+    time), Q-time-int64 (§18.3.1 Int64 realized as Int), Q-time-shim-path (record inline-in-<target>.rs shim location
+    in stdlib/CLAUDE.md), Q-conformance-clean-rebuild (the staleness), Q-parser-allcaps-record (ALLCAPS `{` not a
+    struct literal → E1001), Q-go-record-field-list (List[String] record-field []interface{} vs []string), Q-len-
+    method-shadow (built-in len/is_empty lowering shadows user-record methods), Q-string-char-access (reverse/
+    char_at/slice deferred — split("") diverges). Already-open carried: Q-interp-effect-op-collision, Q-effect-op-
+    node-lowering, Q-effect-import-unused, Q-iter-interp-mutself, Q-xmod-*, etc.
+  PAUSE (operator request, clean stop): main a4c0237 GREEN ×5, 0 open PRs, worktrees == main only, tracking
+    reconciled. ON RESUME: **R3** (core.collections, core.test) — the last v1 stdlib batch; OR P4-hygiene (DQ18/DQ22
+    checker diagnostics, design-gated); OR the option+result-quality FOUNDs above. R1+R2 done; 9/11.
+
+═══ DAILY DIGEST — 2026-06-01 (cont.) ═══
+Merged this block: R2 — #159 option, #160 time(floor), #161 result, #163 string; codegen #162 (String methods +
+  keyword escaping + T:Clone + bundle determinism), #164 dep_graph determinism, #165 Go generic Optional/Result.
+  Plus the earlier 2026-06-01 half: #151-#158 (core.iter, effect foundation, core.effect). Tracking: #166 (this).
+Stdlib: **9/11 v1 modules** (error/compare/convert/iter/effect/option/result/string + time-builtin). R1+R2 COMPLETE.
+  R3 = collections, test. ~375 exec pairs ×5, 0 failed under REQUIRE=all (now genuinely stable — nondeterminism fixed).
+Process: caught + corrected a false-green merge (option #159) — now re-verifying REQUIRE=all myself, multi-run, for
+  stdlib/codegen changes. Two build-staleness false-reds (incremental build); → Q-conformance-clean-rebuild.
+Decisions: fan-out R2 (operator); single compiler-fixer (operator); pause for the night (operator).
+Blocked: none. main a4c0237, 0 open PRs, worktrees == main. CLEAN. Next: R3 (collections/test).
