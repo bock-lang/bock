@@ -48,7 +48,7 @@ cd extensions/vscode && npm test          # extension tests
 ## Where to Find What
  
 - **Language reference:** `spec/bock-spec.md`
-- **Contributing guide:** `docs/src/contributing.md`
+- **Contributing guide:** `docs/src/contributing/` (index, architecture, workflow, spec-changes)
 - **Architecture overview:** `ARCHITECTURE.md` (start here for new contributors)
 - **Current state:** `STATUS.md` (generated from `tracking/` — do not hand-edit)
 - **Forward plans:** `ROADMAP.md` (generated from `tracking/milestones.md` — do not hand-edit)

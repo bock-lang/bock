@@ -6,12 +6,12 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 18
+- Ready: 20
 - v1-blocking: 2
 - Blocked: 5
 - Deferred: 1
 
-## Build status (as of main 53df918, 2026-06-01)
+## Build status (as of main 6a48848, 2026-06-01)
 
 | What | State |
 |------|-------|
@@ -21,7 +21,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |
 | `mdbook build docs` | clean |
 | CI on `main` | green; cache via Swatinem/rust-cache@v2.9.1 (#116, faster) |
-| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **405 exec pairs (81 fixtures × 5 targets), 0 failed under `REQUIRE=all`** (stable — build/bundle nondeterminism fixed, #162/#164); covers the **entire v1 stdlib ×5** (iter/effect/option/result/string/test/collections + time) and the codegen substrate it exercises (generic containers over user Comparable types, sealed-trait bounds on primitives, generic free-fns over Optional/Result on Go). NOTE: local incremental builds can leave a stale `bock`; force `cargo build -p bock` before trusting a run (Q-conformance-clean-rebuild) |
+| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **420 exec pairs (84 fixtures × 5 targets), 0 failed under `BOCK_CONFORMANCE_REQUIRE=all`** (stable — build/bundle nondeterminism fixed, #162/#164; +3 residue-pinning fixtures #176); covers the **entire v1 stdlib ×5** (iter/effect/option/result/string/test/collections + time) and the codegen substrate it exercises (generic containers over user Comparable types, sealed-trait bounds on primitives, generic free-fns over Optional/Result on Go). NOTE: the local stale-`bock` hazard is now handled in-harness — `run-conformance.sh` force-rebuilds `bock` (touch `bock-cli/build.rs` + `cargo build -p bock`) before tests (#175, Q-conformance-clean-rebuild DONE) |
 | `bock check` on examples | 20/20 exit 0 |
 
 ## What works today
@@ -48,7 +48,9 @@ Live summary derived from `tracking/queue.md` (items per section):
   toolchain, diffs stdout (#114/#115); `tools/scripts/run-conformance.sh`.
 - **VS Code extension** — builds to a working `.vsix`; vocab synced
   from the compiler; deps current (ESLint 10, etc., #80).
-- **Docs** — mdBook with tooling reference in sync with the CLI (#90).
+- **Docs** — mdBook with tooling reference in sync with the CLI (#90);
+  the v1 **stdlib reference** (D4, #172) and a proper **Contributing** section
+  (D5, #174 — overview/architecture/workflow/spec-changes) are live.
 - **Website** — Astro static site; Cloudflare Workers deploy green
   (#85); deps current (#78).
 
