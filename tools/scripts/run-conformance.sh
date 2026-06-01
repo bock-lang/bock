@@ -38,6 +38,17 @@ else
 fi
 echo
 
+# Force a fresh `bock` binary so the execution tests don't reuse a stale sibling
+# binary with an out-of-date embedded stdlib. bock-cli/build.rs declares
+# rerun-if-changed on the stdlib tree, but a freshly-added nested subdir/module
+# isn't in the tracked file set from the previous build, so cargo can skip
+# re-running it. Touching the build script forces a re-walk + re-embed; the
+# rebuild refreshes the sibling binary that execution.rs::bock_binary() runs.
+echo "-- forcing fresh bock build (busts stale embedded-stdlib binary) --"
+touch compiler/crates/bock-cli/build.rs
+cargo build -p bock --bin bock
+echo
+
 # 1) Directive / parsing conformance (harness lib unit tests).
 echo "-- directive + parsing conformance --"
 cargo test -p bock-test-harness --lib

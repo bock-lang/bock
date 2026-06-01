@@ -1742,7 +1742,7 @@ Monotonic time primitives, available on all targets. `core.time` owns the `Clock
 
 **Types.**
 
-`Duration` — a span of time. Internally stored as `Int64` nanoseconds, giving a range of approximately ±292 years. Sufficient for all realistic use cases.
+`Duration` — a span of time. Internally stored as `Int64` nanoseconds, giving a range of approximately ±292 years. Sufficient for all realistic use cases. (At the Bock surface, the constructors and accessors below use `Int`, which is `i64`-backed and therefore carries the full `Int64` range described here — there is no separate `Int64` surface type in these signatures.)
 
 `Instant` — a monotonic point in time. Comparable within a single process run; not comparable across processes or across reboots.
 
