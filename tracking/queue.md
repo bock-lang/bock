@@ -12,8 +12,9 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-01 vs main e9204ab (core.iter [#151/#152] + the effect-foundation hardening [#155] +
-**core.effect [#157]** all landed ×5; 5/11 stdlib modules. #123-#157 merged; repo wins). See audit.md._
+_Last reconciled: 2026-06-01 vs main a4c0237 (**R2 COMPLETE ×5** — option [#159/#162/#165], result [#161/#165],
+string [#162/#163], time [#160 builtin floor]; + codegen #162/#164/#165. **9/11 v1 modules; R1+R2 done.** #123-#165
+merged; repo wins). See audit.md._
 
 ---
 
@@ -99,6 +100,26 @@ _Last reconciled: 2026-06-01 vs main e9204ab (core.iter [#151/#152] + the effect
   (topological order → user effects shadow core), which is correct + sufficient for v1, but full qualification (a
   program using BOTH same-named ops) is unsupported on the interpreter. Codegen (all 5 targets) is UNAFFECTED (each
   program compiles in isolation with proper module scoping). Low-pri interpreter-only limitation.
+- **[Q-clock-handler-routing] `Instant.now`/`sleep` bypass the Clock effect handler** — bug · ready · `bock-codegen` ·
+  — · links #160 · note: the time host primitives are inlined per-target and bypass the installed `Clock` handler, so
+  `std.testing.MockClock` virtual-time (§18.4) is not achievable — `sleep` always hits real host. Route now/sleep/
+  elapsed through the `Clock` handler. Codegen change; the time SURFACE works ×5 (core.time done) — this is the
+  testability gap. Pairs with Q-time-shim-path.
+- **[Q-conformance-clean-rebuild] Conformance harness doesn't force a clean `bock` rebuild** — chore/test-infra ·
+  ready · `tools/scripts/run-conformance.sh`, `compiler/tests/` · — · note: after a `git merge`, the incremental
+  build does NOT reliably recompile `bock-codegen` / re-embed new stdlib subdirs (build.rs `rerun-if-changed` on the
+  stdlib DIR misses new nested subdirs) — only an explicit `cargo build -p bock` + `touch build.rs` forces it. Caused
+  TWO stale-binary false-REDs (real state green). CI (fresh build) unaffected, but local verification is unreliable.
+  Make the harness force a clean bock build (or build.rs rerun-if-changed per-file for additions).
+- **[Q-r2-codegen-residue] R2 surfaced minor codegen/parser gaps** — bug · ready · `bock-codegen`/`bock-parser` · — ·
+  links #163 · note (grouped, low-pri, all worked-around in-stdlib): (a) ALLCAPS (≥2-letter) record name `SB {` not
+  parsed as a struct literal → E1001 (parser); (b) `List[String]` RECORD FIELD on Go: `record.field.concat` emits
+  `[]interface{}` vs the `[]string` field (go.rs); (c) built-in `len`/`is_empty` collection lowering shadows
+  same-named user-record methods (codegen); (d) String `reverse`/`char_at`/`slice` deferred — no cross-target
+  char-access primitive, `split("")` diverges (Python raises). None block R2 (string ships ×5 around them).
+- **[Q-time-int64] §18.3.1 `Int64` realized as `Int`** — docs/spec · ready · `spec/` · — · links #160 · note: time
+  signatures use `Int` at the Bock surface (i64-backed storage); §18.3.1 says `Int64`. Internally consistent (i64
+  range); a one-line spec clarification (no behavior change). Low-pri.
 
 ## v1-blocking
 
@@ -129,11 +150,12 @@ _Last reconciled: 2026-06-01 vs main e9204ab (core.iter [#151/#152] + the effect
   DQ18 (mutating lowering), DQ20 (`expr?`), DQ22, DQ21, Bool-interp spelling; (d) Go nested-runtime-payload arith
   [#142 residual] + Rust by-value-reuse [#149 OPEN]. NONE of these gate the R1 effect floor.
 - **[Q-stdlib] Implement the core standard library** — impl ·
-  **v1-BLOCKING** (**5/11 landed**; the codegen substrate is COMPLETE [#131-#149] and the landed modules
-  execute cross-module on all 5. **R1 `iter` COMPLETE** [#151/#152]; **the effect FOUNDATION hardened** [#155 —
-  §10 forms execute ×5]; **`core.effect` COMPLETE** [#157 — Log effect + the `effect`-keyword module-path parser
-  fix + the interpreter topological-registration determinism fix; ×5]. **R1 DONE.** Next: **R2**
-  (option/result/string/time), R3 (collections/test); P4-hygiene available in parallel) ·
+  **v1-BLOCKING** (**9/11 landed; R1+R2 COMPLETE on all 5**). R1: iter [#151/#152], effect-foundation [#155],
+  effect [#157]. **R2: option [#159/#162/#165], result [#161/#165], string [#162/#163], time [#160 — already a
+  builtin; pinned with a conformance floor]** — all ×5. Enabling codegen: #162 (String-method layer + reserved-keyword
+  escaping + Rust Optional-payload T:Clone + bundle determinism), #164 (dep_graph determinism root cause), #165 (Go
+  generic free-fns over Optional/Result + expr-position match IIFE typing). **Next: R3** (core.collections,
+  core.test) — the last v1 stdlib batch; P4-hygiene (DQ18/DQ22) available in parallel ·
   `stdlib/`, `compiler/tests/conformance/stdlib/` · — · links DV1, MS-stdlib, DQ5,
   #100 · note: v1 = **11 core modules** at minimum-useful surface (option, result,
   collections, string, iter, compare, convert, error, effect, time, test). Each =
@@ -143,13 +165,16 @@ _Last reconciled: 2026-06-01 vs main e9204ab (core.iter [#151/#152] + the effect
   traits (#110); **`core.iter`** (#151 generic `Iterator[T]`/`Iterable[T]` + concrete `ListIterator[T]`
   + 6 eager List-returning combinators + the for→Iterable checker desugar; #152 Rust/Go codegen — all 5×5);
   **`core.effect`** (#157 `Log` effect + `ConsoleLog` handler + `console_log()`; the effect foundation #155 + the
-  `effect`-keyword module-path parser fix + the interpreter determinism fix — all 5×5).
+  `effect`-keyword module-path parser fix + the interpreter determinism fix — all 5×5);
+  **`core.option`** (#159 utilities; #162 keyword-escape + Rust T:Clone; #165 Go — ×5); **`core.result`** (#161
+  utilities; #165 Go — ×5); **`core.string`** (#162 String-method codegen layer; #163 utilities + StringBuilder — ×5);
+  **`core.time`** (already a compiler builtin — Duration/Instant/Clock/sleep; #160 conformance floor pins §18.3.1 ×5).
   **Codegen gate CLEARED:** Q-fconf execution conformance (#114/#115)
   + Q-codegen-fixes (#121, DV9) + the codegen-completeness milestone (#131-#152) — 5-target parity real + tested.
-  **R1 COMPLETE** (`iter` #151/#152 · effect-foundation #155 · `effect` #157 — DQ25 decided by owner: primitives +
-  Log floor). **Next: R2** (option/result/string/time), then R3 (collections/test). Plans (all executed):
-  `plans/2026-05-31-core-iter-r1-plan.md`, `plans/2026-05-31-effect-foundation-plan.md`,
-  `plans/2026-05-31-core-effect-r1-plan.md`.
+  **R1+R2 COMPLETE** (R1: iter #151/#152 · effect-foundation #155 · effect #157. R2: option/result/string ×5
+  [#159/#161/#162/#163/#165] · time builtin-floor #160). **Next: R3** (core.collections, core.test) — the last v1
+  stdlib batch. Plans (all executed): `plans/2026-05-31-core-iter-r1-plan.md`,
+  `plans/2026-05-31-effect-foundation-plan.md`, `plans/2026-05-31-core-effect-r1-plan.md`.
   `core.types/math/memory/concurrency` Reserved for v1.x.
   Plans: `plans/2026-05-29-stdlib-loading-error-pilot-plan.md`,
   `plans/2026-05-30-primitive-conformance-bridge-plan.md`,
