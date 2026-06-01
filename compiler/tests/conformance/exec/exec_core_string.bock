@@ -1,0 +1,70 @@
+// TEST: exec_core_string
+// EXPECT: output "ababab;3;yes;no;0007;7...;Hello, Bock;11;yes"
+// EXPECT: targets js, ts, python, rust, go
+//
+// THE PAYOFF FIXTURE for `core.string`: a user program that `use`s the embedded
+// `core.string` stdlib module — the free-function string utilities plus the
+// value-semantics `StringBuilder` — and compiles + runs it on EVERY v1 target
+// (js, ts, python, rust, go).
+//
+// Unlike `exec_core_option`/`exec_core_result` (js/ts/python/rust only — Go
+// cannot infer the type params of a free fn over the *monomorphic* built-in
+// `Optional`/`Result` runtime structs), every `core.string` utility is
+// concrete: it takes `String`/`List[String]`, never a generic over a built-in
+// container, so the Go backend has no type param to infer and the module runs
+// on all five.
+//
+// Fields, in output order:
+//   * repeat("ab", 3)                          -> "ababab"
+//   * lines("x\ny\nz").len()                    -> 3  (split on "\n")
+//   * is_blank("   ")  -> yes ; is_blank("q")   -> no  (trim-then-empty)
+//   * pad_left("7", 4, "0")                     -> "0007"
+//   * pad_right("7", 4, ".")                    -> "7..."
+//   * StringBuilder: append×3 then render        -> "Hello, Bock"
+//   * the builder's char_count (scalar length)   -> 11
+//   * a fresh builder's blank()                  -> yes
+//
+// `StringBuilder`'s query methods are `char_count`/`blank` (not `len`/
+// `is_empty`): the built-in collection-length/emptiness method lowering fires on
+// any receiver and would shadow same-named user methods, mis-compiling on
+// ts/python/go. Bools are mapped to `yes`/`no` via `yn` (raw `Bool`
+// interpolation diverges: Python `True`/`False` vs the rest's `true`/`false` —
+// the same convention `exec_string_methods.bock` uses).
+//
+// GO AUTHORING NOTE: every `StringBuilder` method receiver is a `let`-bound
+// variable (`emptyB.blank()`, not `builder().blank()`). Go emits the record's
+// methods on a *pointer* receiver, and a pointer method cannot be called on a
+// non-addressable temporary (`cannot call pointer method on builder()`), so the
+// builder is bound before the method call. This is an idiom of the Go target,
+// not a `core.string` defect.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.string.{repeat, pad_left, pad_right, lines, is_blank, builder, append}
+
+fn yn(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn main() -> Void {
+  let rep = repeat("ab", 3)
+  let lineCount = lines("x\ny\nz").len()
+  let blankYes = yn(is_blank("   "))
+  let blankNo = yn(is_blank("q"))
+  let padL = pad_left("7", 4, "0")
+  let padR = pad_right("7", 4, ".")
+
+  let sb = append(append(append(builder(), "Hello"), ", "), "Bock")
+  let built = sb.render()
+  let count = sb.char_count()
+
+  let emptyB = builder()
+  let isEmpty = yn(emptyB.blank())
+
+  println("${rep};${lineCount};${blankYes};${blankNo};${padL};${padR};${built};${count};${isEmpty}")
+}
