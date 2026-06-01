@@ -1126,6 +1126,83 @@ impl PyEmitCtx {
     /// Ordering-runtime singleton (`_bock_less` / `_bock_equal` /
     /// `_bock_greater`) via a conditional expression, matching the
     /// construction/`case` sides. `eq` → `==`; `to_string`/`display` → `str(x)`.
+    /// Lower a desugared `String` built-in method call (`recv_kind =
+    /// "Primitive:String"`) to its native Python string op. Wired into the
+    /// `Call` arm *before* `try_emit_list_method` so a String receiver's
+    /// `len`/`contains`/`is_empty` dispatch here, not through the List path.
+    ///
+    /// `len` is the Unicode SCALAR count: Python `str` is a sequence of code
+    /// points, so `len(s)` already yields the scalar count (spec §18.3).
+    /// `byte_len` encodes to UTF-8 first (`len(s.encode())`). `replace` replaces
+    /// ALL occurrences (Python's default). `split` returns a Python list, the
+    /// List runtime rep.
+    fn try_emit_string_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_string_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
+            rest.first()
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match method {
+            "len" | "length" | "count" => format!("len({recv_str})"),
+            "byte_len" => format!("len(({recv_str}).encode())"),
+            "is_empty" => format!("(len({recv_str}) == 0)"),
+            "to_upper" => format!("({recv_str}).upper()"),
+            "to_lower" => format!("({recv_str}).lower()"),
+            "trim" => format!("({recv_str}).strip()"),
+            "contains" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("(({p}) in ({recv_str}))")
+            }
+            "starts_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).startswith({p})")
+            }
+            "ends_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).endswith({p})")
+            }
+            "replace" => {
+                let Some(from) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(to) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).replace({from}, {to})")
+            }
+            "split" => {
+                let Some(sep) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).split({sep})")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     fn try_emit_primitive_bridge(
         &mut self,
         node: &AIRNode,
@@ -2423,6 +2500,12 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_set_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // String method dispatch runs *before* the List recogniser so the
+                // overlapping `len`/`contains`/`is_empty` names route by the
+                // checker's `recv_kind = "Primitive:String"`, not by name alone.
+                if self.try_emit_string_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {

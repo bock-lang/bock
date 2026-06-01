@@ -1183,6 +1183,85 @@ pub fn desugared_set_method<'a>(
     }
 }
 
+// ─── String built-in method dispatch ─────────────────────────────────────────
+//
+// `String` exposes a set of built-in methods (`len`/`to_upper`/`trim`/
+// `contains`/`split`/…) that the checker resolves to a concrete return type
+// (`checker.rs`, the `Type::Primitive(PrimitiveType::String)` method table). But
+// codegen sees only the desugared `Call(FieldAccess(recv, m), [recv, …])`, and
+// several of these method names overlap with `List` (`len`/`length`/`count`,
+// `is_empty`, `contains`, `index_of`): without disambiguation a String
+// receiver's `contains`/`len` is routed through the `List` path (e.g. Go's
+// `[]interface{}` linear scan), which fails to compile against a `string`. The
+// remaining String-only methods (`to_upper`/`trim`/`replace`/…) fall through to
+// the generic desugared-self-call and emit `s.to_upper(s)` — undefined on every
+// target. The checker's `recv_kind` annotation (`RECV_KIND_META_KEY`, value
+// `"Primitive:String"`) records the resolved receiver category on the call node,
+// so each backend reads it here to pick the native string lowering and —
+// crucially — runs this recogniser *before* `desugared_list_method` so the
+// overlapping names dispatch by receiver kind, not by method name alone.
+
+/// The built-in `String` methods this codegen lowers to each target's native
+/// string ops.
+///
+/// Mirrors the checker's `String` method resolution
+/// (`checker.rs`, `Type::Primitive(PrimitiveType::String)`): `len`/`byte_len`
+/// return `Int` (scalar count vs byte count, per spec §18.3); `is_empty`/
+/// `contains`/`starts_with`/`ends_with` a `Bool`; `to_upper`/`to_lower`/`trim`/
+/// `replace` a `String`; `split` a `List[String]`. The set is intentionally the
+/// *minimum-useful* subset that lowers cleanly to a native op on all five
+/// targets — methods needing nontrivial index/Unicode semantics (`char_at`,
+/// `slice`, `chars`, …) are deferred and fall through to the generic path.
+pub const STRING_METHODS: &[&str] = &[
+    "len",
+    "length",
+    "count",
+    "byte_len",
+    "is_empty",
+    "to_upper",
+    "to_lower",
+    "trim",
+    "contains",
+    "starts_with",
+    "ends_with",
+    "replace",
+    "split",
+];
+
+/// Recognise a *desugared `String` built-in method call*.
+///
+/// Building on [`desugared_self_call`], this additionally requires that (a) the
+/// `call_node` carries the checker's `recv_kind = "Primitive:String"` annotation
+/// and (b) the method is one of [`STRING_METHODS`]. Returns the receiver node,
+/// the method name, and the remaining (non-self) arguments — everything a
+/// backend needs to lower the call to the target's native string op
+/// (`s.toUpperCase()` / `s.upper()` / `s.to_uppercase()` / `strings.ToUpper(s)`,
+/// `[...s].length` / `len(s)` / `s.chars().count()` / `utf8.RuneCountInString(s)`,
+/// …). Each backend wires this into its `Call` arm *before*
+/// [`desugared_list_method`] so a String receiver's `len`/`contains` no longer
+/// hits the `List` path (the Go `[]interface{}` scan).
+///
+/// `call_node` is the full `Call` AIR node (it holds the annotation); `callee`
+/// and `args` are its `callee`/`args` fields, passed separately so a backend can
+/// call this from inside its `NodeKind::Call { callee, args, .. }` arm.
+#[must_use]
+pub fn desugared_string_method<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    if primitive_recv_kind(call_node) != Some("String") {
+        return None;
+    }
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if STRING_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
 // ─── Enum-variant registry ──────────────────────────────────────────────────
 //
 // User-defined enum *declarations* already lower correctly per target (JS
@@ -2631,6 +2710,48 @@ mod tests {
                 assert!(desugared_set_method(&call_m, &callee_m, &args_m).is_none());
             }
         }
+    }
+
+    #[test]
+    fn desugared_string_method_matches_string_methods_on_primitive_string() {
+        for &m in STRING_METHODS {
+            // `replace` takes two extra args, the rest take zero or one; the
+            // recogniser is arity-agnostic, so a single placeholder suffices.
+            let extra = vec![n(7, NodeKind::Identifier { name: ident("x") })];
+            let (call, callee, args) = annotated_call(m, "Primitive:String", extra);
+            let (recv, got, rest) =
+                desugared_string_method(&call, &callee, &args).expect("should match");
+            assert_eq!(got, m);
+            assert_eq!(rest.len(), 1);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+            // A non-String primitive receiver must NOT match (e.g. `Int`).
+            let (call_i, callee_i, args_i) = annotated_call(m, "Primitive:Int", vec![]);
+            assert!(desugared_string_method(&call_i, &callee_i, &args_i).is_none());
+        }
+    }
+
+    #[test]
+    fn desugared_string_method_rejects_unknown_methods_and_missing_annotation() {
+        // A String receiver, but a method the recogniser does not cover.
+        let (call, callee, args) = annotated_call("frobnicate", "Primitive:String", vec![]);
+        assert!(desugared_string_method(&call, &callee, &args).is_none());
+
+        // The right method name + receiver shape, but no `recv_kind` annotation
+        // → not matched, so a bare `xs.contains(x)` (a `List`) still falls
+        // through to the List recogniser rather than the String one.
+        let (callee, args) = desugared_call(
+            "contains",
+            vec![n(7, NodeKind::Identifier { name: ident("x") })],
+        );
+        let bare = n(
+            105,
+            NodeKind::Call {
+                callee: Box::new(callee.clone()),
+                args: args.clone(),
+                type_args: vec![],
+            },
+        );
+        assert!(desugared_string_method(&bare, &callee, &args).is_none());
     }
 
     #[test]

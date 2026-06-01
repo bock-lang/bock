@@ -531,31 +531,11 @@ impl CodeGenerator for GoGenerator {
             }
             ctx.emit_node(module)?;
         }
-        let (body, needs_fmt, needs_sync, needs_time) = ctx.into_parts();
+        let (body, needs) = ctx.into_parts();
 
         // One `package main`, one merged/deduped `import (...)` block.
         let mut content = "package main\n".to_string();
-        let mut imports = Vec::new();
-        if needs_fmt {
-            imports.push("\"fmt\"");
-        }
-        if needs_sync {
-            imports.push("\"sync\"");
-        }
-        if needs_time {
-            imports.push("\"time\"");
-        }
-        if !imports.is_empty() {
-            if imports.len() == 1 {
-                content.push_str(&format!("\nimport {}\n", imports[0]));
-            } else {
-                content.push_str("\nimport (\n");
-                for imp in &imports {
-                    content.push_str(&format!("\t{imp}\n"));
-                }
-                content.push_str(")\n");
-            }
-        }
+        content.push_str(&needs.render_block());
         content.push('\n');
         content.push_str(&body);
 
@@ -590,6 +570,10 @@ struct GoEmitCtx {
     needs_sync_import: bool,
     /// Track whether we need `"time"` import.
     needs_time_import: bool,
+    /// Track whether we need `"strings"` import (String built-in methods).
+    needs_strings_import: bool,
+    /// Track whether we need `"unicode/utf8"` import (`String.len` scalar count).
+    needs_utf8_import: bool,
     /// Package name (defaults to "main").
     package_name: String,
     /// Maps effect operation name → effect type name (e.g., "log" → "Logger").
@@ -863,6 +847,57 @@ struct GoEmitCtx {
     expected_lambda_param_types: Option<Vec<String>>,
 }
 
+/// The set of Go stdlib packages the emitted body needs imported, gathered as
+/// it is generated. Rendered into a single deduped `import (...)` block by
+/// [`GoImportNeeds::render_block`]. Shared by the two emission entry points
+/// ([`GoEmitCtx::into_parts`] for the multi-module bundle and
+/// [`GoEmitCtx::finish`] for the single-module path) so the import logic lives
+/// in one place.
+#[derive(Default, Clone, Copy)]
+struct GoImportNeeds {
+    fmt: bool,
+    sync: bool,
+    time: bool,
+    strings: bool,
+    utf8: bool,
+}
+
+impl GoImportNeeds {
+    /// Render the needed packages as a Go `import` clause (`import "x"` for a
+    /// single package, an `import (...)` block for several), or the empty string
+    /// when nothing is needed. The order matches `gofmt`'s lexical sort.
+    fn render_block(self) -> String {
+        let mut imports = Vec::new();
+        if self.fmt {
+            imports.push("\"fmt\"");
+        }
+        if self.strings {
+            imports.push("\"strings\"");
+        }
+        if self.sync {
+            imports.push("\"sync\"");
+        }
+        if self.time {
+            imports.push("\"time\"");
+        }
+        if self.utf8 {
+            imports.push("\"unicode/utf8\"");
+        }
+        if imports.is_empty() {
+            return String::new();
+        }
+        if imports.len() == 1 {
+            return format!("\nimport {}\n", imports[0]);
+        }
+        let mut block = String::from("\nimport (\n");
+        for imp in &imports {
+            block.push_str(&format!("\t{imp}\n"));
+        }
+        block.push_str(")\n");
+        block
+    }
+}
+
 /// A recorded generic-function signature ([`GoEmitCtx::fn_signatures`]): the
 /// declared generic-param names, each value param's declared type node, and the
 /// return type node. Used to specialise an untyped lambda argument at a call
@@ -878,6 +913,8 @@ impl GoEmitCtx {
             needs_fmt_import: false,
             needs_sync_import: false,
             needs_time_import: false,
+            needs_strings_import: false,
+            needs_utf8_import: false,
             package_name: "main".into(),
             effect_ops: HashMap::new(),
             current_handler_vars: HashMap::new(),
@@ -2343,38 +2380,29 @@ impl GoEmitCtx {
     }
 
     /// Returns the emitted body and import flags without building the preamble.
-    fn into_parts(self) -> (String, bool, bool, bool) {
+    fn into_parts(self) -> (String, GoImportNeeds) {
         (
             self.buf,
-            self.needs_fmt_import,
-            self.needs_sync_import,
-            self.needs_time_import,
+            GoImportNeeds {
+                fmt: self.needs_fmt_import,
+                sync: self.needs_sync_import,
+                time: self.needs_time_import,
+                strings: self.needs_strings_import,
+                utf8: self.needs_utf8_import,
+            },
         )
     }
 
     fn finish(self) -> String {
         let mut header = format!("package {}\n", self.package_name);
-        let mut imports = Vec::new();
-        if self.needs_fmt_import {
-            imports.push("\"fmt\"");
-        }
-        if self.needs_sync_import {
-            imports.push("\"sync\"");
-        }
-        if self.needs_time_import {
-            imports.push("\"time\"");
-        }
-        if !imports.is_empty() {
-            if imports.len() == 1 {
-                header.push_str(&format!("\nimport {}\n", imports[0]));
-            } else {
-                header.push_str("\nimport (\n");
-                for imp in &imports {
-                    header.push_str(&format!("\t{imp}\n"));
-                }
-                header.push_str(")\n");
-            }
-        }
+        let needs = GoImportNeeds {
+            fmt: self.needs_fmt_import,
+            sync: self.needs_sync_import,
+            time: self.needs_time_import,
+            strings: self.needs_strings_import,
+            utf8: self.needs_utf8_import,
+        };
+        header.push_str(&needs.render_block());
         header.push('\n');
         header.push_str(&self.buf);
         header
@@ -3165,6 +3193,101 @@ impl GoEmitCtx {
     /// generic Ordering-runtime helper `__bockCompare`, returning a
     /// `__bockOrdering` constant the value-switch / construction sides use. `eq`
     /// → `==`; `to_string`/`display` → `fmt.Sprintf("%v", x)`.
+    /// Lower a desugared `String` built-in method call (`recv_kind =
+    /// "Primitive:String"`) to its native Go string op. Wired into the `Call`
+    /// arm *before* `try_emit_list_method` so a String receiver's
+    /// `len`/`contains`/`is_empty` dispatch here, not through the List path —
+    /// which is the misrouting that broke `String.contains` (the `[]interface{}`
+    /// `fmt.Sprintf("%v", …)` linear scan failed to compile against a `string`).
+    ///
+    /// `len` is the Unicode SCALAR count (`utf8.RuneCountInString(s)`) per spec
+    /// §18.3 — Go's `len(s)` is the BYTE length, so `byte_len` maps to it.
+    /// `replace` replaces ALL occurrences (`strings.ReplaceAll`). `split` returns
+    /// `[]string`, which the read-only `List` built-ins (`len`/…) accept.
+    fn try_emit_string_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_string_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
+            rest.first()
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match method {
+            "len" | "length" | "count" => {
+                self.needs_utf8_import = true;
+                format!("int64(utf8.RuneCountInString({recv_str}))")
+            }
+            "byte_len" => format!("int64(len({recv_str}))"),
+            "is_empty" => format!("(len({recv_str}) == 0)"),
+            "to_upper" => {
+                self.needs_strings_import = true;
+                format!("strings.ToUpper({recv_str})")
+            }
+            "to_lower" => {
+                self.needs_strings_import = true;
+                format!("strings.ToLower({recv_str})")
+            }
+            "trim" => {
+                self.needs_strings_import = true;
+                format!("strings.TrimSpace({recv_str})")
+            }
+            "contains" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.Contains({recv_str}, {p})")
+            }
+            "starts_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.HasPrefix({recv_str}, {p})")
+            }
+            "ends_with" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.HasSuffix({recv_str}, {p})")
+            }
+            "replace" => {
+                let Some(from) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(to) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.ReplaceAll({recv_str}, {from}, {to})")
+            }
+            "split" => {
+                let Some(sep) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.Split({recv_str}, {sep})")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     fn try_emit_primitive_bridge(
         &mut self,
         node: &AIRNode,
@@ -4828,6 +4951,13 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_set_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // String method dispatch runs *before* the List recogniser so the
+                // overlapping `len`/`contains`/`is_empty` names route by the
+                // checker's `recv_kind = "Primitive:String"`, not by name alone —
+                // the fix for `String.contains` being misrouted to the List scan.
+                if self.try_emit_string_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(callee, args)? {

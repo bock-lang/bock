@@ -1,0 +1,52 @@
+// TEST: exec_string_methods
+// EXPECT: output "5;6;HELLO;hello;trimmed;no;yes;yes;no;yes;no;j-a-y;3"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Language-level `String` built-in method codegen, lowered per target to the
+// native string op via the `recv_kind = "Primitive:String"` dispatch (the
+// `try_emit_string_method` recogniser, run *before* the `List` path so the
+// overlapping `len`/`contains`/`is_empty` names dispatch by receiver kind).
+//
+// Coverage, in output order:
+//   - `len()`  -> Unicode SCALAR count (spec §18.3): "héllo" is 5 scalars …
+//   - `byte_len()` -> … but 6 UTF-8 bytes. Proves scalar-vs-byte semantics ×5.
+//   - `to_upper()` / `to_lower()` -> case mapping
+//   - `trim()` -> surrounding-whitespace strip
+//   - `is_empty()` (Bool) on a non-empty and an empty string
+//   - `contains` / `starts_with` / `ends_with` (Bool)
+//   - `replace(from, to)` -> replace ALL occurrences (here "x"->"-" twice)
+//   - `split(sep)` -> List[String]; `.len()` of the parts asserts the count
+//
+// Bools are mapped to `yes`/`no` rather than interpolated directly: raw `Bool`
+// interpolation diverges across targets (Python `True`/`False` vs the rest's
+// `true`/`false`) — a pre-existing concern this fixture does not couple to.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn yn(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn main() -> Void {
+  let s = "héllo"
+  let scalarLen = s.len()
+  let byteLen = s.byte_len()
+
+  let shout = "hello".to_upper()
+  let quiet = "HELLO".to_lower()
+  let clean = "  trimmed  ".trim()
+
+  let empties = "${yn("a".is_empty())};${yn("".is_empty())}"
+  let membership = "${yn("banana".contains("nan"))};${yn("banana".contains("xyz"))}"
+  let edges = "${yn("readme.md".starts_with("readme"))};${yn("readme.md".ends_with("txt"))}"
+
+  let dashed = "jxaxy".replace("x", "-")
+  let parts = "a,b,c".split(",")
+  let partCount = parts.len()
+
+  println("${scalarLen};${byteLen};${shout};${quiet};${clean};${empties};${membership};${edges};${dashed};${partCount}")
+}
