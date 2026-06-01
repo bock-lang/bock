@@ -544,6 +544,52 @@ impl RsEmitCtx {
         scan.found
     }
 
+    /// True when some `match` arm in `body` binds a pattern variable the arm
+    /// reads **more than once** — the case the runtime move-reuse analysis
+    /// ([`Self::reused_match_bindings`]) lowers by emitting `<x>.clone()` on each
+    /// by-value use after the first (the Rust pattern binds by value, so the
+    /// first by-value consumer moves it; later uses would be `E0382`). When the
+    /// reused binding is a *generic* element (`filter[T](o: Optional[T], pred:
+    /// Fn(T) -> Bool)` doing `match o { Some(x) => if pred(x) { Some(x) } … }`),
+    /// the emitted `x.clone()` needs `T: Clone` in scope, so the enclosing
+    /// generic fn must carry the bound — otherwise `E0599`/`E0277`.
+    ///
+    /// Conservative: it fires on the *shape* (a match arm with a reused binding)
+    /// rather than typing each binding, mirroring
+    /// [`Self::body_clones_collection_element`]. A `T: Clone` bound on a generic
+    /// param that turns out not to need it is harmless (every concrete v1
+    /// element type — Int/Float/String/Bool/nested — is `Clone`), and the scan
+    /// never fires for a body whose match arms each use their bindings at most
+    /// once (`or_else`/`to_list`/`count`/`get_or` over `Optional` all stay
+    /// unconstrained, matching the pre-existing behaviour). The caller gates this
+    /// on `!generic_params.is_empty()` so a non-generic fn is never touched.
+    fn body_reuses_match_binding(body: &AIRNode) -> bool {
+        struct ReuseScan {
+            found: bool,
+        }
+        impl bock_air::visitor::Visitor for ReuseScan {
+            fn visit_node(&mut self, node: &AIRNode) {
+                if self.found {
+                    return;
+                }
+                if let NodeKind::MatchArm { pattern, body, .. } = &node.kind {
+                    let mut bound = Vec::new();
+                    RsEmitCtx::collect_pattern_binding_names(pattern, &mut bound);
+                    for name in &bound {
+                        if RsEmitCtx::count_identifier_uses(body, name) > 1 {
+                            self.found = true;
+                            return;
+                        }
+                    }
+                }
+                bock_air::visitor::walk_node(self, node);
+            }
+        }
+        let mut scan = ReuseScan { found: false };
+        bock_air::visitor::Visitor::visit_node(&mut scan, body);
+        scan.found
+    }
+
     /// True when a *generic* free function takes a parameter whose base type is
     /// a clone-bound record ([`Self::clone_bound_records`] — a record whose
     /// `impl` carries a `T: Clone` bound, e.g. `ListIterator[T]`) and drives it
@@ -2018,6 +2064,7 @@ impl RsEmitCtx {
         // `E0599`). See `params_drive_clone_bound_record`.
         let add_clone_bound = !generic_params.is_empty()
             && (Self::body_clones_collection_element(body)
+                || Self::body_reuses_match_binding(body)
                 || self.params_drive_clone_bound_record(params, body));
         let generics = self.generic_params_to_rs_with_clone(generic_params, add_clone_bound);
         let param_strs = self.collect_param_strs(params);

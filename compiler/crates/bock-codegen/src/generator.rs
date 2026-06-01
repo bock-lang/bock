@@ -1262,6 +1262,208 @@ pub fn desugared_string_method<'a>(
     }
 }
 
+// ─── Reserved-keyword escaping ───────────────────────────────────────────────
+//
+// A Bock value identifier (a parameter, local `let`, or free-function name) is a
+// plain word the user chose; nothing stops it colliding with a *target*
+// language's reserved word. Before this layer codegen emitted such an identifier
+// verbatim, producing source the target rejects at compile/parse time —
+// `function getOr(o, default)` (JS/TS/Go reserve `default`), `def: int = …`
+// (Python reserves `def`), and so on. Because each backend funnels its
+// value-binding names through a single case-conversion (`to_camel_case` for
+// JS/TS/Go, `to_snake_case` for Python/Rust), one post-conversion escape step
+// per target closes the whole class: a converted name that equals a target
+// keyword is suffixed with `_` (`default` → `default_`, `def` → `def_`),
+// applied *consistently* at the declaration site, every reference site, and —
+// for Go — the type-inference scope-map keys, so they always agree.
+//
+// Scope: only *value* identifiers are escaped. Member/field/method names (a
+// `obj.default` access, a host-method call) are NOT — `default` is a perfectly
+// legal member name on every target, and escaping it would break the access.
+// Type names are not escaped either (no v1 keyword collides with a Bock type
+// name, and they live in a different namespace). The suffix-`_` mangle is
+// stable and idempotent (`escape` of an already-escaped name is itself), and
+// the chosen suffix never itself reintroduces a keyword.
+
+/// The codegen target whose reserved-word set an identifier is being escaped
+/// against. Mirrors the five v1 backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordTarget {
+    /// JavaScript (`js`).
+    Js,
+    /// TypeScript (`ts`) — a superset of the JS reserved set.
+    Ts,
+    /// Python (`python`).
+    Python,
+    /// Rust (`rust`).
+    Rust,
+    /// Go (`go`).
+    Go,
+}
+
+/// JavaScript reserved words and future-reserved words (ES2015+), plus the
+/// literal keywords. A value binding named any of these must be escaped.
+const JS_KEYWORDS: &[&str] = &[
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+    "enum",
+    "await",
+    "implements",
+    "interface",
+    "let",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "static",
+];
+
+/// TypeScript reserves everything JS does plus a handful of type-level words
+/// that are also illegal as plain bindings in value positions the backend emits.
+const TS_EXTRA_KEYWORDS: &[&str] = &[
+    "abstract",
+    "as",
+    "any",
+    "boolean",
+    "constructor",
+    "declare",
+    "get",
+    "infer",
+    "is",
+    "keyof",
+    "module",
+    "namespace",
+    "never",
+    "readonly",
+    "require",
+    "number",
+    "object",
+    "set",
+    "string",
+    "symbol",
+    "type",
+    "undefined",
+    "unique",
+    "unknown",
+    "from",
+    "of",
+    "async",
+];
+
+/// Python 3 keywords (`keyword.kwlist`) plus the soft keywords that are unsafe
+/// as bindings in the positions the backend emits.
+const PYTHON_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield", "match", "case",
+];
+
+/// Rust strict and reserved keywords (2018/2021 editions). Rust *could* use the
+/// raw-identifier form (`r#match`) for most of these, but a uniform `_` suffix
+/// keeps the escape identical across all targets and avoids the handful of words
+/// (`crate`/`self`/`super`/`Self`) that cannot be raw identifiers at all.
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn",
+    "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+    "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+    "use", "where", "while", "async", "await", "abstract", "become", "box", "do", "final", "macro",
+    "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "union",
+];
+
+/// Go keywords (the Go spec's 25 reserved words).
+const GO_KEYWORDS: &[&str] = &[
+    "break",
+    "case",
+    "chan",
+    "const",
+    "continue",
+    "default",
+    "defer",
+    "else",
+    "fallthrough",
+    "for",
+    "func",
+    "go",
+    "goto",
+    "if",
+    "import",
+    "interface",
+    "map",
+    "package",
+    "range",
+    "return",
+    "select",
+    "struct",
+    "switch",
+    "type",
+    "var",
+];
+
+/// True when `name` is a reserved word in the given target's keyword set.
+#[must_use]
+pub fn is_target_keyword(name: &str, target: KeywordTarget) -> bool {
+    match target {
+        KeywordTarget::Js => JS_KEYWORDS.contains(&name),
+        KeywordTarget::Ts => JS_KEYWORDS.contains(&name) || TS_EXTRA_KEYWORDS.contains(&name),
+        KeywordTarget::Python => PYTHON_KEYWORDS.contains(&name),
+        KeywordTarget::Rust => RUST_KEYWORDS.contains(&name),
+        KeywordTarget::Go => GO_KEYWORDS.contains(&name),
+    }
+}
+
+/// Escape `name` (an already case-converted *value* identifier) against the
+/// target's reserved-word set: a name that collides with a keyword gets a
+/// trailing `_`, otherwise it is returned unchanged.
+///
+/// Idempotent — the suffixed form is never itself a keyword, so re-escaping is a
+/// no-op. Apply this at every site that emits or keys on a Bock value binding
+/// (declaration, reference, and the Go scope-inference maps) so the escaped name
+/// is used uniformly. Do **not** apply it to member/field/method names or to
+/// type names (see the section comment).
+#[must_use]
+pub fn escape_target_keyword(name: &str, target: KeywordTarget) -> String {
+    if is_target_keyword(name, target) {
+        format!("{name}_")
+    } else {
+        name.to_string()
+    }
+}
+
 // ─── Enum-variant registry ──────────────────────────────────────────────────
 //
 // User-defined enum *declarations* already lower correctly per target (JS

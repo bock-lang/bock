@@ -1592,7 +1592,7 @@ impl EmitCtx {
             let effect_names = self.expand_effect_names(effect_clause);
             self.fn_effects.insert(name.to_string(), effect_names);
         }
-        let js_name = to_camel_case(name);
+        let js_name = js_value_ident(name);
         self.writeln(&format!(
             "{export}{async_kw}function {js_name}({}) {{",
             all_params.join(", "),
@@ -2061,7 +2061,7 @@ impl EmitCtx {
                     // `{enum}_{variant}` const emitted by `emit_enum_variant`.
                     let _ = write!(self.buf, "{enum_name}_{}", name.name);
                 } else {
-                    self.buf.push_str(&to_camel_case(&name.name));
+                    self.buf.push_str(&js_value_ident(&name.name));
                 }
                 Ok(())
             }
@@ -2310,8 +2310,9 @@ impl EmitCtx {
                         let supplied = fields.iter().find(|f| &f.name.name == fname);
                         match supplied.and_then(|f| f.value.as_ref()) {
                             Some(val) => self.emit_expr(val)?,
-                            // Shorthand `{ radius }` ≡ `{ radius: radius }`.
-                            None => self.buf.push_str(&to_camel_case(fname)),
+                            // Shorthand `{ radius }` ≡ `{ radius: radius }` — the
+                            // RHS is a value reference, so escape like any ident.
+                            None => self.buf.push_str(&js_value_ident(fname)),
                         }
                     }
                     self.buf.push(')');
@@ -2978,7 +2979,7 @@ impl EmitCtx {
                 let _ = writeln!(
                     self.buf,
                     "{ind}const {} = {access};",
-                    to_camel_case(&name.name)
+                    js_value_ident(&name.name)
                 );
             }
             NodeKind::ConstructorPat { fields, .. } => {
@@ -3028,7 +3029,7 @@ impl EmitCtx {
     fn collect_binds_js(&self, pat: &AIRNode, access: &str, out: &mut String) {
         match &pat.kind {
             NodeKind::BindPat { name, .. } => {
-                let _ = write!(out, "const {} = {access}; ", to_camel_case(&name.name));
+                let _ = write!(out, "const {} = {access}; ", js_value_ident(&name.name));
             }
             NodeKind::ConstructorPat { fields, .. } => {
                 for (i, field) in fields.iter().enumerate() {
@@ -3156,7 +3157,7 @@ impl EmitCtx {
 
     fn pattern_to_binding_name(&self, pat: &AIRNode) -> String {
         match &pat.kind {
-            NodeKind::BindPat { name, .. } => to_camel_case(&name.name),
+            NodeKind::BindPat { name, .. } => js_value_ident(&name.name),
             NodeKind::WildcardPat => "_".into(),
             NodeKind::TuplePat { elems } => {
                 format!(
@@ -3219,6 +3220,20 @@ fn is_time_method_name(name: &str) -> bool {
 }
 
 /// Convert a name to `camelCase` (handles `snake_case`, `PascalCase`, and already `camelCase`).
+/// Convert a Bock *value* identifier (a param, local binding, or free-function
+/// name) to its JS form: `camelCase`, then escaped against the JS reserved-word
+/// set so a binding named e.g. `default` emits `default_` rather than the
+/// illegal bare keyword. Apply at every value declaration and reference site so
+/// the escaped name is used uniformly; member/method names use bare
+/// [`to_camel_case`] (a keyword is legal as a member name). See
+/// [`crate::generator::escape_target_keyword`].
+fn js_value_ident(name: &str) -> String {
+    crate::generator::escape_target_keyword(
+        &to_camel_case(name),
+        crate::generator::KeywordTarget::Js,
+    )
+}
+
 fn to_camel_case(s: &str) -> String {
     if s.is_empty() || s == "_" {
         return s.to_string();

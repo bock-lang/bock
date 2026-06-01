@@ -2206,7 +2206,7 @@ impl TsEmitCtx {
             let effect_names = self.expand_effect_names(effect_clause);
             self.fn_effects.insert(name.to_string(), effect_names);
         }
-        let ts_name = to_camel_case(name);
+        let ts_name = ts_value_ident(name);
         self.writeln(&format!(
             "{export}{async_kw}function {ts_name}{generics}({}){ret_str} {{",
             all_params.join(", "),
@@ -2824,7 +2824,7 @@ impl TsEmitCtx {
                     // `{enum}_{variant}` const.
                     let _ = write!(self.buf, "{enum_name}_{}", name.name);
                 } else {
-                    self.buf.push_str(&to_camel_case(&name.name));
+                    self.buf.push_str(&ts_value_ident(&name.name));
                 }
                 Ok(())
             }
@@ -3059,7 +3059,7 @@ impl TsEmitCtx {
                         let supplied = fields.iter().find(|f| &f.name.name == fname);
                         match supplied.and_then(|f| f.value.as_ref()) {
                             Some(val) => self.emit_expr(val)?,
-                            None => self.buf.push_str(&to_camel_case(fname)),
+                            None => self.buf.push_str(&ts_value_ident(fname)),
                         }
                     }
                     self.buf.push(')');
@@ -3722,7 +3722,7 @@ impl TsEmitCtx {
                 let _ = writeln!(
                     self.buf,
                     "{ind}const {} = {access};",
-                    to_camel_case(&name.name)
+                    ts_value_ident(&name.name)
                 );
             }
             NodeKind::ConstructorPat { fields, .. } => {
@@ -3769,7 +3769,7 @@ impl TsEmitCtx {
     fn collect_binds_ts(&self, pat: &AIRNode, access: &str, out: &mut String) {
         match &pat.kind {
             NodeKind::BindPat { name, .. } => {
-                let _ = write!(out, "const {} = {access}; ", to_camel_case(&name.name));
+                let _ = write!(out, "const {} = {access}; ", ts_value_ident(&name.name));
             }
             NodeKind::ConstructorPat { fields, .. } => {
                 for (i, field) in fields.iter().enumerate() {
@@ -3888,7 +3888,7 @@ impl TsEmitCtx {
 
     fn pattern_to_binding_name(&self, pat: &AIRNode) -> String {
         match &pat.kind {
-            NodeKind::BindPat { name, .. } => to_camel_case(&name.name),
+            NodeKind::BindPat { name, .. } => ts_value_ident(&name.name),
             NodeKind::WildcardPat => "_".into(),
             NodeKind::TuplePat { elems } => {
                 format!(
@@ -3963,6 +3963,19 @@ fn is_time_method_name(name: &str) -> bool {
 }
 
 /// Convert a name to `camelCase` (handles `snake_case`, `PascalCase`, and already `camelCase`).
+/// Convert a Bock *value* identifier (a param, local binding, or free-function
+/// name) to its TS form: `camelCase`, then escaped against the TS reserved-word
+/// set so a binding named e.g. `default`/`type` emits `default_`/`type_` rather
+/// than the illegal bare keyword. Apply at every value declaration and reference
+/// site so the escaped name is used uniformly; member/method names use bare
+/// [`to_camel_case`]. See [`crate::generator::escape_target_keyword`].
+fn ts_value_ident(name: &str) -> String {
+    crate::generator::escape_target_keyword(
+        &to_camel_case(name),
+        crate::generator::KeywordTarget::Ts,
+    )
+}
+
 fn to_camel_case(s: &str) -> String {
     if s.is_empty() || s == "_" {
         return s.to_string();

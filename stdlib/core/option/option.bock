@@ -86,15 +86,21 @@ public fn count[T](o: Optional[T]) -> Int {
   }
 }
 
-/// Extracts the payload of `o`, or returns `default` when `o` is `None`.
+/// Extracts the payload of `o`, or returns `fallback` when `o` is `None`.
 ///
 /// A free-function sibling of the built-in `unwrap_or` method with an *eager*
 /// default. Kept (not dropped as a pure duplicate) because the free form
 /// composes uniformly with the rest of this module and is reachable in
 /// expression positions where the method form on a complex receiver is awkward.
-public fn get_or[T](o: Optional[T], default: T) -> T {
+///
+/// The parameter is named `fallback` (not `default`) because `default` is a
+/// reserved word on several targets (JS/TS/Go) and a Bock identifier that
+/// collides with a target keyword is *also* escaped by codegen (see the
+/// `escape_target_keyword` reserved-word sanitizer); `fallback` keeps the
+/// emitted source idiomatic on every target without relying on that escape.
+public fn get_or[T](o: Optional[T], fallback: T) -> T {
   match o {
     Some(x) => x
-    None => default
+    None => fallback
   }
 }
