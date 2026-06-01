@@ -1,0 +1,55 @@
+// TEST: exec_effect_with_clause
+// EXPECT: output "started at 0 -> done"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §10.2 effect propagation + §10.4 handler installation, end to end on all
+// five targets. `report` declares `with Log, Clock` and invokes both effects'
+// ops as BARE calls (no handler threading at the source level), deferring
+// handler choice to its caller. `main` installs concrete record+impl handlers
+// for both effects via one `handling` block and calls `report` inside it.
+//
+// Crucially, `report` invokes the `Clock` op `now()` INSIDE a string
+// interpolation (`"started at ${now()}"`). On Rust, the interpolation
+// sub-context historically emitted the op bare (`now()` instead of
+// `__clock.now()`), failing to compile (rustc E0425); this fixture is the
+// regression guard for that Rust interpolation-rewrite fix. The other four
+// backends emit interpolated exprs on the same context and were already
+// correct. `main` is intentionally NOT `public` (Go entry-point rationale,
+// see hello_world.bock).
+module main
+
+effect Log {
+  fn log(message: String) -> Void
+}
+
+effect Clock {
+  fn now() -> Int
+}
+
+record ConsoleLog {}
+
+impl Log for ConsoleLog {
+  fn log(message: String) -> Void {
+    println(message)
+  }
+}
+
+record FixedClock {}
+
+impl Clock for FixedClock {
+  fn now() -> Int {
+    0
+  }
+}
+
+fn report() -> Void
+  with Log, Clock
+{
+  log("started at ${now()} -> done")
+}
+
+fn main() -> Void {
+  handling (Log with ConsoleLog {}, Clock with FixedClock {}) {
+    report()
+  }
+}

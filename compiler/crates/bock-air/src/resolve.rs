@@ -394,6 +394,13 @@ impl<'a> Resolver<'a> {
         self.collect_imports(module);
         // Pass 1b: collect all top-level declarations (shadows imports if same name).
         self.collect_items(&module.items);
+        // Pass 1c: §10.3 Layer-2 (Module) handlers. A module-level
+        // `handle <Effect> with <handler>` installs that effect's operations as
+        // module-scope value bindings, so a bare op call (`log(...)`) anywhere
+        // in the module resolves to the module handler with no enclosing
+        // `handling` block. Runs after `collect_items` so `effect_info` is
+        // populated, and before resolution so the ops are visible everywhere.
+        self.inject_module_handle_operations(&module.items);
         // Pass 2: resolve all identifier references.
         for item in &module.items {
             self.resolve_item(item);
@@ -835,6 +842,27 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// For each module-level `handle <Effect> with <handler>` declaration,
+    /// inject that effect's operations into the current (module) scope. This is
+    /// the §10.3 Layer-2 path: the bare op resolves to the module handler with
+    /// no enclosing `handling` block. Mirrors `inject_effect_operations`, but is
+    /// driven by the installed module handlers rather than a `with` clause.
+    fn inject_module_handle_operations(&mut self, items: &[Item]) {
+        let mut visited = HashSet::new();
+        for item in items {
+            if let Item::ModuleHandle(d) = item {
+                let effect_name = d
+                    .effect
+                    .segments
+                    .iter()
+                    .map(|seg| seg.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                self.inject_ops_for_effect(&effect_name, &mut visited);
+            }
+        }
+    }
+
     /// Recursively inject operations for a single effect (handles composites).
     fn inject_ops_for_effect(&mut self, effect_name: &str, visited: &mut HashSet<String>) {
         if !visited.insert(effect_name.to_string()) {
@@ -994,7 +1022,26 @@ impl<'a> Resolver<'a> {
         for pair in &h.handlers {
             self.resolve_expr(&pair.handler);
         }
+        // §10.4 bare-op form: a `handling (Effect with Handler) { ... }` block
+        // installs each effect's operations as in-scope value bindings, so a
+        // bare op call (`log(...)`) inside the block resolves without the
+        // enclosing function declaring `with Effect`. Push a fresh scope, inject
+        // the handled effects' ops into it, resolve the body inside that scope,
+        // then pop — the ops are visible only for the duration of the block.
+        self.symbols.push_scope();
+        let mut visited = HashSet::new();
+        for pair in &h.handlers {
+            let effect_name = pair
+                .effect
+                .segments
+                .iter()
+                .map(|seg| seg.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            self.inject_ops_for_effect(&effect_name, &mut visited);
+        }
         self.resolve_block(&h.body);
+        self.symbols.pop_scope();
     }
 
     // ── Expression resolution ─────────────────────────────────────────────────

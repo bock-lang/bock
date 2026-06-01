@@ -1,0 +1,37 @@
+// TEST: exec_effect_cross_module
+// EXPECT: output "cross-module effect works"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §10 + DV13 cross-module: an effect and its record+impl handler are declared
+// in a SECOND user module (`logging`) and imported into `main` via `use`. The
+// bare op `log(...)` invoked inside a `handling (Log with ConsoleLog {})`
+// block resolves against the imported effect's operations (the registry seeds
+// the imported effect's `effect_info`, so the resolver's handling-block op
+// injection finds them). End to end on all five targets. This is a MULTI-FILE
+// fixture — the `// FILE:` marker declares the imported `logging` module; the
+// harness writes it alongside the entry module so the build's recursive
+// `.bock` discovery compiles both. `main` is intentionally NOT `public`.
+module main
+
+use logging.{Log, ConsoleLog}
+
+fn main() -> Void {
+  handling (Log with ConsoleLog {}) {
+    log("cross-module effect works")
+  }
+}
+
+// FILE: logging.bock
+module logging
+
+public effect Log {
+  fn log(message: String) -> Void
+}
+
+public record ConsoleLog {}
+
+impl Log for ConsoleLog {
+  fn log(message: String) -> Void {
+    println(message)
+  }
+}
