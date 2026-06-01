@@ -861,6 +861,26 @@ pub const READ_ONLY_LIST_METHODS: &[&str] = &[
     "join",
 ];
 
+/// The raw `recv_kind` annotation tag the checker stamped on a desugared method
+/// call node, if any.
+///
+/// Returns the verbatim tag string (`"List"`, `"User:Counter"`,
+/// `"Primitive:Int"`, …) without stripping any prefix, or `None` when the node
+/// carries no `recv_kind` stamp. This is the unprefixed sibling of
+/// [`primitive_recv_kind`] / [`trait_bound_recv_kind`], used where a recogniser
+/// needs to *distinguish* its own receiver category from any other stamped one
+/// (e.g. the built-in `List` recogniser ruling out a same-named user-record
+/// method).
+#[must_use]
+pub fn raw_recv_kind(node: &AIRNode) -> Option<&str> {
+    let bock_air::Value::String(tag) =
+        node.metadata.get(bock_types::checker::RECV_KIND_META_KEY)?
+    else {
+        return None;
+    };
+    Some(tag.as_str())
+}
+
 /// Recognise a *desugared `List` built-in method call*.
 ///
 /// Building on the same desugared shape [`desugared_self_call`] detects
@@ -874,15 +894,37 @@ pub const READ_ONLY_LIST_METHODS: &[&str] = &[
 /// verbatim as `nums.len(nums)` — which would fail at the target's
 /// runtime/compile step.
 ///
+/// `call_node` is the full `Call` AIR node (it holds the `recv_kind`
+/// annotation); `callee`/`args` are its fields, passed separately so a backend
+/// can call this from inside its `NodeKind::Call { callee, args, .. }` arm.
+///
+/// Unlike the `Optional`/`Result`/`Map`/`Set` recognisers — which fire *only*
+/// on their exact `recv_kind` stamp — this one accepts both a `recv_kind =
+/// "List"` stamp *and an absent stamp* (the checker leaves the receiver
+/// untagged when its type is an unresolved inference variable, and several
+/// existing list fixtures rely on that fall-through). It does, however, *reject*
+/// a call carrying any *other* stamp: that rules out a same-named method on a
+/// user record (`recv_kind = "User:Counter"`), a primitive, or another
+/// container, so a user-defined `len()`/`is_empty()`/`contains(...)` falls
+/// through to the user-method path instead of being shadowed by the built-in
+/// `List` lowering.
+///
 /// Returns the receiver, the (validated) method name, and the remaining
 /// (non-self) arguments. The element type of the list is intentionally *not*
 /// inspected here: the checker has already type-checked the call, and each
 /// backend's lowering is element-type-agnostic for these methods.
 #[must_use]
 pub fn desugared_list_method<'a>(
+    call_node: &'a AIRNode,
     callee: &'a AIRNode,
     args: &'a [AirArg],
 ) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    // A stamp other than "List" means the receiver is a user type / primitive /
+    // other container; the built-in List lowering must not shadow it. An absent
+    // stamp keeps the historical name-only behaviour (unresolved receiver type).
+    if !matches!(raw_recv_kind(call_node), None | Some("List")) {
+        return None;
+    }
     let (recv, field, rest) = desugared_self_call(callee, args)?;
     let method = field.name.as_str();
     if READ_ONLY_LIST_METHODS.contains(&method) {
@@ -2815,7 +2857,11 @@ mod tests {
     /// Build a desugared method call `recv.method(extra)` in the AIR shape the
     /// lowerer produces (receiver cloned into both the FieldAccess object and
     /// the leading self arg, sharing a NodeId).
-    fn desugared_call(method: &str, extra: Vec<AIRNode>) -> (AIRNode, Vec<AirArg>) {
+    ///
+    /// Returns the (callee, args) pair and the full wrapping `Call` node — the
+    /// latter is what carries the checker's `recv_kind` annotation, so a
+    /// recogniser that gates on the stamp reads it from there.
+    fn desugared_call(method: &str, extra: Vec<AIRNode>) -> (AIRNode, Vec<AirArg>, AIRNode) {
         let recv = n(
             5,
             NodeKind::Identifier {
@@ -2834,7 +2880,15 @@ mod tests {
             value: recv,
         }];
         args.extend(extra.into_iter().map(|value| AirArg { label: None, value }));
-        (callee, args)
+        let call_node = n(
+            8,
+            NodeKind::Call {
+                callee: Box::new(callee.clone()),
+                args: args.clone(),
+                type_args: vec![],
+            },
+        );
+        (callee, args, call_node)
     }
 
     #[test]
@@ -2849,9 +2903,9 @@ mod tests {
                 _ => vec![],
             };
             let n_extra = extra.len();
-            let (callee, args) = desugared_call(m, extra);
+            let (callee, args, call_node) = desugared_call(m, extra);
             let (recv, got_method, rest) =
-                desugared_list_method(&callee, &args).expect("should match");
+                desugared_list_method(&call_node, &callee, &args).expect("should match");
             assert_eq!(got_method, m);
             assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
             assert_eq!(rest.len(), n_extra);
@@ -2863,10 +2917,49 @@ mod tests {
         // Mutating built-ins (deferred to DQ18) and arbitrary method names are
         // NOT recognised — they fall through to each backend's generic path.
         for &m in &["push", "pop", "insert", "remove", "clear", "frobnicate"] {
-            let (callee, args) = desugared_call(m, vec![]);
+            let (callee, args, call_node) = desugared_call(m, vec![]);
             assert!(
-                desugared_list_method(&callee, &args).is_none(),
+                desugared_list_method(&call_node, &callee, &args).is_none(),
                 "{m} should not be recognised as a read-only List method"
+            );
+        }
+    }
+
+    #[test]
+    fn desugared_list_method_accepts_explicit_list_stamp() {
+        // A `recv_kind = "List"` stamp (or no stamp) is accepted: the built-in
+        // List lowering fires on a genuine list receiver.
+        let (callee, args, mut call_node) = desugared_call("len", vec![]);
+        call_node.metadata.insert(
+            bock_types::checker::RECV_KIND_META_KEY.to_string(),
+            bock_air::Value::String("List".to_string()),
+        );
+        assert!(
+            desugared_list_method(&call_node, &callee, &args).is_some(),
+            "a `recv_kind = \"List\"` len() must be recognised as the built-in"
+        );
+    }
+
+    #[test]
+    fn desugared_list_method_rejects_same_named_user_record_method() {
+        // A user record with its own `len()`/`is_empty()`/`contains()` is stamped
+        // `recv_kind = "User:<name>"`; the built-in List lowering must NOT shadow
+        // it (Q-r2-codegen-residue item c). The call falls through to the
+        // user-method path instead.
+        for &m in &["len", "is_empty", "contains", "count", "first"] {
+            let extra = if m == "contains" {
+                vec![n(7, NodeKind::Identifier { name: ident("x") })]
+            } else {
+                vec![]
+            };
+            let (callee, args, mut call_node) = desugared_call(m, extra);
+            call_node.metadata.insert(
+                bock_types::checker::RECV_KIND_META_KEY.to_string(),
+                bock_air::Value::String("User:Counter".to_string()),
+            );
+            assert!(
+                desugared_list_method(&call_node, &callee, &args).is_none(),
+                "{m} on a user record (recv_kind=User:Counter) must not route to the List built-in"
             );
         }
     }
@@ -2890,7 +2983,7 @@ mod tests {
         tag: &str,
         extra: Vec<AIRNode>,
     ) -> (AIRNode, AIRNode, Vec<AirArg>) {
-        let (callee, args) = desugared_call(method, extra);
+        let (callee, args, _) = desugared_call(method, extra);
         let mut call = n(
             100,
             NodeKind::Call {
@@ -2915,7 +3008,7 @@ mod tests {
         assert_eq!(primitive_recv_kind(&call), None);
 
         // No annotation → None.
-        let (callee, args) = desugared_call("compare", vec![]);
+        let (callee, args, _) = desugared_call("compare", vec![]);
         let bare = n(
             101,
             NodeKind::Call {
@@ -2957,7 +3050,7 @@ mod tests {
         assert!(primitive_bridge_call(&call, &callee, &args).is_none());
 
         // Primitive receiver + bridge method, but no annotation → not matched.
-        let (callee, args) = desugared_call("compare", vec![]);
+        let (callee, args, _) = desugared_call("compare", vec![]);
         let bare = n(
             102,
             NodeKind::Call {
@@ -3028,7 +3121,7 @@ mod tests {
     fn container_methods_require_the_annotation() {
         // The right method name + receiver shape, but no `recv_kind` annotation
         // → not matched (the disambiguation crux).
-        let (callee, args) = desugared_call("unwrap_or", vec![]);
+        let (callee, args, _) = desugared_call("unwrap_or", vec![]);
         let bare = n(
             103,
             NodeKind::Call {
@@ -3118,7 +3211,7 @@ mod tests {
         // The right method name + receiver shape, but no `recv_kind` annotation
         // → not matched, so a bare `xs.contains(x)` (a `List`) still falls
         // through to the List recogniser rather than the String one.
-        let (callee, args) = desugared_call(
+        let (callee, args, _) = desugared_call(
             "contains",
             vec![n(7, NodeKind::Identifier { name: ident("x") })],
         );
@@ -3138,7 +3231,7 @@ mod tests {
         // The right method name + receiver shape, but no `recv_kind` annotation
         // → not matched. A bare `m.get(k)` without the annotation must fall
         // through to the List recogniser, not the Map one.
-        let (callee, args) = desugared_call("get", vec![]);
+        let (callee, args, _) = desugared_call("get", vec![]);
         let bare = n(
             104,
             NodeKind::Call {

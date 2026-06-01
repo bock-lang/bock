@@ -1,0 +1,38 @@
+// TEST: exec_record_field_collection_concat
+// EXPECT: output "3;a-b-c"
+// EXPECT: targets js, ts, python, rust, go
+//
+// A record field typed `List[String]` flows its element type through the
+// read-only `List` built-ins (`concat`, `join`, `count`) when accessed as
+// `record.field.concat(...)` (Q-r2-codegen-residue, codegen item b). The Go
+// concern: `b.items` must carry the field's declared `[]string` element type
+// into the `concat` IIFE — emitting `[]interface{}` there made the
+// `func(__r []string, __o []string) []string` closure reject its arguments
+// (`[]string` is not assignable to a `[]interface{}` parameter in Go), and a
+// later typed use (`join`, a typed `let`) failed `go build`.
+//
+// This fixture pins that the field's `[]string` element type is recovered:
+// `b.items.concat(["c"])` is `[]string`, `.count()` is the length, and `.join`
+// concatenates with a separator — proven by running the program, not just
+// inspecting Go source. js/ts/python/rust type collections natively and were
+// already green; this keeps Go pinned alongside them. Verified already-correct
+// in the field-typed-collection lowering (PR #168 generic List[T]-over-user
+// types); the fixture guards against regression.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Bag {
+  items: List[String]
+}
+
+fn extend(b: Bag, x: String) -> List[String] {
+  return b.items.concat([x])
+}
+
+fn main() -> Void {
+  let b: Bag = Bag { items: ["a", "b"] }
+  let more: List[String] = extend(b, "c")
+  println("${more.count()};${more.join("-")}")
+}

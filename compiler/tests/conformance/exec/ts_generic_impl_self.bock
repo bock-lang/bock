@@ -1,0 +1,47 @@
+// TEST: exec_ts_generic_impl_self
+// EXPECT: output "7;9;hi"
+// EXPECT: targets js, ts, python, rust, go
+//
+// A generic record with an `impl` block that carries its OWN explicit generic
+// params — `impl Box[T] { ... }`, not the param-less `impl Box` form
+// (covered by generic_record_method.bock). TS-specific concern
+// (Q-ts-generic-impl): the impl-target `self` type and a `Box[T]`-returning
+// method must keep the generic arguments — `self: Box<T>` and `-> Box<T>`, not
+// the arg-dropped `self: Box` / `-> Box`. Dropping `<T>` makes the
+// declaration-merging `interface Box<T>` disagree with the prototype's
+// `self: Box` (a different, less precise type) and a `Box<T>`-typed `let`
+// binding lose its element type. The codegen recovers the impl's explicit `[T]`
+// (the non-empty `impl_target_generics` branch) and renders the use-site
+// argument list (`<T>`) on the self parameter and the return type.
+//
+// `replace(self, v) -> Box[T]` is the load-bearing case: both the `self`
+// receiver and the return type are the generic impl target, so both must read
+// `Box<T>`. The program is run (under the conformance harness's `tsc`), so an
+// imprecise `self: Box` that lost `<T>` would surface as a strict-mode type
+// error, not just a cosmetic diff. js/python carry no static types; rust/go
+// thread the impl `[T]`/`<T>` through their own receivers — this pins TS
+// alongside them.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Box[T] {
+  value: T
+}
+
+impl Box[T] {
+  fn get(self) -> T {
+    return self.value
+  }
+  fn replace(self, v: T) -> Box[T] {
+    return Box { value: v }
+  }
+}
+
+fn main() -> Void {
+  let b: Box[Int] = Box { value: 7 }
+  let c: Box[Int] = b.replace(9)
+  let s: Box[String] = Box { value: "hi" }
+  println("${b.get()};${c.get()};${s.get()}")
+}
