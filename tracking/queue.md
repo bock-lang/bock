@@ -12,7 +12,8 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-01 vs main 53df918 (**★ v1 STDLIB COMPLETE — 11/11 modules ×5 ★**; R3 done: test
+_Last reconciled: 2026-06-01 vs main 40efebb (v1 stdlib COMPLETE 11/11 ×5; **D4 stdlib reference docs DONE [#172]**
+→ D5 contributor docs next. — earlier: ★ v1 STDLIB COMPLETE — 11/11 modules ×5 ★; R3 done: test
 [#169], collections [#170]; + #167 bock-test core-loading, #168 R3 generic codegen. Q-stdlib DONE → D4 unblocked.
 #123-#170 merged; repo wins). See audit.md._
 
@@ -182,15 +183,13 @@ _Last reconciled: 2026-06-01 vs main 53df918 (**★ v1 STDLIB COMPLETE — 11/11
 
 ## Blocked
 
-- **[D4] Stdlib reference docs** — docs · **READY (UNBLOCKED 2026-06-01 — Q-stdlib DONE, 11/11 ×5)** ·
-  `docs/src/reference/` · — · note: the v1 stdlib is complete (#103-#170); the reference cycle now follows. Each
-  module's `///` doc comments are the reference source. **This is the next critical-path item** (→ D5 → ItemB). The
-  per-module surface to document: error/compare/convert/iter/effect/option/result/string/test/collections + time
-  (builtin). Note the Reserved-v1.x items per module (per the spec + the changelogs).
-- **[D5] Contributor docs + cleanup** — docs · blocked · `docs/`,
-  `docs/src/contributing.md` · blocked-by: D4 · note: its
-  INVENTORY/SPEC-ALIGNMENT deletion scope is now ABSORBED by the
-  tracking consolidation; remaining = contributor-doc buildout.
+- **[D4] Stdlib reference docs** — docs · **DONE → #172** · `docs/src/reference/` · note: shipped the v1 stdlib
+  reference — landing (`reference/stdlib.md`, replacing the outdated `std.*` stub) + 11 per-module pages
+  (`reference/stdlib/core-*.md`) generated from the `///`/`//!` comments via `bock doc stdlib/core` then curated to
+  user-facing prose; `core.time` (builtin) hand-written from §18.3.1. SUMMARY wired; `mdbook build docs` clean.
+- **[D5] Contributor docs + cleanup** — docs · **READY (UNBLOCKED 2026-06-01 — D4 done)** · `docs/`,
+  `docs/src/contributing.md` · — · note: its INVENTORY/SPEC-ALIGNMENT deletion scope is ABSORBED by the tracking
+  consolidation; remaining = contributor-doc buildout. **Next critical-path item** (→ ItemB project-mode codegen).
 - **[D2-polish] D2 language-reference final polish** — docs · blocked ·
   `docs/src/language/` · blocked-by: (D2-FOUND mostly resolved — verify)
   · note: most D2-FOUND rows resolved per spec revision; confirm residue.
