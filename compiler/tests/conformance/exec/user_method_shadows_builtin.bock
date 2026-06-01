@@ -1,0 +1,69 @@
+// TEST: exec_user_method_shadows_builtin
+// EXPECT: output "50;empty;5;has"
+// EXPECT: targets js, ts, python, rust, go
+//
+// A user record defines its own `len()` / `is_empty()` / `contains(x)` methods —
+// names that collide with the built-in read-only `List` lowering
+// (Q-r2-codegen-residue, codegen item c). Before the fix the desugared
+// `c.len()` / `c.is_empty()` / `c.contains(x)` call (shape `Call(FieldAccess(c,
+// m), [c, ...])`) was matched by name alone in the `List` recogniser, so every
+// backend emitted the *built-in collection* lowering over the struct receiver:
+//   Go     `int64(len(c))` / `(len(c) == 0)`        — `len` on a struct: won't compile
+//   JS/TS  `(c).length`    / `((c).length === 0)`   — `undefined` on a class instance
+//   Python `len(c)`        / `(len(c) == 0)`         — `TypeError: object has no len()`
+//   Rust   `(c).len() as i64` (spurious cast)        — wrong path, masks the user method
+// shadowing the user's own method.
+//
+// The fix gates the `List` recogniser on the checker's `recv_kind` stamp the
+// same way the `Map`/`Set`/`Optional`/`Result`/`String` recognisers already do:
+// a call stamped `recv_kind = "User:<name>"` (or any non-`List` kind) no longer
+// routes through the built-in `List` lowering, so it falls through to the
+// user-method path and the record's own `len`/`is_empty`/`contains` win. A
+// genuine `List` receiver (stamp `"List"`, or an unresolved/absent stamp) is
+// still lowered to the built-in as before — the existing `list_*` fixtures
+// pin that no-regression.
+//
+// Outputs are chosen to print identically on every target: `len()` returns an
+// `Int`; the bool-returning `is_empty()` / `contains()` are routed through a
+// `String`-returning helper rather than interpolated raw (raw `Bool` interp
+// diverges Python `True`/`False` vs `true`/`false`, a List-independent concern).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Counter {
+  n: Int
+}
+
+impl Counter {
+  fn len(self) -> Int {
+    return self.n * 10
+  }
+  fn is_empty(self) -> Bool {
+    return self.n == 0
+  }
+  fn contains(self, x: Int) -> Bool {
+    return self.n == x
+  }
+}
+
+fn emptyStr(b: Bool) -> String {
+  if (b) {
+    return "empty"
+  }
+  return "full"
+}
+
+fn hasStr(b: Bool) -> String {
+  if (b) {
+    return "has"
+  }
+  return "missing"
+}
+
+fn main() -> Void {
+  let c: Counter = Counter { n: 5 }
+  let z: Counter = Counter { n: 0 }
+  println("${c.len()};${emptyStr(z.is_empty())};${c.n};${hasStr(c.contains(5))}")
+}

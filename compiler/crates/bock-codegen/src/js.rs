@@ -745,10 +745,12 @@ impl EmitCtx {
     /// IIFE so the receiver expression is evaluated exactly once.
     fn try_emit_list_method(
         &mut self,
+        node: &AIRNode,
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
-        let Some((recv, method, rest)) = crate::generator::desugared_list_method(callee, args)
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_method(node, callee, args)
         else {
             return Ok(false);
         };
@@ -2169,7 +2171,7 @@ impl EmitCtx {
                 if self.try_emit_string_method(node, callee, args)? {
                     return Ok(());
                 }
-                if self.try_emit_list_method(callee, args)? {
+                if self.try_emit_list_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {
