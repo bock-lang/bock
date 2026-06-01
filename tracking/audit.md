@@ -1506,3 +1506,53 @@ Process: caught + corrected a false-green merge (option #159) — now re-verifyi
   stdlib/codegen changes. Two build-staleness false-reds (incremental build); → Q-conformance-clean-rebuild.
 Decisions: fan-out R2 (operator); single compiler-fixer (operator); pause for the night (operator).
 Blocked: none. main a4c0237, 0 open PRs, worktrees == main. CLEAN. Next: R3 (collections/test).
+
+[2026-06-01 17:36 UTC] ★ v1 STANDARD LIBRARY COMPLETE — R3 done (collections/test); 11/11 modules ×5 ★
+  Input: operator "ready to start back" (resume after the night pause) → R3 (the last stdlib batch).
+  APPROACH: same fan-out + single-fixer model. Scoped collections (R2-shaped: SortedSet new + utils) as a build; test
+    (novel — a test framework + `bock test` integration) via a Plan pass that surfaced DQ26.
+  R3 MODULES:
+    - **core.test** #169 — DQ26 DECIDED by owner: ship BOTH free-function assertions AND a fluent matcher API
+      (fluent delegates to free; minimal duplication). `assert_true/false/eq/ne/some/none/ok/err/fail` + `Expectation`
+      /`BoolExpectation`. ×5. Reserved-v1.x: BDD grouping (needs a runner registration model), mocking (effect-handler
+      idiom is the v1 story). Benchmarking OUT (§15.4 removed `@benchmark`; §20.4 delegates). DV17 filed: §18.3 still
+      lists "benchmarking" for core.test → Design.
+    - **core.collections** #170 — SortedSet[T] (pure-Bock, value-semantics, Comparable-sorted) + utils (sum/max_of/
+      min_of/unique/reversed/get_or). The most codegen-demanding module. ×5.
+  SUPPORTING FIXES (R3 surfaced real codegen/CLI gaps the stdlib authoring exposed):
+    - **#167** `bock test` loads the embedded core stdlib (was: compiled only the user file → `use core.*` failed).
+      test.rs → full multi-file pipeline mirroring run/check. Unblocked core.test usability in the test runner.
+    - **#168** generic codegen: GAP-A (Go generic record over List[T] → `[]T` not `[]interface{}`), GAP-B (Rust
+      `#[derive(Clone)]` on records), GAP-C (sealed-core-trait bound fires the primitive bridge so `assert_eq`/`max`
+      work on primitives ×5 — CONTAINED in codegen, no checker change). 3 synthetic exec_generic_* fixtures.
+    - collections residuals (in #170): Rust `empty()` E0282 + a reused-let move bug (rs.rs); 5 Go codegen bugs
+      (payload-less match `__v`, record field `[]T`, zero-arg-ctor turbofish, `[key(3)]` element typing, let-binding
+      Go-type recording) — all in go.rs. collections.bock source UNCHANGED; pure codegen + fixture-idiom.
+  ★ DISK-FULL CRISIS (mid-R3): the root fs hit 100% (0 bytes) during parallel codegen rebuilds → BOTH a codegen
+    fixer AND the bock-test fixer hard-blocked on ENOSPC (and my own Bash). ROOT CAUSE: this session's ~20 per-branch
+    Cargo caches (~110GB, merged + prior-session branches) persisted after worktree removal. RECOVERED: `rm -rf` the
+    stale `~/.cargo/cache/bock-target/*` (kept the 4 active) → 49% used, 123G free. The blocked engineers' work was
+    SAVED to disk (Write/Edit bypass the tmpfs); I committed + finished their gates myself, and re-dispatched the
+    codegen GAP-A/C continuation. LESSON (now standing): **prune `~/.cargo/cache/bock-target/<slug>` immediately
+    after each merge** — applied for every R3 merge since. Filed Q-conformance-clean-rebuild's sibling: the disk
+    accumulation. Also: forced-clean `cargo build -p bock` before every conformance run (2 staleness false-reds earlier).
+  VERIFICATION (the false-green lesson, applied throughout): re-ran REQUIRE=all MYSELF, multi-run, forced-clean, on
+    the COMBINED state for every codegen merge (#168 ×2, collections ×2, test). Final main 53df918: REQUIRE=all 0
+    failed, 405 exec pairs (81 fixtures × 5), all 11 modules ×5.
+  ★ RESULT: **Q-stdlib COMPLETE — the v1 standard library is DONE: 11/11 modules running on all 5 targets.**
+    (error/compare/convert/iter/effect/option/result/string/test/collections as Bock modules + time as a builtin.)
+    R1+R2+R3 done. This UNBLOCKS D4 (stdlib reference docs, was blocked on Q-stdlib) → the documentation phase.
+  Follow-ups (queue, non-blocking): the time items (Q-clock-handler-routing, Q-time-int64, Q-time-shim-path),
+    Q-conformance-clean-rebuild, the minor R2/R3 codegen-residue items; DV17 (§18.3 benchmarking wording → Design).
+  NEXT: **the critical path shifts off the stdlib** → D4 (stdlib reference docs) → D5 (contributor docs) → ItemB
+    (project-mode codegen). OR the non-blocking quality follow-ups / P4-hygiene. Surface to operator: v1 stdlib done.
+
+═══ DAILY DIGEST — 2026-06-01 (R3 / v1-stdlib-complete) ═══
+Merged: R3 — #167 (bock test core-loading), #168 (R3 generic codegen GAP-A/B/C), #169 (core.test), #170
+  (core.collections). + the earlier 2026-06-01 work (#151-#166: core.iter, effect, core.effect, R2). Tracking: #171.
+Milestone: **★ v1 STANDARD LIBRARY COMPLETE — 11/11 modules ×5 ★** (Q-stdlib, the long-running v1-blocking item, DONE).
+  405 exec pairs ×5, 0 failed; the codegen substrate now exercised by the full stdlib (generic containers over user
+  Comparable types, sealed-trait bounds on primitives, generic free-fns over Optional/Result on Go — all working).
+Decisions (operator): scope core.collections + Plan core.test; DQ26 "both free + fluent APIs"; "chase collections to ×5".
+Incident: disk-full crisis (110GB stale caches) — recovered; standing lesson: prune branch caches per-merge.
+Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next phase: docs (D4) / project-mode (ItemB).**

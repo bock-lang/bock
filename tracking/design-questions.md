@@ -228,6 +228,17 @@ decided→link)`
   Q7/Q8 per recommendation. Reconciled in **#157** (module + `spec/changelogs/...core-effect-v1-surface.md`); §18.3
   body unchanged (the surface realizes its "minimum-useful subset" latitude). core.effect = 5/11.
 
+### DQ26 — `core.test` v1 surface — DECIDED (owner)
+- **Question:** §18.3 lists `core.test` = "Assertions, BDD grouping, mocking, benchmarking"; which is the v1 floor?
+  And the assertion API SHAPE — free-function (`assert_eq`) vs fluent (`expect().to_equal()`)?
+- **Status:** **DECIDED 2026-06-01 (owner): ship BOTH** the free-function assertions AND a fluent matcher API, fully
+  overlapping, with the fluent layer **powered by** the free functions (minimal duplication). Floor = assertions only
+  (`assert_true/false/eq/ne/some/none/ok/err/fail` + `Expectation`/`BoolExpectation`). **BDD grouping** Reserved-v1.x
+  (needs a `bock test` runner registration-execution model); **mocking** Reserved-v1.x (the effect-handler-substitution
+  pattern is the v1 idiom — no new API); **benchmarking OUT** (§15.4 already REMOVED `@benchmark`; §20.4 delegates to
+  native tools). Reconciled in **#169** (module + `spec/changelogs/20260601-1350-core-test-v1-surface.md`). §18.3 body
+  unchanged. Residual → DV17.
+
 ## Decided by Design (core spec — 2026-05-30 stdlib batch; reconciled in #106)
 
 Escalated from the stdlib pilot (DQ6–DQ9); decided by Design 2026-05-30 and

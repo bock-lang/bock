@@ -11,7 +11,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 - Blocked: 5
 - Deferred: 1
 
-## Build status (as of main a4c0237, 2026-06-01)
+## Build status (as of main 53df918, 2026-06-01)
 
 | What | State |
 |------|-------|
@@ -21,7 +21,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |
 | `mdbook build docs` | clean |
 | CI on `main` | green; cache via Swatinem/rust-cache@v2.9.1 (#116, faster) |
-| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **~375 exec pairs (75 fixtures × 5 targets), 0 failed under `REQUIRE=all`** (genuinely stable — the build/bundle nondeterminism is fixed, #162/#164); covers core.iter [#151/#152], the effect invocation forms + `core.effect` [#155/#157], and **R2: core.option/result/string [#159-#165] + core.time §18.3.1 [#160]** all ×5. NOTE: local incremental builds can use a stale `bock`; force `cargo build -p bock` before trusting a run (Q-conformance-clean-rebuild) |
+| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **405 exec pairs (81 fixtures × 5 targets), 0 failed under `REQUIRE=all`** (stable — build/bundle nondeterminism fixed, #162/#164); covers the **entire v1 stdlib ×5** (iter/effect/option/result/string/test/collections + time) and the codegen substrate it exercises (generic containers over user Comparable types, sealed-trait bounds on primitives, generic free-fns over Optional/Result on Go). NOTE: local incremental builds can leave a stale `bock`; force `cargo build -p bock` before trusting a run (Q-conformance-clean-rebuild) |
 | `bock check` on examples | 20/20 exit 0 |
 
 ## What works today
@@ -56,14 +56,16 @@ Live summary derived from `tracking/queue.md` (items per section):
 
 The embedded source-compiled loading mechanism is **live** (#103): `core.*`
 modules ship as Bock source bundled in the `bock` binary and resolve through
-the module registry (hermetic; works from any cwd). **9 of 11 v1 modules landed; R1+R2 COMPLETE on all 5.**
-R1: `core.error` (#103), `core.compare` (#104), `core.convert` (#110), `core.iter` (#151/#152), `core.effect` (#157).
-**R2: `core.option` (#159/#162/#165), `core.result` (#161/#165), `core.string` (#162/#163), `core.time` (#160 — its
-§18.3.1 surface is a compiler builtin, pinned with a conformance floor).** All EXECUTE cross-module ×5. R2's enabling
-codegen: #162 (String-method dispatch layer + general reserved-keyword identifier escaping + Rust Optional-payload
-T:Clone + deterministic bundling), #164 (dep_graph topological-order determinism — root cause of a rare `bock build`
-failure), #165 (Go generic free-fns over the monomorphic Optional/Result runtimes + an expr-position match
-IIFE-typing fix). **Remaining: R3 — `core.collections`, `core.test`.**
+the module registry (hermetic; works from any cwd). **★ ALL 11 v1 modules landed — the v1 standard library is
+COMPLETE, running on all 5 targets. ★** `core.error` (#103), `core.compare` (#104), `core.convert` (#110),
+`core.iter` (#151/#152), `core.effect` (#157), `core.option` (#159/#162/#165), `core.result` (#161/#165),
+`core.string` (#162/#163), `core.test` (#169), `core.collections` (#170) as Bock modules; **`core.time`** (#160 — its
+§18.3.1 surface is a compiler builtin, pinned with a conformance floor). All EXECUTE cross-module ×5. The enabling
+codegen across the batch: #162 (String-method dispatch + reserved-keyword escaping + Rust Optional-payload T:Clone +
+deterministic bundling), #164 (dep_graph determinism), #165 (Go generic free-fns over Optional/Result), #167 (bock
+test loads embedded core), #168 (Go generic record-over-List[T] + sealed-core-trait bounds firing the primitive
+bridge ×5), #170 (collections Go/Rust codegen residue). **The codegen substrate is now exercised by the full
+stdlib.** Q-stdlib (v1-blocking) is DONE → D4 (stdlib reference docs) is the next critical-path item.
 The 2026-05-30 Design stdlib batch (DQ6–DQ9) is reconciled into the spec (#106);
 **Q-bridge (#108)** wired the trait-impl table + canonical primitive conformances
 (primitives satisfy bounds; `where`-bounds enforced; DV6 fixed); **#110** added
@@ -95,8 +97,9 @@ pairs ×5. **4/11 stdlib modules landed; main 9f1a2bd (2026-05-31).** Remaining 
 was hardened first (#155): the language effect system (§10) now EXECUTES on all 5 (the conformance/effects suite
 was previously INERT — never checked/run; #155 fixed the §10.2/§10.4 bare-op resolution + the Rust op-in-interpolation
 codegen + wired the suite into the exec lane). #157 then shipped the module (+ the `effect`-keyword module-path parser
-fix + an interpreter topological-registration determinism fix). **R1+R2 are COMPLETE (9/11, main a4c0237); next is
-R3** (core.collections, core.test). [R2 detail above + in audit.md 2026-06-01 07:41.] Design-gated (non-blocking, →
+fix + an interpreter topological-registration determinism fix). **R1+R2+R3 are ALL COMPLETE — the v1 stdlib is DONE
+(11/11 ×5, main 53df918).** [R3 detail in audit.md 2026-06-01 17:36.] Next critical-path item is D4 (stdlib reference
+docs), now unblocked. Design-gated (non-blocking, →
 Design): DQ24 (core.iter surface —
 combinator set / dropped Iterator-impl / omitted enumerate, NEW), DQ23 (Int/Int §3.6), DQ18/20/21/22,
 DQ10-DQ15/DQ19, Bool-interp spelling; + Go nested-runtime-payload arith (#142) & Rust by-value-reuse (#149)

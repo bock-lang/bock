@@ -52,7 +52,12 @@ the Bock identity.
 
 ---
 
-## MS-stdlib — DECIDED: v1-blocking + SCOPE decided (operator + Design, 2026-05-29)
+## MS-stdlib — ★ COMPLETE (2026-06-01) — v1 stdlib DONE, 11/11 modules ×5
+**★ DONE:** the v1 core standard library is COMPLETE — all 11 modules execute on all 5 targets
+(error/compare/convert/iter/effect/option/result/string/test/collections as Bock modules + time as a builtin).
+R1+R2+R3 landed (#103-#170); the codegen-completeness milestone + a long tail of generic-codegen fixes
+(#131-#170) built the substrate the stdlib needed. Q-stdlib SATISFIED → **unblocks D4** (stdlib reference docs) →
+D5 → ItemB. v1.0's stdlib gate is cleared. [Historical scope/decision record below.]
 The **core** standard library (§18.3) ships in **v1** and **blocks v1.0**
 (→ `queue.md` Q-stdlib). Resolves the "ship what's done vs §18-full-stdlib"
 tension in favor of shipping it. Distinct from v2's stdlib *expansion*
