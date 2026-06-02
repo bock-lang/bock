@@ -6,12 +6,12 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 21
+- Ready: 22
 - v1-blocking: 2
 - Blocked: 5
 - Deferred: 1
 
-## Build status (as of main 264e11e, 2026-06-02)
+## Build status (as of main 6434237, 2026-06-02)
 
 | What | State |
 |------|-------|
@@ -21,7 +21,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |
 | `mdbook build docs` | clean |
 | CI on `main` | green; cache via Swatinem/rust-cache@v2.9.1 (#116, faster) |
-| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **425 exec pairs (85 fixtures × 5 targets), 0 failed under `BOCK_CONFORMANCE_REQUIRE=all`** (stable — build/bundle nondeterminism fixed, #162/#164; +3 residue-pinning fixtures #176; +1 transitive cross-module #182). **MS-projectmode S1–S4 (#182/#184/#185/#186) — DV13 CLOSED:** ALL 5 targets now emit + run as **per-module native-import trees** (the sole emission path; single-file bundling retired). py: package imports; js/ts: ES modules (+ minimal `package.json`); rust: `src/`-rooted cargo crate (`cargo run`); go: flat `package main` + `go.mod` (`go run .`). The conformance harness builds+runs the multi-file project per target. Covers the **entire v1 stdlib ×5** (iter/effect/option/result/string/test/collections + time) and the codegen substrate it exercises (generic containers over user Comparable types, sealed-trait bounds on primitives, generic free-fns over Optional/Result on Go). NOTE: the local stale-`bock` hazard is now handled in-harness — `run-conformance.sh` force-rebuilds `bock` (touch `bock-cli/build.rs` + `cargo build -p bock`) before tests (#175, Q-conformance-clean-rebuild DONE) |
+| Conformance | parse/discover **+ execution** — compile+run+diff stdout per target (#114/#115); `run-conformance.sh`; **427 exec pairs (87 fixtures × 5 targets), 0 failed under `BOCK_CONFORMANCE_REQUIRE=all`**. **MS-projectmode S1–S6 (#182/#184/#185/#186/#188/#190/#191) — DV13 + DV18 CLOSED:** ALL 5 targets emit + run as **per-module native-import trees** (sole path; bundling retired) — py package imports; js/ts ES modules; rust `src/`-rooted cargo crate (`cargo run`); go flat `package main` (`go run .`). **Project mode is real:** the `Scaffolder` (project mode only; `--source-only` is bare) emits per-target manifests + formatter/opt-in-linter configs + README first-contact, honoring `bock.project` `[targets.<T>]`/`[targets.<T>.scaffolding]` config (defaults per §20.6.2). The conformance harness now builds in **project mode** and runs the scaffolded project per target. (Transpiled `@test` files + the formatter-clean release gate are S7.) Covers the **entire v1 stdlib ×5** (iter/effect/option/result/string/test/collections + time) and the codegen substrate it exercises (generic containers over user Comparable types, sealed-trait bounds on primitives, generic free-fns over Optional/Result on Go). NOTE: the local stale-`bock` hazard is now handled in-harness — `run-conformance.sh` force-rebuilds `bock` (touch `bock-cli/build.rs` + `cargo build -p bock`) before tests (#175, Q-conformance-clean-rebuild DONE) |
 | `bock check` on examples | 20/20 exit 0 |
 
 ## What works today

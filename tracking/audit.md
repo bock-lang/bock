@@ -1712,3 +1712,29 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
     project-mode builds so source mode goes bare). Q-go-error-message still ready (fold into S6 go).
   RESULT: S5 DONE; project-mode foundation in place. main 264e11e. NEXT: **pre-S6 operator checkpoint** (agreed), then
     S6 — fill the 5 per-target scaffolder bodies + deep-config codegen branches (the per-target fan-out).
+
+[2026-06-02 23:05 UTC] MS-projectmode S6 DONE (#190 S6a + #191 S6b) — project mode is real; DV18 CLOSED
+  Operator "go" at the pre-S6 checkpoint. Ran S6 as two sub-PRs.
+  S6a (#190, project-mode ARCHITECTURE + DV18): moved manifest emission codegen→scaffolder (project mode only),
+    made `--source-only` bare, migrated the conformance harness to project-mode builds. ★ INCIDENT: the engineer
+    sub-agent STALLED — it did the work correctly (7 files) but launched a background conformance run and ended its
+    turn "waiting for a notification" without committing/pushing/PR'ing (a sub-agent gets no re-invocation after it
+    returns). I took over: inspected the worktree (work complete + correct, matched the contract), re-ran the full
+    gate MYSELF (clippy/test/doc/conformance all 0; found + fixed a fmt drift — same S1 failure mode), committed,
+    pushed, opened + merged #190. Full CI matrix green incl. windows/macos (the harness run-model change is
+    cross-platform safe). **DV18 CLOSED.** LESSON: engineer prompts now say "verify in FOREGROUND, complete the full
+    push→PR cycle synchronously, do NOT background-and-wait" (added to S6b prompt) + orchestrator can finish a
+    stalled session from its worktree.
+  S6b (#191): enriched per-target scaffolders ×5 (rich manifests w/ framework refs + §20.6.2 defaults, formatter
+    configs, opt-in linter configs, README + pkg-mgr hints; 41 unit tests) + **fixed Q-go-error-message** (go
+    field/method collision via `go_method_name`; locked by `exec_core_error.bock`). Side-fix: TS run plan `tsc main.ts`
+    → `tsc -p .` (scaffolded tsconfig forces project build). 427/0. fmt run last — no drift this time. Verified scope +
+    main-clean + full CI matrix before merge.
+  NEW FOUND (triaged → Q-error-message-jstspy): the same core.error `message` field/method collision is PRE-EXISTING
+    on **js/ts/python** (TS dup-identifier; JS field shadows prototype method; Python dataclass field overwrites
+    method). Only go was in S6b scope; fixture restricted to rust+go to keep conformance green. QUALITY SIGNAL: the v1
+    stdlib was "complete" but `core.error.message()` was never exercised cross-target — a name-collision codegen pattern
+    that may recur. Flagged to operator as a candidate pre-v1.0 fix; not on the ItemB critical path.
+  RESULT: **S6 DONE — project mode is real on all 5** (manifests/configs/README via the Scaffolder; harness exercises
+    it). DV13 + DV18 CLOSED. main 6434237; 0 open PRs; worktrees == main. NEXT: **pre-S7 operator checkpoint** (agreed),
+    then S7 — transpiled `@test` files per framework + the formatter-clean release gate (the last build-feature stage).

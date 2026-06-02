@@ -12,13 +12,12 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-02 vs main 264e11e (**MS-projectmode S1–S5 DONE [#182/#184/#185/#186/#188]** — S1–S4
-→ DV13 CLOSED [all 5 targets emit per-module native trees, sole path; bundling retired]; S5 [#188] added the
-project-mode scaffolding framework + `bock.project` config-table parsing/validation [per-target bodies stubbed].
-425 exec pairs / 0 failed REQUIRE=all. **Next = S6 (per-target scaffolders + deep-config branches); operator
-pre-S6 checkpoint pending.** OPEN → **DV18** [source-mode manifest boundary, S6/S7 resolves]; ready bug
-Q-go-error-message. Also cleared dependabot #178/#179/#180 (dev-dep bumps; 0 security alerts). Plan:
-`plans/2026-06-02-itemB-per-module-projectmode-plan.md`. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
+_Last reconciled: 2026-06-02 vs main 6434237 (**MS-projectmode S1–S6 DONE [#182/#184/#185/#186/#188/#190/#191]** —
+DV13 CLOSED [all 5 emit per-module native trees, sole path]; DV18 CLOSED [source mode bare, scaffolder owns
+manifests, harness builds project-mode]; per-target scaffolders enriched [manifests/configs/README ×5]; go
+core.error fixed. 427 exec pairs / 0 failed REQUIRE=all. **Next = S7 (transpiled tests + formatter-clean gate);
+operator pre-S7 checkpoint pending.** NEW FOUND → **Q-error-message-jstspy** [core.error.message() collision on
+js/ts/python, pre-existing; go fixed #191]. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
 [#175]**; **Q-r2-codegen-residue (c) builtin-vs-user-method shadowing [#176, ×5]** + pinned Q-go-list-literal /
 Q-r2-(b) / Q-ts-generic-impl (verified already-fixed). New FOUND triaged: Q-allcaps-record-parse (parser),
 Q-arch-doc-drift (ARCHITECTURE.md/compiler-CLAUDE.md/CONTRIBUTING.md crate-name drift). Q-match-exprpos still
@@ -106,12 +105,19 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   (topological order → user effects shadow core), which is correct + sufficient for v1, but full qualification (a
   program using BOTH same-named ops) is unsupported on the interpreter. Codegen (all 5 targets) is UNAFFECTED (each
   program compiles in isolation with proper module scoping). Low-pri interpreter-only limitation.
-- **[Q-go-error-message] Go: `core.error.SimpleError` field/method name collision** — bug · ready ·
-  `compiler/crates/bock-codegen/src/go.rs` · — · links #185 · note: FOUND during S3 (#185), **pre-existing, NOT a
-  regression** (confirmed identical on pre-#185 bundled go output). `SimpleError` emits both a `message` field and a
-  `Message()` method → Go rejects "field and method with the same name", so `.message()` does not compile on go. No
-  `exec_` fixture exercises it, so conformance stays green — but a real go project using `core.error.message()` won't
-  build. Fix: rename the emitted accessor (or field) to avoid the collision on go. Candidate to fold into S6 go work.
+- **[Q-go-error-message] Go: `core.error.SimpleError` field/method name collision** — bug · **DONE (#191)** ·
+  `bock-codegen/src/go.rs` · note: fixed in S6b — `go_method_name` disambiguates a public method colliding with a
+  same-named record field to `<Name>Method` (applied at trait interface + receiver + call sites; field stays
+  `Message`). Locked by a `go.rs` unit test + `conformance/exec/exec_core_error.bock` (rust+go). The js/ts/python
+  variants of the same collision split out → **Q-error-message-jstspy** below.
+- **[Q-error-message-jstspy] `core.error.message()` field/method collision also breaks js/ts/python** — bug · ready ·
+  `bock-codegen/src/{js,ts,py}.rs` · — · links #191 · note: FOUND in S6b. The same `SimpleError { message }` field +
+  `message()` method collision is **pre-existing on js/ts/python** (structural shadowing — TS: "Duplicate identifier
+  'message'"; JS: instance field shadows the prototype method → `.message()` "not a function"; Python: dataclass field
+  overwrites the method). Go fixed (#191); the `exec_core_error.bock` fixture is restricted to rust+go to keep
+  conformance green. Each backend needs its own disambiguation (not just a name suffix). **Quality signal:** the v1
+  stdlib was "complete" but `core.error.message()` was never exercised cross-target — a name-collision codegen pattern
+  that may recur for other stdlib field/method pairs. Worth a pre-v1.0 fix; not on the ItemB critical path.
 - **[Q-clock-handler-routing] `Instant.now`/`sleep` bypass the Clock effect handler** — bug · ready · `bock-codegen` ·
   — · links #160 · note: the time host primitives are inlined per-target and bypass the installed `Clock` handler, so
   `std.testing.MockClock` virtual-time (§18.4) is not achievable — `sleep` always hits real host. Route now/sleep/
@@ -219,7 +225,7 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `docs/src/language/` · blocked-by: (D2-FOUND mostly resolved — verify)
   · note: most D2-FOUND rows resolved per spec revision; confirm residue.
 - **[ItemB] Per-module output + project-mode codegen + config tables** — impl · **IN FLIGHT (milestone
-  MS-projectmode, v1-BLOCKING; S1–S5 DONE [#182/#184/#185/#186/#188] → DV13 CLOSED; next = S6 per-target scaffolders)** ·
+  MS-projectmode, v1-BLOCKING; S1–S6 DONE [#182/#184/#185/#186/#188/#190/#191] → DV13+DV18 CLOSED; next = S7 transpiled tests)** ·
   `compiler/crates/bock-codegen/`,
   `bock-cli/src/build.rs`, `bock-build/src/toolchain.rs`, `compiler/tests/execution.rs` · — · links #28, #132,
   DV13, DQ19, MS-projectmode · plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md` · note: **v1.0's last
@@ -248,16 +254,24 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
     `bock-codegen/src/scaffold.rs`; project-mode hook in `build.rs` gated on `!source_only`; `[targets.<T>]` /
     `[targets.<T>.scaffolding]` parsing + validation against the §20.6.2 v1 matrix (unknown value → error naming
     options; 26 unit tests); per-target bodies STUBBED (placeholder README) for S6. Flagged **DV18** (below).
-  - **S6** — per-target scaffolders + deep-config branches (Vitest|Jest, Black|Ruff…) · **READY (dispatch next —
-    pre-S6 operator checkpoint per pacing decision)** · was blocked-by S5. SCOPE: fill the stubbed `Scaffolder`
-    bodies ×5 (real manifests, formatter/linter configs, package-manager README) + deep-config codegen branches +
-    target-appropriate defaults; **resolve DV18** (migrate the conformance harness to project-mode builds so source
-    mode can drop manifests); fold in **Q-go-error-message** (go core.error fix) + the leftover single-module-emit
-    cleanup if they ease the per-target rework.
-  - **S7** — transpiled tests + formatter-clean gate · blocked-by S6.
+  - **S6** — per-target scaffolders. **DONE** (split S6a/S6b):
+    - **S6a → #190** — project-mode output ARCHITECTURE + **DV18 CLOSED**: codegen emits only per-module source;
+      the `Scaffolder` owns the manifests (project mode only); `--source-only` is now bare; the conformance harness
+      builds in project mode + runs the project. (NOTE: orchestrator finished this PR — the engineer session stalled
+      after doing the work; I re-ran the gate, fixed a fmt drift, committed/merged.)
+    - **S6b → #191** — enriched per-target scaffolders ×5 (rich manifests w/ framework refs + defaults, formatter
+      configs, opt-in linter configs, README first-contact w/ package-manager hints; 41 unit tests) + **fixed
+      Q-go-error-message** (go field/method collision via `go_method_name`; locked by `exec_core_error.bock`).
+      Required side-fix: TS run plan `tsc main.ts` → `tsc -p .` (scaffolded tsconfig). 427 exec pairs / 0 failed.
+      Deep-config that changes CODE (test-file codegen per framework) → S7.
+  - **S7** — transpiled tests + formatter-clean gate · **READY (dispatch next — pre-S7 operator checkpoint per
+    pacing decision)** · was blocked-by S6. SCOPE: transpile Bock `@test` fns → idiomatic target test files
+    (Vitest|Jest / pytest|unittest / cargo test / go test) so `npm test`/`cargo test`/`pytest`/`go test` run them;
+    formatter-clean release gate (rustfmt/gofmt/prettier/black `--check` on emitted output). Also address
+    **Q-error-message-jstspy** (below) if not done standalone.
   - **S8** — internal docs + close · blocked-by S7.
-  INVARIANT every PR: `run-conformance.sh REQUIRE=all` stays green (now **425/425**). `--deliverable`/`--no-tests`
-  stay v1.x. External `/get-started` = ItemD. **S1–S4 DONE; DV13 CLOSED; next = S5 (scaffolding).**
+  INVARIANT every PR: `run-conformance.sh REQUIRE=all` stays green (now **427/427**). `--deliverable`/`--no-tests`
+  stay v1.x. External `/get-started` = ItemD. **S1–S6 DONE; DV13 + DV18 CLOSED; next = S7 (transpiled tests).**
 - **[ItemD] /get-started project-mode evolution** — docs · blocked ·
   `docs/`, `website/` · blocked-by: ItemB Phase 6 · note: external-facing
   copy — escalate for approval.
