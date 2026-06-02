@@ -137,7 +137,14 @@ fn module_uses_range(items: &[AIRNode]) -> bool {
     items.iter().any(|n| format!("{n:?}").contains("Range {"))
 }
 
-/// TypeScript code generator implementing the `CodeGenerator` trait.
+/// The shared per-module runtime module name (without extension). In the
+/// per-module (native-import) emission path the Optional/Result runtime *types*
+/// (`BockOption`, `BockResult`) and the concurrency / range runtime *helpers*
+/// (`__bockChannelNew`, `range`, …) live in one file — `_bock_runtime.ts` at
+/// the build root — and every emitted module imports the names it references.
+/// A single shared definition avoids redeclaring `type BockOption` / `const
+/// range` across files (a TS redeclaration error).
+const RUNTIME_MODULE_TS: &str = "_bock_runtime";
 #[derive(Debug)]
 pub struct TsGenerator {
     profile: TargetProfile,
@@ -198,62 +205,195 @@ impl CodeGenerator for TsGenerator {
         }
     }
 
-    /// Bundle every module (stdlib + user, dependency-ordered) into one entry
-    /// file. TypeScript shares JS's single top-level scope, so concatenating
-    /// each module's declarations is valid and resolves cross-module `use`
-    /// (DV13). `ImportDecl`s are dropped; each runtime prelude is emitted once.
+    /// Emit a per-module **native ES-module import tree** (spec §20.6.1; DQ19
+    /// resolved): each reachable module → its own `.ts` file, cross-module
+    /// references resolved with real ESM `import`/`import type`. Mirrors the JS
+    /// backend's per-module path (see [`crate::js`]) plus TS's type level:
+    /// Optional/Result runtime *types* and concurrency/range runtime *helpers*
+    /// are emitted once into a shared `_bock_runtime.ts`, imported per file; a
+    /// minimal `package.json` `{"type":"module"}` is emitted at the build root so
+    /// the `tsc`-emitted `.js` tree runs under `node`.
     ///
-    /// Diverges from spec §20.6.1 (one output file per module); see the
-    /// `OPEN: §20.6.1` note in the bundling PR.
+    /// Output-path mapping is keyed on each module's *declared* path
+    /// (`module core.option` ⇒ `core/option.ts`, imported `"./core/option.js"` —
+    /// ESM specifiers reference the *emitted* `.js`, which `tsc`'s
+    /// `.js`→`.ts` resolution follows). The entry module is always `main.ts`.
     fn generate_project(
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
-        // Bundle only modules the entry program actually `use`s (plus the entry
-        // itself) — never the prelude-only stdlib (see `reachable_modules`).
+        // Emit only modules the entry program actually `use`s (plus the entry
+        // itself), dependency-ordered — never the prelude-only stdlib.
         let reachable = crate::generator::reachable_modules(modules);
         let modules = reachable.as_slice();
-        let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
+        if modules.is_empty() {
             return Ok(GeneratedCode { files: vec![] });
-        };
-
-        let mut ctx = TsEmitCtx::new();
-        ctx.enum_variants = crate::generator::collect_enum_variants(modules);
-        ctx.generic_decls = crate::generator::collect_generic_decls(modules);
-        ctx.trait_decls = crate::generator::collect_trait_decls(modules);
-        ctx.exported_types = crate::generator::collect_exported_type_names(modules);
-        for (i, (module, _)) in modules.iter().enumerate() {
-            if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
-                ctx.buf.push('\n');
-            }
-            ctx.emit_node(module)?;
         }
-        let (mut content, mappings) = ctx.finish();
+
+        let entry_idx = modules
+            .iter()
+            .position(|(m, _)| crate::generator::module_declares_main_fn(m))
+            .unwrap_or(modules.len() - 1);
+
+        let enum_variants = crate::generator::collect_enum_variants(modules);
+        let generic_decls = crate::generator::collect_generic_decls(modules);
+        let trait_decls = crate::generator::collect_trait_decls(modules);
+        let exported_types = crate::generator::collect_exported_type_names(modules);
+        let record_names = crate::generator::collect_record_names(modules);
+        let public_symbols = crate::generator::collect_public_symbols_for_esm(modules);
 
         let main_is_async = modules
             .iter()
             .any(|(m, _)| crate::generator::module_main_fn_is_async(m));
         let invocation = self.entry_invocation(main_is_async);
-        crate::generator::append_entry_invocation(&mut content, modules, invocation.as_ref());
 
-        let derived_name = out_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        let source_map = SourceMap {
-            generated_file: derived_name,
-            mappings,
-            ..Default::default()
-        };
-        Ok(GeneratedCode {
-            files: vec![OutputFile {
+        let mut files: Vec<OutputFile> = Vec::with_capacity(modules.len() + 2);
+        let mut runtime_optional = false;
+        let mut runtime_result = false;
+        let mut runtime_concurrency = false;
+        let mut runtime_range = false;
+
+        for (i, (module, source_path)) in modules.iter().enumerate() {
+            let own_path = crate::generator::module_path_string(module).unwrap_or_default();
+            let mut ctx = TsEmitCtx::new();
+            ctx.per_module = true;
+            ctx.enum_variants = enum_variants.clone();
+            ctx.generic_decls = generic_decls.clone();
+            ctx.trait_decls = trait_decls.clone();
+            ctx.exported_types = exported_types.clone();
+            // Record names need the whole reachable set so a cross-module record
+            // construction lowers to `new Name(...)` (see the JS backend note).
+            ctx.record_names = record_names.clone();
+            ctx.seed_effect_registries(modules);
+            ctx.self_module_path = if i == entry_idx {
+                String::new()
+            } else {
+                own_path.clone()
+            };
+            ctx.implicit_imports =
+                crate::generator::implicit_esm_imports_for(module, &public_symbols, &own_path);
+            ctx.public_symbols = public_symbols.clone();
+            ctx.enum_variant_exports = crate::generator::enum_variant_value_names(module);
+            ctx.emit_node(module)?;
+            runtime_optional |= ctx.needs_runtime_optional;
+            runtime_result |= ctx.needs_runtime_result;
+            runtime_concurrency |= ctx.needs_runtime_concurrency;
+            runtime_range |= ctx.needs_runtime_range;
+            let (mut content, mappings) = ctx.finish();
+
+            if i == entry_idx && crate::generator::module_declares_main_fn(module) {
+                if let Some(invoc) = invocation.as_ref() {
+                    if !content.is_empty() && !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                    content.push_str(invoc);
+                }
+            }
+
+            let out_path = self.module_output_path(module, source_path, i == entry_idx);
+            let generated_file = out_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            files.push(OutputFile {
                 path: out_path,
                 content,
-                source_map: Some(source_map),
-            }],
-        })
+                source_map: Some(SourceMap {
+                    generated_file,
+                    mappings,
+                    ..Default::default()
+                }),
+            });
+        }
+
+        // Shared runtime module: Optional/Result types and concurrency/range
+        // helpers, each `export`ed (types via `export type`, values via `export
+        // const`) so consuming modules `import` / `import type` them.
+        if runtime_optional || runtime_result || runtime_concurrency || runtime_range {
+            let mut content = String::new();
+            if runtime_optional {
+                content.push_str(&export_runtime_decls(OPTIONAL_RUNTIME_TS));
+                content.push('\n');
+            }
+            if runtime_result {
+                content.push_str(&export_runtime_decls(RESULT_RUNTIME_TS));
+                content.push('\n');
+            }
+            if runtime_concurrency {
+                content.push_str(&export_runtime_decls(CONCURRENCY_RUNTIME_TS));
+                content.push('\n');
+            }
+            if runtime_range {
+                content.push_str(&export_runtime_decls(RANGE_RUNTIME_TS));
+                content.push('\n');
+            }
+            files.push(OutputFile {
+                path: PathBuf::from(format!("{RUNTIME_MODULE_TS}.ts")),
+                content,
+                source_map: Some(SourceMap {
+                    generated_file: format!("{RUNTIME_MODULE_TS}.ts"),
+                    ..Default::default()
+                }),
+            });
+        }
+
+        // Minimal run affordance: `package.json` `{"type":"module"}` at the
+        // build root so the `tsc`-emitted `.js` tree runs as ES modules under
+        // `node main.js` (the TS run plan is `tsc main.ts && node main.js`).
+        files.push(OutputFile {
+            path: PathBuf::from("package.json"),
+            content: "{\n  \"type\": \"module\"\n}\n".to_string(),
+            source_map: None,
+        });
+
+        Ok(GeneratedCode { files })
     }
+}
+
+impl TsGenerator {
+    /// Output path for one module in the per-module native-import tree. The entry
+    /// module is always `main.ts`; every other module is placed at the path
+    /// mirrored from its declared module-path (`core.option` ⇒ `core/option.ts`).
+    fn module_output_path(
+        &self,
+        module: &AIRModule,
+        source_path: &std::path::Path,
+        is_entry: bool,
+    ) -> PathBuf {
+        if is_entry {
+            return crate::generator::derive_output_path(source_path, self.target());
+        }
+        match crate::generator::module_path_string(module) {
+            Some(path) if !path.is_empty() => {
+                let rel: PathBuf = path.split('.').collect();
+                rel.with_extension(&self.target().conventions.file_extension)
+            }
+            _ => crate::generator::derive_output_path(source_path, self.target()),
+        }
+    }
+}
+
+/// Rewrite a TS runtime-prelude string so each **top-level** declaration is
+/// exported: a `type NAME` line becomes `export type NAME`, a `const NAME` line
+/// becomes `export const NAME`. Used to build the shared `_bock_runtime.ts`,
+/// whose helpers/types consuming modules import. Only column-0 declarations are
+/// rewritten; indented inner lines (a helper body's local `const`) are left
+/// untouched.
+fn export_runtime_decls(runtime: &str) -> String {
+    runtime
+        .lines()
+        .map(|line| {
+            if let Some(rest) = line.strip_prefix("type ") {
+                format!("export type {rest}")
+            } else if let Some(rest) = line.strip_prefix("const ") {
+                format!("export const {rest}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ─── Emission context ────────────────────────────────────────────────────────
@@ -366,6 +506,39 @@ struct TsEmitCtx {
     /// narrowed) `s`. `None` outside a typed value-binding context; restored
     /// after the value so it never leaks to a sibling/outer expression.
     current_expected_type: Option<String>,
+    /// True in the **per-module native-import** emission path (S2). When set, the
+    /// `Module` arm emits real ESM `import`/`import type` for cross-module
+    /// references, records which shared-runtime helpers/types the module needs
+    /// (instead of inlining them), and a trailing `export { … }` re-exports the
+    /// module's enum-variant value names (every other declaration kind already
+    /// exports inline). When clear, the legacy single-file bundling is used.
+    per_module: bool,
+    /// In the per-module path, records that this module references the Optional /
+    /// Result runtime *types* (`BockOption` / `BockResult`) — so they are emitted
+    /// once into the shared `_bock_runtime.ts` and this module `import type`s them.
+    needs_runtime_optional: bool,
+    needs_runtime_result: bool,
+    /// As above, for the concurrency / range runtime *values*
+    /// (`__bockChannelNew` / `range`).
+    needs_runtime_concurrency: bool,
+    needs_runtime_range: bool,
+    /// Implicit cross-module imports for the per-module path — names this module
+    /// references but neither declares locally nor imports via an explicit `use`.
+    /// Computed in `generate_project`; emitted as ESM imports by the `Module` arm.
+    implicit_imports: Vec<crate::generator::ImplicitEsmImport>,
+    /// Map of every reachable public symbol → declaring module + kind, used to
+    /// spell an explicit `use`d name the way its declaration emits it.
+    public_symbols: HashMap<String, crate::generator::EsmSymbol>,
+    /// The declared dotted module-path of the file currently being emitted, or
+    /// empty for the entry file (always `main.ts` at the build root). Drives the
+    /// relative-specifier computation for every emitted `import`.
+    self_module_path: String,
+    /// Public enum-variant value names this module declares (`Color_Red`, …),
+    /// re-exported in a trailing `export { … }`. Unlike records/classes/aliases
+    /// (which export inline), enum-variant interfaces/consts/factories are emitted
+    /// without `export`, so cross-module references need the trailing re-export.
+    /// Computed in `generate_project`.
+    enum_variant_exports: Vec<String>,
 }
 
 impl TsEmitCtx {
@@ -398,11 +571,224 @@ impl TsEmitCtx {
             trait_self_subst: None,
             exported_types: std::collections::HashSet::new(),
             current_expected_type: None,
+            per_module: false,
+            needs_runtime_optional: false,
+            needs_runtime_result: false,
+            needs_runtime_concurrency: false,
+            needs_runtime_range: false,
+            implicit_imports: Vec::new(),
+            public_symbols: HashMap::new(),
+            self_module_path: String::new(),
+            enum_variant_exports: Vec::new(),
         }
     }
 
     fn finish(self) -> (String, Vec<SourceMapping>) {
         (self.buf, self.mappings)
+    }
+
+    /// Pre-seed the effect registries (`effect_ops`, `composite_effects`,
+    /// `effect_names`) from every module's top-level `EffectDecl`s. The
+    /// per-module path emits each module in its own context, so a bare op used in
+    /// one module whose effect is declared in another must be recognised without
+    /// having emitted the declaring module first. Mirrors how `enum_variants` /
+    /// `trait_decls` are collected across the bundle and the JS / Python
+    /// backends' equivalents.
+    fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
+        for (module, _) in modules {
+            let NodeKind::Module { items, .. } = &module.kind else {
+                continue;
+            };
+            for item in items {
+                let NodeKind::EffectDecl {
+                    name,
+                    components,
+                    operations,
+                    ..
+                } = &item.kind
+                else {
+                    continue;
+                };
+                if !components.is_empty() {
+                    let comp_names: Vec<String> = components
+                        .iter()
+                        .map(|tp| {
+                            tp.segments
+                                .last()
+                                .map_or("effect".to_string(), |s| s.name.clone())
+                        })
+                        .collect();
+                    self.composite_effects.insert(name.name.clone(), comp_names);
+                    continue;
+                }
+                self.effect_names.insert(name.name.clone());
+                for op in operations {
+                    if let NodeKind::FnDecl { name: op_name, .. } = &op.kind {
+                        self.effect_ops
+                            .insert(op_name.name.clone(), name.name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Emit the per-module ESM `import` statements at the top of the file: the
+    /// shared-runtime import (Optional/Result types via `import type`,
+    /// concurrency/range helpers via a value `import`), the explicit cross-module
+    /// `use` imports, and the implicit prelude imports. Grouped one statement per
+    /// source module, with the relative specifier computed from this file's
+    /// declared module-path. ESM specifiers reference the *emitted* `.js` (which
+    /// `tsc` resolves back to the `.ts`).
+    fn emit_esm_imports(&mut self, imports: &[AIRNode]) -> Result<(), CodegenError> {
+        // ESM specifiers reference the emitted `.js`, not the `.ts` source.
+        let ext = "js";
+
+        // Shared runtime: type-only and value imports, split so a type name never
+        // appears in a value `import` (which would be a runtime error if elided
+        // away to nothing, and is cleaner under `--strict`).
+        let mut type_names: Vec<&str> = Vec::new();
+        if self.needs_runtime_optional {
+            type_names.push("BockOption");
+        }
+        if self.needs_runtime_result {
+            type_names.push("BockResult");
+        }
+        let mut value_names: Vec<&str> = Vec::new();
+        if self.needs_runtime_concurrency {
+            value_names.extend(["__bockChannelNew", "__bockSpawn"]);
+        }
+        if self.needs_runtime_range {
+            value_names.extend(["range", "rangeInclusive"]);
+        }
+        if !type_names.is_empty() || !value_names.is_empty() {
+            let spec = crate::generator::esm_relative_specifier(
+                &self.self_module_path,
+                RUNTIME_MODULE_TS,
+                ext,
+            );
+            if !type_names.is_empty() {
+                self.writeln(&format!(
+                    "import type {{ {} }} from \"{spec}\";",
+                    type_names.join(", ")
+                ));
+            }
+            if !value_names.is_empty() {
+                self.writeln(&format!(
+                    "import {{ {} }} from \"{spec}\";",
+                    value_names.join(", ")
+                ));
+            }
+        }
+
+        // Explicit `use` imports → real ESM imports. A `use`d *function* is
+        // imported under its camelCased name; other kinds keep their raw name.
+        // Accumulate cross-module imports grouped by declaring module-path, split
+        // into value imports (`import { … }`) and type-only imports
+        // (`import type { … }`) — a TS-only distinction so an enum *type*, trait
+        // interface, or type alias never appears in a value import.
+        let mut value_by_module: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut type_by_module: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+
+        for import in imports {
+            if let NodeKind::ImportDecl { path, items } = &import.kind {
+                let target_path = path
+                    .segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if target_path.is_empty() {
+                    continue;
+                }
+                if let bock_ast::ImportItems::Named(named) = items {
+                    for n in named {
+                        // A `use`d runtime-prelude *value* name lowers inline and
+                        // is never a real export of the declaring module.
+                        if crate::generator::ESM_RUNTIME_PRELUDE_NAMES
+                            .contains(&n.name.name.as_str())
+                        {
+                            continue;
+                        }
+                        let kind = self.public_symbols.get(&n.name.name).map(|s| s.kind);
+                        let is_fn = matches!(kind, Some(crate::generator::EsmDeclKind::Function));
+                        let src = ts_esm_emit_name(&n.name.name, is_fn);
+                        let rendered = match &n.alias {
+                            Some(alias) => {
+                                let dst = ts_esm_emit_name(&alias.name, is_fn);
+                                if dst == src {
+                                    src
+                                } else {
+                                    format!("{src} as {dst}")
+                                }
+                            }
+                            None => src,
+                        };
+                        let type_only = kind.is_some_and(|k| k.is_ts_type_only());
+                        if type_only {
+                            type_by_module.entry(target_path.clone()).or_default()
+                        } else {
+                            value_by_module.entry(target_path.clone()).or_default()
+                        }
+                        .push(rendered);
+                    }
+                }
+                // `use Foo` / `use Foo.*` resolve via implicit imports by name.
+            }
+        }
+
+        // Implicit imports: prelude-visible names referenced but not explicitly
+        // `use`d, routed value vs type-only the same way.
+        for imp in &self.implicit_imports {
+            let rendered = ts_esm_emit_name(&imp.name, imp.is_fn());
+            if imp.kind.is_ts_type_only() {
+                type_by_module.entry(imp.module_path.clone()).or_default()
+            } else {
+                value_by_module.entry(imp.module_path.clone()).or_default()
+            }
+            .push(rendered);
+        }
+
+        for (module_path, mut names) in value_by_module {
+            names.sort_unstable();
+            names.dedup();
+            let spec =
+                crate::generator::esm_relative_specifier(&self.self_module_path, &module_path, ext);
+            self.writeln(&format!(
+                "import {{ {} }} from \"{spec}\";",
+                names.join(", ")
+            ));
+        }
+        for (module_path, mut names) in type_by_module {
+            names.sort_unstable();
+            names.dedup();
+            let spec =
+                crate::generator::esm_relative_specifier(&self.self_module_path, &module_path, ext);
+            self.writeln(&format!(
+                "import type {{ {} }} from \"{spec}\";",
+                names.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// Emit the trailing `export { … }` for this module's public enum-variant
+    /// value names (`Color_Red`, …). Every other public declaration kind exports
+    /// inline in TS; enum-variant interfaces/consts/factories do not, so they are
+    /// re-exported here for cross-module references. Emits nothing when there is
+    /// nothing to re-export.
+    fn emit_trailing_exports(&mut self) {
+        if self.enum_variant_exports.is_empty() {
+            return;
+        }
+        let mut names = self.enum_variant_exports.clone();
+        names.sort_unstable();
+        names.dedup();
+        if !self.buf.is_empty() && !self.buf.ends_with('\n') {
+            self.buf.push('\n');
+        }
+        self.writeln(&format!("export {{ {} }};", names.join(", ")));
     }
 
     /// Variant info for `path` when its last segment is a registered *user*
@@ -1619,31 +2005,53 @@ impl TsEmitCtx {
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         self.mark_span(node.span);
         match &node.kind {
-            NodeKind::Module { items, .. } => {
-                // Cross-module `use` (DV13) → single-file bundling: every
-                // module's top-level declarations are concatenated into the one
-                // entry file and `ImportDecl`s are dropped. Each runtime prelude
-                // is emitted at most once across the bundle, gated on a ctx flag
-                // (a duplicate `type Option<T>` would be a TS redeclaration).
-                if !self.optional_runtime_emitted && module_uses_optional(items) {
-                    self.buf.push_str(OPTIONAL_RUNTIME_TS);
-                    self.buf.push('\n');
-                    self.optional_runtime_emitted = true;
-                }
-                if !self.result_runtime_emitted && module_uses_result(items) {
-                    self.buf.push_str(RESULT_RUNTIME_TS);
-                    self.buf.push('\n');
-                    self.result_runtime_emitted = true;
-                }
-                if !self.concurrency_runtime_emitted && module_uses_concurrency(items) {
-                    self.buf.push_str(CONCURRENCY_RUNTIME_TS);
-                    self.buf.push('\n');
-                    self.concurrency_runtime_emitted = true;
-                }
-                if !self.range_runtime_emitted && module_uses_range(items) {
-                    self.buf.push_str(RANGE_RUNTIME_TS);
-                    self.buf.push('\n');
-                    self.range_runtime_emitted = true;
+            NodeKind::Module { items, imports, .. } => {
+                if self.per_module {
+                    // Per-module native-import path (S2): each module is emitted
+                    // to its own `.ts` file and the runtime types/helpers live in
+                    // the shared `_bock_runtime.ts`. Record which the module
+                    // references; `generate_project` emits them once into the
+                    // shared module, and `emit_esm_imports` imports them here.
+                    if module_uses_optional(items) {
+                        self.needs_runtime_optional = true;
+                    }
+                    if module_uses_result(items) {
+                        self.needs_runtime_result = true;
+                    }
+                    if module_uses_concurrency(items) {
+                        self.needs_runtime_concurrency = true;
+                    }
+                    if module_uses_range(items) {
+                        self.needs_runtime_range = true;
+                    }
+                    self.emit_esm_imports(imports)?;
+                } else {
+                    // Cross-module `use` (DV13) → single-file bundling: every
+                    // module's top-level declarations are concatenated into the
+                    // one entry file and `ImportDecl`s are dropped. Each runtime
+                    // prelude is emitted at most once across the bundle, gated on
+                    // a ctx flag (a duplicate `type Option<T>` would be a TS
+                    // redeclaration).
+                    if !self.optional_runtime_emitted && module_uses_optional(items) {
+                        self.buf.push_str(OPTIONAL_RUNTIME_TS);
+                        self.buf.push('\n');
+                        self.optional_runtime_emitted = true;
+                    }
+                    if !self.result_runtime_emitted && module_uses_result(items) {
+                        self.buf.push_str(RESULT_RUNTIME_TS);
+                        self.buf.push('\n');
+                        self.result_runtime_emitted = true;
+                    }
+                    if !self.concurrency_runtime_emitted && module_uses_concurrency(items) {
+                        self.buf.push_str(CONCURRENCY_RUNTIME_TS);
+                        self.buf.push('\n');
+                        self.concurrency_runtime_emitted = true;
+                    }
+                    if !self.range_runtime_emitted && module_uses_range(items) {
+                        self.buf.push_str(RANGE_RUNTIME_TS);
+                        self.buf.push('\n');
+                        self.range_runtime_emitted = true;
+                    }
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -1651,11 +2059,17 @@ impl TsEmitCtx {
                     }
                     self.emit_node(item)?;
                 }
+                // Per-module path: re-export enum-variant values (everything else
+                // exports inline). Emitted once after all items.
+                if self.per_module {
+                    self.emit_trailing_exports();
+                }
                 Ok(())
             }
             NodeKind::ImportDecl { .. } => {
-                // Resolved by bundling — the imported module's declarations are
-                // concatenated into this same file — so the import is a no-op.
+                // Resolved either by bundling (declarations concatenated into the
+                // same file) or, in the per-module path, by the real ESM imports
+                // emitted up front by `emit_esm_imports`. Either way a no-op here.
                 Ok(())
             }
             NodeKind::FnDecl {
@@ -4025,6 +4439,19 @@ fn ts_value_ident(name: &str) -> String {
     )
 }
 
+/// Spell `name` the way the TS backend emits the symbol's declaration / call
+/// sites for an `import`/`export` specifier in the per-module path: a function
+/// is camelCased and keyword-escaped via [`ts_value_ident`]; any other kind
+/// (records, enum variants, classes, traits, effects, consts, type aliases)
+/// keeps its raw name.
+fn ts_esm_emit_name(name: &str, is_fn: bool) -> String {
+    if is_fn {
+        ts_value_ident(name)
+    } else {
+        name.to_string()
+    }
+}
+
 fn to_camel_case(s: &str) -> String {
     if s.is_empty() || s == "_" {
         return s.to_string();
@@ -4304,6 +4731,198 @@ mod tests {
         let src_path = std::path::Path::new("src/lib.bock");
         let result = gen.generate_project(&[(&m, src_path)]).unwrap();
         assert_eq!(result.files[0].path, std::path::PathBuf::from("lib.ts"));
+    }
+
+    /// A module node with a declared dotted `path`, for the per-module tests.
+    fn module_with_path(path: &[&str], imports: Vec<AIRNode>, items: Vec<AIRNode>) -> AIRNode {
+        node(
+            0,
+            NodeKind::Module {
+                path: Some(bock_ast::ModulePath {
+                    segments: path.iter().map(|s| ident(s)).collect(),
+                    span: span(),
+                }),
+                annotations: vec![],
+                imports,
+                items,
+            },
+        )
+    }
+
+    /// An `import <path>.{ name }` AIR node (single-item `Named` import).
+    fn import_named(id: u32, path: &[&str], name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::ImportDecl {
+                path: bock_ast::ModulePath {
+                    segments: path.iter().map(|s| ident(s)).collect(),
+                    span: span(),
+                },
+                items: bock_ast::ImportItems::Named(vec![bock_ast::ImportedName {
+                    span: span(),
+                    name: ident(name),
+                    alias: None,
+                }]),
+            },
+        )
+    }
+
+    /// A bare `fn <name>() -> <tail>` declaration with the given visibility.
+    fn fn_decl_tail(id: u32, vis: Visibility, name: &str, tail: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: vis,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(id + 1, vec![], Some(tail))),
+            },
+        )
+    }
+
+    #[test]
+    fn per_module_emits_native_esm_import_tree_ts() {
+        // entry `module main` uses `mathutil.add_one`; emission must produce
+        // `main.ts` (with `import { addOne } from "./mathutil.js"` — the relative
+        // specifier references the *emitted* `.js`), `mathutil.ts`, and a
+        // `package.json` run affordance.
+        let call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "add_one")),
+                args: vec![bock_air::AirArg {
+                    label: None,
+                    value: int_lit(12, "6"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(5, &["mathutil"], "add_one")],
+            vec![fn_decl_tail(1, Visibility::Private, "main", call)],
+        );
+        let util_mod = module_with_path(
+            &["mathutil"],
+            vec![],
+            vec![fn_decl_tail(
+                20,
+                Visibility::Public,
+                "add_one",
+                int_lit(22, "7"),
+            )],
+        );
+
+        let gen = TsGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&util_mod, std::path::Path::new("src/mathutil.bock")),
+            ])
+            .unwrap();
+        let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
+        let main_file = by_name("main.ts").expect("main.ts emitted");
+        let util_file = by_name("mathutil.ts").expect("mathutil.ts emitted");
+        by_name("package.json").expect("package.json run affordance emitted");
+        assert!(
+            main_file
+                .content
+                .contains("import { addOne } from \"./mathutil.js\";"),
+            "main.ts must import the camelCased fn via the `.js` specifier; got:\n{}",
+            main_file.content
+        );
+        assert!(
+            util_file.content.contains("export function addOne("),
+            "mathutil.ts must export the fn inline; got:\n{}",
+            util_file.content
+        );
+    }
+
+    #[test]
+    fn per_module_imports_enum_type_via_import_type_ts() {
+        // entry `module main` references a `public enum Color` declared in
+        // `module palette` *as a type* (a function param annotation). The enum's
+        // type name has no JS binding, so TS must `import type { Color }` — not a
+        // value import. The variants are re-exported by `palette.ts` and lower
+        // inline as tagged objects.
+        let color_enum = node(
+            40,
+            NodeKind::EnumDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Color"),
+                generic_params: vec![],
+                variants: vec![
+                    node(
+                        41,
+                        NodeKind::EnumVariant {
+                            name: ident("Red"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                    node(
+                        42,
+                        NodeKind::EnumVariant {
+                            name: ident("Blue"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                ],
+            },
+        );
+        let palette_mod = module_with_path(&["palette"], vec![], vec![color_enum]);
+        // `fn paint(c: Color) -> Int { 0 }` — `Color` appears as a type only.
+        let paint = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![typed_param_node(2, "c", "Color")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(4, vec![], Some(int_lit(5, "0")))),
+            },
+        );
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(6, &["palette"], "Color")],
+            vec![paint],
+        );
+
+        let gen = TsGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&palette_mod, std::path::Path::new("src/palette.bock")),
+            ])
+            .unwrap();
+        let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
+        let main_file = by_name("main.ts").expect("main.ts emitted");
+        let palette_file = by_name("palette.ts").expect("palette.ts emitted");
+        assert!(
+            main_file
+                .content
+                .contains("import type { Color } from \"./palette.js\";"),
+            "main.ts must `import type` the enum type; got:\n{}",
+            main_file.content
+        );
+        assert!(
+            palette_file
+                .content
+                .contains("export { Color_Blue, Color_Red };"),
+            "palette.ts must re-export the enum variant values; got:\n{}",
+            palette_file.content
+        );
     }
 
     // ── Type annotations ────────────────────────────────────────────────────

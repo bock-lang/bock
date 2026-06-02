@@ -77,9 +77,30 @@ fn read_entry_bundle(build_dir: &Path, target: &str, ext: &str) -> Option<String
 }
 
 /// Whether `target` emits a per-module native import tree (vs. bundling). Kept
-/// in sync with the harness's `emits_per_module_tree`: S1 migrates `python`.
+/// in sync with the harness's `emits_per_module_tree`: S1 migrated `python`, S2
+/// adds `js`/`ts`.
 fn emits_per_module_tree(target: &str) -> bool {
-    matches!(target, "python")
+    matches!(target, "python" | "js" | "ts")
+}
+
+/// Assert the entry file carries a real cross-module import of `module` (the
+/// dotted declared path) spelled the way `target` emits it: Python
+/// `from <module> import …`; js/ts ESM `import … from "./<path>.js"`.
+fn assert_entry_imports_module(entry: &str, target: &str, module: &str) {
+    match target {
+        "python" => assert!(
+            entry.contains(&format!("from {module} import")),
+            "target {target}: entry must import from the {module} module file",
+        ),
+        "js" | "ts" => {
+            let rel = format!("./{}.js", module.replace('.', "/"));
+            assert!(
+                entry.contains("import ") && entry.contains(&rel),
+                "target {target}: entry must `import … from \"{rel}\"`",
+            );
+        }
+        other => panic!("assert_entry_imports_module: unexpected per-module target {other}"),
+    }
 }
 
 #[test]
@@ -124,10 +145,7 @@ fn core_convert_compiles_on_every_target() {
             let entry = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
                 panic!("target {target}: no entry file build/{target}/main.{ext}")
             });
-            assert!(
-                entry.contains("from core.convert import"),
-                "target {target}: entry must import from the core.convert module file",
-            );
+            assert_entry_imports_module(&entry, target, "core.convert");
         } else {
             let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
                 panic!("target {target}: no entry bundle build/{target}/main.{ext}")

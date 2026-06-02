@@ -43,18 +43,32 @@ See §20.6.1.
 
 > **v1 note (per-module output, in progress).** The per-module mirrored
 > tree above is the v1 output model (DQ19 resolved, §20.6.1), and it is
-> being delivered target by target. **Python** emits it today: a
-> cross-module program compiles to one `.py` file per reached module
-> (mirrored from each module's declared path — `module core.option` ⇒
-> `core/option.py`), wired with real Python imports (`from core.option
-> import …`), plus a shared `_bock_runtime.py` for the Optional/Result/
-> Ordering/concurrency runtimes. It runs as `python3 main.py` from the
-> build root, where `core` resolves as a namespace package. The other
-> four targets (`js`, `ts`, `rust`, `go`) still **bundle** every reached
+> being delivered target by target. **Python, JavaScript, and TypeScript**
+> emit it today: a cross-module program compiles to one file per reached
+> module (mirrored from each module's declared path — `module core.option`
+> ⇒ `core/option.py` / `core/option.js` / `core/option.ts`), wired with
+> the target's native imports:
+>
+> - **Python** — package imports (`from core.option import …`), plus a
+>   shared `_bock_runtime.py` for the Optional/Result/Ordering/concurrency
+>   runtimes. Runs as `python3 main.py` from the build root, where `core`
+>   resolves as a namespace package.
+> - **JS / TS** — ES-module imports (`import { … } from "./core/option.js"`;
+>   relative specifiers carry the `.js` extension Node requires), public
+>   declarations `export`ed, plus a shared `_bock_runtime.{js,ts}` for the
+>   concurrency/range helpers (and, for TS, the Optional/Result runtime
+>   types). A minimal `package.json` `{"type":"module"}` is emitted at the
+>   `build/<target>/` root so Node treats the tree as ES modules; this is
+>   the bare run affordance only — full project-mode scaffolding (the
+>   richer `package.json`, `tsconfig.json`, etc.) is a later milestone. JS
+>   runs as `node main.js`; TS compiles with `tsc main.ts` (which follows
+>   the import tree) then runs `node main.js`.
+>
+> The remaining two targets (`rust`, `go`) still **bundle** every reached
 > module (in dependency order, including imported `core.*` stdlib) into
 > the single entry file `build/<target>/main.<ext>`, dropping the import
-> statements, until their native-import paths land. A program that
-> imports nothing emits only its own entry module on every target.
+> statements, until their native-import paths land. A program that imports
+> nothing emits only its own entry module on every target.
 
 ### Output Modes
 
