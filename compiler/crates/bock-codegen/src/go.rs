@@ -494,8 +494,9 @@ impl CodeGenerator for GoGenerator {
     /// `ImportDecl`s therefore emit nothing (same package). The runtime preludes
     /// (Optional / Result / numeric / Ordering / concurrency / range) are
     /// emitted **once** into a shared `bock_runtime.go`; consuming files use the
-    /// runtime symbols directly (same package). A minimal `go.mod` (module name +
-    /// go version) is emitted at the build root so `go run .` resolves the
+    /// runtime symbols directly (same package). The minimal `go.mod` (module
+    /// name + go version) run affordance is emitted by the **scaffolder** in
+    /// project mode (S6a / DV18), not by codegen, so `go run .` resolves the
     /// package. Go uses a native `func main`, so no entry invocation is appended.
     fn generate_project(
         &self,
@@ -598,22 +599,14 @@ impl CodeGenerator for GoGenerator {
             });
         }
 
-        // Minimal manifest: module name + go version, enough for `go run .`.
-        files.push(OutputFile {
-            path: std::path::PathBuf::from("go.mod"),
-            content: GO_MOD.to_string(),
-            source_map: None,
-        });
+        // Manifest emission moved to the project-mode scaffolder (S6a / DV18):
+        // codegen emits only the per-module *source* package in all modes; the
+        // `go.mod` run affordance is emitted by `GoScaffolder` in project mode
+        // only (never under `--source-only`). See `scaffold.rs`.
 
         Ok(GeneratedCode { files })
     }
 }
-
-/// The minimal `go.mod` for the emitted per-module package: a module path and a
-/// go version, enough for `go run .` to resolve the package. The go version is
-/// intentionally conservative (1.21) so the output builds on a wide range of
-/// installed toolchains.
-const GO_MOD: &str = "module bock_app\n\ngo 1.21\n";
 
 /// The flat output filename for one non-entry module in the per-module Go
 /// package: the declared dotted module-path kept verbatim (`module core.option`
@@ -11610,10 +11603,12 @@ mod tests {
     #[test]
     fn per_module_emits_native_go_package_tree() {
         // entry `module main` uses `mathutil.add_one`; `module mathutil` exports
-        // a `public fn add_one`. Per-module emission must produce a Go module:
-        // `go.mod`, `main.go` (one `package main`), and the flat `mathutil.go`
-        // (same package — the call site needs no import) — separate files, not a
-        // single collapsed file.
+        // a `public fn add_one`. Per-module emission must produce the native Go
+        // *source* package: `main.go` (one `package main`) and the flat
+        // `mathutil.go` (same package — the call site needs no import) —
+        // separate files, not a single collapsed file. The `go.mod` run
+        // affordance is emitted by the scaffolder (project mode), NOT codegen
+        // (S6a / DV18).
         let call = node(
             10,
             NodeKind::Call {
@@ -11651,7 +11646,12 @@ mod tests {
         let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
         let main_file = by_name("main.go").expect("main.go emitted");
         let util_file = by_name("mathutil.go").expect("flat mathutil.go emitted");
-        by_name("go.mod").expect("go.mod manifest emitted");
+        // Codegen no longer emits the manifest (S6a / DV18) — the scaffolder
+        // owns the `go.mod` in project mode.
+        assert!(
+            by_name("go.mod").is_none(),
+            "codegen must NOT emit go.mod — the scaffolder owns it (S6a)"
+        );
 
         assert!(
             main_file.content.starts_with("package main"),

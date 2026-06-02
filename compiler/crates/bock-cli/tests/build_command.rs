@@ -477,3 +477,84 @@ fn build_no_ai_flag_is_alias_for_deterministic() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// A runnable entry program so every target emits a real per-module tree (rust
+/// needs a `main` for `src/main.rs`; go needs a `func main`). Uses `println`
+/// (→ `console.log` for js/ts) rather than `print` (→ `process.stdout.write`,
+/// which `tsc --noEmit` rejects without `@types/node`), so the project-mode
+/// build's per-file ts validation passes — matching what the conformance
+/// fixtures use.
+const MAIN_SOURCE: &str = "fn main() { println(\"hi\") }\n";
+
+/// The project-mode run-affordance manifest each target's scaffolder emits, or
+/// `None` for targets that need no manifest to run (python — PEP 420).
+fn target_manifest(target: &str) -> Option<&'static str> {
+    match target {
+        "js" | "ts" => Some("package.json"),
+        "rust" => Some("Cargo.toml"),
+        "go" => Some("go.mod"),
+        "python" => None,
+        other => panic!("unknown target {other}"),
+    }
+}
+
+/// DV18 (spec §20.6.2): **source mode** (`--source-only`) emits "no manifests,
+/// scaffolding, or entry-point wiring." Before S6a, codegen emitted the
+/// run-affordance manifests in *all* modes, so `--source-only` wrongly carried
+/// them. S6a moves manifest emission into the project-mode scaffolder, so source
+/// mode is now bare per-module source. This test makes the fix checkable: for
+/// every target, `bock build --source-only` must NOT emit the manifest.
+#[test]
+fn source_mode_is_bare_no_manifest() {
+    for target in &["js", "ts", "python", "rust", "go"] {
+        let dir = create_project(MAIN_SOURCE);
+        let output = bock_bin()
+            .args(["build", "--target", target, "--source-only"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "source-only build failed for {target}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let build_dir = dir.path().join(format!("build/{target}"));
+        if let Some(manifest) = target_manifest(target) {
+            assert!(
+                !build_dir.join(manifest).exists(),
+                "DV18: source mode (--source-only) for `{target}` wrongly emitted \
+                 the manifest `{manifest}` — source mode must be bare source"
+            );
+        }
+    }
+}
+
+/// The dual of the DV18 test: **project mode** (the default — no
+/// `--source-only`) must emit the run-affordance manifest via the scaffolder, so
+/// the output is runnable in the target toolchain (§20.6.2). The build may warn
+/// that a toolchain is absent (compilation skipped), but the manifest is written
+/// before any toolchain invocation, so its presence does not depend on the
+/// toolchain being installed.
+#[test]
+fn project_mode_emits_manifest() {
+    for target in &["js", "ts", "rust", "go"] {
+        let dir = create_project(MAIN_SOURCE);
+        let output = bock_bin()
+            .args(["build", "--target", target])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "project-mode build failed for {target}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let build_dir = dir.path().join(format!("build/{target}"));
+        let manifest = target_manifest(target).expect("js/ts/rust/go have manifests");
+        assert!(
+            build_dir.join(manifest).exists(),
+            "project mode for `{target}` must emit the scaffolder manifest \
+             `{manifest}` so the output is runnable"
+        );
+    }
+}

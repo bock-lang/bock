@@ -134,9 +134,12 @@ impl CodeGenerator for RsGenerator {
     ///
     /// ## Layout (cargo-idiomatic `src/`-rooted crate)
     ///
-    /// The build root `build/rust/` is a runnable Cargo crate:
-    /// - `Cargo.toml` — a minimal manifest (`[package]` + a `[[bin]]` at
-    ///   `src/main.rs`) — just enough to `cargo run`.
+    /// Codegen emits the `src/`-rooted source tree (in all modes); in project
+    /// mode the scaffolder adds the `Cargo.toml` run affordance (S6a / DV18), so
+    /// `build/rust/` becomes a runnable Cargo crate:
+    /// - `Cargo.toml` — minimal manifest (`[package]` + a `[[bin]]` at
+    ///   `src/main.rs`), emitted by the **scaffolder** in project mode only —
+    ///   just enough to `cargo run`.
     /// - `src/main.rs` — the entry module's body, preceded by `mod <seg>;`
     ///   declarations for every top-level namespace the tree contains.
     /// - `src/<path>.rs` — one file per reached non-entry module, mirrored from
@@ -366,42 +369,13 @@ impl CodeGenerator for RsGenerator {
             });
         }
 
-        // Minimal manifest: a `[package]` + a `[[bin]]` pointing at
-        // `src/main.rs`, just enough to `cargo run`. `tokio` is added only when
-        // a program uses the concurrency runtime (otherwise the crate has no
-        // dependencies). `edition = "2021"` matches the existing rust profile.
-        files.push(OutputFile {
-            path: PathBuf::from("Cargo.toml"),
-            content: cargo_toml(needs_runtime),
-            source_map: None,
-        });
+        // Manifest emission moved to the project-mode scaffolder (S6a / DV18):
+        // codegen emits only the per-module *source* tree in all modes; the
+        // `Cargo.toml` run affordance is emitted by `RustScaffolder` in project
+        // mode only (never under `--source-only`). See `scaffold.rs`.
 
         Ok(GeneratedCode { files })
     }
-}
-
-/// Render the minimal `Cargo.toml` for the emitted crate. A `[[bin]]` names the
-/// entry `main` at `src/main.rs`. `tokio` (with the `rt-multi-thread`/`macros`/
-/// `sync`/`time` features the concurrency runtime needs) is included only when
-/// the program uses `Channel`/`spawn`, so a non-concurrent program's crate has
-/// no dependencies and `cargo run` stays fast.
-fn cargo_toml(needs_tokio: bool) -> String {
-    let mut s = String::from(
-        "[package]\n\
-         name = \"bock_app\"\n\
-         version = \"0.1.0\"\n\
-         edition = \"2021\"\n\n\
-         [[bin]]\n\
-         name = \"bock_app\"\n\
-         path = \"src/main.rs\"\n",
-    );
-    if needs_tokio {
-        s.push_str(
-            "\n[dependencies]\n\
-             tokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"sync\", \"time\"] }\n",
-        );
-    }
-    s
 }
 
 /// Builder for the Rust `mod` declaration tree of a per-module crate.
@@ -7236,10 +7210,11 @@ mod tests {
     #[test]
     fn per_module_emits_native_rust_module_tree() {
         // entry `module main` uses `mathutil.add_one`; `module mathutil` exports
-        // a `public fn add_one`. Per-module emission must produce a Cargo crate:
-        // `Cargo.toml`, `src/main.rs` (with `mod mathutil;` + `use
+        // a `public fn add_one`. Per-module emission must produce the native
+        // module *source* tree: `src/main.rs` (with `mod mathutil;` + `use
         // crate::mathutil::{add_one};`), and `src/mathutil.rs` — a real module
-        // tree, not a single collapsed file.
+        // tree, not a single collapsed file. The `Cargo.toml` run affordance is
+        // emitted by the scaffolder (project mode), NOT by codegen (S6a / DV18).
         let call = node(
             10,
             NodeKind::Call {
@@ -7278,7 +7253,12 @@ mod tests {
         let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
         let main_file = by_name("src/main.rs").expect("src/main.rs emitted");
         let util_file = by_name("src/mathutil.rs").expect("src/mathutil.rs emitted");
-        by_name("Cargo.toml").expect("Cargo.toml manifest emitted");
+        // Codegen no longer emits the manifest (S6a / DV18) — the scaffolder
+        // owns the `Cargo.toml` in project mode.
+        assert!(
+            by_name("Cargo.toml").is_none(),
+            "codegen must NOT emit Cargo.toml — the scaffolder owns it (S6a)"
+        );
 
         assert!(
             main_file.content.contains("mod mathutil;"),

@@ -152,10 +152,11 @@ impl CodeGenerator for JsGenerator {
     /// model is stable.
     ///
     /// To run under `node main.js`, the emitted tree is ESM (relative specifiers
-    /// carry `.js`, declarations use `export`), so a minimal `package.json`
-    /// `{"type":"module"}` is emitted at the build root — the bare run affordance
-    /// that makes Node treat the `.js` files as ES modules (full project-mode
-    /// scaffolding is a later milestone). The concurrency and range runtime
+    /// carry `.js`, declarations use `export`); the minimal `package.json`
+    /// `{"type":"module"}` run affordance — which makes Node treat the `.js`
+    /// files as ES modules — is emitted by the **scaffolder** in project mode
+    /// (S6a / DV18), not by codegen, so `--source-only` output is bare source.
+    /// The concurrency and range runtime
     /// helpers are emitted **once** into a shared `_bock_runtime.js`
     /// (see `RUNTIME_MODULE_JS`); every module that references one imports the
     /// helpers it needs.
@@ -273,13 +274,11 @@ impl CodeGenerator for JsGenerator {
             });
         }
 
-        // Minimal run affordance: `package.json` `{"type":"module"}` at the
-        // build root so `node main.js` resolves the `.js` tree as ES modules.
-        files.push(OutputFile {
-            path: PathBuf::from("package.json"),
-            content: "{\n  \"type\": \"module\"\n}\n".to_string(),
-            source_map: None,
-        });
+        // Run-affordance emission moved to the project-mode scaffolder (S6a /
+        // DV18): codegen emits only the per-module `.js` *source* tree in all
+        // modes; the `package.json` `{"type":"module"}` run affordance is
+        // emitted by `JsScaffolder` in project mode only (never under
+        // `--source-only`). See `scaffold.rs`.
 
         Ok(GeneratedCode { files })
     }
@@ -6458,9 +6457,10 @@ mod tests {
     fn per_module_emits_native_esm_import_tree() {
         // entry `module main` uses `mathutil.add_one`; `module mathutil` exports a
         // `public fn add_one`. Per-module emission must produce `main.js` (with a
-        // real `import { addOne } from "./mathutil.js"` — note the camelCase),
-        // `mathutil.js`, and a `package.json` run affordance — a real import
-        // tree, not a single collapsed file.
+        // real `import { addOne } from "./mathutil.js"` — note the camelCase) and
+        // `mathutil.js` — a real import tree, not a single collapsed file. The
+        // `package.json` run affordance is emitted by the scaffolder (project
+        // mode), NOT codegen (S6a / DV18).
         let call = node(
             10,
             NodeKind::Call {
@@ -6499,7 +6499,12 @@ mod tests {
         let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
         let main_file = by_name("main.js").expect("main.js emitted");
         let util_file = by_name("mathutil.js").expect("mathutil.js emitted");
-        by_name("package.json").expect("package.json run affordance emitted");
+        // Codegen no longer emits the run affordance (S6a / DV18) — the
+        // scaffolder owns the `package.json` in project mode.
+        assert!(
+            by_name("package.json").is_none(),
+            "codegen must NOT emit package.json — the scaffolder owns it (S6a)"
+        );
 
         assert!(
             main_file
