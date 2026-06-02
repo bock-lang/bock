@@ -256,8 +256,9 @@ func __bockErr(v interface{}) __bockResult { return __bockResult{tag: \"Err\", v
 /// `for _, i := range __bockRange(0, n, false)`; this builds the `[]int64`
 /// slice with half-open (`inclusive=false`) or inclusive (`inclusive=true`)
 /// bounds, matching Python's `range(lo, hi)` / `range(lo, hi + 1)` and Rust's
-/// `lo..hi` / `lo..=hi`. Emitted at most once per bundle, gated on a ctx flag
-/// (mirrors `OPTIONAL_RUNTIME_GO`).
+/// `lo..hi` / `lo..=hi`. Emitted once into the shared `bock_runtime.go`
+/// (per-module path) or inlined at most once (single-module path), gated on a
+/// ctx flag (mirrors `OPTIONAL_RUNTIME_GO`).
 const RANGE_RUNTIME_GO: &str = "// ── Bock range runtime ──
 func __bockRange(lo int64, hi int64, inclusive bool) []int64 {
 	end := hi
@@ -307,9 +308,9 @@ fn go_module_uses_result(items: &[AIRNode]) -> bool {
 
 /// The prelude `Ordering` runtime: a small enum type with the three variants as
 /// package-level constants, plus a generic `compare` helper the primitive bridge
-/// calls. Mirrors `OPTIONAL_RUNTIME_GO` — the `core.compare` enum decl is not
-/// bundled into the single-file entry, so `Ordering`/`Less`/`Equal`/`Greater`
-/// and `(x).compare(y)` need this self-contained representation. A value-switch
+/// calls. Mirrors `OPTIONAL_RUNTIME_GO` — when the `core.compare` enum decl is
+/// not among the reached modules, `Ordering`/`Less`/`Equal`/`Greater` and
+/// `(x).compare(y)` need this self-contained representation. A value-switch
 /// `case Less:` (the existing Go match lowering for these arms) matches a
 /// `__bockOrdering` constant directly.
 const ORDERING_RUNTIME_GO: &str = "// ── Bock Ordering runtime ──
@@ -712,81 +713,6 @@ impl GoGenerator {
     }
 }
 
-impl GoGenerator {
-    /// Legacy single-file bundle path, retained behind the per-module flag so
-    /// the transition fallback stays available until S4 retires bundling.
-    #[allow(dead_code)]
-    fn generate_bundle(
-        &self,
-        modules: &[(&AIRModule, &std::path::Path)],
-    ) -> Result<GeneratedCode, CodegenError> {
-        let reachable = crate::generator::reachable_modules(modules);
-        let modules = reachable.as_slice();
-        let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
-            return Ok(GeneratedCode { files: vec![] });
-        };
-
-        let mut global_async_fns: HashSet<String> = HashSet::new();
-        for (module, _) in modules {
-            if let NodeKind::Module { items, .. } = &module.kind {
-                for item in items {
-                    if let NodeKind::FnDecl {
-                        is_async: true,
-                        name,
-                        ..
-                    } = &item.kind
-                    {
-                        global_async_fns.insert(name.name.clone());
-                    }
-                }
-            }
-        }
-
-        let mut ctx = GoEmitCtx::new();
-        ctx.async_fns = global_async_fns;
-        ctx.enum_variants = crate::generator::collect_enum_variants(modules);
-        ctx.generic_decls = crate::generator::collect_generic_decls(modules);
-        ctx.trait_decls = crate::generator::collect_trait_decls(modules);
-        ctx.derive_self_param_traits();
-        for (module, _) in modules {
-            ctx.collect_methods(module);
-            ctx.collect_optional_returns(module);
-            ctx.collect_method_optional_returns(module);
-            ctx.collect_record_param_fields(module);
-            ctx.collect_fn_and_type_names(module);
-        }
-        for (i, (module, _)) in modules.iter().enumerate() {
-            if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
-                ctx.buf.push('\n');
-            }
-            ctx.emit_node(module)?;
-        }
-        let (body, needs) = ctx.into_parts();
-
-        let mut content = "package main\n".to_string();
-        content.push_str(&needs.render_block());
-        content.push('\n');
-        content.push_str(&body);
-
-        let derived_name = out_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        let source_map = SourceMap {
-            generated_file: derived_name,
-            ..Default::default()
-        };
-        Ok(GeneratedCode {
-            files: vec![OutputFile {
-                path: out_path,
-                content,
-                source_map: Some(source_map),
-            }],
-        })
-    }
-}
-
 // ─── Emission context ────────────────────────────────────────────────────────
 
 /// Internal state for Go emission.
@@ -927,27 +853,28 @@ struct GoEmitCtx {
     /// scrutinee type-asserts the bound payload. The Result analogue of
     /// [`Self::fn_optional_ret_elem`]; functions not returning a Result are absent.
     fn_result_ret_elem: HashMap<String, (String, String)>,
-    /// Set once the concurrency runtime prelude has been emitted into `buf`, so
-    /// a single-file **bundle** of several modules (cross-module `use`, DV13)
-    /// emits it at most once (a duplicate `type __bockChannel` would not
-    /// compile). A lone-module build sets it on first use exactly as before.
+    /// Set once the concurrency runtime prelude has been emitted into `buf` in
+    /// the single-module self-contained path ([`GoGenerator::generate_module`]),
+    /// so a module referencing it more than once still inlines it at most once (a
+    /// duplicate `type __bockChannel` would not compile). The per-module project
+    /// path emits the runtime once into the shared `bock_runtime.go`.
     concurrency_runtime_emitted: bool,
     /// Set once the Optional runtime prelude has been emitted into `buf`;
-    /// deduped across a bundle exactly as [`Self::concurrency_runtime_emitted`].
+    /// deduped exactly as [`Self::concurrency_runtime_emitted`].
     optional_runtime_emitted: bool,
-    /// Set once the `Result` runtime prelude has been emitted; deduped across a
-    /// bundle exactly as [`Self::optional_runtime_emitted`].
+    /// Set once the `Result` runtime prelude has been emitted; deduped exactly as
+    /// [`Self::optional_runtime_emitted`].
     result_runtime_emitted: bool,
     /// Set once the shared numeric-payload helpers ([`NUMERIC_RUNTIME_GO`]) have
     /// been emitted. Emitted once if *either* the Optional or `Result` runtime is
     /// used, so the two never redeclare `__bockAsInt64`/`__bockAsFloat64`.
     numeric_runtime_emitted: bool,
     /// Set once the [`ORDERING_RUNTIME_GO`] prelude has been emitted; deduped
-    /// across a bundle exactly as [`Self::optional_runtime_emitted`].
+    /// exactly as [`Self::optional_runtime_emitted`].
     ordering_runtime_emitted: bool,
-    /// Set once the [`RANGE_RUNTIME_GO`] helper has been emitted; deduped across
-    /// a bundle exactly as [`Self::optional_runtime_emitted`] (a duplicate
-    /// `func __bockRange` would not compile).
+    /// Set once the [`RANGE_RUNTIME_GO`] helper has been emitted; deduped exactly
+    /// as [`Self::optional_runtime_emitted`] (a duplicate `func __bockRange`
+    /// would not compile).
     range_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Go has no sum type, so a user enum is
     /// a sealed interface + per-variant structs named `{enum}{variant}`
@@ -956,14 +883,14 @@ struct GoEmitCtx {
     /// s.(type) { case ShapeCircle: … }`) with field extraction, rather than the
     /// broken value-switch on the unqualified variant name. Built-in
     /// Optional/Result pre-seeds are filtered out (Optional has its own
-    /// `__bockOption` runtime). Pre-scanned across the bundle.
+    /// `__bockOption` runtime). Pre-scanned across the reached modules.
     enum_variants: crate::generator::EnumVariantRegistry,
     /// Generic-type declaration registry: a record/enum/class name → its
     /// declared generic params. Lets an `impl Box { ... }` block recover the
     /// `[T any]` declared on `record Box[T]` so a Go method receiver emits
     /// `func (self *Box[T]) ...` (Go requires the type-param list on the
     /// receiver) and a construction emits `Box[int64]{...}`. Pre-scanned across
-    /// the bundle (mirrors [`Self::enum_variants`]).
+    /// the reached modules (mirrors [`Self::enum_variants`]).
     generic_decls: crate::generator::GenericDeclRegistry,
     /// Maps an in-scope variable name → its Go type, used to infer a lambda's
     /// return type. Go infers a bare `func(...) interface{}` for every lambda;
@@ -985,7 +912,7 @@ struct GoEmitCtx {
     /// parameter correctly: inside `fn next(self)` of `record ListIter[T] { xs:
     /// List[T] }`, `self.xs.get(i)` must take `[]T` (T is in scope on the
     /// receiver), not `[]interface{}` (which a `[]T` argument does not satisfy).
-    /// Only `List`-typed fields are recorded. Pre-scanned across the bundle.
+    /// Only `List`-typed fields are recorded. Pre-scanned across the reached modules.
     record_field_list_elem: HashMap<String, HashMap<String, String>>,
     /// Maps a record name → its generic-param names in declaration order
     /// (`"SortedSet" → ["T"]`). Lets a construction site substitute a field's
@@ -1005,7 +932,7 @@ struct GoEmitCtx {
     /// receiver method is synthesized on the target — the Go interface declares
     /// only the signature, so a type relying on an inherited default would
     /// otherwise fail to satisfy the interface and have no such method. Pre-
-    /// scanned across the bundle (mirrors [`Self::enum_variants`]).
+    /// scanned across the reached modules (mirrors [`Self::enum_variants`]).
     trait_decls: crate::generator::TraitDeclRegistry,
     /// Names of all top-level types (records, enums, traits, classes). A public
     /// Bock function whose PascalCased Go name collides with one of these (e.g.
@@ -1077,7 +1004,7 @@ struct GoEmitCtx {
     /// `interface{}` default an unannotated param falls back to (which both
     /// breaks `x > 2` arithmetic and mismatches the `func(int64) bool`
     /// parameter). Only generic fns are recorded (a non-generic fn's lambda arg
-    /// already types correctly). Pre-scanned across the bundle.
+    /// already types correctly). Pre-scanned across the reached modules.
     fn_signatures: HashMap<String, GoFnSig>,
     /// Names of generic fns whose bound was lowered to a Go built-in constraint
     /// from a sealed-core trait (`[T: Comparable]` → `[T __bockOrdered]`, GAP-C).
@@ -1104,19 +1031,21 @@ struct GoEmitCtx {
     /// before emitting such an argument, consumed (taken) by the lambda emit so
     /// it never leaks to a nested lambda. `None` for an ordinarily-typed lambda.
     expected_lambda_param_types: Option<Vec<String>>,
-    /// True in the **per-module native-package** emission path (S3). When set,
+    /// True in the **per-module native-package** emission path
+    /// ([`GoGenerator::generate_project`], the sole real-build path). When set,
     /// the `Module` arm does **not** inline the runtime preludes (they are
     /// emitted once into the shared `bock_runtime.go` by `generate_project`) —
     /// each module is its own `package main` file and same-package symbols are
-    /// visible without an import. When clear, the legacy single-file bundling is
-    /// used.
+    /// visible without an import. When clear, the module is emitted as a single
+    /// self-contained file with its runtime preludes inlined — the
+    /// [`GoGenerator::generate_module`] path used by unit tests.
     per_module: bool,
 }
 
 /// The set of Go stdlib packages the emitted body needs imported, gathered as
 /// it is generated. Rendered into a single deduped `import (...)` block by
 /// [`GoImportNeeds::render_block`]. Shared by the two emission entry points
-/// ([`GoEmitCtx::into_parts`] for the multi-module bundle and
+/// ([`GoEmitCtx::into_parts`] for the per-module path and
 /// [`GoEmitCtx::finish`] for the single-module path) so the import logic lives
 /// in one place.
 #[derive(Default, Clone, Copy)]
@@ -1237,8 +1166,8 @@ impl GoEmitCtx {
     /// per-file emission state (output buffer + indent, the `needs_*` per-file
     /// import flags, and the runtime-once flags). The analysis registries
     /// (`enum_variants`, `trait_decls`, method/Optional-return metadata, …) are
-    /// carried so a reference in one file to a symbol declared in another lowers
-    /// identically to the single-file bundling path.
+    /// carried so a reference in one file to a symbol declared in another
+    /// resolves correctly across the per-module tree.
     fn fork(&self) -> Self {
         let mut c = self.clone();
         c.buf = String::with_capacity(4096);
@@ -1260,12 +1189,11 @@ impl GoEmitCtx {
 
     /// Pre-seed the effect registries (`effect_ops`, `composite_effects`,
     /// `void_effect_ops`) from every module's top-level `EffectDecl`s. In the
-    /// single-file bundling path these are populated as each module body is
-    /// emitted (dependency order); in the per-module path each module is emitted
-    /// by its own forked context, so a bare op `log(...)` used in `main` whose
-    /// effect `Log` is declared in another module must be recognised without
-    /// having emitted the declaring module first (cross-module effects, §10 +
-    /// DV13). Mirrors the Python / JS / TS / Rust backends' equivalents.
+    /// per-module path each module is emitted by its own forked context, so a
+    /// bare op `log(...)` used in `main` whose effect `Log` is declared in
+    /// another module must be recognised without having emitted the declaring
+    /// module first (cross-module effects, §10). Mirrors the Python / JS / TS /
+    /// Rust backends' equivalents.
     fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
         for (module, _) in modules {
             let NodeKind::Module { items, .. } = &module.kind else {
@@ -1458,7 +1386,7 @@ impl GoEmitCtx {
     /// record, record which field's declared type is each generic param (in
     /// param order). A construction site then looks up the field value's Go
     /// type per param to emit the explicit `[arg, ...]` instantiation Go
-    /// requires. Additive across a bundle (mirrors the other `collect_*`).
+    /// requires. Additive across the reached modules (mirrors the other `collect_*`).
     fn collect_record_param_fields(&mut self, module: &AIRModule) {
         let NodeKind::Module { items, .. } = &module.kind else {
             return;
@@ -1561,14 +1489,14 @@ impl GoEmitCtx {
         Some(info)
     }
 
-    /// True when the real `core.compare.Ordering` enum is bundled into this
-    /// program (its `Less` variant is a registered user enum variant). Under
-    /// DV13 bundling, `use core.compare` concatenates the actual `enum Ordering`
-    /// decl into the entry file; its `Less`/`Equal`/`Greater` references and
-    /// matches then use the user-enum representation (sealed-interface variant
-    /// structs `OrderingLess{}`), not the prelude `__bockOrdering` value runtime
-    /// used when the enum is *not* bundled (e.g. a bare primitive `compare`).
-    fn ordering_enum_bundled(&self) -> bool {
+    /// True when the real `core.compare.Ordering` enum is reachable in this
+    /// program (its `Less` variant is a registered user enum variant). When
+    /// `core.compare` is `use`d, the actual `enum Ordering` decl is emitted; its
+    /// `Less`/`Equal`/`Greater` references and matches then use the user-enum
+    /// representation (sealed-interface variant structs `OrderingLess{}`), not
+    /// the prelude `__bockOrdering` value runtime used when the enum is *not*
+    /// reachable (e.g. a bare primitive `compare`).
+    fn ordering_enum_reachable(&self) -> bool {
         self.enum_variants
             .get("Less")
             .is_some_and(|info| info.enum_name == "Ordering")
@@ -4354,13 +4282,14 @@ impl GoEmitCtx {
                     }
                     return Ok(());
                 }
-                // Cross-module `use` (DV13) → single-file bundling: every
-                // module's items are concatenated into the one entry file (one
-                // `package main`, one merged `import (...)` block built by the
-                // caller) and `ImportDecl`s are dropped. Each runtime prelude is
-                // emitted at most once across the bundle, gated on a ctx flag
-                // (a duplicate `type __bockChannel`/`__bockOption` would not
-                // compile).
+                // Single-module self-contained emit (`generate_module`, used by
+                // unit tests): the module's runtime preludes are inlined into
+                // this one file's buffer and `ImportDecl`s are dropped. Each
+                // prelude is emitted at most once, gated on a ctx flag (a
+                // duplicate `type __bockChannel`/`__bockOption` would not
+                // compile). The per-module *project* path never takes this branch
+                // (it sets `per_module` and emits preludes once into the shared
+                // `bock_runtime.go`).
                 if !self.concurrency_runtime_emitted && go_module_uses_concurrency(items) {
                     self.buf.push_str(CONCURRENCY_RUNTIME_GO);
                     self.buf.push('\n');
@@ -4387,14 +4316,14 @@ impl GoEmitCtx {
                     self.numeric_runtime_emitted = true;
                 }
                 // The bespoke `__bockOrdering` value runtime is emitted only when
-                // the real `core.compare.Ordering` enum is NOT bundled — when it
-                // is, that user enum is authoritative (its variants are the
+                // the real `core.compare.Ordering` enum is NOT reachable — when
+                // it is, that user enum is authoritative (its variants are the
                 // sealed-interface structs `OrderingLess{}`, and `compare`
                 // returns it), so the int runtime would be dead and its `Less`
                 // constants would shadow nothing the program uses.
                 if !self.ordering_runtime_emitted
                     && go_module_uses_ordering(items)
-                    && !self.ordering_enum_bundled()
+                    && !self.ordering_enum_reachable()
                 {
                     self.buf.push_str(ORDERING_RUNTIME_GO);
                     self.buf.push('\n');
@@ -4414,10 +4343,11 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::ImportDecl { .. } => {
-                // Resolved by bundling — the imported module's items are
-                // concatenated into this same `package main` file — so the
-                // import is a no-op (DV13). A real `import "core/compare"` would
-                // not resolve: there is no such package for a `go run main.go`.
+                // Single-module self-contained emit: a Bock `use` is a no-op (no
+                // sibling file to import from). The per-module project path keeps
+                // one `package main` across files, so a same-package symbol is
+                // also visible without a Go `import` — the per-item visit here is
+                // a no-op in both paths.
                 Ok(())
             }
             NodeKind::FnDecl {
@@ -5072,7 +5002,7 @@ impl GoEmitCtx {
         // this was gated on `use_value_receiver` (trait impls only), so an
         // inherent-impl `Self` lowered to the `/* Self */` placeholder and
         // produced an invalid Go signature. `receiver_type` is in scope for both
-        // method kinds. Saved/restored so the bundle-wide default of `/* Self */`
+        // method kinds. Saved/restored so the ctx-wide default of `/* Self */`
         // is unchanged outside impl methods.
         let prev_self_subst = self.go_self_subst.take();
         self.go_self_subst = Some(receiver_type.to_string());
@@ -5768,11 +5698,11 @@ impl GoEmitCtx {
                 // Prelude `Ordering` variant → the bare `__bockOrdering` constant
                 // (`Less`/`Equal`/`Greater`) of the Ordering runtime, which a
                 // value-switch `case Less:` and the `compare` bridge also use —
-                // UNLESS the real `core.compare.Ordering` enum is bundled (DV13),
-                // in which case the reference is a user-enum variant-struct
+                // UNLESS the real `core.compare.Ordering` enum is reachable, in
+                // which case the reference is a user-enum variant-struct
                 // construction (`OrderingLess{}`), handled by the path below.
                 if crate::generator::ordering_variant(&name.name).is_some()
-                    && !self.ordering_enum_bundled()
+                    && !self.ordering_enum_reachable()
                 {
                     self.buf.push_str(&name.name);
                     return Ok(());
@@ -6472,13 +6402,13 @@ impl GoEmitCtx {
                 if go_match_is_result(arms) {
                     return self.emit_result_match_expr(scrutinee, arms);
                 }
-                // A user-enum match (including the bundled `core.compare.Ordering`
+                // A user-enum match (including a reachable `core.compare.Ordering`
                 // enum) dispatches on the dynamic concrete-variant *type*
                 // (`OrderingGreater`), so the IIFE must be a *type-switch* — the
                 // variant names are Go struct types, not values, so a value-switch
                 // (`case OrderingGreater:`) is a compile error. (The prelude
                 // `__bockOrdering` value-enum, used when the real enum is NOT
-                // bundled, stays a value-switch via the path below.)
+                // reachable, stays a value-switch via the path below.)
                 let is_user_enum = self.go_match_is_user_enum(arms);
                 // Type the IIFE so its result is assignable where a
                 // concrete/named type is required — `interface{}` does not
@@ -11682,7 +11612,8 @@ mod tests {
         // entry `module main` uses `mathutil.add_one`; `module mathutil` exports
         // a `public fn add_one`. Per-module emission must produce a Go module:
         // `go.mod`, `main.go` (one `package main`), and the flat `mathutil.go`
-        // (same package — the call site needs no import). Never a bundle.
+        // (same package — the call site needs no import) — separate files, not a
+        // single collapsed file.
         let call = node(
             10,
             NodeKind::Call {

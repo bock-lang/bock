@@ -11,9 +11,9 @@
 // object in JS/TS, a runtime singleton/const in Python/Go) — the same value the
 // `Less`/`Equal`/`Greater` match arms recognise.
 //
-// The `Ordering` enum's decl (`core.compare`) is NOT bundled into the
-// single-file entry (the harness compiles only `main.<ext>`), so the bridge must
-// be self-contained. Match arms are in statement position (`return`), the
+// The `Ordering` enum's decl (`core.compare`) is NOT among the reached modules
+// here, so the bridge must be self-contained (it falls back to the prelude
+// representation). Match arms are in statement position (`return`), the
 // realistic shape for branching on a comparison.
 //
 // Covers all three orderings on `Int` and two on `String` (lexicographic), so

@@ -130,9 +130,9 @@ class _BockErr:
 
 /// The prelude `Ordering` runtime: the three variants of `core.compare.Ordering`
 /// as singleton instances of distinct classes, matchable by `case` and emitted
-/// for construction. Mirrors `OPTIONAL_RUNTIME_PY` — the `core.compare` enum
-/// declaration is not bundled into the single-file entry, so the primitive
-/// bridge (`(x).compare(y)`) and any bare `Less`/`Equal`/`Greater` need this
+/// for construction. Mirrors `OPTIONAL_RUNTIME_PY` — when the `core.compare`
+/// enum declaration is not among the reached modules, the primitive bridge
+/// (`(x).compare(y)`) and any bare `Less`/`Equal`/`Greater` need this
 /// self-contained representation. Each class is empty (no payload), so
 /// `case _BockOrderingLess():` matches the corresponding singleton.
 const ORDERING_RUNTIME_PY: &str = "\
@@ -172,14 +172,13 @@ const RUNTIME_PRELUDE_NAMES: &[&str] = &[
 /// `Enum_Variant` dataclass name), traits, classes, effects, type aliases, and
 /// consts.
 ///
-/// The per-module emission path needs this for **implicit imports**: in the
-/// single-file bundling path every reached module's top-level declarations
-/// shared one namespace, so a prelude trait used as a base class
-/// (`impl Iterable for Bag`, with `Iterable` auto-imported per §18.2) resolved
-/// for free. Emitting one file per module breaks that — `main.py` must `import`
-/// `Iterable` from `core.iter` even though it never appears in an explicit
-/// `use`. This map lets `generate_project` add exactly those imports for names a
-/// module references but neither declares locally nor imports explicitly.
+/// The per-module emission path needs this for **implicit imports**: a prelude
+/// trait used as a base class (`impl Iterable for Bag`, with `Iterable`
+/// auto-imported per §18.2) is referenced without an explicit `use`. Emitting
+/// one file per module means `main.py` must `import` `Iterable` from `core.iter`
+/// even though it never appears in an explicit `use`. This map lets
+/// `generate_project` add exactly those imports for names a module references
+/// but neither declares locally nor imports explicitly.
 ///
 /// Runtime-prelude names (`RUNTIME_PRELUDE_NAMES`) are excluded — they resolve
 /// through `_bock_runtime`, not a `core.*` import. The first declarer wins for a
@@ -461,8 +460,8 @@ impl CodeGenerator for PyGenerator {
     /// Emit a per-module **native import tree** (spec §20.6.1; DQ19 resolved):
     /// each module the entry program reaches through a real `use` is emitted to
     /// its **own** Python file, and cross-module references resolve through real
-    /// Python imports (`from core.option import or_else`) rather than the
-    /// single-file bundling this replaces.
+    /// Python imports (`from core.option import or_else`). This is the sole
+    /// `bock build` output path.
     ///
     /// Output-path mapping is keyed on each module's *declared* path, not its
     /// on-disk source path, so the file layout and the import path agree:
@@ -684,20 +683,22 @@ struct PyEmitCtx {
     /// methods as class members instead of leaving orphan module-level
     /// functions that never get bound to the handler instance.
     impls_by_target: HashMap<String, Vec<AIRNode>>,
-    /// Set once the Optional runtime prelude has been emitted, so a single-file
-    /// **bundle** of several modules (cross-module `use`, DV13) emits it at most
-    /// once (redefining the `_BockSome`/`_BockNone` helpers is wasteful and
-    /// risks shadowing surprises).
+    /// Set once the Optional runtime prelude has been emitted in the
+    /// single-module self-contained path ([`PyGenerator::generate_module`]), so
+    /// a module referencing it more than once still inlines it at most once
+    /// (redefining the `_BockSome`/`_BockNone` helpers is wasteful and risks
+    /// shadowing surprises). The per-module project path imports the runtime
+    /// from the shared `RUNTIME_MODULE_PY` module instead.
     optional_runtime_emitted: bool,
-    /// Set once the `Result` runtime prelude has been emitted; deduped across a
-    /// bundle exactly as [`Self::optional_runtime_emitted`] (redefining the
-    /// `_BockOk`/`_BockErr` classes is wasteful).
+    /// Set once the `Result` runtime prelude has been emitted; deduped exactly as
+    /// [`Self::optional_runtime_emitted`] (redefining the `_BockOk`/`_BockErr`
+    /// classes is wasteful).
     result_runtime_emitted: bool,
     /// Set once the [`ORDERING_RUNTIME_PY`] prelude has been emitted; deduped
-    /// across a bundle exactly as [`Self::optional_runtime_emitted`].
+    /// exactly as [`Self::optional_runtime_emitted`].
     ordering_runtime_emitted: bool,
-    /// Set once the concurrency runtime prelude has been emitted; deduped across
-    /// a bundle exactly as [`Self::optional_runtime_emitted`].
+    /// Set once the concurrency runtime prelude has been emitted; deduped exactly
+    /// as [`Self::optional_runtime_emitted`].
     concurrency_runtime_emitted: bool,
     /// Set when an enum decl emits a `Name = Union[...]` alias, so the preamble
     /// imports `Union` from `typing`.
@@ -716,26 +717,29 @@ struct PyEmitCtx {
     /// Set when a generic decl emits `T = TypeVar("T")`, so the preamble
     /// imports `TypeVar` (and `Generic`, used in the class base list).
     needs_typing_typevar: Cell<bool>,
-    /// Names already emitted as `T = TypeVar("T")`, deduped across the bundle so
+    /// Names already emitted as `T = TypeVar("T")`, deduped within the file so
     /// a type parameter shared by several decls is declared exactly once.
     emitted_typevars: std::collections::HashSet<String>,
     /// User-enum-variant registry (DV14). Routes a construction/pattern to the
     /// `{enum}_{variant}` dataclass and recognises a unit variant (needs `()`
     /// instantiation). Built-in Optional/Result pre-seeds filtered out where
     /// the bespoke `_BockSome`/`_BockNone` lowering applies. Pre-scanned across
-    /// the bundle.
+    /// the reached modules.
     enum_variants: crate::generator::EnumVariantRegistry,
-    /// The bundle's user-declared traits (keyed by name). Distinguishes a
+    /// The reached modules' user-declared traits (keyed by name). Distinguishes a
     /// `T: Equatable` bound that is a real user trait from the compiler-provided
     /// sealed-core conformance, which must drop the `bound=` on the `TypeVar` and
     /// lower `.eq`/`.compare` to native operators (GAP-C). See
     /// [`crate::generator::is_unimplemented_sealed_core_trait`].
     trait_decls: crate::generator::TraitDeclRegistry,
-    /// True in the **per-module native-import** emission path (Python S1). When
-    /// set, the `Module` arm imports each needed runtime prelude from the shared
+    /// True in the **per-module native-import** emission path
+    /// ([`PyGenerator::generate_project`], the sole real-build path). When set,
+    /// the `Module` arm imports each needed runtime prelude from the shared
     /// `RUNTIME_MODULE_PY` module instead of inlining its definitions, and the
     /// `ImportDecl` arm emits a real `from <module> import …` rather than a
-    /// no-op. When clear, the legacy single-file bundling behaviour is used.
+    /// no-op. When clear, the module is emitted as a single self-contained file
+    /// with its runtime preludes inlined — the [`PyGenerator::generate_module`]
+    /// path used by unit tests.
     per_module: bool,
     /// In the per-module path, records which shared-runtime names this module
     /// must import from `RUNTIME_MODULE_PY`: Optional, Result, Ordering,
@@ -877,14 +881,12 @@ impl PyEmitCtx {
     }
 
     /// Pre-seed the effect registries (`effect_ops`, `composite_effects`) from
-    /// every module's top-level `EffectDecl`s. In the single-file bundling path
-    /// these are populated as each module body is emitted (dependency order, so
-    /// the effect's declaration precedes its use). In the per-module path each
+    /// every module's top-level `EffectDecl`s. In the per-module path each
     /// module is emitted by its own context, so a bare op `log(...)` used in
     /// `main` whose effect `Log` is declared in another module would not be
     /// recognised as an effect op (and not rewritten to `handler.log(...)`)
     /// without pre-seeding from the whole reachable set. Mirrors how
-    /// `enum_variants` / `trait_decls` are collected across the bundle.
+    /// `enum_variants` / `trait_decls` are collected across the reached modules.
     fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
         for (module, _) in modules {
             let NodeKind::Module { items, .. } = &module.kind else {
@@ -1852,13 +1854,11 @@ impl PyEmitCtx {
         match &node.kind {
             NodeKind::Module { items, imports, .. } => {
                 if self.per_module {
-                    // Per-module native-import path (Python S1): each module is
-                    // emitted to its own file and the shared runtime preludes
-                    // live in `_bock_runtime.py`. Record which prelude names
-                    // this module references; `finish` emits the single
-                    // `from _bock_runtime import *` line. The structural scans
-                    // are the same ones the bundling path uses to decide whether
-                    // to inline a prelude.
+                    // Per-module native-import path (the real build): each module
+                    // is emitted to its own file and the shared runtime preludes
+                    // live in `_bock_runtime.py`. Record which prelude names this
+                    // module references; `finish` emits the single
+                    // `from _bock_runtime import *` line.
                     if py_module_uses_optional(items) {
                         self.needs_runtime_optional = true;
                     }
@@ -1872,11 +1872,10 @@ impl PyEmitCtx {
                         self.needs_runtime_concurrency = true;
                     }
                 } else {
-                    // Cross-module `use` (DV13) → single-file bundling: every
-                    // module's top-level declarations are concatenated into the
-                    // one entry file and `ImportDecl`s are dropped. Each runtime
-                    // prelude is emitted at most once across the bundle, gated on
-                    // a ctx flag.
+                    // Single-module self-contained emit (`generate_module`, used
+                    // by unit tests): the module's runtime preludes are inlined
+                    // into this one file and `ImportDecl`s are dropped. Each
+                    // prelude is inlined at most once, gated on a ctx flag.
                     if !self.optional_runtime_emitted && py_module_uses_optional(items) {
                         self.buf.push_str(OPTIONAL_RUNTIME_PY);
                         self.buf.push('\n');
@@ -1901,8 +1900,7 @@ impl PyEmitCtx {
                 // Per-module path: emit the module's cross-module imports as
                 // real Python `from <module> import …` statements at the top of
                 // the body (the runtime-prelude import is emitted into the
-                // preamble by `finish`). Bundling drops these (the imported
-                // declarations are concatenated into the same file instead).
+                // preamble by `finish`). The single-module path drops these.
                 if self.per_module {
                     for import in imports {
                         self.emit_node(import)?;
@@ -1975,11 +1973,10 @@ impl PyEmitCtx {
             }
             NodeKind::ImportDecl { path, items } => {
                 if !self.per_module {
-                    // Resolved by bundling — the imported module's declarations
-                    // are concatenated into this same file — so the import is a
-                    // no-op (DV13). A real `from core.compare import ...` would
-                    // fail at run time: that module is not on `sys.path` for a
-                    // lone `main.py`, which is exactly the defect bundling fixes.
+                    // Single-module self-contained emit: there is no sibling file
+                    // to import from, so the import is a no-op. (Only
+                    // `generate_module` — the unit-test path — takes this branch;
+                    // the per-module project path emits real imports below.)
                     return Ok(());
                 }
                 // Per-module native-import path (Python S1): emit a real Python
@@ -2432,7 +2429,7 @@ impl PyEmitCtx {
     // ── Generic type parameters ─────────────────────────────────────────────
 
     /// Emit `T = TypeVar("T")` for each generic parameter not already declared,
-    /// deduped across the whole bundle via [`Self::emitted_typevars`]. A param
+    /// deduped within the file via [`Self::emitted_typevars`]. A param
     /// with a single bound (`T: Comparable`) becomes
     /// `T = TypeVar("T", bound=Comparable)` so static checkers see the
     /// constraint; multiple bounds collapse to the first (Python `TypeVar`
@@ -2986,9 +2983,9 @@ impl PyEmitCtx {
                     self.buf.push_str("_bock_none");
                 } else if let Some(variant) = crate::generator::ordering_variant(&name.name) {
                     // Prelude `Ordering` variant → the Ordering-runtime singleton
-                    // (`_bock_less` / `_bock_equal` / `_bock_greater`). The
-                    // `core.compare` enum decl is not bundled single-file, so the
-                    // runtime stands in (mirrors `_bock_none`).
+                    // (`_bock_less` / `_bock_equal` / `_bock_greater`). When the
+                    // `core.compare` enum decl is not among the reached modules,
+                    // the runtime stands in (mirrors `_bock_none`).
                     self.buf.push_str(ordering_singleton_py(variant));
                 } else if let Some(enum_name) = self
                     .user_variant_for_name(&name.name)
@@ -4596,7 +4593,7 @@ mod tests {
         // entry `module main` uses `mathutil.add_one`; `module mathutil` exports
         // a `public fn add_one`. Per-module emission must produce TWO files —
         // `main.py` (with a real `from mathutil import add_one`) and a separate
-        // `mathutil.py` — never a single bundled file.
+        // `mathutil.py` — not a single collapsed file.
         let call = node(
             10,
             NodeKind::Call {
@@ -7269,7 +7266,7 @@ mod tests {
     #[test]
     fn shared_type_param_typevar_is_deduped() {
         // Two generic records sharing the parameter name `T` must declare
-        // `T = TypeVar("T")` exactly once across the bundle.
+        // `T = TypeVar("T")` exactly once in the file.
         let box_a = node(
             1,
             NodeKind::RecordDecl {

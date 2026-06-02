@@ -326,77 +326,41 @@ pub trait CodeGenerator {
 
     /// Generates target code from multiple AIR modules with their source paths.
     ///
-    /// Per spec §20.6.1, each source file produces a corresponding target file
-    /// at the source-mirrored path. The default implementation invokes
-    /// `generate_module` per module, then rewrites each emitted file's path
-    /// (and its source map's `generated_file`) using
-    /// [`derive_output_path`]. The entry-point invocation, if any, is
-    /// appended to the file generated from the module that declares `main`.
-    ///
-    /// Generators with cross-module concerns (e.g., Go's `package` declaration
-    /// or async-function pre-scan) should override this method.
+    /// Per spec §20.6.1 (DQ19 resolved), each reached module is emitted to its
+    /// own target file and cross-module references are wired with the target's
+    /// **native** import mechanism (ESM `import`, Python package imports, Rust
+    /// `mod`/`use`, Go package files). Every v1 backend (JS, TS, Python, Rust,
+    /// Go) overrides this with its per-module native-import emitter, so this is
+    /// a **required** method — there is no default. (The single-module
+    /// [`Self::generate_module`] is the self-contained, runtime-inlining emit
+    /// used by per-backend unit tests, not a multi-module fallback.)
     fn generate_project(
         &self,
         modules: &[(&AIRModule, &Path)],
-    ) -> Result<GeneratedCode, CodegenError> {
-        let main_is_async = modules.iter().any(|(m, _)| module_main_fn_is_async(m));
-        let invocation = self.entry_invocation(main_is_async);
-
-        let mut all_files: Vec<OutputFile> = Vec::with_capacity(modules.len());
-
-        for (module, source_path) in modules {
-            let code = self.generate_module(module)?;
-            let derived = derive_output_path(source_path, self.target());
-            let derived_name = derived
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let needs_invocation = invocation.is_some() && module_declares_main_fn(module);
-
-            for mut file in code.files {
-                file.path = derived.clone();
-                if let Some(sm) = file.source_map.as_mut() {
-                    sm.generated_file = derived_name.clone();
-                }
-                if needs_invocation {
-                    if let Some(invoc) = invocation.as_ref() {
-                        if !file.content.is_empty() && !file.content.ends_with('\n') {
-                            file.content.push('\n');
-                        }
-                        file.content.push_str(invoc);
-                    }
-                }
-                all_files.push(file);
-            }
-        }
-
-        Ok(GeneratedCode { files: all_files })
-    }
+    ) -> Result<GeneratedCode, CodegenError>;
 }
 
 /// Restrict `modules` to those **reachable** from the entry module via real
 /// `use` edges, returned in a *deterministic* dependency-before-dependent order
 /// (a post-order DFS of the `use` graph with `use` targets visited in declared
 /// module-path order). The result is independent of the input slice's order, so
-/// the emitted single-file bundle is byte-stable across the per-process topo-sort
+/// the emitted per-module tree is byte-stable across the per-process topo-sort
 /// shuffling described below.
 ///
 /// `bock build` prepends the entire embedded `core.*` stdlib and makes every
 /// user module implicitly depend on all of it (the §18.2 prelude, so core
 /// symbols resolve without an explicit `use`). That implicit dependency is
-/// correct for *name resolution* but wrong for *bundling*: concatenating a core
+/// correct for *name resolution* but wrong for *output*: emitting a core
 /// module a program never references both bloats the output and — until the
 /// stdlib is codegen-clean on every target — drags its latent codegen defects
-/// into the entry file. Bundling must therefore include only modules the entry
-/// program actually reaches through a real `use`.
+/// into the build. The emitted tree must therefore include only modules the
+/// entry program actually reaches through a real `use`.
 ///
 /// Reachability is the transitive closure of each module's `ImportDecl` paths
 /// (the explicit `use`s) matched against other modules' declared `module`
 /// path — never the synthetic prelude edges, which are not represented as
 /// `ImportDecl`s in the AIR. A program with no `use` (e.g. `hello_world`) thus
-/// bundles to its entry module alone, exactly matching the pre-bundling
-/// single-file run (no regression).
+/// emits its entry module alone.
 ///
 /// The entry module is the one declaring `main`; absent that (a library), the
 /// last module in dependency order. The returned vec borrows from `modules`.
@@ -459,19 +423,19 @@ pub fn reachable_modules<'a>(
 
     // A *deterministic* post-order DFS of the explicit-`use` graph from the
     // entry module: this both prunes to reachable modules and orders them
-    // dependencies-before-dependents (the order bundling concatenates in), with
-    // a canonical, input-order-independent result.
+    // dependencies-before-dependents, with a canonical, input-order-independent
+    // result.
     //
     // Determinism matters because `bock build` runs in a fresh process per
     // invocation, and the upstream module list (`air_modules`) is produced by a
     // topological sort whose internal `HashMap`/`HashSet` iteration is seeded
     // randomly per process — so the *same* program's `modules` slice can arrive
     // in different (all valid) topological orders on different runs. Relying on
-    // that input order made the emitted single-file bundle's module order vary
-    // run-to-run, which surfaced as a rare, random `bock build` failure once
-    // several independent embedded `core.*` modules were reachable (a shifted
-    // concatenation occasionally collides). Visiting each module's `use` targets
-    // in a fixed order (declared module path, then index) pins the output.
+    // that input order made the emitted module order (entry selection + file
+    // emission order) vary run-to-run, which surfaced as a rare, random `bock
+    // build` failure once several independent embedded `core.*` modules were
+    // reachable. Visiting each module's `use` targets in a fixed order (declared
+    // module path, then index) pins the output.
     let mut visited = vec![false; modules.len()];
     let mut order: Vec<usize> = Vec::new();
     // Iterative post-order DFS (recursion-free to avoid deep-graph stack use):
@@ -516,53 +480,6 @@ pub fn reachable_modules<'a>(
     }
 
     order.into_iter().map(|i| modules[i]).collect()
-}
-
-/// Choose the output path for a **single-file bundle** of `modules`.
-///
-/// Cross-module programs are emitted as one entry file (see §20.6.1 OPEN
-/// divergence: the per-module tree is collapsed into a single runnable file so
-/// the single-file run model — `node main.js`, `python3 main.py`, … — can run
-/// an importing program). The bundle is named after the module that declares
-/// `main` (the entry point); if none does (e.g. a library), the last module in
-/// dependency order names the file. Modules arrive dependency-ordered, so the
-/// last one is the top of the dependency graph — the natural entry.
-///
-/// Returns the source-mirrored output path (e.g. `main.<ext>`) for the chosen
-/// module, or `None` when `modules` is empty.
-#[must_use]
-pub fn bundle_output_path(
-    modules: &[(&AIRModule, &Path)],
-    target: &TargetProfile,
-) -> Option<PathBuf> {
-    let entry = modules
-        .iter()
-        .find(|(m, _)| module_declares_main_fn(m))
-        .or_else(|| modules.last())?;
-    Some(derive_output_path(entry.1, target))
-}
-
-/// Append the entry-point invocation (e.g. `main();`) to a bundled file's
-/// content exactly once, when any bundled module declares a top-level `main`.
-///
-/// Backends with a synthetic entry call (JS/TS/Python) supply `invocation` via
-/// [`CodeGenerator::entry_invocation`]; native-entry targets (Rust `fn main`,
-/// Go `func main`) pass `None` and this is a no-op. Bundling concatenates every
-/// module body into one file, so the invocation must be appended once at the
-/// end — never per module.
-pub fn append_entry_invocation(
-    content: &mut String,
-    modules: &[(&AIRModule, &Path)],
-    invocation: Option<&String>,
-) {
-    let Some(invoc) = invocation else { return };
-    if !modules.iter().any(|(m, _)| module_declares_main_fn(m)) {
-        return;
-    }
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push_str(invoc);
 }
 
 /// Returns true if the given AIR module declares a top-level function named
@@ -733,11 +650,10 @@ impl EsmSymbol {
 /// variant's emitted `Enum_Variant` factory/const name), traits, classes,
 /// effects, type aliases, and consts.
 ///
-/// The per-module ESM emission path needs this for **implicit imports**: in the
-/// single-file bundling path every reached module's top-level declarations
-/// shared one scope, so a prelude trait used as a base in an `impl`
-/// (`impl Iterable for Bag`, with `Iterable` auto-imported per §18.2) resolved
-/// for free. Emitting one file per module breaks that — the consuming file must
+/// The per-module ESM emission path needs this for **implicit imports**: a
+/// prelude trait used as a base in an `impl` (`impl Iterable for Bag`, with
+/// `Iterable` auto-imported per §18.2) is referenced without an explicit `use`.
+/// Emitting one file per module means the consuming file must
 /// `import` `Iterable` from `core/iter.js` even though it never appears in an
 /// explicit `use`. This map lets the backend add exactly those imports for
 /// names a module references but neither declares locally nor imports
@@ -933,9 +849,9 @@ pub fn exportable_value_names(module: &AIRModule) -> Vec<EsmExport> {
 /// In the TS backend every public top-level declaration exports inline
 /// (`export class`, `export type`, `export function`, `export const`) **except**
 /// an enum's per-variant interface / const / factory, which the variant emitter
-/// writes without an `export`. The single-file bundle never needed those
-/// exported (same scope); the per-module tree does, so this enumerates exactly
-/// the variant value names for the trailing re-export. Variants of a runtime-
+/// writes without an `export`. The per-module tree needs those exported so a
+/// consuming file can import them, so this enumerates exactly the variant value
+/// names for the trailing re-export. Variants of a runtime-
 /// prelude enum (`Optional` / `Result` / `Ordering`) are excluded — they lower
 /// inline.
 #[must_use]
@@ -1085,16 +1001,13 @@ pub fn implicit_esm_imports_for(
 /// Collect the names of every **record** declared across `modules` (the names
 /// the JS/TS backends emit as classes and construct with `new Name(...)`).
 ///
-/// In the single-file bundling path each backend's `record_names` set is
-/// populated as records are emitted, and because every reachable module is
-/// concatenated into the one file, a record construction in one module sees a
-/// record declared in another. The per-module path emits each module in its own
-/// context, so a cross-module record construction (`handling (Log with
-/// ConsoleLog {})` where `ConsoleLog` is `use`d from another module) would not
-/// find the record in the local `record_names` set and would mis-lower to a
-/// bare object literal `{}` instead of `new ConsoleLog()` (dropping its
-/// prototype methods). Pre-seeding `record_names` from the whole reachable set
-/// restores the bundling path's cross-module visibility. Mirrors
+/// The per-module path emits each module in its own context, so a cross-module
+/// record construction (`handling (Log with ConsoleLog {})` where `ConsoleLog`
+/// is `use`d from another module) would not find the record in the local
+/// `record_names` set and would mis-lower to a bare object literal `{}` instead
+/// of `new ConsoleLog()` (dropping its prototype methods). Pre-seeding
+/// `record_names` from the whole reachable set gives every per-module emit
+/// context cross-module record visibility. Mirrors
 /// [`collect_enum_variants`] / [`collect_trait_decls`].
 #[must_use]
 pub fn collect_record_names(modules: &[(&AIRModule, &Path)]) -> std::collections::HashSet<String> {
@@ -1180,12 +1093,10 @@ pub fn esm_relative_specifier(from_path: &str, to_path: &str, ext: &str) -> Stri
 /// `Iterable` → `core.iter`). Covers functions, records, enums (the **type**
 /// name), traits, classes, effects, type aliases, and consts.
 ///
-/// The per-module native-module path needs this for **implicit imports**: in
-/// the single-file bundling path every reached module's top-level declarations
-/// shared one scope (Rust's flattened crate root / Go's one `package main`),
-/// so a §18.2-prelude trait used as an `impl` base (`impl Iterable for Bag`,
-/// with `Iterable` auto-imported per §18.2) resolved for free. Emitting one
-/// file per module breaks that for Rust — the consuming `main.rs` must
+/// The per-module native-module path needs this for **implicit imports**: a
+/// §18.2-prelude trait used as an `impl` base (`impl Iterable for Bag`, with
+/// `Iterable` auto-imported per §18.2) is referenced without an explicit `use`.
+/// Emitting one file per module means the consuming `main.rs` must
 /// `use crate::core::iter::Iterable;` even though `Iterable` never appears in
 /// an explicit `use`. (Go keeps one package across files, so a same-package
 /// symbol is visible without an import; Go uses this map only to know which
@@ -1658,12 +1569,12 @@ pub fn desugared_list_method<'a>(
 /// order the comparison ladder produces them.
 ///
 /// `Ordering` is the return type of `Comparable.compare`, so the primitive
-/// bridge constructs one of these per comparison. Under the single-file run
-/// model the `core.compare` enum declaration is not bundled into the entry
-/// file, so each backend lowers `Ordering`/`Less`/`Equal`/`Greater` to a
-/// self-contained representation (Rust's native `std::cmp::Ordering`, a tagged
-/// object in JS/TS, a runtime singleton in Python/Go) — the same treatment the
-/// built-in `Optional`/`Result` receive.
+/// bridge constructs one of these per comparison. When the `core.compare` enum
+/// declaration is not among the reached modules, each backend lowers
+/// `Ordering`/`Less`/`Equal`/`Greater` to a self-contained representation
+/// (Rust's native `std::cmp::Ordering`, a tagged object in JS/TS, a runtime
+/// singleton in Python/Go) — the same treatment the built-in `Optional`/
+/// `Result` receive.
 pub const ORDERING_VARIANTS: &[&str] = &["Less", "Equal", "Greater"];
 
 /// Returns the variant name if `name` is one of the prelude `Ordering` variants
@@ -2341,8 +2252,8 @@ pub fn escape_target_keyword(name: &str, target: KeywordTarget) -> String {
 // AIR carries no back-pointer from a variant name to its enum at a construction
 // or pattern site (`ConstructorPat`/`RecordPat`/`RecordConstruct` paths hold
 // only the variant name, never the enum). This registry closes that gap: a
-// single pre-scan over the bundle maps each variant name to its enum and
-// payload shape, which each backend consults to qualify constructions
+// single pre-scan over every reached module maps each variant name to its enum
+// and payload shape, which each backend consults to qualify constructions
 // (`Color_Red`, `Shape::Circle`, `ShapeCircle{..}`) and to dispatch matches.
 //
 // The built-in `Optional`/`Result` constructors (`Some`/`None`/`Ok`/`Err`) are
@@ -2380,14 +2291,14 @@ pub struct EnumVariantInfo {
 /// name resolves every construction and pattern site.
 pub type EnumVariantRegistry = HashMap<String, EnumVariantInfo>;
 
-/// Pre-scan every module in the bundle and build the [`EnumVariantRegistry`].
+/// Pre-scan every reached module and build the [`EnumVariantRegistry`].
 ///
 /// Walks each module's top-level `EnumDecl`s (the only place enum variants are
 /// declared) and records every variant. A *pre-scan* — rather than recording
 /// variants as their decls are emitted — is required because a use site may
 /// precede its enum's declaration in source order (forward reference), and
-/// because bundling concatenates modules so a `use`d enum's decl can live in a
-/// different module than its construction site. This mirrors the Go backend's
+/// because a `use`d enum's decl can live in a different module than its
+/// construction site (cross-module `use`). This mirrors the Go backend's
 /// existing `collect_methods` / `collect_optional_returns` pre-scans.
 ///
 /// The built-in `Optional`/`Result` constructors are pre-seeded (B1) so the
@@ -2486,7 +2397,8 @@ pub fn registered_variant<'a>(
 }
 
 /// Maps a generic type's declared name to its generic parameters. Built by a
-/// pre-scan of every `RecordDecl`/`EnumDecl`/`ClassDecl` in the bundle.
+/// pre-scan of every `RecordDecl`/`EnumDecl`/`ClassDecl` across the reached
+/// modules.
 ///
 /// Backends with native generic-receiver / `impl` syntax (Rust `impl<T> T<T>`,
 /// Go `func (self *T[T])`, TS declaration-merged `interface T<T>`) need a
@@ -2495,12 +2407,12 @@ pub fn registered_variant<'a>(
 /// declared on the *record*, not the impl. This registry recovers those params
 /// at the impl site. A *pre-scan* (rather than recording params as decls are
 /// emitted) is required because an `impl` may precede its type's declaration in
-/// source order, and because bundling concatenates modules so a `use`d type's
-/// decl can live in a different module than its `impl`. Mirrors
+/// source order, and because a `use`d type's decl can live in a different
+/// module than its `impl` (cross-module `use`). Mirrors
 /// [`collect_enum_variants`].
 pub type GenericDeclRegistry = HashMap<String, Vec<bock_ast::GenericParam>>;
 
-/// Pre-scan every module in the bundle and build the [`GenericDeclRegistry`].
+/// Pre-scan every reached module and build the [`GenericDeclRegistry`].
 /// Records the generic parameters declared on each top-level `RecordDecl`,
 /// `EnumDecl`, and `ClassDecl`. Non-generic decls are recorded with an empty
 /// parameter list (their presence still lets a backend distinguish a known
@@ -2701,7 +2613,7 @@ pub fn trait_uses_self_operand(trait_info: &TraitDeclInfo) -> bool {
     })
 }
 
-/// Pre-scan every module in the bundle and build the [`TraitDeclRegistry`].
+/// Pre-scan every reached module and build the [`TraitDeclRegistry`].
 ///
 /// Walks each module's top-level `TraitDecl`s and records the trait's generic
 /// params and the full method list. Backends use this at each `impl Trait for
@@ -2710,9 +2622,9 @@ pub fn trait_uses_self_operand(trait_info: &TraitDeclInfo) -> bool {
 /// alone carries only signatures, so a type that relies on an inherited default
 /// would otherwise have no such method at runtime (js/ts/go). A *pre-scan*
 /// (rather than recording traits as their decls are emitted) is required because
-/// an `impl` may precede its trait's declaration in source order, and because
-/// bundling concatenates modules so a `use`d trait's decl can live in a
-/// different module than its `impl`. Mirrors [`collect_generic_decls`].
+/// an `impl` may precede its trait's declaration in source order, and because a
+/// `use`d trait's decl can live in a different module than its `impl`
+/// (cross-module `use`). Mirrors [`collect_generic_decls`].
 #[must_use]
 pub fn collect_trait_decls(modules: &[(&AIRModule, &Path)]) -> TraitDeclRegistry {
     let mut registry = TraitDeclRegistry::new();
@@ -3088,8 +3000,7 @@ mod tests {
     fn reachable_modules_prunes_unused_prelude_modules() {
         // Mirrors a `bock build`: the embedded `core.*` stdlib is prepended in
         // dependency order, then the user `main`. `main` uses NOTHING, so only
-        // `main` should be bundled — never the prelude-only stdlib (no
-        // regression vs the pre-bundling single-file run).
+        // `main` should be emitted — never the prelude-only stdlib.
         let core_a = module_named("core.compare", &[], vec![]);
         let core_b = module_named("core.convert", &["core.compare"], vec![]);
         let main_m = module_named("main", &[], vec![fn_decl("main")]);
@@ -3103,8 +3014,8 @@ mod tests {
     #[test]
     fn reachable_modules_includes_transitive_use_targets() {
         // `main` uses `util`, `util` uses `helper`; an unrelated `unused`
-        // module is excluded. Bundling must include the transitive `use`
-        // closure (main, util, helper) but drop `unused`.
+        // module is excluded. The emitted tree must include the transitive
+        // `use` closure (main, util, helper) but drop `unused`.
         let helper = module_named("helper", &[], vec![fn_decl("h")]);
         let util = module_named("util", &["helper"], vec![fn_decl("u")]);
         let unused = module_named("unused", &[], vec![fn_decl("x")]);
@@ -3137,8 +3048,8 @@ mod tests {
 
     #[test]
     fn reachable_modules_order_is_input_order_independent() {
-        // The bundle order must be deterministic regardless of the order the
-        // `modules` slice arrives in — the upstream topological sort iterates a
+        // The emitted module order must be deterministic regardless of the order
+        // the `modules` slice arrives in — the upstream topological sort iterates a
         // `HashMap`/`HashSet` with a per-process random seed, so independent
         // modules can be presented in any (valid) order. `main` uses three
         // mutually-independent cores plus a transitive chain; whatever the input
@@ -3181,8 +3092,8 @@ mod tests {
         let o1 = names(&reachable_modules(&perm1));
         let o2 = names(&reachable_modules(&perm2));
         let o3 = names(&reachable_modules(&perm3));
-        assert_eq!(o1, o2, "bundle order must not depend on input order");
-        assert_eq!(o1, o3, "bundle order must not depend on input order");
+        assert_eq!(o1, o2, "module order must not depend on input order");
+        assert_eq!(o1, o3, "module order must not depend on input order");
         // All five reachable, dependency-before-dependent, ties canonical.
         assert_eq!(o1.len(), 5, "got: {o1:?}");
         let pos = |name: &str| o1.iter().position(|x| x == name).unwrap();
@@ -4163,8 +4074,8 @@ mod tests {
 
     #[test]
     fn collect_enum_variants_pre_seeds_optional_and_result() {
-        // An empty bundle still carries the built-in Optional/Result entries so
-        // one mechanism describes both user and built-in ADTs (B1).
+        // An empty module set still carries the built-in Optional/Result entries
+        // so one mechanism describes both user and built-in ADTs (B1).
         let reg = collect_enum_variants(&[]);
         assert_eq!(
             reg.get("Some").map(|i| i.enum_name.as_str()),
@@ -4184,7 +4095,7 @@ mod tests {
 
     #[test]
     fn collect_enum_variants_spans_multiple_modules() {
-        // A `use`d enum in another bundled module is still registered (the
+        // A `use`d enum in another reached module is still registered (the
         // pre-scan walks every module, so a forward / cross-module reference
         // resolves).
         let color = enum_decl("Color", vec![enum_variant("Red", EnumVariantPayload::Unit)]);

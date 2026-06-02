@@ -11,7 +11,7 @@
 // Python slice): `record Box[T]` emitted `class Box:` with a field annotation
 // `value: T` and no `T = TypeVar("T")` / `Generic[T]`, so the module raised
 // `NameError: name 'T' is not defined` at class-evaluation time. The fix emits
-// `T = TypeVar("T")` once per type parameter (deduped across the bundle), adds
+// `T = TypeVar("T")` once per type parameter (deduped within the file), adds
 // `Generic[T, …]` to the class bases, and imports `TypeVar`/`Generic`.
 //
 // `go` is now included (codegen-completeness P1-b2 / DV12): Go's generic

@@ -130,8 +130,7 @@ impl CodeGenerator for RsGenerator {
     /// resolved): each module the entry program reaches through a real `use` is
     /// emitted to its **own** `.rs` file under `src/`, wired with Rust's native
     /// module system (`mod <m>;` declarations + `use crate::<m>::<x>;` for
-    /// cross-module references) rather than the flatten-to-crate-root bundling
-    /// this replaces.
+    /// cross-module references). This is the sole `bock build` output path.
     ///
     /// ## Layout (cargo-idiomatic `src/`-rooted crate)
     ///
@@ -503,23 +502,24 @@ struct RsEmitCtx {
     fn_effects: HashMap<String, Vec<String>>,
     /// Maps composite effect name → component effect names.
     composite_effects: HashMap<String, Vec<String>>,
-    /// Set once the concurrency runtime prelude has been emitted, so a
-    /// single-file **bundle** of several modules (cross-module `use`, DV13)
-    /// emits it at most once (a duplicate `struct __BockChannel` is a Rust
-    /// redefinition error).
+    /// Set once the concurrency runtime prelude has been emitted in the
+    /// single-module self-contained path ([`RustGenerator::generate_module`]), so
+    /// a module referencing it more than once still inlines it at most once (a
+    /// duplicate `struct __BockChannel` is a Rust redefinition error). The
+    /// per-module project path emits the runtime once into a shared module.
     concurrency_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Maps a variant name to its enum so a
     /// construction (`Circle { .. }`, `Rect(..)`, `Empty`) and a match pattern
     /// can be qualified `Enum::Variant`, which Rust requires (an unqualified
     /// variant does not resolve at the crate root). Pre-scanned across the
-    /// bundle; consulted *after* the bespoke Optional/Result paths so those are
-    /// never regressed.
+    /// reached modules; consulted *after* the bespoke Optional/Result paths so
+    /// those are never regressed.
     enum_variants: crate::generator::EnumVariantRegistry,
     /// Generic-type declaration registry: a record/enum/class name → its
     /// declared generic params. An `impl Box { ... }` block carries no params of
     /// its own (the `T` is declared on `record Box[T]`); Rust requires the impl
     /// to introduce and apply them (`impl<T> Box<T> { ... }`). This recovers them
-    /// at the impl site. Pre-scanned across the bundle (mirrors
+    /// at the impl site. Pre-scanned across the reached modules (mirrors
     /// [`Self::enum_variants`]).
     generic_decls: crate::generator::GenericDeclRegistry,
     /// Records whose `impl` returns a `self` field by value and so need
@@ -576,18 +576,22 @@ struct RsEmitCtx {
     /// generic such binding lives in a fn already carrying the matching `T:
     /// Clone` bound. Seeded per-block (saved/restored) so it never leaks.
     reused_let_bindings: std::collections::HashSet<String>,
-    /// The bundle's user-declared traits (keyed by name). Used to distinguish a
+    /// The reached modules' user-declared traits (keyed by name). Used to
+    /// distinguish a
     /// `T: Equatable` bound that is a real user trait (it has an `impl`, so the
     /// bound and the `.eq` call dispatch normally) from the compiler-provided
     /// sealed-core conformance, which must be lowered to the Rust std trait /
     /// native operator (GAP-C). See [`crate::generator::is_unimplemented_sealed_core_trait`].
     trait_decls: crate::generator::TraitDeclRegistry,
-    /// True in the **per-module native-module** emission path (S3). When set,
+    /// True in the **per-module native-module** emission path
+    /// ([`RustGenerator::generate_project`], the sole real-build path). When set,
     /// the `Module` arm emits real `use crate::<m>::<x>;` for cross-module
     /// references (explicit `use`s and the implicit prelude imports) at the top
     /// of the file instead of dropping the `ImportDecl`s, and the concurrency
     /// runtime is imported from the shared `bock_runtime` module rather than
-    /// inlined. When clear, the legacy flatten-to-crate-root bundling is used.
+    /// inlined. When clear, the module is emitted as a single self-contained file
+    /// with its runtime preludes inlined — the [`RustGenerator::generate_module`]
+    /// path used by unit tests.
     per_module: bool,
     /// Implicit cross-module imports for the per-module path, as
     /// `(module_path, symbol_name)` pairs — public names this module references
@@ -1037,14 +1041,14 @@ impl RsEmitCtx {
         Some(info.enum_name.clone())
     }
 
-    /// True when the real `core.compare.Ordering` enum is bundled into this
-    /// program (its `Less` variant is a registered user enum variant). Under
-    /// DV13 cross-module bundling, `use core.compare` concatenates the actual
-    /// `enum Ordering` decl into the entry file; the `Less`/`Equal`/`Greater`
-    /// references and match patterns must then use that user enum
-    /// (`Ordering::Less`), not the `std::cmp::Ordering` bridge the prelude form
-    /// uses when the enum is *not* bundled (e.g. a bare primitive `compare`).
-    fn ordering_enum_bundled(&self) -> bool {
+    /// True when the real `core.compare.Ordering` enum is reachable in this
+    /// program (its `Less` variant is a registered user enum variant). When
+    /// `core.compare` is `use`d, the actual `enum Ordering` decl is emitted; the
+    /// `Less`/`Equal`/`Greater` references and match patterns must then use that
+    /// user enum (`Ordering::Less`), not the `std::cmp::Ordering` bridge the
+    /// prelude form uses when the enum is *not* reachable (e.g. a bare primitive
+    /// `compare`).
+    fn ordering_enum_reachable(&self) -> bool {
         self.enum_variants
             .get("Less")
             .is_some_and(|info| info.enum_name == "Ordering")
@@ -1099,15 +1103,13 @@ impl RsEmitCtx {
     }
 
     /// Pre-seed the effect registries (`effect_ops`, `composite_effects`) from
-    /// every module's top-level `EffectDecl`s. In the single-file bundling path
-    /// these are populated as each module body is emitted (dependency order, so
-    /// the effect's declaration precedes its use). In the per-module path each
+    /// every module's top-level `EffectDecl`s. In the per-module path each
     /// module is emitted by its own forked context, so a bare op `log(...)` used
     /// in `main` whose effect `Log` is declared in another module would not be
     /// recognised as an effect op (and not rewritten to `__handler.log(...)`)
     /// without pre-seeding from the whole reachable set. Mirrors how
-    /// `enum_variants` / `trait_decls` are collected across the bundle and the
-    /// Python / JS / TS backends' equivalents.
+    /// `enum_variants` / `trait_decls` are collected across the reached modules
+    /// and the Python / JS / TS backends' equivalents.
     fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
         for (module, _) in modules {
             let NodeKind::Module { items, .. } = &module.kind else {
@@ -2196,12 +2198,12 @@ impl RsEmitCtx {
         match &node.kind {
             NodeKind::Module { items, imports, .. } => {
                 if self.per_module {
-                    // Per-module native-module path (S3): each module is emitted
-                    // to its own `.rs` file. Record whether it references the
-                    // concurrency runtime (emitted once into `bock_runtime`) and,
-                    // if so, import it from there rather than inlining the
-                    // prelude (a duplicate `struct __BockChannel` across files is
-                    // a Rust redefinition error). Then emit real
+                    // Per-module native-module path (the real build): each module
+                    // is emitted to its own `.rs` file. Record whether it
+                    // references the concurrency runtime (emitted once into
+                    // `bock_runtime`) and, if so, import it from there rather than
+                    // inlining the prelude (a duplicate `struct __BockChannel`
+                    // across files is a Rust redefinition error). Then emit real
                     // `use crate::<m>::<x>;` for cross-module references.
                     if rs_module_uses_concurrency(items) {
                         self.concurrency_runtime_emitted = true;
@@ -2209,12 +2211,10 @@ impl RsEmitCtx {
                     }
                     self.emit_cross_module_uses(imports);
                 } else {
-                    // Cross-module `use` (DV13) → single-file bundling: every
-                    // module's items are FLATTENED to the crate root (decision
-                    // A1) and `ImportDecl`s are dropped. The imported items live
-                    // in the same crate root, so `key(...)` / `Key` resolve
-                    // unqualified. The concurrency runtime is emitted at most
-                    // once across the bundle (a duplicate `struct __BockChannel`
+                    // Single-module self-contained emit (`generate_module`, used
+                    // by unit tests): the module's items are emitted into one file
+                    // and `ImportDecl`s are dropped. The concurrency runtime is
+                    // inlined at most once (a duplicate `struct __BockChannel`
                     // would not compile).
                     if !self.concurrency_runtime_emitted && rs_module_uses_concurrency(items) {
                         self.buf.push_str(CONCURRENCY_RUNTIME_RS);
@@ -2231,11 +2231,11 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::ImportDecl { .. } => {
-                // Resolved either by bundling (the imported module's items are
-                // flattened into this same crate root) or, in the per-module
-                // path, by the real `use crate::<m>::<x>;` statements emitted up
-                // front by `emit_cross_module_uses` from the `Module` arm. Either
-                // way, the per-item visit here is a no-op.
+                // Resolved by the real `use crate::<m>::<x>;` statements emitted
+                // up front by `emit_cross_module_uses` from the `Module` arm
+                // (per-module path), or dropped entirely in the single-module
+                // self-contained path. Either way, the per-item visit here is a
+                // no-op.
                 Ok(())
             }
             NodeKind::FnDecl {
@@ -3266,12 +3266,12 @@ impl RsEmitCtx {
             NodeKind::Identifier { name } => {
                 // The prelude `Ordering` variants map to Rust's native
                 // `std::cmp::Ordering` — UNLESS the real `core.compare.Ordering`
-                // enum is bundled (DV13), in which case the references must use
-                // that user enum (handled by the `variant_enum_qualifier_for_name`
+                // enum is reachable, in which case the references must use that
+                // user enum (handled by the `variant_enum_qualifier_for_name`
                 // path below). This mirrors how `Some`/`None` map to
                 // `std::option`.
                 if crate::generator::ordering_variant(&name.name).is_some()
-                    && !self.ordering_enum_bundled()
+                    && !self.ordering_enum_reachable()
                 {
                     let variant = &name.name;
                     let _ = write!(self.buf, "std::cmp::Ordering::{variant}");
@@ -4099,15 +4099,15 @@ impl RsEmitCtx {
             NodeKind::ConstructorPat { path, fields } => {
                 // Prelude `Ordering` variant patterns match Rust's native
                 // `std::cmp::Ordering` (the construction side maps the same way)
-                // — UNLESS the real `core.compare.Ordering` enum is bundled
-                // (DV13), in which case the user enum (`Ordering::Less`) is
-                // matched via the qualifier path below.
+                // — UNLESS the real `core.compare.Ordering` enum is reachable, in
+                // which case the user enum (`Ordering::Less`) is matched via the
+                // qualifier path below.
                 if let Some(variant) = path
                     .segments
                     .last()
                     .and_then(|s| crate::generator::ordering_variant(&s.name))
                 {
-                    if fields.is_empty() && !self.ordering_enum_bundled() {
+                    if fields.is_empty() && !self.ordering_enum_reachable() {
                         let _ = write!(self.buf, "std::cmp::Ordering::{variant}");
                         return Ok(());
                     }
@@ -5797,10 +5797,9 @@ mod tests {
 
     #[test]
     fn import_declaration_is_dropped() {
-        // Cross-module `use` is realized by single-file bundling (DV13): the
-        // imported module's items are flattened into the same crate root, so a
-        // Bock `ImportDecl` emits nothing — a real `use core::compare::{...}`
-        // would not resolve in a lone `rustc main.rs`.
+        // In the single-module self-contained emit (`generate_module`), there is
+        // no sibling module to import from, so a Bock `ImportDecl` emits nothing.
+        // (The per-module project path emits real `use crate::<m>::<x>;`.)
         let imp = node(
             1,
             NodeKind::ImportDecl {
@@ -5811,7 +5810,7 @@ mod tests {
         let out = gen(&module(vec![imp], vec![]));
         assert!(
             !out.contains("use core::compare"),
-            "ImportDecl must be a no-op under bundling; got: {out}"
+            "ImportDecl must be a no-op in single-module emit; got: {out}"
         );
     }
 
@@ -7239,7 +7238,8 @@ mod tests {
         // entry `module main` uses `mathutil.add_one`; `module mathutil` exports
         // a `public fn add_one`. Per-module emission must produce a Cargo crate:
         // `Cargo.toml`, `src/main.rs` (with `mod mathutil;` + `use
-        // crate::mathutil::{add_one};`), and `src/mathutil.rs` — never a bundle.
+        // crate::mathutil::{add_one};`), and `src/mathutil.rs` — a real module
+        // tree, not a single collapsed file.
         let call = node(
             10,
             NodeKind::Call {

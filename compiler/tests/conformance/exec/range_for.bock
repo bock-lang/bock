@@ -8,7 +8,8 @@
 // five targets. Before: js/ts emitted bare `range(...)`/`rangeInclusive(...)`
 // with no runtime definition (`ReferenceError`), and Go emitted
 // `/* range */ nil` (a non-iterable). After: js/ts inject a `range`/
-// `rangeInclusive` array-builder runtime (once per bundle), and Go injects a
+// `rangeInclusive` array-builder runtime (once, in the shared runtime module),
+// and Go injects a
 // `__bockRange(lo, hi, inclusive) []int64` helper so `for _, x := range
 // __bockRange(...)` iterates. Python (`range(lo, hi)` / `range(lo, hi + 1)`)
 // and Rust (`lo..hi` / `lo..=hi`) are native and unchanged.
