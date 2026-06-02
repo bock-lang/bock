@@ -1,14 +1,15 @@
 //! Cross-target compile verification for the embedded `core.convert` module.
 //!
 //! For each v1 target, `bock build --source-only` over a `core.convert`-using
-//! project must succeed and **bundle** `core.convert`'s declarations (four
-//! traits, an error record, a sample parameterized `From[Celsius] for
-//! Fahrenheit` impl, and a constructor) into the one entry file — proving the
-//! embedded stdlib flows through codegen on every target. Under single-file
-//! bundling (DV13; see spec §20.6.1 divergence), the imported module is
-//! concatenated into `main.<ext>` rather than emitted as a separate
-//! `core/convert/convert.<ext>` file, so this asserts the bundled entry file
-//! carries the module's emitted symbol (the `ConvertError` record).
+//! project must succeed and emit `core.convert`'s declarations (four traits, an
+//! error record, a sample parameterized `From[Celsius] for Fahrenheit` impl,
+//! and a constructor) — proving the embedded stdlib flows through codegen on
+//! every target. As of S3 **all five v1 targets** emit the per-module tree (DQ19
+//! resolved): `core.convert` lives in its own module file carrying the
+//! `ConvertError` record, and the entry wires to it with the target's native
+//! import/module mechanism (python/js/ts/rust imports; go shares one
+//! `package main`, so no import). See `stdlib_error_targets.rs` for the
+//! per-target layout details.
 //!
 //! This is *compile* (source-emission) verification only. Full conformance
 //! *execution* across targets is the separate Q-fconf task and is NOT covered
@@ -71,21 +72,52 @@ fn make_project(tag: &str) -> PathBuf {
     root
 }
 
-/// Read the bundled entry file `build/<target>/main.<ext>`, if present.
-fn read_entry_bundle(build_dir: &Path, target: &str, ext: &str) -> Option<String> {
-    fs::read_to_string(build_dir.join(target).join(format!("main.{ext}"))).ok()
+/// Read the emitted entry file, if present. The entry is `main.<ext>` at the
+/// build root for every target except rust, whose per-module output is a
+/// `src/`-rooted Cargo crate (`src/main.rs`).
+fn read_entry(build_dir: &Path, target: &str, ext: &str) -> Option<String> {
+    let target_dir = build_dir.join(target);
+    let entry = if target == "rust" {
+        target_dir.join("src").join("main.rs")
+    } else {
+        target_dir.join(format!("main.{ext}"))
+    };
+    fs::read_to_string(entry).ok()
 }
 
-/// Whether `target` emits a per-module native import tree (vs. bundling). Kept
-/// in sync with the harness's `emits_per_module_tree`: S1 migrated `python`, S2
-/// adds `js`/`ts`.
-fn emits_per_module_tree(target: &str) -> bool {
-    matches!(target, "python" | "js" | "ts")
+/// Path to the per-module file for `module` (dotted) under `build/<target>/`, in
+/// the layout each target emits: python/js/ts mirror the tree
+/// (`core/<m>.<ext>`); rust roots under `src/` (`src/core/<m>.rs`); go is one
+/// flat package (`core.<m>.go`, dots kept — `_test.go` is Go's test suffix).
+fn module_file_path(build_dir: &Path, target: &str, module: &str, ext: &str) -> PathBuf {
+    let target_dir = build_dir.join(target);
+    match target {
+        "rust" => {
+            let mut p = target_dir.join("src");
+            for seg in module.split('.') {
+                p = p.join(seg);
+            }
+            p.with_extension(ext)
+        }
+        // Go keeps the dotted module path in the flat filename (`core.test.go`)
+        // — flattening to `_` would hit Go's reserved `_test.go` suffix.
+        "go" => target_dir.join(format!("{module}.{ext}")),
+        _ => {
+            let mut p = target_dir;
+            let segs: Vec<&str> = module.split('.').collect();
+            for seg in &segs[..segs.len() - 1] {
+                p = p.join(seg);
+            }
+            p.join(format!("{}.{ext}", segs[segs.len() - 1]))
+        }
+    }
 }
 
-/// Assert the entry file carries a real cross-module import of `module` (the
-/// dotted declared path) spelled the way `target` emits it: Python
-/// `from <module> import …`; js/ts ESM `import … from "./<path>.js"`.
+/// Assert the entry file wires to the per-module `module` file (dotted path) the
+/// way `target` emits cross-module references: python `from <module> import …`;
+/// js/ts ESM `import … from "./<path>.js"`; rust `use crate::<m::path>::…;`; go
+/// shares one `package main`, so there is no import — the separate module file
+/// (asserted by the caller) is the per-module evidence.
 fn assert_entry_imports_module(entry: &str, target: &str, module: &str) {
     match target {
         "python" => assert!(
@@ -96,13 +128,20 @@ fn assert_entry_imports_module(entry: &str, target: &str, module: &str) {
             let rel = format!("./{}.js", module.replace('.', "/"));
             assert!(
                 entry.contains("import ") && entry.contains(&rel),
-                "target {target}: entry must `import … from \"{rel}\"`",
+                "target {target}: entry must `import … from \"{rel}\""
             );
         }
+        "rust" => {
+            let crate_path = format!("crate::{}::", module.replace('.', "::"));
+            assert!(
+                entry.contains(&format!("use {crate_path}")),
+                "target {target}: entry must `use {crate_path}…;`",
+            );
+        }
+        "go" => {}
         other => panic!("assert_entry_imports_module: unexpected per-module target {other}"),
     }
 }
-
 #[test]
 fn core_convert_compiles_on_every_target() {
     for (target, ext) in TARGETS {
@@ -123,37 +162,23 @@ fn core_convert_compiles_on_every_target() {
             String::from_utf8_lossy(&output.stderr),
         );
 
-        // The `ConvertError` record must be emitted: bundled into the entry
-        // file on bundling targets, or in the separate `core/convert.<ext>`
-        // module file (with a real import in the entry) on per-module targets.
+        // Per-module tree (all five targets, S3): `core.convert` is its own file
+        // carrying `ConvertError`, and the entry wires to it with the target's native
+        // import/module mechanism rather than inlining the declaration.
         let build_dir = root.join("build");
-        if emits_per_module_tree(target) {
-            let module_file = build_dir
-                .join(target)
-                .join("core")
-                .join(format!("convert.{ext}"));
-            let module_src = fs::read_to_string(&module_file).unwrap_or_else(|_| {
-                panic!(
-                    "target {target}: no per-module file {}",
-                    module_file.display()
-                )
-            });
-            assert!(
-                module_src.contains("ConvertError"),
-                "target {target}: core.convert module file lacks `ConvertError`",
-            );
-            let entry = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
-                panic!("target {target}: no entry file build/{target}/main.{ext}")
-            });
-            assert_entry_imports_module(&entry, target, "core.convert");
-        } else {
-            let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
-                panic!("target {target}: no entry bundle build/{target}/main.{ext}")
-            });
-            assert!(
-                bundle.contains("ConvertError"),
-                "target {target}: core.convert not bundled into main.{ext} (no `ConvertError`)",
-            );
-        }
+        let module_file = module_file_path(&build_dir, target, "core.convert", ext);
+        let module_src = fs::read_to_string(&module_file).unwrap_or_else(|_| {
+            panic!(
+                "target {target}: no per-module file {}",
+                module_file.display()
+            )
+        });
+        assert!(
+            module_src.contains("ConvertError"),
+            "target {target}: core.convert module file lacks `ConvertError`",
+        );
+        let entry = read_entry(&build_dir, target, ext)
+            .unwrap_or_else(|| panic!("target {target}: no entry file"));
+        assert_entry_imports_module(&entry, target, "core.convert");
     }
 }

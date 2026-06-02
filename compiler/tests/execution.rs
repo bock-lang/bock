@@ -45,6 +45,19 @@ fn entry_extension(target: &str) -> &'static str {
     }
 }
 
+/// The emitted entry file's path **relative to `build/<target>/`**.
+///
+/// Most targets place the entry at `main.<ext>` at the build root. Rust's
+/// per-module output is a cargo-idiomatic `src/`-rooted crate (S3), so its
+/// entry is `src/main.rs` — the `Cargo.toml` `[[bin]]` points there and the run
+/// plan is `cargo run` from the build root.
+fn entry_relpath(target: &str) -> PathBuf {
+    match target {
+        "rust" => PathBuf::from("src").join("main.rs"),
+        other => PathBuf::from(format!("main.{}", entry_extension(other))),
+    }
+}
+
 /// Stable ordering of the v1 targets for deterministic reporting.
 const TARGET_ORDER: &[&str] = &["js", "ts", "python", "rust", "go"];
 
@@ -53,24 +66,28 @@ const TARGET_ORDER: &[&str] = &["js", "ts", "python", "rust", "go"];
 ///
 /// Per the per-module-output milestone (DQ19 resolved), a cross-module program
 /// compiles to one target file per reached module, wired with the target's
-/// native imports, and runs through the target's normal runner from the build
-/// root. The migration is target-by-target: **S1 migrated Python**, **S2 adds
-/// JS + TS**; the remaining two targets (rust/go) still bundle every reached
-/// module into one entry file (and the harness runs that single file). As each
-/// remaining target's native-import path lands (S3 rust/go), it is added here.
+/// native imports/modules, and runs through the target's normal runner from the
+/// build root. The migration landed target-by-target — **S1 Python**, **S2 JS +
+/// TS**, **S3 Rust + Go** — so **all five v1 targets** now emit the tree.
 ///
-/// Functionally the *run* is the same either way — `ToolchainRegistry::run`
-/// runs the entry (`main.<ext>`) with the build directory as the current
-/// directory, so a per-module tree's sibling files (`core/option.py`,
-/// `core/option.js`, `_bock_runtime.js`, …) resolve as imports relative to that
-/// root. For js/ts a minimal `package.json` `{"type":"module"}` is emitted at
-/// the build root so Node treats the `.js` tree as ES modules; the TS run plan
-/// (`tsc main.ts && node main.js`) compiles the whole tree (tsc follows the
-/// relative imports) and runs the emitted ESM. The predicate exists so the
-/// harness can additionally assert the per-module *shape* for migrated targets
-/// and document the staged cutover.
+/// How each runs from the build dir (`ToolchainRegistry::run`'s `workdir`):
+/// - **python** — `python3 main.py`; sibling files (`core/option.py`,
+///   `_bock_runtime.py`) resolve as package imports (`core` is a PEP 420
+///   namespace package).
+/// - **js / ts** — `node main.js` (ts first `tsc main.ts`); a minimal
+///   `package.json` `{"type":"module"}` makes Node treat the `.js` tree as ESM,
+///   and the emitted `import … from "./core/option.js"` resolve relatively.
+/// - **rust** — `cargo run` over the emitted Cargo crate (`Cargo.toml` +
+///   `src/main.rs` + the `src/<module>.rs` tree wired with `mod`/`use crate::…`).
+/// - **go** — `go run .` over the emitted Go module (`go.mod` + the flat
+///   per-module `.go` files in one `package main`, plus a shared
+///   `bock_runtime.go`).
+///
+/// The predicate gates the per-module run path and the per-module *shape*
+/// assertion below; after S3 it covers every target (S4 retires the now-dead
+/// bundling path and the predicate itself).
 fn emits_per_module_tree(target: &str) -> bool {
-    matches!(target, "python" | "js" | "ts")
+    matches!(target, "python" | "js" | "ts" | "rust" | "go")
 }
 
 /// Locate the compiled `bock` CLI binary.
@@ -188,7 +205,7 @@ fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
     );
 
     let build_dir = project_dir.join("build").join(target);
-    let entry = build_dir.join(format!("main.{}", entry_extension(target)));
+    let entry = build_dir.join(entry_relpath(target));
     assert!(
         entry.is_file(),
         "expected emitted entrypoint {} for fixture `{}`, but it was not written",
