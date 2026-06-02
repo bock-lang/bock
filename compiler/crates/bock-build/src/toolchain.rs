@@ -502,10 +502,16 @@ fn builtin_typescript_spec() -> ToolchainSpec {
         compile_command: "tsc".to_string(),
         compile_args: vec!["--noEmit".to_string()],
         validate_per_project: false,
-        // Emit `main.js` next to `main.ts`, then run it with Node.
+        // Compile the whole project via its `tsconfig.json` (`tsc -p .`), then
+        // run the emitted ESM entry with Node. Project mode (§20.6.2) always
+        // scaffolds a `tsconfig.json`; with it present in the run workdir, the
+        // old single-file `tsc main.ts` fails (TS5112: "tsconfig.json is present
+        // but will not be loaded if files are specified on commandline").
+        // Building by project resolves the config *and* compiles the whole
+        // per-module `.ts` tree (S6b).
         run_plan: RunPlan {
             steps: vec![
-                RunStep::new("tsc", &["main.ts"]),
+                RunStep::new("tsc", &["-p", "."]),
                 RunStep::new("node", &["main.js"]),
             ],
         },
@@ -1140,11 +1146,17 @@ mod tests {
     }
 
     #[test]
-    fn ts_run_plan_is_tsc_then_node() {
+    fn ts_run_plan_is_tsc_project_then_node() {
+        // TS builds by project (`tsc -p .`) so the scaffolded `tsconfig.json`
+        // (always present in project mode, §20.6.2 / S6b) is honored rather than
+        // colliding with a single-file `tsc main.ts` (TS5112).
         let spec = builtin_typescript_spec();
         assert_eq!(spec.run_plan.steps.len(), 2, "ts emits then runs");
         assert_eq!(spec.run_plan.steps[0].command, "tsc");
-        assert_eq!(spec.run_plan.steps[0].args, vec!["main.ts".to_string()]);
+        assert_eq!(
+            spec.run_plan.steps[0].args,
+            vec!["-p".to_string(), ".".to_string()]
+        );
         assert_eq!(spec.run_plan.steps[1].command, "node");
         assert_eq!(spec.run_plan.steps[1].args, vec!["main.js".to_string()]);
     }
