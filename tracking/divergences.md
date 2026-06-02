@@ -155,7 +155,9 @@ status(open | resolved→link)`
   mode is "no manifests, scaffolding, or entry-point wiring." · **Classification:** gap (transitional) · **Disposition:**
   planned resolution in **S6/S7** — migrate the conformance harness to **project-mode** builds (the mode that legitimately
   carries manifests + transpiled tests), letting source mode become truly bare. Surfaced by S5 (#188); the S5 project-mode
-  scaffolding pass is correctly project-mode-only. Non-blocking (425/0 green). · **Status:** OPEN → ItemB S6/S7.
+  scaffolding pass is correctly project-mode-only. Non-blocking (425/0 green). · **Status:** **CLOSED → #190** (S6a):
+  codegen now emits only per-module source; the `Scaffolder` owns the manifests (project mode only); `--source-only`
+  is bare (asserted by `build_command` + per-backend codegen tests); the conformance harness builds in project mode.
 
 ---
 
