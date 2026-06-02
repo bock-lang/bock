@@ -12,11 +12,12 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-02 vs main 68d79e3 (**MS-projectmode S0 [#181] + S1 [#182] DONE** — S0 reconciled spec
-[DQ19→per-module tree; config tables→v1] + tracking; S1 python pilot landed: per-module native-import tree runs
-×multi-file, 425 exec pairs / 0 failed REQUIRE=all. **Next = S2 (js→ts native imports).** Plan:
-`plans/2026-06-02-itemB-per-module-projectmode-plan.md`. — 2 owner decisions 2026-06-02 [eyes-open]: per-module
-native tree is the v1 output [re-opens DV13]; config tables pulled into v1. — earlier: **D5 [#174]**. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
+_Last reconciled: 2026-06-02 vs main 8532e79 (**MS-projectmode S1–S4 DONE [#182/#184/#185/#186] → DV13 CLOSED** —
+all 5 targets now emit per-module native-import trees as the sole path + run as multi-file projects; bundling code
+retired; 425 exec pairs / 0 failed REQUIRE=all. S0 [#181] reconciled spec [DQ19→per-module; config tables→v1] +
+tracking. **Next = S5 (scaffolding framework + config parsing); operator pre-S5 checkpoint pending.** FOUND →
+Q-go-error-message [pre-existing go core.error bug]. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`.
+— 2 owner decisions 2026-06-02 [eyes-open]: per-module is the v1 output [re-opened DV13]; config tables → v1. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
 [#175]**; **Q-r2-codegen-residue (c) builtin-vs-user-method shadowing [#176, ×5]** + pinned Q-go-list-literal /
 Q-r2-(b) / Q-ts-generic-impl (verified already-fixed). New FOUND triaged: Q-allcaps-record-parse (parser),
 Q-arch-doc-drift (ARCHITECTURE.md/compiler-CLAUDE.md/CONTRIBUTING.md crate-name drift). Q-match-exprpos still
@@ -104,6 +105,12 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   (topological order → user effects shadow core), which is correct + sufficient for v1, but full qualification (a
   program using BOTH same-named ops) is unsupported on the interpreter. Codegen (all 5 targets) is UNAFFECTED (each
   program compiles in isolation with proper module scoping). Low-pri interpreter-only limitation.
+- **[Q-go-error-message] Go: `core.error.SimpleError` field/method name collision** — bug · ready ·
+  `compiler/crates/bock-codegen/src/go.rs` · — · links #185 · note: FOUND during S3 (#185), **pre-existing, NOT a
+  regression** (confirmed identical on pre-#185 bundled go output). `SimpleError` emits both a `message` field and a
+  `Message()` method → Go rejects "field and method with the same name", so `.message()` does not compile on go. No
+  `exec_` fixture exercises it, so conformance stays green — but a real go project using `core.error.message()` won't
+  build. Fix: rename the emitted accessor (or field) to avoid the collision on go. Candidate to fold into S6 go work.
 - **[Q-clock-handler-routing] `Instant.now`/`sleep` bypass the Clock effect handler** — bug · ready · `bock-codegen` ·
   — · links #160 · note: the time host primitives are inlined per-target and bypass the installed `Clock` handler, so
   `std.testing.MockClock` virtual-time (§18.4) is not achievable — `sleep` always hits real host. Route now/sleep/
@@ -211,7 +218,8 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `docs/src/language/` · blocked-by: (D2-FOUND mostly resolved — verify)
   · note: most D2-FOUND rows resolved per spec revision; confirm residue.
 - **[ItemB] Per-module output + project-mode codegen + config tables** — impl · **IN FLIGHT (milestone
-  MS-projectmode, v1-BLOCKING; expanded by 2 owner decisions 2026-06-02)** · `compiler/crates/bock-codegen/`,
+  MS-projectmode, v1-BLOCKING; S1–S4 DONE [#182/#184/#185/#186] → DV13 CLOSED; next = S5 scaffolding)** ·
+  `compiler/crates/bock-codegen/`,
   `bock-cli/src/build.rs`, `bock-build/src/toolchain.rs`, `compiler/tests/execution.rs` · — · links #28, #132,
   DV13, DQ19, MS-projectmode · plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md` · note: **v1.0's last
   engineering milestone.** Owner decided (eyes-open) the v1 output is the **per-module native tree** (DQ19 →
@@ -225,15 +233,24 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
     ESM run affordance, rust/go need a manifest; output paths key on the declared `module` path (not source-mirrored);
     per-module emission loses bundling's single-context visibility (re-seed via `seed_effect_registries` /
     `implicit_imports_for`).
-  - **S2** — js then ts · **ready (dispatch next)** · was blocked-by S1.
-  - **S3** — rust + go (+ minimal Cargo.toml/go.mod) · blocked-by S2.
-  - **S4** — flip default to per-module; retire bundling (**DV13 CLOSED**) · blocked-by S3.
-  - **S5** — scaffolding framework + `bock.project` config parsing · blocked-by S4.
-  - **S6** — per-target scaffolders + deep-config branches (Vitest|Jest, Black|Ruff…) · blocked-by S5.
+  - **S2** — js then ts native ESM imports. **DONE → #184** (js: per-module ESM + minimal `package.json
+    {"type":"module"}` run affordance; ts: `tsc→node`, no toolchain.rs change).
+  - **S3** — rust + go native imports + minimal manifest. **DONE → #185** (rust: `src/`-rooted cargo crate +
+    `mod`/`use crate::`, run `cargo run`; go: flat `package main` + `go.mod`, run `go run .`; run-plans reworked
+    to validate/run at project level). FOUND → **Q-go-error-message** below.
+  - **S4** — retire dead bundling code (**DV13 CLOSED**). **DONE → #186** — removed the multi-module bundling
+    concatenator (trait-default `generate_project`, `bundle_output_path`, `append_entry_invocation`,
+    `go::generate_bundle`, the always-true `emits_per_module_tree` predicate; ~170 net lines). KEPT (load-bearing,
+    NOT bundling): the single-module self-contained emit (`generate_module` + `per_module` flag) used by ~250 unit
+    tests — reframed terminology. **All 5 targets now emit per-module native trees as the sole path.**
+  - **S5** — scaffolding framework + `bock.project` config parsing · **READY (dispatch next — pre-S5 operator
+    checkpoint per pacing decision)** · was blocked-by S4.
+  - **S6** — per-target scaffolders + deep-config branches (Vitest|Jest, Black|Ruff…) · blocked-by S5. NOTE: fold
+    in the leftover single-module-emit-path cleanup if it eases per-target rework.
   - **S7** — transpiled tests + formatter-clean gate · blocked-by S6.
   - **S8** — internal docs + close · blocked-by S7.
-  INVARIANT every PR: `run-conformance.sh REQUIRE=all` stays 420/420; bundling behind a flag until all 5 native;
-  harness migrates target-by-target. `--deliverable`/`--no-tests` stay v1.x. External `/get-started` = ItemD.
+  INVARIANT every PR: `run-conformance.sh REQUIRE=all` stays green (now **425/425**). `--deliverable`/`--no-tests`
+  stay v1.x. External `/get-started` = ItemD. **S1–S4 DONE; DV13 CLOSED; next = S5 (scaffolding).**
 - **[ItemD] /get-started project-mode evolution** — docs · blocked ·
   `docs/`, `website/` · blocked-by: ItemB Phase 6 · note: external-facing
   copy — escalate for approval.
