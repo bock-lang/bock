@@ -582,6 +582,30 @@ pub fn module_declares_main_fn(module: &AIRModule) -> bool {
     })
 }
 
+/// The declared module-path of an AIR module as a dotted string
+/// (e.g. `core.option`), or `None` if the module declares no `module <path>`.
+///
+/// Used by the per-module (native-import) emission path to map a module's
+/// *declared* path — not its on-disk source path — onto the target's import
+/// path. For Python this drives both the emitted file location
+/// (`core.option` → `core/option.py`) and the import statement
+/// (`from core.option import …`), so the two agree and a multi-file program
+/// resolves its imports when run from the build root.
+#[must_use]
+pub fn module_path_string(module: &AIRModule) -> Option<String> {
+    if let NodeKind::Module { path: Some(p), .. } = &module.kind {
+        Some(
+            p.segments
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join("."),
+        )
+    } else {
+        None
+    }
+}
+
 /// Returns true if the given AIR module declares a top-level `async fn main`.
 /// Used by `generate_project` to select an async-aware entry invocation.
 #[must_use]

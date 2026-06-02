@@ -157,6 +157,205 @@ _bock_equal = _BockOrderingEqual()
 _bock_greater = _BockOrderingGreater()
 ";
 
+/// Runtime-prelude names that resolve through the shared `_bock_runtime`
+/// module (or built-in lowering), NOT through a cross-module import — so the
+/// implicit-import pass must never try to import them from a declaring module.
+/// These are the §18.2-prelude container/ordering symbols whose Python form is
+/// the bespoke tagged runtime (`_BockSome`, …), not the `core.*` declaration.
+const RUNTIME_PRELUDE_NAMES: &[&str] = &[
+    "Optional", "Some", "None", "Result", "Ok", "Err", "Ordering", "Less", "Equal", "Greater",
+];
+
+/// Build a map from every **public top-level symbol name** declared across
+/// `modules` to the dotted module-path that declares it (e.g. `Iterable` →
+/// `core.iter`). Covers functions, records, enums (and each variant's emitted
+/// `Enum_Variant` dataclass name), traits, classes, effects, type aliases, and
+/// consts.
+///
+/// The per-module emission path needs this for **implicit imports**: in the
+/// single-file bundling path every reached module's top-level declarations
+/// shared one namespace, so a prelude trait used as a base class
+/// (`impl Iterable for Bag`, with `Iterable` auto-imported per §18.2) resolved
+/// for free. Emitting one file per module breaks that — `main.py` must `import`
+/// `Iterable` from `core.iter` even though it never appears in an explicit
+/// `use`. This map lets `generate_project` add exactly those imports for names a
+/// module references but neither declares locally nor imports explicitly.
+///
+/// Runtime-prelude names (`RUNTIME_PRELUDE_NAMES`) are excluded — they resolve
+/// through `_bock_runtime`, not a `core.*` import. The first declarer wins for a
+/// name declared in several modules (deterministic via the dependency order
+/// `modules` arrives in).
+fn collect_public_symbol_modules(
+    modules: &[(&AIRModule, &std::path::Path)],
+) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for (module, _) in modules {
+        let Some(module_path) = crate::generator::module_path_string(module) else {
+            continue;
+        };
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            let mut record = |name: &str| {
+                if !RUNTIME_PRELUDE_NAMES.contains(&name) {
+                    map.entry(name.to_string())
+                        .or_insert_with(|| module_path.clone());
+                }
+            };
+            match &item.kind {
+                NodeKind::FnDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::RecordDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::TraitDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::ClassDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::EffectDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::TypeAlias {
+                    visibility, name, ..
+                }
+                | NodeKind::ConstDecl {
+                    visibility, name, ..
+                } => {
+                    if matches!(visibility, Visibility::Public) {
+                        record(&name.name);
+                    }
+                }
+                NodeKind::EnumDecl {
+                    visibility,
+                    name,
+                    variants,
+                    ..
+                } => {
+                    if matches!(visibility, Visibility::Public) {
+                        record(&name.name);
+                        for v in variants {
+                            if let NodeKind::EnumVariant { name: vname, .. } = &v.kind {
+                                record(&format!("{}_{}", name.name, vname.name));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    map
+}
+
+/// Declared module-path of `module`, or empty if it declares none.
+fn module_path_string_of(module: &AIRModule) -> String {
+    crate::generator::module_path_string(module).unwrap_or_default()
+}
+
+/// Top-level symbol names declared **locally** in `module` (item names plus
+/// each enum variant's emitted `Enum_Variant` name) — the names a per-module
+/// implicit import must never shadow with a cross-module import.
+fn locally_declared_names(module: &AIRModule) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let NodeKind::Module { items, .. } = &module.kind else {
+        return names;
+    };
+    for item in items {
+        match &item.kind {
+            NodeKind::FnDecl { name, .. }
+            | NodeKind::RecordDecl { name, .. }
+            | NodeKind::TraitDecl { name, .. }
+            | NodeKind::ClassDecl { name, .. }
+            | NodeKind::EffectDecl { name, .. }
+            | NodeKind::TypeAlias { name, .. }
+            | NodeKind::ConstDecl { name, .. } => {
+                names.insert(name.name.clone());
+            }
+            NodeKind::EnumDecl { name, variants, .. } => {
+                names.insert(name.name.clone());
+                for v in variants {
+                    if let NodeKind::EnumVariant { name: vname, .. } = &v.kind {
+                        names.insert(format!("{}_{}", name.name, vname.name));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Names brought into scope by `module`'s explicit `use` declarations (the
+/// imported leaf names and their aliases) — already emitted as real imports,
+/// so the implicit-import pass must skip them.
+fn explicitly_imported_names(module: &AIRModule) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let NodeKind::Module { imports, .. } = &module.kind else {
+        return names;
+    };
+    for import in imports {
+        if let NodeKind::ImportDecl {
+            items: bock_ast::ImportItems::Named(named),
+            ..
+        } = &import.kind
+        {
+            for n in named {
+                names.insert(n.name.name.clone());
+                if let Some(alias) = &n.alias {
+                    names.insert(alias.name.clone());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Compute the implicit cross-module imports for `module`: public symbols
+/// declared in *other* reachable modules that `module` references but neither
+/// declares locally nor imports explicitly. Returns `(module_path, name)`
+/// pairs.
+///
+/// "References" is a conservative structural scan of the module's debug
+/// rendering for the symbol name as an identifier token (mirroring
+/// [`py_module_uses_optional`] and friends). It can only *over*-import a name
+/// the program does not really use, which is harmless (a dead import), never
+/// *under*-import — so it cannot reintroduce the `NameError` it exists to fix.
+fn implicit_imports_for(
+    module: &AIRModule,
+    public_symbols: &HashMap<String, String>,
+    own_path: &str,
+) -> Vec<(String, String)> {
+    let local = locally_declared_names(module);
+    let explicit = explicitly_imported_names(module);
+    let rendered = format!("{module:?}");
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, declaring_module) in public_symbols {
+        if declaring_module == own_path || local.contains(name) || explicit.contains(name) {
+            continue;
+        }
+        // Identifier-token match: the AIR debug rendering quotes identifier
+        // names, so `"Iterable"` appears iff the name is referenced.
+        if rendered.contains(&format!("\"{name}\"")) {
+            out.push((declaring_module.clone(), name.clone()));
+        }
+    }
+    out
+}
+
+/// The shared per-module runtime module name (without extension). In the
+/// per-module (native-import) emission path the four runtime preludes
+/// (`Optional`, `Result`, `Ordering`, concurrency) live in one file —
+/// `_bock_runtime.py` at the build root — and every emitted module imports the
+/// names it needs from it. A single shared definition keeps the tagged runtime
+/// classes *identical objects* across files, so an `isinstance(x, _BockSome)`
+/// in `main.py` still matches a `_BockSome` built in `core/option.py` (separate
+/// per-file class definitions would not be `isinstance`-compatible).
+const RUNTIME_MODULE_PY: &str = "_bock_runtime";
+
 /// The Ordering-runtime *singleton* name for an `Ordering` variant
 /// (`Less`→`_bock_less`, …). Used at construction sites.
 fn ordering_singleton_py(variant: &str) -> &'static str {
@@ -259,60 +458,193 @@ impl CodeGenerator for PyGenerator {
         }
     }
 
-    /// Bundle every module (stdlib + user, dependency-ordered) into one entry
-    /// file. Python module top-level defs share one namespace, so concatenating
-    /// each module's defs is valid and resolves cross-module `use` (DV13).
-    /// `ImportDecl`s are dropped; `import` preamble lines and runtime preludes
-    /// are emitted once. `finish` prepends the merged `import …` preamble after
-    /// all module bodies are emitted (so accumulated `needs_*` flags are seen).
+    /// Emit a per-module **native import tree** (spec §20.6.1; DQ19 resolved):
+    /// each module the entry program reaches through a real `use` is emitted to
+    /// its **own** Python file, and cross-module references resolve through real
+    /// Python imports (`from core.option import or_else`) rather than the
+    /// single-file bundling this replaces.
     ///
-    /// Diverges from spec §20.6.1 (one output file per module); see the
-    /// `OPEN: §20.6.1` note in the bundling PR.
+    /// Output-path mapping is keyed on each module's *declared* path, not its
+    /// on-disk source path, so the file layout and the import path agree:
+    /// `module core.option` ⇒ `core/option.py` and `from core.option import …`.
+    /// The **entry** module (the one declaring `main`, else the last in
+    /// dependency order) is always emitted as `main.py` so the run model
+    /// (`python3 main.py` from the build root) is stable; Python adds the
+    /// script's directory to `sys.path`, and `core` resolves as a PEP 420
+    /// namespace package (no `__init__.py` needed).
+    ///
+    /// The four runtime preludes (`Optional`, `Result`, `Ordering`,
+    /// concurrency) are emitted **once** into a shared `_bock_runtime.py`
+    /// (see `RUNTIME_MODULE_PY`); every module that references one imports it
+    /// (`from _bock_runtime import *`). A single shared definition keeps the
+    /// tagged runtime classes identical across files so cross-module
+    /// `isinstance` checks succeed.
     fn generate_project(
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
-        // Bundle only modules the entry program actually `use`s (plus the entry
-        // itself) — never the prelude-only stdlib (see `reachable_modules`).
+        // Emit only modules the entry program actually `use`s (plus the entry
+        // itself), dependency-ordered — never the prelude-only stdlib (see
+        // `reachable_modules`).
         let reachable = crate::generator::reachable_modules(modules);
         let modules = reachable.as_slice();
-        let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
+        if modules.is_empty() {
             return Ok(GeneratedCode { files: vec![] });
-        };
-
-        let mut ctx = PyEmitCtx::new();
-        ctx.enum_variants = crate::generator::collect_enum_variants(modules);
-        ctx.trait_decls = crate::generator::collect_trait_decls(modules);
-        for (i, (module, _)) in modules.iter().enumerate() {
-            if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
-                ctx.buf.push('\n');
-            }
-            ctx.emit_node(module)?;
         }
-        let mut content = ctx.finish();
+
+        // The entry module names `main.py`; every other module is placed at the
+        // path mirrored from its declared module-path.
+        let entry_idx = modules
+            .iter()
+            .position(|(m, _)| crate::generator::module_declares_main_fn(m))
+            .unwrap_or(modules.len() - 1);
+
+        // Enum-variant / trait registries are collected across the whole
+        // reachable set so a reference in one file to a type declared in another
+        // lowers identically to the bundling path.
+        let enum_variants = crate::generator::collect_enum_variants(modules);
+        let trait_decls = crate::generator::collect_trait_decls(modules);
+        // Map of public symbol → declaring module, for the implicit-import pass.
+        let public_symbols = collect_public_symbol_modules(modules);
 
         let main_is_async = modules
             .iter()
             .any(|(m, _)| crate::generator::module_main_fn_is_async(m));
         let invocation = self.entry_invocation(main_is_async);
-        crate::generator::append_entry_invocation(&mut content, modules, invocation.as_ref());
 
-        let derived_name = out_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        let source_map = SourceMap {
-            generated_file: derived_name,
-            ..Default::default()
-        };
-        Ok(GeneratedCode {
-            files: vec![OutputFile {
+        let mut files: Vec<OutputFile> = Vec::with_capacity(modules.len() + 1);
+        // Which runtime preludes any module references — drives `_bock_runtime.py`.
+        let mut runtime_optional = false;
+        let mut runtime_result = false;
+        let mut runtime_ordering = false;
+        let mut runtime_concurrency = false;
+
+        for (i, (module, source_path)) in modules.iter().enumerate() {
+            let mut ctx = PyEmitCtx::new();
+            ctx.per_module = true;
+            ctx.enum_variants = enum_variants.clone();
+            ctx.trait_decls = trait_decls.clone();
+            // Effect-op resolution needs the whole reachable set: a bare op in
+            // one module may belong to an effect declared in another.
+            ctx.seed_effect_registries(modules);
+            ctx.implicit_imports =
+                implicit_imports_for(module, &public_symbols, &module_path_string_of(module));
+            ctx.emit_node(module)?;
+            runtime_optional |= ctx.needs_runtime_optional;
+            runtime_result |= ctx.needs_runtime_result;
+            runtime_ordering |= ctx.needs_runtime_ordering;
+            runtime_concurrency |= ctx.needs_runtime_concurrency;
+            let mut content = ctx.finish();
+
+            // The entry file gets the `if __name__ == "__main__": main()`
+            // invocation appended (exactly once, only when it declares `main`).
+            if i == entry_idx && crate::generator::module_declares_main_fn(module) {
+                if let Some(invoc) = invocation.as_ref() {
+                    if !content.is_empty() && !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                    content.push_str(invoc);
+                }
+            }
+
+            let out_path = self.module_output_path(module, source_path, i == entry_idx);
+            let generated_file = out_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let source_map = SourceMap {
+                generated_file,
+                ..Default::default()
+            };
+            files.push(OutputFile {
                 path: out_path,
                 content,
                 source_map: Some(source_map),
-            }],
-        })
+            });
+        }
+
+        // Emit the shared runtime module with exactly the preludes referenced.
+        if runtime_optional || runtime_result || runtime_ordering || runtime_concurrency {
+            let mut content = String::new();
+            // Every runtime name is underscore-prefixed, which `from … import *`
+            // skips *unless* the module declares `__all__`. Build `__all__`
+            // explicitly from the emitted preludes so the consuming modules'
+            // `from _bock_runtime import *` pulls in `_BockSome` / `_bock_none`
+            // / … (without it, those names resolve to `NameError` at run time).
+            let mut all_names: Vec<&str> = Vec::new();
+            if runtime_optional {
+                content.push_str(OPTIONAL_RUNTIME_PY);
+                content.push('\n');
+                all_names.extend(["_BockSome", "_BockNone", "_bock_none"]);
+            }
+            if runtime_result {
+                content.push_str(RESULT_RUNTIME_PY);
+                content.push('\n');
+                all_names.extend(["_BockOk", "_BockErr"]);
+            }
+            if runtime_ordering {
+                content.push_str(ORDERING_RUNTIME_PY);
+                content.push('\n');
+                all_names.extend([
+                    "_BockOrderingLess",
+                    "_BockOrderingEqual",
+                    "_BockOrderingGreater",
+                    "_bock_less",
+                    "_bock_equal",
+                    "_bock_greater",
+                ]);
+            }
+            if runtime_concurrency {
+                content.push_str(CONCURRENCY_RUNTIME_PY);
+                content.push('\n');
+                all_names.extend(["__BockChannel", "__bock_channel_new", "__bock_spawn"]);
+            }
+            let all_list = all_names
+                .iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            content.push_str(&format!("__all__ = [{all_list}]\n"));
+            files.push(OutputFile {
+                path: PathBuf::from(format!("{RUNTIME_MODULE_PY}.py")),
+                content,
+                source_map: Some(SourceMap {
+                    generated_file: format!("{RUNTIME_MODULE_PY}.py"),
+                    ..Default::default()
+                }),
+            });
+        }
+
+        Ok(GeneratedCode { files })
+    }
+}
+
+impl PyGenerator {
+    /// Output path for one module in the per-module native-import tree.
+    ///
+    /// The entry module is always `main.py` (mirrored from its source path) so
+    /// the run model `python3 main.py` is stable. Every other module is placed
+    /// at the path mirrored from its **declared** module-path so the file
+    /// location and the Python import path agree:
+    /// `module core.option` ⇒ `core/option.py` (imported as `core.option`).
+    /// A module without a declared path falls back to its source-mirrored path.
+    fn module_output_path(
+        &self,
+        module: &AIRModule,
+        source_path: &std::path::Path,
+        is_entry: bool,
+    ) -> PathBuf {
+        if is_entry {
+            return crate::generator::derive_output_path(source_path, self.target());
+        }
+        match crate::generator::module_path_string(module) {
+            Some(path) if !path.is_empty() => {
+                let rel: PathBuf = path.split('.').collect();
+                rel.with_extension(&self.target().conventions.file_extension)
+            }
+            _ => crate::generator::derive_output_path(source_path, self.target()),
+        }
     }
 }
 
@@ -399,6 +731,28 @@ struct PyEmitCtx {
     /// lower `.eq`/`.compare` to native operators (GAP-C). See
     /// [`crate::generator::is_unimplemented_sealed_core_trait`].
     trait_decls: crate::generator::TraitDeclRegistry,
+    /// True in the **per-module native-import** emission path (Python S1). When
+    /// set, the `Module` arm imports each needed runtime prelude from the shared
+    /// `RUNTIME_MODULE_PY` module instead of inlining its definitions, and the
+    /// `ImportDecl` arm emits a real `from <module> import …` rather than a
+    /// no-op. When clear, the legacy single-file bundling behaviour is used.
+    per_module: bool,
+    /// In the per-module path, records which shared-runtime names this module
+    /// must import from `RUNTIME_MODULE_PY`: Optional, Result, Ordering,
+    /// concurrency — set from the same structural scans the bundling path uses
+    /// to decide whether to inline a prelude. `finish` turns these into the
+    /// module's `from _bock_runtime import …` line.
+    needs_runtime_optional: bool,
+    needs_runtime_result: bool,
+    needs_runtime_ordering: bool,
+    needs_runtime_concurrency: bool,
+    /// Implicit cross-module imports for the per-module path, as
+    /// `(module_path, symbol_name)` pairs — names this module references but
+    /// neither declares locally nor imports via an explicit `use` (e.g. a
+    /// §18.2-prelude trait used as a base class). The `Module` arm emits a
+    /// `from <module_path> import <symbol_name>` for each, grouped by module,
+    /// after the explicit imports. Computed in `generate_project`.
+    implicit_imports: Vec<(String, String)>,
 }
 
 impl PyEmitCtx {
@@ -430,6 +784,12 @@ impl PyEmitCtx {
             emitted_typevars: std::collections::HashSet::new(),
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
+            per_module: false,
+            needs_runtime_optional: false,
+            needs_runtime_result: false,
+            needs_runtime_ordering: false,
+            needs_runtime_concurrency: false,
+            implicit_imports: Vec::new(),
         }
     }
 
@@ -451,6 +811,21 @@ impl PyEmitCtx {
         // references never evaluate eagerly. It must be the first statement in
         // the module, so it is prepended ahead of every other import.
         preamble.push_str("from __future__ import annotations\n");
+        // Per-module native-import path: pull the runtime-prelude names this
+        // module references from the shared `_bock_runtime` module so the
+        // tagged runtime classes are shared (and `isinstance`-compatible)
+        // across every emitted file (see `RUNTIME_MODULE_PY`). A `*` import
+        // is intentional — the runtime exposes a small, fixed, underscore-
+        // prefixed surface and the exact set of referenced names varies with
+        // how each prelude is used (constructors, singletons, match classes).
+        if self.per_module
+            && (self.needs_runtime_optional
+                || self.needs_runtime_result
+                || self.needs_runtime_ordering
+                || self.needs_runtime_concurrency)
+        {
+            let _ = writeln!(preamble, "from {RUNTIME_MODULE_PY} import *");
+        }
         if self.needs_asyncio_import {
             preamble.push_str("import asyncio\n");
         }
@@ -499,6 +874,52 @@ impl PyEmitCtx {
             self.buf.insert_str(0, &preamble);
         }
         self.buf
+    }
+
+    /// Pre-seed the effect registries (`effect_ops`, `composite_effects`) from
+    /// every module's top-level `EffectDecl`s. In the single-file bundling path
+    /// these are populated as each module body is emitted (dependency order, so
+    /// the effect's declaration precedes its use). In the per-module path each
+    /// module is emitted by its own context, so a bare op `log(...)` used in
+    /// `main` whose effect `Log` is declared in another module would not be
+    /// recognised as an effect op (and not rewritten to `handler.log(...)`)
+    /// without pre-seeding from the whole reachable set. Mirrors how
+    /// `enum_variants` / `trait_decls` are collected across the bundle.
+    fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
+        for (module, _) in modules {
+            let NodeKind::Module { items, .. } = &module.kind else {
+                continue;
+            };
+            for item in items {
+                let NodeKind::EffectDecl {
+                    name,
+                    components,
+                    operations,
+                    ..
+                } = &item.kind
+                else {
+                    continue;
+                };
+                if !components.is_empty() {
+                    let comp_names: Vec<String> = components
+                        .iter()
+                        .map(|tp| {
+                            tp.segments
+                                .last()
+                                .map_or("effect".to_string(), |s| s.name.clone())
+                        })
+                        .collect();
+                    self.composite_effects.insert(name.name.clone(), comp_names);
+                    continue;
+                }
+                for op in operations {
+                    if let NodeKind::FnDecl { name: op_name, .. } = &op.kind {
+                        self.effect_ops
+                            .insert(op_name.name.clone(), name.name.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Variant info for `path` when its last segment is a registered *user*
@@ -1429,30 +1850,86 @@ impl PyEmitCtx {
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         match &node.kind {
-            NodeKind::Module { items, .. } => {
-                // Cross-module `use` (DV13) → single-file bundling: every
-                // module's top-level declarations are concatenated into the one
-                // entry file and `ImportDecl`s are dropped. Each runtime prelude
-                // is emitted at most once across the bundle, gated on a ctx flag.
-                if !self.optional_runtime_emitted && py_module_uses_optional(items) {
-                    self.buf.push_str(OPTIONAL_RUNTIME_PY);
-                    self.buf.push('\n');
-                    self.optional_runtime_emitted = true;
+            NodeKind::Module { items, imports, .. } => {
+                if self.per_module {
+                    // Per-module native-import path (Python S1): each module is
+                    // emitted to its own file and the shared runtime preludes
+                    // live in `_bock_runtime.py`. Record which prelude names
+                    // this module references; `finish` emits the single
+                    // `from _bock_runtime import *` line. The structural scans
+                    // are the same ones the bundling path uses to decide whether
+                    // to inline a prelude.
+                    if py_module_uses_optional(items) {
+                        self.needs_runtime_optional = true;
+                    }
+                    if py_module_uses_result(items) {
+                        self.needs_runtime_result = true;
+                    }
+                    if py_module_uses_ordering(items) {
+                        self.needs_runtime_ordering = true;
+                    }
+                    if py_module_uses_concurrency(items) {
+                        self.needs_runtime_concurrency = true;
+                    }
+                } else {
+                    // Cross-module `use` (DV13) → single-file bundling: every
+                    // module's top-level declarations are concatenated into the
+                    // one entry file and `ImportDecl`s are dropped. Each runtime
+                    // prelude is emitted at most once across the bundle, gated on
+                    // a ctx flag.
+                    if !self.optional_runtime_emitted && py_module_uses_optional(items) {
+                        self.buf.push_str(OPTIONAL_RUNTIME_PY);
+                        self.buf.push('\n');
+                        self.optional_runtime_emitted = true;
+                    }
+                    if !self.result_runtime_emitted && py_module_uses_result(items) {
+                        self.buf.push_str(RESULT_RUNTIME_PY);
+                        self.buf.push('\n');
+                        self.result_runtime_emitted = true;
+                    }
+                    if !self.ordering_runtime_emitted && py_module_uses_ordering(items) {
+                        self.buf.push_str(ORDERING_RUNTIME_PY);
+                        self.buf.push('\n');
+                        self.ordering_runtime_emitted = true;
+                    }
+                    if !self.concurrency_runtime_emitted && py_module_uses_concurrency(items) {
+                        self.buf.push_str(CONCURRENCY_RUNTIME_PY);
+                        self.buf.push('\n');
+                        self.concurrency_runtime_emitted = true;
+                    }
                 }
-                if !self.result_runtime_emitted && py_module_uses_result(items) {
-                    self.buf.push_str(RESULT_RUNTIME_PY);
-                    self.buf.push('\n');
-                    self.result_runtime_emitted = true;
-                }
-                if !self.ordering_runtime_emitted && py_module_uses_ordering(items) {
-                    self.buf.push_str(ORDERING_RUNTIME_PY);
-                    self.buf.push('\n');
-                    self.ordering_runtime_emitted = true;
-                }
-                if !self.concurrency_runtime_emitted && py_module_uses_concurrency(items) {
-                    self.buf.push_str(CONCURRENCY_RUNTIME_PY);
-                    self.buf.push('\n');
-                    self.concurrency_runtime_emitted = true;
+                // Per-module path: emit the module's cross-module imports as
+                // real Python `from <module> import …` statements at the top of
+                // the body (the runtime-prelude import is emitted into the
+                // preamble by `finish`). Bundling drops these (the imported
+                // declarations are concatenated into the same file instead).
+                if self.per_module {
+                    for import in imports {
+                        self.emit_node(import)?;
+                    }
+                    // Implicit imports: prelude-visible names this module
+                    // references but does not explicitly `use` (e.g. a base
+                    // trait). Grouped per declaring module for one import line
+                    // each, in deterministic (sorted) order.
+                    let mut by_module: std::collections::BTreeMap<String, Vec<String>> =
+                        std::collections::BTreeMap::new();
+                    for (module_path, name) in &self.implicit_imports {
+                        by_module
+                            .entry(module_path.clone())
+                            .or_default()
+                            .push(name.clone());
+                    }
+                    let import_lines: Vec<String> = by_module
+                        .into_iter()
+                        .map(|(module_path, mut names)| {
+                            names.sort_unstable();
+                            names.dedup();
+                            format!("from {module_path} import {}", names.join(", "))
+                        })
+                        .collect();
+                    for line in import_lines {
+                        self.writeln(&line);
+                    }
                 }
                 // Pre-scan impl blocks so we can attach their methods to the
                 // target record/class body instead of leaving them as orphan
@@ -1496,12 +1973,58 @@ impl PyEmitCtx {
                 }
                 Ok(())
             }
-            NodeKind::ImportDecl { .. } => {
-                // Resolved by bundling — the imported module's declarations are
-                // concatenated into this same file — so the import is a no-op
-                // (DV13). A real `from core.compare import ...` would fail at
-                // run time: that module is not on `sys.path` for a lone
-                // `main.py`, which is exactly the defect bundling fixes.
+            NodeKind::ImportDecl { path, items } => {
+                if !self.per_module {
+                    // Resolved by bundling — the imported module's declarations
+                    // are concatenated into this same file — so the import is a
+                    // no-op (DV13). A real `from core.compare import ...` would
+                    // fail at run time: that module is not on `sys.path` for a
+                    // lone `main.py`, which is exactly the defect bundling fixes.
+                    return Ok(());
+                }
+                // Per-module native-import path (Python S1): emit a real Python
+                // import. The module path's dotted form is both the on-disk
+                // package path (`core.option` ⇒ `core/option.py`, emitted by
+                // `generate_project`) and the import path, so this resolves when
+                // the entry is run from the build root (Python adds the script's
+                // dir to `sys.path`, and `core` resolves as a PEP 420 namespace
+                // package).
+                let module_path = path
+                    .segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if module_path.is_empty() {
+                    return Ok(());
+                }
+                match items {
+                    bock_ast::ImportItems::Named(names) => {
+                        let rendered: Vec<String> = names
+                            .iter()
+                            .map(|n| match &n.alias {
+                                Some(alias) => format!("{} as {}", n.name.name, alias.name),
+                                None => n.name.name.clone(),
+                            })
+                            .collect();
+                        if rendered.is_empty() {
+                            self.writeln(&format!("import {module_path}"));
+                        } else {
+                            self.writeln(&format!(
+                                "from {module_path} import {}",
+                                rendered.join(", ")
+                            ));
+                        }
+                    }
+                    bock_ast::ImportItems::Glob => {
+                        self.writeln(&format!("from {module_path} import *"));
+                    }
+                    bock_ast::ImportItems::Module => {
+                        // `use Foo` brings the module's exported names into
+                        // scope unqualified in Bock; a `*` import mirrors that.
+                        self.writeln(&format!("from {module_path} import *"));
+                    }
+                }
                 Ok(())
             }
             NodeKind::FnDecl {
@@ -4010,6 +4533,183 @@ mod tests {
         let m = module(vec![], vec![]);
         let out = gen(&m);
         assert_eq!(out, "");
+    }
+
+    /// A module node with a declared dotted `path` (e.g. `core.option`), used
+    /// by the per-module emission tests where the file layout and import path
+    /// are keyed on the declared module-path.
+    fn module_with_path(path: &[&str], imports: Vec<AIRNode>, items: Vec<AIRNode>) -> AIRNode {
+        node(
+            0,
+            NodeKind::Module {
+                path: Some(bock_ast::ModulePath {
+                    segments: path.iter().map(|s| ident(s)).collect(),
+                    span: span(),
+                }),
+                annotations: vec![],
+                imports,
+                items,
+            },
+        )
+    }
+
+    /// An `import <path>.{ name }` AIR node (a `Named` single-item import).
+    fn import_named(id: u32, path: &[&str], name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::ImportDecl {
+                path: bock_ast::ModulePath {
+                    segments: path.iter().map(|s| ident(s)).collect(),
+                    span: span(),
+                },
+                items: bock_ast::ImportItems::Named(vec![bock_ast::ImportedName {
+                    span: span(),
+                    name: ident(name),
+                    alias: None,
+                }]),
+            },
+        )
+    }
+
+    /// A bare `fn <name>() -> <ret? expr>` declaration with the given visibility
+    /// and a single tail expression as its body.
+    fn fn_decl_tail(id: u32, vis: Visibility, name: &str, tail: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: vis,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(id + 1, vec![], Some(tail))),
+            },
+        )
+    }
+
+    #[test]
+    fn per_module_emits_native_import_tree() {
+        // entry `module main` uses `mathutil.add_one`; `module mathutil` exports
+        // a `public fn add_one`. Per-module emission must produce TWO files —
+        // `main.py` (with a real `from mathutil import add_one`) and a separate
+        // `mathutil.py` — never a single bundled file.
+        let call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "add_one")),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(12, "6"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(5, &["mathutil"], "add_one")],
+            vec![fn_decl_tail(1, Visibility::Private, "main", call)],
+        );
+        let mathutil_mod = module_with_path(
+            &["mathutil"],
+            vec![],
+            vec![fn_decl_tail(
+                20,
+                Visibility::Public,
+                "add_one",
+                int_lit(22, "7"),
+            )],
+        );
+
+        let gen = PyGenerator::new();
+        let main_path = std::path::Path::new("src/main.bock");
+        let util_path = std::path::Path::new("src/mathutil.bock");
+        let out = gen
+            .generate_project(&[(&main_mod, main_path), (&mathutil_mod, util_path)])
+            .unwrap();
+
+        // Two module files (no shared runtime needed here).
+        let by_name = |p: &str| {
+            out.files
+                .iter()
+                .find(|f| f.path == std::path::Path::new(p))
+        };
+        let main_file = by_name("main.py").expect("main.py emitted");
+        let util_file = by_name("mathutil.py").expect("mathutil.py emitted");
+        assert!(
+            main_file.content.contains("from mathutil import add_one"),
+            "main.py must import from the sibling module; got:\n{}",
+            main_file.content
+        );
+        assert!(
+            main_file.content.contains("if __name__ == \"__main__\":"),
+            "main.py must carry the entry invocation; got:\n{}",
+            main_file.content
+        );
+        assert!(
+            util_file.content.contains("def add_one():"),
+            "mathutil.py must carry the exported fn; got:\n{}",
+            util_file.content
+        );
+        // The bundling no-op import comment must NOT appear (real import only).
+        assert!(
+            !main_file.content.contains("# import"),
+            "per-module path emits a real import, not a comment"
+        );
+    }
+
+    #[test]
+    fn per_module_shares_optional_runtime() {
+        // Two modules both referencing `None` must share ONE `_bock_runtime.py`
+        // (so `_bock_none` is the same object across files) and import it.
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(5, &["other"], "thing")],
+            vec![fn_decl_tail(
+                1,
+                Visibility::Private,
+                "main",
+                id_node(12, "None"),
+            )],
+        );
+        let other_mod = module_with_path(
+            &["other"],
+            vec![],
+            vec![fn_decl_tail(
+                20,
+                Visibility::Public,
+                "thing",
+                id_node(22, "None"),
+            )],
+        );
+        let gen = PyGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&other_mod, std::path::Path::new("src/other.bock")),
+            ])
+            .unwrap();
+        let runtime = out
+            .files
+            .iter()
+            .find(|f| f.path == std::path::Path::new("_bock_runtime.py"))
+            .expect("_bock_runtime.py emitted once");
+        assert!(runtime.content.contains("class _BockNone:"), "got runtime");
+        assert!(
+            runtime.content.contains("__all__") && runtime.content.contains("\"_bock_none\""),
+            "runtime must export underscore names via __all__; got:\n{}",
+            runtime.content
+        );
+        // Every consuming module imports the shared runtime.
+        let importers = out
+            .files
+            .iter()
+            .filter(|f| f.content.contains("from _bock_runtime import *"))
+            .count();
+        assert_eq!(importers, 2, "both modules import the shared runtime");
     }
 
     #[test]

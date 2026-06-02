@@ -48,6 +48,27 @@ fn entry_extension(target: &str) -> &'static str {
 /// Stable ordering of the v1 targets for deterministic reporting.
 const TARGET_ORDER: &[&str] = &["js", "ts", "python", "rust", "go"];
 
+/// Whether `target` emits a **per-module native import tree** rather than a
+/// single bundled `main.<ext>`.
+///
+/// Per the per-module-output milestone (DQ19 resolved), a cross-module program
+/// compiles to one target file per reached module, wired with the target's
+/// native imports, and runs through the target's normal runner from the build
+/// root. The migration is target-by-target: **S1 migrates Python only**; the
+/// other four targets still bundle every reached module into one entry file
+/// (and the harness runs that single file). As each target's native-import
+/// path lands (S2 js/ts, S3 rust/go), it is added here.
+///
+/// Functionally the *run* is the same either way — `ToolchainRegistry::run`
+/// already runs the entry (`main.<ext>`) with the build directory as the
+/// current directory, so a per-module tree's sibling files (`core/option.py`,
+/// `_bock_runtime.py`, …) resolve as imports relative to that root. The
+/// predicate exists so the harness can additionally assert the per-module
+/// *shape* for migrated targets and document the staged cutover.
+fn emits_per_module_tree(target: &str) -> bool {
+    matches!(target, "python")
+}
+
 /// Locate the compiled `bock` CLI binary.
 ///
 /// `cargo test --workspace` builds every workspace binary, so the binary is
@@ -170,6 +191,39 @@ fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
         entry.display(),
         case.name,
     );
+
+    // Migrated (per-module-tree) targets: a multi-file fixture — one that ships
+    // an auxiliary `.bock` module via a `// FILE:` marker — must emit a real
+    // import tree, i.e. at least one sibling module file *in addition to* the
+    // entry `main.<ext>`. (A program that only uses the embedded `core.*`
+    // stdlib also emits sibling files, but those live under `core/`; an aux
+    // module guarantees a deterministic sibling regardless of stdlib layout.)
+    // Bundling targets, by contrast, collapse everything into the single entry
+    // file — so this shape check is gated on the predicate.
+    if emits_per_module_tree(target) && !case.aux_files.is_empty() {
+        let ext = entry_extension(target);
+        let mut sibling_count = 0usize;
+        let mut walk = vec![build_dir.clone()];
+        while let Some(dir) = walk.pop() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk.push(p);
+                    } else if p.extension().and_then(|s| s.to_str()) == Some(ext) && p != entry {
+                        sibling_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            sibling_count > 0,
+            "fixture `{}` is multi-file but target `{target}` (per-module tree) \
+             emitted only `main.{ext}` — expected sibling module files",
+            case.name,
+        );
+    }
+
     build_dir
 }
 
