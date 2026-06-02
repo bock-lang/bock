@@ -11,10 +11,25 @@
 //! on the host, the harness:
 //!
 //! 1. writes the fixture source into an isolated temp project,
-//! 2. runs `bock build -t <target> --source-only` to emit target source,
-//! 3. executes the emitted `main.<ext>` via the target's run plan
+//! 2. runs `bock build -t <target>` in **project mode** (the default — no
+//!    `--source-only`) to emit the per-module source tree *plus* the
+//!    scaffolder's run-affordance manifest (`Cargo.toml` / `go.mod` /
+//!    `package.json`), making the output runnable in the target toolchain,
+//! 3. executes the emitted entry via the target's run plan
 //!    ([`ToolchainRegistry::run`]), and
 //! 4. asserts the trimmed stdout equals the expected output.
+//!
+//! Project mode (rather than `--source-only`) is what the harness exercises so
+//! the scaffolder's manifest output — the thing that makes the per-module tree
+//! actually run — is on the tested path (S6a, DV18). `bock build` in project
+//! mode also validates the output via the target toolchain (`cargo check` /
+//! `go build` / per-file `node --check` / `tsc --noEmit` / `py_compile`) before
+//! the harness runs it; for rust/go that is a redundant compile with the
+//! subsequent `cargo run` / `go run .`, but cargo/go reuse their build caches so
+//! the cost is a warm rebuild, and the build→run path stays coherent. When a
+//! target's toolchain is absent, `bock build` only warns (compilation skipped),
+//! so the manifest is still written and the absent-toolchain target is skipped
+//! at the run step below.
 //!
 //! Targets whose toolchain is **absent** are *skipped* (recorded and printed),
 //! not failed — so a developer without, say, Go installed still gets a green
@@ -64,17 +79,21 @@ const TARGET_ORDER: &[&str] = &["js", "ts", "python", "rust", "go"];
 // Per the per-module-output milestone (DQ19 resolved), every v1 target emits a
 // **per-module native import tree** — one target file per reached module, wired
 // with the target's native imports/modules — and runs through the target's
-// normal runner from the build root (`ToolchainRegistry::run`'s `workdir`):
+// normal runner from the build root (`ToolchainRegistry::run`'s `workdir`). In
+// project mode (which this harness now builds — S6a / DV18) the run-affordance
+// manifest is emitted by the per-target *scaffolder*, not codegen:
 // - **python** — `python3 main.py`; sibling files (`core/option.py`,
 //   `_bock_runtime.py`) resolve as package imports (`core` is a PEP 420
-//   namespace package).
+//   namespace package). No manifest needed.
 // - **js / ts** — `node main.js` (ts first `tsc main.ts`); a minimal
-//   `package.json` `{"type":"module"}` makes Node treat the `.js` tree as ESM,
-//   and the emitted `import … from "./core/option.js"` resolve relatively.
-// - **rust** — `cargo run` over the emitted Cargo crate (`Cargo.toml` +
-//   `src/main.rs` + the `src/<module>.rs` tree wired with `mod`/`use crate::…`).
-// - **go** — `go run .` over the emitted Go module (`go.mod` + the flat
-//   per-module `.go` files in one `package main`, plus a shared
+//   `package.json` `{"type":"module"}` (scaffolder) makes Node treat the `.js`
+//   tree as ESM, and the emitted `import … from "./core/option.js"` resolve
+//   relatively.
+// - **rust** — `cargo run` over the emitted Cargo crate (`Cargo.toml`
+//   (scaffolder) + `src/main.rs` + the `src/<module>.rs` tree wired with
+//   `mod`/`use crate::…`).
+// - **go** — `go run .` over the emitted Go module (`go.mod` (scaffolder) + the
+//   flat per-module `.go` files in one `package main`, plus a shared
 //   `bock_runtime.go`).
 
 /// Locate the compiled `bock` CLI binary.
@@ -177,9 +196,15 @@ fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
         std::fs::write(&dest, content).expect("write aux fixture source");
     }
 
+    // Project mode (no `--source-only`): emit the per-module source tree plus
+    // the scaffolder's run-affordance manifest, so the output is runnable in the
+    // target toolchain (S6a, DV18). `run_one` has already confirmed the target's
+    // toolchain is present before calling here (skip-if-absent), so the
+    // in-build toolchain validation (`cargo check` / `go build` / `node --check`
+    // / `tsc --noEmit` / `py_compile`) runs and must succeed.
     let output = Command::new(bock_binary())
         .current_dir(project_dir)
-        .args(["build", "-t", target, "--source-only"])
+        .args(["build", "-t", target])
         .output()
         .expect("failed to spawn bock build");
 
@@ -215,6 +240,15 @@ fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
                 for e in entries.flatten() {
                     let p = e.path();
                     if p.is_dir() {
+                        // Skip target-toolchain build artifacts that project-mode
+                        // `bock build` leaves behind (cargo's `target/`, node's
+                        // `node_modules/`): they are not part of the emitted
+                        // per-module source tree and would otherwise inflate the
+                        // sibling count with dependency sources.
+                        let name = p.file_name().and_then(|s| s.to_str());
+                        if matches!(name, Some("target" | "node_modules")) {
+                            continue;
+                        }
                         walk.push(p);
                     } else if p.extension().and_then(|s| s.to_str()) == Some(ext) && p != entry {
                         sibling_count += 1;

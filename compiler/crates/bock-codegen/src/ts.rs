@@ -211,9 +211,11 @@ impl CodeGenerator for TsGenerator {
     /// references resolved with real ESM `import`/`import type`. Mirrors the JS
     /// backend's per-module path (see [`crate::js`]) plus TS's type level:
     /// Optional/Result runtime *types* and concurrency/range runtime *helpers*
-    /// are emitted once into a shared `_bock_runtime.ts`, imported per file; a
-    /// minimal `package.json` `{"type":"module"}` is emitted at the build root so
-    /// the `tsc`-emitted `.js` tree runs under `node`.
+    /// are emitted once into a shared `_bock_runtime.ts`, imported per file. The
+    /// minimal `package.json` `{"type":"module"}` run affordance — which makes
+    /// the `tsc`-emitted `.js` tree run under `node` — is emitted by the
+    /// **scaffolder** in project mode (S6a / DV18), not by codegen, so
+    /// `--source-only` output is bare source.
     ///
     /// Output-path mapping is keyed on each module's *declared* path
     /// (`module core.option` ⇒ `core/option.ts`, imported `"./core/option.js"` —
@@ -339,14 +341,12 @@ impl CodeGenerator for TsGenerator {
             });
         }
 
-        // Minimal run affordance: `package.json` `{"type":"module"}` at the
-        // build root so the `tsc`-emitted `.js` tree runs as ES modules under
-        // `node main.js` (the TS run plan is `tsc main.ts && node main.js`).
-        files.push(OutputFile {
-            path: PathBuf::from("package.json"),
-            content: "{\n  \"type\": \"module\"\n}\n".to_string(),
-            source_map: None,
-        });
+        // Run-affordance emission moved to the project-mode scaffolder (S6a /
+        // DV18): codegen emits only the per-module `.ts` *source* tree in all
+        // modes; the `package.json` `{"type":"module"}` run affordance — which
+        // makes the `tsc`-emitted `.js` tree run as ES modules under `node
+        // main.js` — is emitted by `JsScaffolder` (shared js/ts) in project mode
+        // only (never under `--source-only`). See `scaffold.rs`.
 
         Ok(GeneratedCode { files })
     }
@@ -4795,8 +4795,9 @@ mod tests {
     fn per_module_emits_native_esm_import_tree_ts() {
         // entry `module main` uses `mathutil.add_one`; emission must produce
         // `main.ts` (with `import { addOne } from "./mathutil.js"` — the relative
-        // specifier references the *emitted* `.js`), `mathutil.ts`, and a
-        // `package.json` run affordance.
+        // specifier references the *emitted* `.js`) and `mathutil.ts`. The
+        // `package.json` run affordance is emitted by the scaffolder (project
+        // mode), NOT codegen (S6a / DV18).
         let call = node(
             10,
             NodeKind::Call {
@@ -4834,7 +4835,12 @@ mod tests {
         let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
         let main_file = by_name("main.ts").expect("main.ts emitted");
         let util_file = by_name("mathutil.ts").expect("mathutil.ts emitted");
-        by_name("package.json").expect("package.json run affordance emitted");
+        // Codegen no longer emits the run affordance (S6a / DV18) — the
+        // scaffolder owns the `package.json` in project mode.
+        assert!(
+            by_name("package.json").is_none(),
+            "codegen must NOT emit package.json — the scaffolder owns it (S6a)"
+        );
         assert!(
             main_file
                 .content
