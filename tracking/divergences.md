@@ -148,6 +148,15 @@ status(open | resolved→link)`
   native tools (§20.4), not shipped" (one-line spec clarification; no behavior change; the impl is correct). Surfaced
   by the core.test build (#169 changelog). Non-blocking (v1 stdlib is complete). · **Status:** OPEN.
 
+### DV18 — source mode emits run-affordance manifests, but §20.6.2 says source mode emits none
+- **§:** §20.6.2 · **impl-does:** `--source-only` still emits the run-affordance manifests (`Cargo.toml`, `go.mod`,
+  `package.json {"type":"module"}`) because codegen emits them in ALL modes — needed so the per-module tree is runnable
+  and so the conformance harness (which builds `--source-only` then runs `cargo run`/`go run .`) works. §20.6.2 source
+  mode is "no manifests, scaffolding, or entry-point wiring." · **Classification:** gap (transitional) · **Disposition:**
+  planned resolution in **S6/S7** — migrate the conformance harness to **project-mode** builds (the mode that legitimately
+  carries manifests + transpiled tests), letting source mode become truly bare. Surfaced by S5 (#188); the S5 project-mode
+  scaffolding pass is correctly project-mode-only. Non-blocking (425/0 green). · **Status:** OPEN → ItemB S6/S7.
+
 ---
 
 ## Resolved (this session / spec-revision — kept for traceability)

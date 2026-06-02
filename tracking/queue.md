@@ -12,12 +12,13 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-02 vs main 8532e79 (**MS-projectmode S1–S4 DONE [#182/#184/#185/#186] → DV13 CLOSED** —
-all 5 targets now emit per-module native-import trees as the sole path + run as multi-file projects; bundling code
-retired; 425 exec pairs / 0 failed REQUIRE=all. S0 [#181] reconciled spec [DQ19→per-module; config tables→v1] +
-tracking. **Next = S5 (scaffolding framework + config parsing); operator pre-S5 checkpoint pending.** FOUND →
-Q-go-error-message [pre-existing go core.error bug]. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`.
-— 2 owner decisions 2026-06-02 [eyes-open]: per-module is the v1 output [re-opened DV13]; config tables → v1. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
+_Last reconciled: 2026-06-02 vs main 264e11e (**MS-projectmode S1–S5 DONE [#182/#184/#185/#186/#188]** — S1–S4
+→ DV13 CLOSED [all 5 targets emit per-module native trees, sole path; bundling retired]; S5 [#188] added the
+project-mode scaffolding framework + `bock.project` config-table parsing/validation [per-target bodies stubbed].
+425 exec pairs / 0 failed REQUIRE=all. **Next = S6 (per-target scaffolders + deep-config branches); operator
+pre-S6 checkpoint pending.** OPEN → **DV18** [source-mode manifest boundary, S6/S7 resolves]; ready bug
+Q-go-error-message. Also cleared dependabot #178/#179/#180 (dev-dep bumps; 0 security alerts). Plan:
+`plans/2026-06-02-itemB-per-module-projectmode-plan.md`. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
 [#175]**; **Q-r2-codegen-residue (c) builtin-vs-user-method shadowing [#176, ×5]** + pinned Q-go-list-literal /
 Q-r2-(b) / Q-ts-generic-impl (verified already-fixed). New FOUND triaged: Q-allcaps-record-parse (parser),
 Q-arch-doc-drift (ARCHITECTURE.md/compiler-CLAUDE.md/CONTRIBUTING.md crate-name drift). Q-match-exprpos still
@@ -218,7 +219,7 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `docs/src/language/` · blocked-by: (D2-FOUND mostly resolved — verify)
   · note: most D2-FOUND rows resolved per spec revision; confirm residue.
 - **[ItemB] Per-module output + project-mode codegen + config tables** — impl · **IN FLIGHT (milestone
-  MS-projectmode, v1-BLOCKING; S1–S4 DONE [#182/#184/#185/#186] → DV13 CLOSED; next = S5 scaffolding)** ·
+  MS-projectmode, v1-BLOCKING; S1–S5 DONE [#182/#184/#185/#186/#188] → DV13 CLOSED; next = S6 per-target scaffolders)** ·
   `compiler/crates/bock-codegen/`,
   `bock-cli/src/build.rs`, `bock-build/src/toolchain.rs`, `compiler/tests/execution.rs` · — · links #28, #132,
   DV13, DQ19, MS-projectmode · plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md` · note: **v1.0's last
@@ -243,10 +244,16 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
     `go::generate_bundle`, the always-true `emits_per_module_tree` predicate; ~170 net lines). KEPT (load-bearing,
     NOT bundling): the single-module self-contained emit (`generate_module` + `per_module` flag) used by ~250 unit
     tests — reframed terminology. **All 5 targets now emit per-module native trees as the sole path.**
-  - **S5** — scaffolding framework + `bock.project` config parsing · **READY (dispatch next — pre-S5 operator
-    checkpoint per pacing decision)** · was blocked-by S4.
-  - **S6** — per-target scaffolders + deep-config branches (Vitest|Jest, Black|Ruff…) · blocked-by S5. NOTE: fold
-    in the leftover single-module-emit-path cleanup if it eases per-target rework.
+  - **S5** — scaffolding framework + `bock.project` config parsing. **DONE → #188** — `Scaffolder` trait in
+    `bock-codegen/src/scaffold.rs`; project-mode hook in `build.rs` gated on `!source_only`; `[targets.<T>]` /
+    `[targets.<T>.scaffolding]` parsing + validation against the §20.6.2 v1 matrix (unknown value → error naming
+    options; 26 unit tests); per-target bodies STUBBED (placeholder README) for S6. Flagged **DV18** (below).
+  - **S6** — per-target scaffolders + deep-config branches (Vitest|Jest, Black|Ruff…) · **READY (dispatch next —
+    pre-S6 operator checkpoint per pacing decision)** · was blocked-by S5. SCOPE: fill the stubbed `Scaffolder`
+    bodies ×5 (real manifests, formatter/linter configs, package-manager README) + deep-config codegen branches +
+    target-appropriate defaults; **resolve DV18** (migrate the conformance harness to project-mode builds so source
+    mode can drop manifests); fold in **Q-go-error-message** (go core.error fix) + the leftover single-module-emit
+    cleanup if they ease the per-target rework.
   - **S7** — transpiled tests + formatter-clean gate · blocked-by S6.
   - **S8** — internal docs + close · blocked-by S7.
   INVARIANT every PR: `run-conformance.sh REQUIRE=all` stays green (now **425/425**). `--deliverable`/`--no-tests`

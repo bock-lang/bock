@@ -92,11 +92,11 @@ spec/tracking reconcile (this entry) → S1 native imports + harness multi-file 
 S3 rust/go (with minimal manifest — those targets can't run multi-file without it) → S4 flip default + retire
 bundling (**DV13 CLOSED**) → S5 scaffolding framework + `bock.project` config parsing → S6 per-target scaffolders
 + deep-config branches (Vitest|Jest, Black|Ruff…) → S7 transpiled tests + formatter-clean gate → S8 internal docs.
-**Progress:** **S0–S4 DONE → DV13 CLOSED.** S0 #181 (spec/tracking reconcile); S1 #182 (python pilot); S2 #184
-(js/ts ESM); S3 #185 (rust cargo + go module + manifests, run-plans reworked); S4 #186 (retired dead bundling —
-per-module is the sole output path on all 5; 425 exec pairs / 0 failed). **Next = S5 (scaffolding framework +
-`bock.project` config parsing); operator pre-S5 checkpoint pending.** **Invariant:** `run-conformance.sh
-REQUIRE=all` stays green every PR (now 425/425). FOUND → Q-go-error-message (pre-existing go core.error bug, off
-critical path). ~20–30 PRs (S5–S8 remain). **Still v1.x:** `--deliverable`,
+**Progress:** **S0–S5 DONE.** S0–S4 → **DV13 CLOSED** (#181/#182/#184/#185/#186 — all 5 emit per-module native
+trees, sole path; bundling retired). S5 #188 — project-mode scaffolding framework (`Scaffolder` trait + build hook,
+project-mode-only) + `bock.project` config-table parsing/validation (per-target bodies stubbed for S6). 425/0.
+**Next = S6 (per-target scaffolders + deep-config branches: Vitest|Jest, Black|Ruff…; resolve DV18; fold in
+Q-go-error-message); operator pre-S6 checkpoint pending.** **Invariant:** `run-conformance.sh REQUIRE=all` stays
+green every PR (425/425). OPEN → DV18 (source-mode manifest boundary). S6–S8 remain. **Still v1.x:** `--deliverable`,
 `--no-tests` (§20.1). External `/get-started` copy = **ItemD** (escalates). Links: ItemB, DV13, DQ19, §20.6.1/2,
 §20.7, changelogs `20260602-1608-per-module-output-dq19.md` + `20260602-1608-projectmode-config-tables-v1.md`.
