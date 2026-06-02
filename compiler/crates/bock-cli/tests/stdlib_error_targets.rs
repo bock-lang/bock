@@ -5,12 +5,14 @@
 //! embedded stdlib flows through codegen on every target. The emission *shape*
 //! depends on the target's migration state (per-module-output milestone, DQ19):
 //!
-//! - **Bundling targets (`js`/`ts`/`rust`/`go`):** the imported module is
-//!   concatenated into the single entry file `main.<ext>`, so that file carries
-//!   the `SimpleError` record (core.error's sole record).
-//! - **Per-module targets (`python`, migrated in S1):** each module is emitted
-//!   to its own file, so `SimpleError` lives in `core/error.py` and `main.py`
-//!   carries a real `from core.error import …` rather than the bundled record.
+//! - **Bundling targets (`rust`/`go`):** the imported module is concatenated
+//!   into the single entry file `main.<ext>`, so that file carries the
+//!   `SimpleError` record (core.error's sole record).
+//! - **Per-module targets (`python` in S1, `js`/`ts` in S2):** each module is
+//!   emitted to its own file, so `SimpleError` lives in `core/error.{py,js,ts}`
+//!   and the entry carries a real cross-module import (Python `from core.error
+//!   import …`; js/ts `import … from "./core/error.js"`) rather than the bundled
+//!   record.
 //!
 //! This is *compile* (source-emission) verification only. Full conformance
 //! *execution* across targets (running the emitted code through each target's
@@ -69,9 +71,32 @@ fn read_entry_bundle(build_dir: &Path, target: &str, ext: &str) -> Option<String
 }
 
 /// Whether `target` emits a per-module native import tree (vs. bundling). Kept
-/// in sync with the harness's `emits_per_module_tree`: S1 migrates `python`.
+/// in sync with the harness's `emits_per_module_tree`: S1 migrated `python`, S2
+/// adds `js`/`ts`.
 fn emits_per_module_tree(target: &str) -> bool {
-    matches!(target, "python")
+    matches!(target, "python" | "js" | "ts")
+}
+
+/// Assert the entry file carries a real cross-module import of `module` (the
+/// dotted declared path, e.g. `core.error`) in the per-module path, spelled the
+/// way the `target` emits it: Python `from core.error import …`; js/ts ESM
+/// `import … from "./core/error.js"` (the relative specifier always references
+/// the emitted `.js`, even for ts).
+fn assert_entry_imports_module(entry: &str, target: &str, module: &str) {
+    match target {
+        "python" => assert!(
+            entry.contains(&format!("from {module} import")),
+            "target {target}: entry must import from the {module} module file",
+        ),
+        "js" | "ts" => {
+            let rel = format!("./{}.js", module.replace('.', "/"));
+            assert!(
+                entry.contains("import ") && entry.contains(&rel),
+                "target {target}: entry must `import … from \"{rel}\"`",
+            );
+        }
+        other => panic!("assert_entry_imports_module: unexpected per-module target {other}"),
+    }
 }
 
 #[test]
@@ -116,10 +141,7 @@ fn core_error_compiles_on_every_target() {
             let entry = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
                 panic!("target {target}: no entry file build/{target}/main.{ext}")
             });
-            assert!(
-                entry.contains("from core.error import"),
-                "target {target}: entry must import from the core.error module file",
-            );
+            assert_entry_imports_module(&entry, target, "core.error");
         } else {
             // Bundling: the imported `core.error` is concatenated into the entry
             // file, so the `SimpleError` record must appear in `main.<ext>`.

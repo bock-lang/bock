@@ -69,6 +69,15 @@ fn js_module_uses_range(items: &[AIRNode]) -> bool {
     items.iter().any(|n| format!("{n:?}").contains("Range {"))
 }
 
+/// The shared per-module runtime module name (without extension). In the
+/// per-module (native-import) emission path the concurrency and range runtime
+/// helpers live in one file — `_bock_runtime.js` at the build root — and every
+/// emitted module imports the named helpers it references (`__bockChannelNew`,
+/// `range`, …). A single shared definition avoids redeclaring `const
+/// __bockChannelNew` / `const range` across files (a duplicate top-level
+/// `const` is a redeclaration error in an ES module).
+const RUNTIME_MODULE_JS: &str = "_bock_runtime";
+
 /// JavaScript code generator implementing the `CodeGenerator` trait.
 #[derive(Debug)]
 pub struct JsGenerator {
@@ -128,61 +137,199 @@ impl CodeGenerator for JsGenerator {
         }
     }
 
-    /// Bundle every module (stdlib + user, dependency-ordered) into one entry
-    /// file. JS has no module wrapper — top-level declarations live in one
-    /// scope — so concatenating each module's declarations is valid and makes a
-    /// cross-module `use` (DV13) resolve against the same file. `ImportDecl`s
-    /// are dropped during emission; the concurrency runtime is emitted once.
+    /// Emit a per-module **native ES-module import tree** (spec §20.6.1; DQ19
+    /// resolved): each module the entry program reaches through a real `use` is
+    /// emitted to its **own** `.js` file, and cross-module references resolve
+    /// through real ESM `import { … } from "./…"` rather than the single-file
+    /// bundling this replaces.
     ///
-    /// This diverges from spec §20.6.1 (one output file per module). See the
-    /// `OPEN: §20.6.1` note in the bundling PR.
+    /// Output-path mapping is keyed on each module's *declared* path, not its
+    /// on-disk source path, so the file layout and the import specifier agree:
+    /// `module core.option` ⇒ `core/option.js` and `import … from
+    /// "./core/option.js"`. The **entry** module (the one declaring `main`, else
+    /// the last in dependency order) is always emitted as `main.js` so the run
+    /// model is stable.
+    ///
+    /// To run under `node main.js`, the emitted tree is ESM (relative specifiers
+    /// carry `.js`, declarations use `export`), so a minimal `package.json`
+    /// `{"type":"module"}` is emitted at the build root — the bare run affordance
+    /// that makes Node treat the `.js` files as ES modules (full project-mode
+    /// scaffolding is a later milestone). The concurrency and range runtime
+    /// helpers are emitted **once** into a shared `_bock_runtime.js`
+    /// (see `RUNTIME_MODULE_JS`); every module that references one imports the
+    /// helpers it needs.
     fn generate_project(
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
-        // Bundle only modules the entry program actually `use`s (plus the entry
-        // itself) — never the prelude-only stdlib (see `reachable_modules`).
+        // Emit only modules the entry program actually `use`s (plus the entry
+        // itself), dependency-ordered — never the prelude-only stdlib.
         let reachable = crate::generator::reachable_modules(modules);
         let modules = reachable.as_slice();
-        let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
+        if modules.is_empty() {
             return Ok(GeneratedCode { files: vec![] });
-        };
-
-        let mut ctx = EmitCtx::new();
-        ctx.enum_variants = crate::generator::collect_enum_variants(modules);
-        ctx.trait_decls = crate::generator::collect_trait_decls(modules);
-        for (i, (module, _)) in modules.iter().enumerate() {
-            if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
-                ctx.buf.push('\n');
-            }
-            ctx.emit_node(module)?;
         }
-        let (mut content, mappings) = ctx.finish();
+
+        // The entry module names `main.js`; every other module is placed at the
+        // path mirrored from its declared module-path.
+        let entry_idx = modules
+            .iter()
+            .position(|(m, _)| crate::generator::module_declares_main_fn(m))
+            .unwrap_or(modules.len() - 1);
+
+        // Registries collected across the whole reachable set so a reference in
+        // one file to a type declared in another lowers identically to bundling.
+        let enum_variants = crate::generator::collect_enum_variants(modules);
+        let trait_decls = crate::generator::collect_trait_decls(modules);
+        let record_names = crate::generator::collect_record_names(modules);
+        let public_symbols = crate::generator::collect_public_symbols_for_esm(modules);
 
         let main_is_async = modules
             .iter()
             .any(|(m, _)| crate::generator::module_main_fn_is_async(m));
         let invocation = self.entry_invocation(main_is_async);
-        crate::generator::append_entry_invocation(&mut content, modules, invocation.as_ref());
 
-        let derived_name = out_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        let source_map = SourceMap {
-            generated_file: derived_name,
-            mappings,
-            ..Default::default()
-        };
-        Ok(GeneratedCode {
-            files: vec![OutputFile {
+        let mut files: Vec<OutputFile> = Vec::with_capacity(modules.len() + 2);
+        let mut runtime_concurrency = false;
+        let mut runtime_range = false;
+
+        for (i, (module, source_path)) in modules.iter().enumerate() {
+            let own_path = crate::generator::module_path_string(module).unwrap_or_default();
+            let mut ctx = EmitCtx::new();
+            ctx.per_module = true;
+            ctx.enum_variants = enum_variants.clone();
+            ctx.trait_decls = trait_decls.clone();
+            // Record names need the whole reachable set so a cross-module record
+            // construction (`use`d from another module) lowers to `new Name(...)`
+            // rather than a bare object literal that drops its prototype methods.
+            ctx.record_names = record_names.clone();
+            // Effect-op resolution needs the whole reachable set: a bare op in
+            // one module may belong to an effect declared in another.
+            ctx.seed_effect_registries(modules);
+            // The entry file is always `main.js` at the root, so it imports
+            // siblings as if it lived at the root regardless of its declared
+            // path — pass the empty self-path for the relative-specifier base.
+            ctx.self_module_path = if i == entry_idx {
+                String::new()
+            } else {
+                own_path.clone()
+            };
+            ctx.implicit_imports =
+                crate::generator::implicit_esm_imports_for(module, &public_symbols, &own_path);
+            ctx.public_symbols = public_symbols.clone();
+            ctx.export_names = crate::generator::exportable_value_names(module);
+            ctx.emit_node(module)?;
+            runtime_concurrency |= ctx.needs_runtime_concurrency;
+            runtime_range |= ctx.needs_runtime_range;
+            let (mut content, mappings) = ctx.finish();
+
+            // The entry file gets the `main()` invocation appended exactly once.
+            if i == entry_idx && crate::generator::module_declares_main_fn(module) {
+                if let Some(invoc) = invocation.as_ref() {
+                    if !content.is_empty() && !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                    content.push_str(invoc);
+                }
+            }
+
+            let out_path = self.module_output_path(module, source_path, i == entry_idx);
+            let generated_file = out_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            files.push(OutputFile {
                 path: out_path,
                 content,
-                source_map: Some(source_map),
-            }],
-        })
+                source_map: Some(SourceMap {
+                    generated_file,
+                    mappings,
+                    ..Default::default()
+                }),
+            });
+        }
+
+        // Shared runtime module with exactly the helpers referenced, each
+        // `export`ed so consuming modules can `import { … }` them.
+        if runtime_concurrency || runtime_range {
+            let mut content = String::new();
+            if runtime_concurrency {
+                content.push_str(&export_runtime_consts(CONCURRENCY_RUNTIME_JS));
+                content.push('\n');
+            }
+            if runtime_range {
+                content.push_str(&export_runtime_consts(RANGE_RUNTIME_JS));
+                content.push('\n');
+            }
+            files.push(OutputFile {
+                path: PathBuf::from(format!("{RUNTIME_MODULE_JS}.js")),
+                content,
+                source_map: Some(SourceMap {
+                    generated_file: format!("{RUNTIME_MODULE_JS}.js"),
+                    ..Default::default()
+                }),
+            });
+        }
+
+        // Minimal run affordance: `package.json` `{"type":"module"}` at the
+        // build root so `node main.js` resolves the `.js` tree as ES modules.
+        files.push(OutputFile {
+            path: PathBuf::from("package.json"),
+            content: "{\n  \"type\": \"module\"\n}\n".to_string(),
+            source_map: None,
+        });
+
+        Ok(GeneratedCode { files })
     }
+}
+
+impl JsGenerator {
+    /// Output path for one module in the per-module native-import tree.
+    ///
+    /// The entry module is always `main.js` (mirrored from its source path) so
+    /// the run model `node main.js` is stable. Every other module is placed at
+    /// the path mirrored from its **declared** module-path so the file location
+    /// and the relative import specifier agree:
+    /// `module core.option` ⇒ `core/option.js`. A module without a declared path
+    /// falls back to its source-mirrored path.
+    fn module_output_path(
+        &self,
+        module: &AIRModule,
+        source_path: &std::path::Path,
+        is_entry: bool,
+    ) -> PathBuf {
+        if is_entry {
+            return crate::generator::derive_output_path(source_path, self.target());
+        }
+        match crate::generator::module_path_string(module) {
+            Some(path) if !path.is_empty() => {
+                let rel: PathBuf = path.split('.').collect();
+                rel.with_extension(&self.target().conventions.file_extension)
+            }
+            _ => crate::generator::derive_output_path(source_path, self.target()),
+        }
+    }
+}
+
+/// Rewrite a runtime-prelude string (a sequence of top-level `const NAME = …`
+/// definitions, see [`CONCURRENCY_RUNTIME_JS`] / [`RANGE_RUNTIME_JS`]) so each
+/// top-level `const` becomes an `export const`. Used to build the shared
+/// `_bock_runtime.js`, whose helpers consuming modules import by name. Only
+/// lines that *begin* a top-level `const` (column 0) are rewritten; nested
+/// `const`s inside a helper body are indented and so left untouched.
+fn export_runtime_consts(runtime: &str) -> String {
+    runtime
+        .lines()
+        .map(|line| {
+            if let Some(rest) = line.strip_prefix("const ") {
+                format!("export const {rest}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ─── Emission context ────────────────────────────────────────────────────────
@@ -253,6 +400,42 @@ struct EmitCtx {
     /// a type relying on an inherited default would otherwise have no such
     /// method. Pre-scanned across the bundle (mirrors [`Self::enum_variants`]).
     trait_decls: crate::generator::TraitDeclRegistry,
+    /// True in the **per-module native-import** emission path (S2). When set, the
+    /// `Module` arm emits real ESM `import { … } from "./…"` for cross-module
+    /// references, records which shared-runtime helpers the module needs (instead
+    /// of inlining them), and a trailing `export { … }` re-exports the module's
+    /// public non-function declarations (functions export inline). When clear,
+    /// the legacy single-file bundling behaviour is used.
+    per_module: bool,
+    /// In the per-module path, records that this module references the
+    /// concurrency runtime (`Channel`/`spawn`) — so `generate_project` emits the
+    /// concurrency helpers into the shared `_bock_runtime.js` and this module
+    /// imports the names it needs from it (rather than inlining the prelude,
+    /// which would redeclare `const __bockChannelNew` across files).
+    needs_runtime_concurrency: bool,
+    /// As [`Self::needs_runtime_concurrency`], for the range runtime
+    /// (`range`/`rangeInclusive`).
+    needs_runtime_range: bool,
+    /// Implicit cross-module imports for the per-module path — names this module
+    /// references but neither declares locally nor imports via an explicit `use`
+    /// (e.g. a §18.2-prelude trait used as a base in an `impl`). Computed in
+    /// `generate_project`; emitted as ESM imports by the `Module` arm.
+    implicit_imports: Vec<crate::generator::ImplicitEsmImport>,
+    /// Map of every reachable public symbol → its declaring module + kind, used
+    /// to spell an explicit `use`d name the way its declaration emits it (a
+    /// function is camelCased; other kinds keep their raw name).
+    public_symbols: HashMap<String, crate::generator::EsmSymbol>,
+    /// The declared dotted module-path of the file currently being emitted
+    /// (`core.option`), or empty for the entry file (always `main.js` at the
+    /// build root). Drives the relative-specifier computation for every emitted
+    /// `import`.
+    self_module_path: String,
+    /// Public, exportable value declarations this module declares — listed in
+    /// the trailing `export { … }` of the per-module file. Functions are skipped
+    /// there (they export inline via `emit_fn_decl`); every other kind (records,
+    /// enums + variants, traits, classes, effects, consts) is re-exported.
+    /// Computed in `generate_project`.
+    export_names: Vec<crate::generator::EsmExport>,
 }
 
 impl EmitCtx {
@@ -278,6 +461,13 @@ impl EmitCtx {
             range_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
+            per_module: false,
+            needs_runtime_concurrency: false,
+            needs_runtime_range: false,
+            implicit_imports: Vec::new(),
+            public_symbols: HashMap::new(),
+            self_module_path: String::new(),
+            export_names: Vec::new(),
         }
     }
 
@@ -308,6 +498,223 @@ impl EmitCtx {
 
     fn finish(self) -> (String, Vec<SourceMapping>) {
         (self.buf, self.mappings)
+    }
+
+    /// Pre-seed the effect registries (`effect_ops`, `composite_effects`) from
+    /// every module's top-level `EffectDecl`s. In the single-file bundling path
+    /// these are populated as each module body is emitted (dependency order, so
+    /// the effect's declaration precedes its use). In the per-module path each
+    /// module is emitted by its own context, so a bare op `log(...)` used in
+    /// `main` whose effect `Log` is declared in another module would not be
+    /// recognised as an effect op (and not rewritten to `logger.log(...)`)
+    /// without pre-seeding from the whole reachable set. Mirrors how
+    /// `enum_variants` / `trait_decls` are collected across the bundle, and the
+    /// Python backend's `PyEmitCtx::seed_effect_registries`.
+    fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
+        for (module, _) in modules {
+            let NodeKind::Module { items, .. } = &module.kind else {
+                continue;
+            };
+            for item in items {
+                let NodeKind::EffectDecl {
+                    name,
+                    components,
+                    operations,
+                    ..
+                } = &item.kind
+                else {
+                    continue;
+                };
+                if !components.is_empty() {
+                    let comp_names: Vec<String> = components
+                        .iter()
+                        .map(|tp| {
+                            tp.segments
+                                .last()
+                                .map_or("effect".to_string(), |s| s.name.clone())
+                        })
+                        .collect();
+                    self.composite_effects.insert(name.name.clone(), comp_names);
+                    continue;
+                }
+                for op in operations {
+                    if let NodeKind::FnDecl { name: op_name, .. } = &op.kind {
+                        self.effect_ops
+                            .insert(op_name.name.clone(), name.name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Emit the per-module ESM `import` statements at the top of the file: the
+    /// shared-runtime import (concurrency / range helpers), the explicit
+    /// cross-module `use` imports, and the implicit prelude imports (e.g. a base
+    /// trait used in an `impl`). Grouped one `import { … } from "./…"` per
+    /// source module, with the relative specifier computed from this file's
+    /// declared module-path. Called once at the top of the `Module` arm in the
+    /// per-module path.
+    fn emit_esm_imports(&mut self, imports: &[AIRNode]) -> Result<(), CodegenError> {
+        // The JS backend always emits `.js` files; the relative specifier
+        // carries that extension (ESM + Node require an explicit extension).
+        let ext = "js";
+
+        // Shared runtime: `import { … } from "./…/_bock_runtime.js"`.
+        if self.needs_runtime_concurrency || self.needs_runtime_range {
+            let mut names: Vec<&str> = Vec::new();
+            if self.needs_runtime_concurrency {
+                names.extend(["__bockChannelNew", "__bockSpawn"]);
+            }
+            if self.needs_runtime_range {
+                names.extend(["range", "rangeInclusive"]);
+            }
+            let spec = crate::generator::esm_relative_specifier(
+                &self.self_module_path,
+                RUNTIME_MODULE_JS,
+                ext,
+            );
+            self.writeln(&format!(
+                "import {{ {} }} from \"{spec}\";",
+                names.join(", ")
+            ));
+        }
+
+        // Explicit `use` imports → real ESM imports. A `use`d *function* is
+        // imported under its camelCased name (matching its `export function`
+        // form); other kinds keep their raw name. An explicit rename (`as`)
+        // applies the same transform to the alias.
+        for import in imports {
+            if let NodeKind::ImportDecl { path, items } = &import.kind {
+                let target_path = path
+                    .segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if target_path.is_empty() {
+                    continue;
+                }
+                let spec = crate::generator::esm_relative_specifier(
+                    &self.self_module_path,
+                    &target_path,
+                    ext,
+                );
+                match items {
+                    bock_ast::ImportItems::Named(named) => {
+                        let rendered: Vec<String> = named
+                            .iter()
+                            // A `use`d runtime-prelude *value* name (`Optional`,
+                            // `Some`, …) lowers inline and is never a real export;
+                            // a type-only symbol (an enum *type* name, a type
+                            // alias) has no JS binding. Neither may appear in a
+                            // real JS import.
+                            .filter(|n| {
+                                if crate::generator::ESM_RUNTIME_PRELUDE_NAMES
+                                    .contains(&n.name.name.as_str())
+                                {
+                                    return false;
+                                }
+                                match self.public_symbols.get(&n.name.name) {
+                                    Some(s) => s.kind.is_js_value(),
+                                    // Unknown symbol: keep it (conservative — a
+                                    // genuinely-missing import surfaces loudly).
+                                    None => true,
+                                }
+                            })
+                            .map(|n| {
+                                let is_fn = self
+                                    .public_symbols
+                                    .get(&n.name.name)
+                                    .map(|s| s.is_fn())
+                                    .unwrap_or(false);
+                                let src = self.esm_emit_name(&n.name.name, is_fn);
+                                match &n.alias {
+                                    Some(alias) => {
+                                        let dst = self.esm_emit_name(&alias.name, is_fn);
+                                        if dst == src {
+                                            src
+                                        } else {
+                                            format!("{src} as {dst}")
+                                        }
+                                    }
+                                    None => src,
+                                }
+                            })
+                            .collect();
+                        if !rendered.is_empty() {
+                            self.writeln(&format!(
+                                "import {{ {} }} from \"{spec}\";",
+                                rendered.join(", ")
+                            ));
+                        }
+                    }
+                    // `use Foo` / `use Foo.*` — Bock brings the module's exported
+                    // names into scope unqualified. ESM has no namespace-flatten
+                    // import; the consuming references are resolved as implicit
+                    // imports (below) by name, so a module/glob import needs no
+                    // statement here.
+                    bock_ast::ImportItems::Module | bock_ast::ImportItems::Glob => {}
+                }
+            }
+        }
+
+        // Implicit imports: prelude-visible names referenced but not explicitly
+        // `use`d (e.g. a base trait), grouped per declaring module, deterministic.
+        // Type-only kinds (an enum *type* name, a type alias) have no JS binding,
+        // so they are skipped here — a JS reference to them is erased.
+        let mut by_module: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for imp in &self.implicit_imports {
+            if !imp.kind.is_js_value() {
+                continue;
+            }
+            by_module
+                .entry(imp.module_path.clone())
+                .or_default()
+                .push(esm_emit_name_static(&imp.name, imp.is_fn()));
+        }
+        for (module_path, mut names) in by_module {
+            names.sort_unstable();
+            names.dedup();
+            let spec =
+                crate::generator::esm_relative_specifier(&self.self_module_path, &module_path, ext);
+            self.writeln(&format!(
+                "import {{ {} }} from \"{spec}\";",
+                names.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// Spell `name` the way the JS backend emits its declaration / call sites: a
+    /// function is camelCased (and keyword-escaped) via [`js_value_ident`]; any
+    /// other declaration kind keeps its raw name. Used so an `import`/`export`
+    /// statement binds exactly the identifier the code references.
+    fn esm_emit_name(&self, name: &str, is_fn: bool) -> String {
+        esm_emit_name_static(name, is_fn)
+    }
+
+    /// Emit the trailing `export { … }` for this module's public **non-function**
+    /// declarations (records, enums + variants, traits, classes, effects,
+    /// consts). Functions export inline via [`Self::emit_fn_decl`] and so are
+    /// skipped here; type aliases are erased in JS. Emits nothing when there is
+    /// nothing to re-export.
+    fn emit_trailing_exports(&mut self) {
+        let mut names: Vec<String> = self
+            .export_names
+            .iter()
+            .filter(|e| !e.is_fn)
+            .map(|e| esm_emit_name_static(&e.name, e.is_fn))
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        names.sort_unstable();
+        names.dedup();
+        if !self.buf.is_empty() && !self.buf.ends_with('\n') {
+            self.buf.push('\n');
+        }
+        self.writeln(&format!("export {{ {} }};", names.join(", ")));
     }
 
     /// Bring `cur_line` / `cur_col` up to date with everything appended to
@@ -1296,21 +1703,41 @@ impl EmitCtx {
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         self.mark_span(node.span);
         match &node.kind {
-            NodeKind::Module { items, .. } => {
-                // Cross-module `use` (DV13) is realized by single-file bundling:
-                // every module body is concatenated into the one entry file and
-                // `ImportDecl`s are dropped (the imported symbols are present in
-                // the same file). The concurrency runtime is emitted at most once
-                // across the bundle, gated on a ctx flag.
-                if !self.concurrency_runtime_emitted && self.module_uses_concurrency(items) {
-                    self.buf.push_str(CONCURRENCY_RUNTIME_JS);
-                    self.buf.push('\n');
-                    self.concurrency_runtime_emitted = true;
-                }
-                if !self.range_runtime_emitted && js_module_uses_range(items) {
-                    self.buf.push_str(RANGE_RUNTIME_JS);
-                    self.buf.push('\n');
-                    self.range_runtime_emitted = true;
+            NodeKind::Module { items, imports, .. } => {
+                if self.per_module {
+                    // Per-module native-import path (S2): each module is emitted
+                    // to its own `.js` file and the runtime helpers live in the
+                    // shared `_bock_runtime.js`. Record which runtime helpers
+                    // this module references (the same structural scans the
+                    // bundling path uses); `generate_project` emits them once
+                    // into the shared module, and `emit_esm_imports` imports the
+                    // referenced names here.
+                    if self.module_uses_concurrency(items) {
+                        self.needs_runtime_concurrency = true;
+                    }
+                    if js_module_uses_range(items) {
+                        self.needs_runtime_range = true;
+                    }
+                    // Real ESM imports (runtime, explicit `use`, implicit prelude)
+                    // at the top of the file, before any declaration.
+                    self.emit_esm_imports(imports)?;
+                } else {
+                    // Cross-module `use` (DV13) is realized by single-file
+                    // bundling: every module body is concatenated into the one
+                    // entry file and `ImportDecl`s are dropped (the imported
+                    // symbols are present in the same file). The concurrency /
+                    // range runtimes are emitted at most once across the bundle,
+                    // gated on a ctx flag.
+                    if !self.concurrency_runtime_emitted && self.module_uses_concurrency(items) {
+                        self.buf.push_str(CONCURRENCY_RUNTIME_JS);
+                        self.buf.push('\n');
+                        self.concurrency_runtime_emitted = true;
+                    }
+                    if !self.range_runtime_emitted && js_module_uses_range(items) {
+                        self.buf.push_str(RANGE_RUNTIME_JS);
+                        self.buf.push('\n');
+                        self.range_runtime_emitted = true;
+                    }
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -1318,12 +1745,19 @@ impl EmitCtx {
                     }
                     self.emit_node(item)?;
                 }
+                // Per-module path: re-export the public non-function declarations
+                // (functions export inline). Emitted once after all items.
+                if self.per_module {
+                    self.emit_trailing_exports();
+                }
                 Ok(())
             }
             NodeKind::ImportDecl { .. } => {
-                // Bock `use` is resolved by bundling — every imported module's
-                // top-level declarations are concatenated into this same file —
-                // so the import statement itself is a no-op (DV13).
+                // Bock `use` is resolved either by bundling (the imported
+                // module's declarations are concatenated into this same file) or,
+                // in the per-module path, by the real ESM imports emitted up front
+                // by `emit_esm_imports` from the `Module` arm. Either way, the
+                // per-item visit here is a no-op.
                 Ok(())
             }
             NodeKind::FnDecl {
@@ -3269,6 +3703,20 @@ fn js_value_ident(name: &str) -> String {
         &to_camel_case(name),
         crate::generator::KeywordTarget::Js,
     )
+}
+
+/// Spell `name` the way the JS backend emits the symbol's declaration / call
+/// sites for an `import`/`export` specifier in the per-module path: a function
+/// is camelCased and keyword-escaped via [`js_value_ident`]; any other kind
+/// (records, enum variants, classes, traits, effects, consts) keeps its raw
+/// name. A free function (not a method) so both `EmitCtx` and `generate_project`
+/// helpers can call it.
+fn esm_emit_name_static(name: &str, is_fn: bool) -> String {
+    if is_fn {
+        js_value_ident(name)
+    } else {
+        name.to_string()
+    }
 }
 
 fn to_camel_case(s: &str) -> String {
@@ -5946,6 +6394,188 @@ mod tests {
         assert!(
             src.contains("(async () => { await main(); })();"),
             "async entry wrapper missing, got: {src}"
+        );
+    }
+
+    /// A module node with a declared dotted `path` (e.g. `core.option`), used by
+    /// the per-module emission tests where the file layout and the relative
+    /// import specifier are keyed on the declared module-path.
+    fn module_with_path(path: &[&str], imports: Vec<AIRNode>, items: Vec<AIRNode>) -> AIRNode {
+        node(
+            0,
+            NodeKind::Module {
+                path: Some(bock_ast::ModulePath {
+                    segments: path.iter().map(|s| ident(s)).collect(),
+                    span: span(),
+                }),
+                annotations: vec![],
+                imports,
+                items,
+            },
+        )
+    }
+
+    /// An `import <path>.{ name }` AIR node (a single-item `Named` import).
+    fn import_named(id: u32, path: &[&str], name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::ImportDecl {
+                path: bock_ast::ModulePath {
+                    segments: path.iter().map(|s| ident(s)).collect(),
+                    span: span(),
+                },
+                items: bock_ast::ImportItems::Named(vec![bock_ast::ImportedName {
+                    span: span(),
+                    name: ident(name),
+                    alias: None,
+                }]),
+            },
+        )
+    }
+
+    /// A bare `fn <name>() -> <tail>` declaration with the given visibility and a
+    /// single tail expression as its body.
+    fn fn_decl_tail(id: u32, vis: Visibility, name: &str, tail: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: vis,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(id + 1, vec![], Some(tail))),
+            },
+        )
+    }
+
+    #[test]
+    fn per_module_emits_native_esm_import_tree() {
+        // entry `module main` uses `mathutil.add_one`; `module mathutil` exports a
+        // `public fn add_one`. Per-module emission must produce `main.js` (with a
+        // real `import { addOne } from "./mathutil.js"` — note the camelCase),
+        // `mathutil.js`, and a `package.json` run affordance — never a bundle.
+        let call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "add_one")),
+                args: vec![bock_air::AirArg {
+                    label: None,
+                    value: int_lit(12, "6"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(5, &["mathutil"], "add_one")],
+            vec![fn_decl_tail(1, Visibility::Private, "main", call)],
+        );
+        let util_mod = module_with_path(
+            &["mathutil"],
+            vec![],
+            vec![fn_decl_tail(
+                20,
+                Visibility::Public,
+                "add_one",
+                int_lit(22, "7"),
+            )],
+        );
+
+        let gen = JsGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&util_mod, std::path::Path::new("src/mathutil.bock")),
+            ])
+            .unwrap();
+
+        let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
+        let main_file = by_name("main.js").expect("main.js emitted");
+        let util_file = by_name("mathutil.js").expect("mathutil.js emitted");
+        by_name("package.json").expect("package.json run affordance emitted");
+
+        assert!(
+            main_file
+                .content
+                .contains("import { addOne } from \"./mathutil.js\";"),
+            "main.js must import the camelCased fn from the sibling; got:\n{}",
+            main_file.content
+        );
+        assert!(
+            main_file.content.contains("main();"),
+            "main.js must carry the entry invocation; got:\n{}",
+            main_file.content
+        );
+        assert!(
+            util_file.content.contains("export function addOne("),
+            "mathutil.js must export the fn inline; got:\n{}",
+            util_file.content
+        );
+    }
+
+    #[test]
+    fn per_module_reexports_record_and_constructs_cross_module() {
+        // entry uses `shapes.Point`; `module shapes` declares `public record
+        // Point`. Per-module emission must re-export `Point` from `shapes.js`
+        // (records do not export inline in JS) and `main.js` must import it.
+        let point = node(
+            30,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Point"),
+                generic_params: vec![],
+                fields: vec![],
+            },
+        );
+        let shapes_mod = module_with_path(&["shapes"], vec![], vec![point]);
+        let ctor = node(
+            10,
+            NodeKind::RecordConstruct {
+                path: type_path(&["Point"]),
+                fields: vec![],
+                spread: None,
+            },
+        );
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(5, &["shapes"], "Point")],
+            vec![fn_decl_tail(1, Visibility::Private, "main", ctor)],
+        );
+
+        let gen = JsGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&shapes_mod, std::path::Path::new("src/shapes.bock")),
+            ])
+            .unwrap();
+        let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
+        let main_file = by_name("main.js").expect("main.js emitted");
+        let shapes_file = by_name("shapes.js").expect("shapes.js emitted");
+        assert!(
+            shapes_file.content.contains("export { Point };"),
+            "shapes.js must re-export the record; got:\n{}",
+            shapes_file.content
+        );
+        assert!(
+            main_file
+                .content
+                .contains("import { Point } from \"./shapes.js\";"),
+            "main.js must import the record; got:\n{}",
+            main_file.content
+        );
+        // Cross-module record construction must lower to `new Point(...)`, not a
+        // bare object literal (record_names seeded across the reachable set).
+        assert!(
+            main_file.content.contains("new Point("),
+            "cross-module record construction must use `new`; got:\n{}",
+            main_file.content
         );
     }
 

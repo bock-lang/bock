@@ -621,6 +621,545 @@ pub fn module_main_fn_is_async(module: &AIRModule) -> bool {
     })
 }
 
+// ─── ESM per-module emission helpers (js/ts) ────────────────────────────────
+//
+// The JS and TS backends emit a per-module **native ES-module import tree**
+// (spec §20.6.1; DQ19 resolved): each reachable module → its own `.js`/`.ts`
+// file, cross-module references resolved with real `import { x } from "./…"`.
+// These helpers are shared by both backends because the analysis is purely
+// over the AIR (declared symbols, references, declared module paths) and is
+// identical for the two targets. Python (`py.rs`) has its own equivalents
+// because its import surface (package paths, no relative specifier, a shared
+// `*`-runtime) differs enough to not share cleanly.
+
+/// Runtime-prelude *value* names that the JS/TS backends lower **inline** to
+/// tagged objects (`{ _tag: "Some", _0: v }`, `{ _tag: "Less" }`, …) — NOT from
+/// a cross-module `core.*` import. The implicit-import pass and the
+/// public-symbol map must never route these through a `core.option` /
+/// `core.compare` import: the declaring module does not actually export them
+/// (they are compiler built-ins), so a real import would be an unresolved
+/// reference.
+///
+/// `Ordering` is intentionally **absent**: unlike `Optional`/`Result`, the
+/// comparison `Ordering` enum is genuinely *declared* (and exported) by the
+/// `core.compare` stdlib module, so a cross-module use of the `Ordering` **type**
+/// resolves through a real import; only its *variant values* (`Less`/`Equal`/
+/// `Greater`) lower inline and so stay excluded here.
+pub const ESM_RUNTIME_PRELUDE_NAMES: &[&str] = &[
+    "Optional", "Some", "None", "Result", "Ok", "Err", "Less", "Equal", "Greater",
+];
+
+/// The declaration kind of a public symbol exposed by the per-module ESM
+/// analysis. Each backend maps this to the right cross-module import form,
+/// because the JS and TS emitted shapes differ (a trait is a JS `const` mixin
+/// value but a TS `interface` type; an enum *type* name has no JS binding but is
+/// a TS type; a type alias is erased in JS but a TS type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EsmDeclKind {
+    /// A top-level function (camelCased on emit; a value in both targets).
+    Function,
+    /// A `const` (a value in both targets).
+    Const,
+    /// A record (JS/TS `class` — a value; in TS also a type).
+    Record,
+    /// A `class` (a value; in TS also a type).
+    Class,
+    /// An enum's **type** name (`Ordering`) — no JS binding; a TS type.
+    EnumType,
+    /// An enum **variant** value (`Color_Red`) — a value in both targets.
+    EnumVariant,
+    /// A trait — a JS `const` mixin value; a TS `interface` type.
+    Trait,
+    /// An effect — a JS/TS `class`/`interface`; treated as a value.
+    Effect,
+    /// A type alias — erased in JS; a TS type.
+    TypeAlias,
+}
+
+impl EsmDeclKind {
+    /// Whether a symbol of this kind has a runtime binding in **JS** (so a JS
+    /// cross-module reference imports it as a value). Type-only kinds (an enum
+    /// type name, a TS-only type alias) have no JS binding.
+    #[must_use]
+    pub fn is_js_value(self) -> bool {
+        matches!(
+            self,
+            EsmDeclKind::Function
+                | EsmDeclKind::Const
+                | EsmDeclKind::Record
+                | EsmDeclKind::Class
+                | EsmDeclKind::EnumVariant
+                | EsmDeclKind::Trait
+                | EsmDeclKind::Effect
+        )
+    }
+
+    /// Whether a symbol of this kind is imported with TS `import type` (a
+    /// pure-type kind: an enum type name, a trait interface, or a type alias).
+    /// Value-and-type kinds (records, classes) and pure values import normally.
+    #[must_use]
+    pub fn is_ts_type_only(self) -> bool {
+        matches!(
+            self,
+            EsmDeclKind::EnumType | EsmDeclKind::Trait | EsmDeclKind::TypeAlias
+        )
+    }
+}
+
+/// One public symbol exposed by the per-module ESM analysis. Carries the
+/// declaring module-path and the declaration kind. The kind drives both the
+/// emitted-name transform (only a function is camelCased: `get_or` → `getOr`)
+/// and the import form each backend selects (value vs `import type` vs skip in
+/// JS) — see [`EsmDeclKind`].
+#[derive(Debug, Clone)]
+pub struct EsmSymbol {
+    /// Dotted declared module-path that declares this symbol (e.g. `core.iter`).
+    pub module_path: String,
+    /// The declaration kind.
+    pub kind: EsmDeclKind,
+}
+
+impl EsmSymbol {
+    /// True if the symbol is a function (camelCased on emit).
+    #[must_use]
+    pub fn is_fn(&self) -> bool {
+        matches!(self.kind, EsmDeclKind::Function)
+    }
+}
+
+/// Build a map from every **public top-level symbol name** (the raw Bock name)
+/// declared across `modules` to its [`EsmSymbol`] (declaring module-path +
+/// whether it is a function). Covers functions, records, enums (and each
+/// variant's emitted `Enum_Variant` factory/const name), traits, classes,
+/// effects, type aliases, and consts.
+///
+/// The per-module ESM emission path needs this for **implicit imports**: in the
+/// single-file bundling path every reached module's top-level declarations
+/// shared one scope, so a prelude trait used as a base in an `impl`
+/// (`impl Iterable for Bag`, with `Iterable` auto-imported per §18.2) resolved
+/// for free. Emitting one file per module breaks that — the consuming file must
+/// `import` `Iterable` from `core/iter.js` even though it never appears in an
+/// explicit `use`. This map lets the backend add exactly those imports for
+/// names a module references but neither declares locally nor imports
+/// explicitly. The key is the **raw** Bock name so the reference scan in
+/// [`implicit_esm_imports_for`] matches the AIR debug rendering.
+///
+/// Runtime-prelude names ([`ESM_RUNTIME_PRELUDE_NAMES`]) are excluded — they
+/// lower inline. The first declarer wins for a name declared in several modules
+/// (deterministic via the dependency order `modules` arrives in).
+#[must_use]
+pub fn collect_public_symbols_for_esm(
+    modules: &[(&AIRModule, &Path)],
+) -> HashMap<String, EsmSymbol> {
+    let mut map: HashMap<String, EsmSymbol> = HashMap::new();
+    for (module, _) in modules {
+        let Some(module_path) = module_path_string(module) else {
+            continue;
+        };
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            let mut record = |name: &str, kind: EsmDeclKind| {
+                if !ESM_RUNTIME_PRELUDE_NAMES.contains(&name) {
+                    map.entry(name.to_string()).or_insert_with(|| EsmSymbol {
+                        module_path: module_path.clone(),
+                        kind,
+                    });
+                }
+            };
+            match &item.kind {
+                NodeKind::FnDecl {
+                    visibility, name, ..
+                } => {
+                    if matches!(visibility, bock_ast::Visibility::Public) {
+                        record(&name.name, EsmDeclKind::Function);
+                    }
+                }
+                NodeKind::RecordDecl {
+                    visibility, name, ..
+                } => {
+                    if matches!(visibility, bock_ast::Visibility::Public) {
+                        record(&name.name, EsmDeclKind::Record);
+                    }
+                }
+                NodeKind::ClassDecl {
+                    visibility, name, ..
+                } => {
+                    if matches!(visibility, bock_ast::Visibility::Public) {
+                        record(&name.name, EsmDeclKind::Class);
+                    }
+                }
+                NodeKind::TraitDecl {
+                    visibility, name, ..
+                } => {
+                    if matches!(visibility, bock_ast::Visibility::Public) {
+                        record(&name.name, EsmDeclKind::Trait);
+                    }
+                }
+                NodeKind::EffectDecl {
+                    visibility, name, ..
+                } => {
+                    if matches!(visibility, bock_ast::Visibility::Public) {
+                        record(&name.name, EsmDeclKind::Effect);
+                    }
+                }
+                NodeKind::TypeAlias {
+                    visibility, name, ..
+                } => {
+                    if matches!(visibility, bock_ast::Visibility::Public) {
+                        record(&name.name, EsmDeclKind::TypeAlias);
+                    }
+                }
+                NodeKind::ConstDecl {
+                    visibility, name, ..
+                } => {
+                    if matches!(visibility, bock_ast::Visibility::Public) {
+                        record(&name.name, EsmDeclKind::Const);
+                    }
+                }
+                NodeKind::EnumDecl {
+                    visibility,
+                    name,
+                    variants,
+                    ..
+                } => {
+                    if matches!(visibility, bock_ast::Visibility::Public) {
+                        record(&name.name, EsmDeclKind::EnumType);
+                        for v in variants {
+                            if let NodeKind::EnumVariant { name: vname, .. } = &v.kind {
+                                record(
+                                    &format!("{}_{}", name.name, vname.name),
+                                    EsmDeclKind::EnumVariant,
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    map
+}
+
+/// One **exportable, runtime-valued** public declaration of a module: the raw
+/// emitted name plus whether it is a function (camelCased on emit). Returned by
+/// [`exportable_value_names`].
+#[derive(Debug, Clone)]
+pub struct EsmExport {
+    /// The symbol's name as the declaration/enum-variant emits it before any
+    /// camelCase transform (`get_or`, `Color_Red`, `MAX`).
+    pub name: String,
+    /// True if the symbol is a function (the backend camelCases it on emit).
+    pub is_fn: bool,
+}
+
+/// The set of **JS/TS-emitted, exportable** public top-level value declarations
+/// a module declares — the names the per-module path lists in a trailing
+/// `export { … }` (or, for functions, that the backend exports inline). Covers
+/// functions, records, enums (+ each `Enum_Variant`), traits, classes, effects,
+/// and consts. **Type aliases are excluded**: they are erased in JS (a comment,
+/// no runtime binding) and emitted as an `export type` alias inline in TS, so
+/// they need no trailing re-export. Runtime-prelude names are excluded (lowered
+/// inline). Each entry carries the function flag so the backend camelCases
+/// function names to match their inline `export function` form.
+///
+/// Used by the **JS** backend's trailing-export pass (TS exports every kind
+/// except enum variants inline — see [`enum_variant_value_names`]).
+#[must_use]
+pub fn exportable_value_names(module: &AIRModule) -> Vec<EsmExport> {
+    let mut names: Vec<EsmExport> = Vec::new();
+    let mut push = |name: String, is_fn: bool| {
+        if !ESM_RUNTIME_PRELUDE_NAMES.contains(&name.as_str()) {
+            names.push(EsmExport { name, is_fn });
+        }
+    };
+    let NodeKind::Module { items, .. } = &module.kind else {
+        return names;
+    };
+    for item in items {
+        match &item.kind {
+            NodeKind::FnDecl {
+                visibility, name, ..
+            } => {
+                if matches!(visibility, bock_ast::Visibility::Public) {
+                    push(name.name.clone(), true);
+                }
+            }
+            NodeKind::RecordDecl {
+                visibility, name, ..
+            }
+            | NodeKind::TraitDecl {
+                visibility, name, ..
+            }
+            | NodeKind::ClassDecl {
+                visibility, name, ..
+            }
+            | NodeKind::EffectDecl {
+                visibility, name, ..
+            }
+            | NodeKind::ConstDecl {
+                visibility, name, ..
+            } => {
+                if matches!(visibility, bock_ast::Visibility::Public) {
+                    push(name.name.clone(), false);
+                }
+            }
+            NodeKind::EnumDecl {
+                visibility,
+                name,
+                variants,
+                ..
+            } => {
+                if matches!(visibility, bock_ast::Visibility::Public) {
+                    for v in variants {
+                        if let NodeKind::EnumVariant { name: vname, .. } = &v.kind {
+                            push(format!("{}_{}", name.name, vname.name), false);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The public **enum-variant value names** (`Color_Red`, …) declared in
+/// `module` — the names a TS per-module file must re-export in a trailing
+/// `export { … }`.
+///
+/// In the TS backend every public top-level declaration exports inline
+/// (`export class`, `export type`, `export function`, `export const`) **except**
+/// an enum's per-variant interface / const / factory, which the variant emitter
+/// writes without an `export`. The single-file bundle never needed those
+/// exported (same scope); the per-module tree does, so this enumerates exactly
+/// the variant value names for the trailing re-export. Variants of a runtime-
+/// prelude enum (`Optional` / `Result` / `Ordering`) are excluded — they lower
+/// inline.
+#[must_use]
+pub fn enum_variant_value_names(module: &AIRModule) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let NodeKind::Module { items, .. } = &module.kind else {
+        return names;
+    };
+    for item in items {
+        if let NodeKind::EnumDecl {
+            visibility,
+            name,
+            variants,
+            ..
+        } = &item.kind
+        {
+            if matches!(visibility, bock_ast::Visibility::Public)
+                && !ESM_RUNTIME_PRELUDE_NAMES.contains(&name.name.as_str())
+            {
+                for v in variants {
+                    if let NodeKind::EnumVariant { name: vname, .. } = &v.kind {
+                        names.push(format!("{}_{}", name.name, vname.name));
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Top-level symbol names declared **locally** in `module` (item names plus
+/// each enum variant's emitted `Enum_Variant` name) — the names a per-module
+/// implicit import must never shadow with a cross-module import.
+#[must_use]
+pub fn locally_declared_names(module: &AIRModule) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let NodeKind::Module { items, .. } = &module.kind else {
+        return names;
+    };
+    for item in items {
+        match &item.kind {
+            NodeKind::FnDecl { name, .. }
+            | NodeKind::RecordDecl { name, .. }
+            | NodeKind::TraitDecl { name, .. }
+            | NodeKind::ClassDecl { name, .. }
+            | NodeKind::EffectDecl { name, .. }
+            | NodeKind::TypeAlias { name, .. }
+            | NodeKind::ConstDecl { name, .. } => {
+                names.insert(name.name.clone());
+            }
+            NodeKind::EnumDecl { name, variants, .. } => {
+                names.insert(name.name.clone());
+                for v in variants {
+                    if let NodeKind::EnumVariant { name: vname, .. } = &v.kind {
+                        names.insert(format!("{}_{}", name.name, vname.name));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Names brought into scope by `module`'s explicit `use` declarations (the
+/// imported leaf names and their aliases) — already emitted as real imports, so
+/// the implicit-import pass must skip them.
+#[must_use]
+pub fn explicitly_imported_names(module: &AIRModule) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let NodeKind::Module { imports, .. } = &module.kind else {
+        return names;
+    };
+    for import in imports {
+        if let NodeKind::ImportDecl {
+            items: bock_ast::ImportItems::Named(named),
+            ..
+        } = &import.kind
+        {
+            for n in named {
+                names.insert(n.name.name.clone());
+                if let Some(alias) = &n.alias {
+                    names.insert(alias.name.clone());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// One implicit cross-module import computed by [`implicit_esm_imports_for`]:
+/// the declaring module-path, the raw symbol name, and the declaration kind (so
+/// the backend can camelCase a function, route a type to `import type`, or skip
+/// a JS type-only name).
+#[derive(Debug, Clone)]
+pub struct ImplicitEsmImport {
+    /// Dotted declared module-path that declares the symbol.
+    pub module_path: String,
+    /// The symbol's raw Bock name.
+    pub name: String,
+    /// The declaration kind.
+    pub kind: EsmDeclKind,
+}
+
+impl ImplicitEsmImport {
+    /// True if the symbol is a function (camelCased on emit).
+    #[must_use]
+    pub fn is_fn(&self) -> bool {
+        matches!(self.kind, EsmDeclKind::Function)
+    }
+}
+
+/// Compute the implicit cross-module imports for `module`: public symbols
+/// declared in *other* reachable modules that `module` references but neither
+/// declares locally nor imports explicitly.
+///
+/// "References" is a conservative structural scan of the module's debug
+/// rendering for the symbol name as a quoted identifier token. It can only
+/// *over*-import a name the program does not really use (a harmless dead
+/// import), never *under*-import — so it cannot reintroduce the unresolved
+/// reference it exists to fix.
+#[must_use]
+pub fn implicit_esm_imports_for(
+    module: &AIRModule,
+    public_symbols: &HashMap<String, EsmSymbol>,
+    own_path: &str,
+) -> Vec<ImplicitEsmImport> {
+    let local = locally_declared_names(module);
+    let explicit = explicitly_imported_names(module);
+    let rendered = format!("{module:?}");
+    let mut out: Vec<ImplicitEsmImport> = Vec::new();
+    for (name, sym) in public_symbols {
+        if sym.module_path == own_path || local.contains(name) || explicit.contains(name) {
+            continue;
+        }
+        if rendered.contains(&format!("\"{name}\"")) {
+            out.push(ImplicitEsmImport {
+                module_path: sym.module_path.clone(),
+                name: name.clone(),
+                kind: sym.kind,
+            });
+        }
+    }
+    out
+}
+
+/// Collect the names of every **record** declared across `modules` (the names
+/// the JS/TS backends emit as classes and construct with `new Name(...)`).
+///
+/// In the single-file bundling path each backend's `record_names` set is
+/// populated as records are emitted, and because every reachable module is
+/// concatenated into the one file, a record construction in one module sees a
+/// record declared in another. The per-module path emits each module in its own
+/// context, so a cross-module record construction (`handling (Log with
+/// ConsoleLog {})` where `ConsoleLog` is `use`d from another module) would not
+/// find the record in the local `record_names` set and would mis-lower to a
+/// bare object literal `{}` instead of `new ConsoleLog()` (dropping its
+/// prototype methods). Pre-seeding `record_names` from the whole reachable set
+/// restores the bundling path's cross-module visibility. Mirrors
+/// [`collect_enum_variants`] / [`collect_trait_decls`].
+#[must_use]
+pub fn collect_record_names(modules: &[(&AIRModule, &Path)]) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for (module, _) in modules {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            if let NodeKind::RecordDecl { name, .. } = &item.kind {
+                names.insert(name.name.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Compute the relative ES-module import specifier from the file that hosts
+/// module `from_path` to the file that hosts module `to_path`, both keyed on
+/// their **declared** dotted module-paths and laid out at the mirrored path
+/// (`core.option` → `core/option.<ext>`). The entry module is always at the
+/// build root as `main.<ext>` regardless of its declared path, so callers pass
+/// the **empty string** as `from_path` for the entry file.
+///
+/// Returns a specifier that always begins with `./` or `../` and ends with the
+/// target file extension (e.g. `./core/option.js`, `../helper.ts`) — ESM
+/// requires a relative specifier to be explicitly relative and, for Node, to
+/// carry the file extension.
+#[must_use]
+pub fn esm_relative_specifier(from_path: &str, to_path: &str, ext: &str) -> String {
+    // The directory components of the *source* file (everything but the final
+    // segment, which is the file stem). The entry file lives at the root.
+    let from_dirs: Vec<&str> = if from_path.is_empty() {
+        Vec::new()
+    } else {
+        let segs: Vec<&str> = from_path.split('.').collect();
+        segs[..segs.len().saturating_sub(1)].to_vec()
+    };
+    let to_segs: Vec<&str> = to_path.split('.').filter(|s| !s.is_empty()).collect();
+
+    // Longest common directory prefix.
+    let mut common = 0usize;
+    while common < from_dirs.len()
+        && common + 1 < to_segs.len()
+        && from_dirs[common] == to_segs[common]
+    {
+        common += 1;
+    }
+
+    let ups = from_dirs.len() - common;
+    let mut spec = String::new();
+    if ups == 0 {
+        spec.push_str("./");
+    } else {
+        for _ in 0..ups {
+            spec.push_str("../");
+        }
+    }
+    let down: Vec<&str> = to_segs[common..].to_vec();
+    spec.push_str(&down.join("/"));
+    spec.push('.');
+    spec.push_str(ext);
+    spec
+}
+
 // ─── Statement-aware match helpers ──────────────────────────────────────────
 //
 // Some Bock `match` arms have *statement* bodies — `break`, `continue`,
@@ -2188,6 +2727,41 @@ mod tests {
         assert_eq!(
             derive_output_path(path, &TargetProfile::go()),
             PathBuf::from("main.go")
+        );
+    }
+
+    #[test]
+    fn esm_relative_specifier_from_entry_root() {
+        // Entry (`main.<ext>` at the build root) → a `core.option` sibling.
+        assert_eq!(
+            esm_relative_specifier("", "core.option", "js"),
+            "./core/option.js"
+        );
+        // Entry → a root-level sibling module.
+        assert_eq!(esm_relative_specifier("", "helper", "js"), "./helper.js");
+    }
+
+    #[test]
+    fn esm_relative_specifier_between_nested_modules() {
+        // `helper` (root) → `core.option` (nested): one level down.
+        assert_eq!(
+            esm_relative_specifier("helper", "core.option", "ts"),
+            "./core/option.ts"
+        );
+        // `core.option` → `core.compare`: same dir, no `../`.
+        assert_eq!(
+            esm_relative_specifier("core.option", "core.compare", "js"),
+            "./compare.js"
+        );
+        // `a.b.deep` → `helper` (root): climb out of `a/b/`.
+        assert_eq!(
+            esm_relative_specifier("a.b.deep", "helper", "js"),
+            "../../helper.js"
+        );
+        // `a.b.deep` → `a.c.thing`: climb to the common `a/` then descend.
+        assert_eq!(
+            esm_relative_specifier("a.b.deep", "a.c.thing", "js"),
+            "../c/thing.js"
         );
     }
 

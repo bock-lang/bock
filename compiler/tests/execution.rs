@@ -54,19 +54,23 @@ const TARGET_ORDER: &[&str] = &["js", "ts", "python", "rust", "go"];
 /// Per the per-module-output milestone (DQ19 resolved), a cross-module program
 /// compiles to one target file per reached module, wired with the target's
 /// native imports, and runs through the target's normal runner from the build
-/// root. The migration is target-by-target: **S1 migrates Python only**; the
-/// other four targets still bundle every reached module into one entry file
-/// (and the harness runs that single file). As each target's native-import
-/// path lands (S2 js/ts, S3 rust/go), it is added here.
+/// root. The migration is target-by-target: **S1 migrated Python**, **S2 adds
+/// JS + TS**; the remaining two targets (rust/go) still bundle every reached
+/// module into one entry file (and the harness runs that single file). As each
+/// remaining target's native-import path lands (S3 rust/go), it is added here.
 ///
 /// Functionally the *run* is the same either way — `ToolchainRegistry::run`
-/// already runs the entry (`main.<ext>`) with the build directory as the
-/// current directory, so a per-module tree's sibling files (`core/option.py`,
-/// `_bock_runtime.py`, …) resolve as imports relative to that root. The
-/// predicate exists so the harness can additionally assert the per-module
-/// *shape* for migrated targets and document the staged cutover.
+/// runs the entry (`main.<ext>`) with the build directory as the current
+/// directory, so a per-module tree's sibling files (`core/option.py`,
+/// `core/option.js`, `_bock_runtime.js`, …) resolve as imports relative to that
+/// root. For js/ts a minimal `package.json` `{"type":"module"}` is emitted at
+/// the build root so Node treats the `.js` tree as ES modules; the TS run plan
+/// (`tsc main.ts && node main.js`) compiles the whole tree (tsc follows the
+/// relative imports) and runs the emitted ESM. The predicate exists so the
+/// harness can additionally assert the per-module *shape* for migrated targets
+/// and document the staged cutover.
 fn emits_per_module_tree(target: &str) -> bool {
-    matches!(target, "python")
+    matches!(target, "python" | "js" | "ts")
 }
 
 /// Locate the compiled `bock` CLI binary.
