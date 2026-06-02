@@ -92,7 +92,9 @@ spec/tracking reconcile (this entry) → S1 native imports + harness multi-file 
 S3 rust/go (with minimal manifest — those targets can't run multi-file without it) → S4 flip default + retire
 bundling (**DV13 CLOSED**) → S5 scaffolding framework + `bock.project` config parsing → S6 per-target scaffolders
 + deep-config branches (Vitest|Jest, Black|Ruff…) → S7 transpiled tests + formatter-clean gate → S8 internal docs.
-**Invariant:** `run-conformance.sh REQUIRE=all` stays 420/420 every PR; bundling kept behind a flag until all 5
-run natively; harness migrates target-by-target (no big-bang). ~20–30 PRs. **Still v1.x:** `--deliverable`,
+**Progress:** S0 DONE (#181 — spec/tracking reconcile); **S1 DONE (#182 — python per-module native tree + harness
+multi-file run; 425 exec pairs / 0 failed)**. Next = S2 (js→ts). **Invariant:** `run-conformance.sh REQUIRE=all`
+stays green every PR (now 425/425); bundling kept behind a flag until all 5 run natively; harness migrates
+target-by-target (no big-bang). ~20–30 PRs. **Still v1.x:** `--deliverable`,
 `--no-tests` (§20.1). External `/get-started` copy = **ItemD** (escalates). Links: ItemB, DV13, DQ19, §20.6.1/2,
 §20.7, changelogs `20260602-1608-per-module-output-dq19.md` + `20260602-1608-projectmode-config-tables-v1.md`.
