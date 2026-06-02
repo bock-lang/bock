@@ -751,6 +751,13 @@ struct GoEmitCtx {
     /// desugared method-call sites to pick PascalCase (public) vs camelCase
     /// (private) so the call matches the method definition's Go casing.
     public_methods: HashSet<String>,
+    /// PascalCased names of every record/class field declared in the program.
+    /// Go forbids a struct having a field and a method with the same name, so a
+    /// public method whose PascalCased Go name collides with a field name
+    /// (e.g. `core.error`'s `SimpleError { message }` + `fn message(self)`) is
+    /// suffixed `Method` by [`Self::go_method_name`] at the declaration (trait
+    /// interface + receiver) and every call site so they agree.
+    record_field_names: HashSet<String>,
     /// Loop-label stack. In Go, `break` inside a `switch` exits the switch, not
     /// an enclosing `for`. When a statement-arm `match` (lowered to a `switch`)
     /// contains a `break`/`continue` meant for the loop, the loop is given a
@@ -1112,6 +1119,7 @@ impl GoEmitCtx {
             void_effect_ops: HashSet::new(),
             async_fns: HashSet::new(),
             public_methods: HashSet::new(),
+            record_field_names: HashSet::new(),
             loop_labels: Vec::new(),
             switch_label_depth: 0,
             loop_label_counter: 0,
@@ -1579,6 +1587,18 @@ impl GoEmitCtx {
     fn collect_methods(&mut self, module: &AIRNode) {
         if let NodeKind::Module { items, .. } = &module.kind {
             for item in items {
+                // Collect every record/class field's PascalCased Go name so
+                // `go_method_name` can detect a field/method name collision Go
+                // forbids on a struct (`SimpleError { message }` + a `message`
+                // method). Done for every record/class regardless of where the
+                // method that collides is declared (a separate `impl` block).
+                if let NodeKind::RecordDecl { fields, .. } | NodeKind::ClassDecl { fields, .. } =
+                    &item.kind
+                {
+                    for f in fields {
+                        self.record_field_names.insert(to_pascal_case(&f.name.name));
+                    }
+                }
                 let (methods, always_export) = match &item.kind {
                     NodeKind::ImplBlock {
                         methods,
@@ -1600,6 +1620,28 @@ impl GoEmitCtx {
                     }
                 }
             }
+        }
+    }
+
+    /// The Go method name for a Bock method, applying the public/private
+    /// PascalCase/camelCase rule and then disambiguating a public method whose
+    /// PascalCased name collides with a struct field name. Go forbids a struct
+    /// having a field and a method with the same name, so when a public method's
+    /// Go name (`Message`) equals a record/class field name (`SimpleError`'s
+    /// `message` field), the method is suffixed `Method` (`MessageMethod`). The
+    /// same rule is applied at the trait-interface declaration, the receiver
+    /// method, and every call site so they always agree. Private methods are
+    /// camelCased and never collide with a (PascalCased) field name.
+    fn go_method_name(&self, name: &str, is_public: bool) -> String {
+        if is_public {
+            let pascal = to_pascal_case(name);
+            if self.record_field_names.contains(&pascal) {
+                format!("{pascal}Method")
+            } else {
+                pascal
+            }
+        } else {
+            to_camel_case(name)
         }
     }
 
@@ -4529,7 +4571,7 @@ impl GoEmitCtx {
                         };
                         self.writeln(&format!(
                             "{}({}){ret}",
-                            to_pascal_case(&name.name),
+                            self.go_method_name(&name.name, true),
                             param_strs.join(", "),
                         ));
                     }
@@ -5039,11 +5081,10 @@ impl GoEmitCtx {
             // default method (e.g. `not_equals`) would otherwise be camelCased
             // here while the interface declares it PascalCased. Inherent (`impl
             // Type`) methods keep the public/private casing rule.
-            let method_name = if use_value_receiver || matches!(visibility, Visibility::Public) {
-                to_pascal_case(&name.name)
-            } else {
-                to_camel_case(&name.name)
-            };
+            let method_name = self.go_method_name(
+                &name.name,
+                use_value_receiver || matches!(visibility, Visibility::Public),
+            );
             // The AIR keeps `self` as a leading `Param` and method bodies refer
             // to `self.Field`. Name the Go receiver `self` and drop the leading
             // `self` param so the body resolves with no rewrite — otherwise the
@@ -5852,11 +5893,8 @@ impl GoEmitCtx {
                     crate::generator::desugared_self_call(callee, args)
                 {
                     self.emit_expr(recv)?;
-                    let go_method = if self.public_methods.contains(&method.name) {
-                        to_pascal_case(&method.name)
-                    } else {
-                        to_camel_case(&method.name)
-                    };
+                    let go_method = self
+                        .go_method_name(&method.name, self.public_methods.contains(&method.name));
                     let _ = write!(self.buf, ".{go_method}(");
                     for (i, arg) in rest.iter().enumerate() {
                         if i > 0 {
@@ -5977,7 +6015,12 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 self.emit_expr(receiver)?;
-                let _ = write!(self.buf, ".{}", to_pascal_case(&method.name));
+                // `MethodCall` dispatches a method through Go method casing. A
+                // method whose name collides with a struct field is suffixed
+                // identically here and at the declaration (`go_method_name`).
+                let go_method =
+                    self.go_method_name(&method.name, self.public_methods.contains(&method.name));
+                let _ = write!(self.buf, ".{go_method}");
                 self.buf.push('(');
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -10827,6 +10870,165 @@ mod tests {
         assert!(
             !out.contains("doThing()"),
             "call should NOT use camelCase for public fn, got: {out}"
+        );
+    }
+
+    /// Go forbids a struct having a field and a method with the same name. A
+    /// record whose field name collides with a method's PascalCased Go name (the
+    /// `core.error` shape: `record SimpleError { message: String }` +
+    /// `fn message(self) -> String`) must emit the method under a disambiguated
+    /// name (`MessageMethod`) at the *trait interface*, the *receiver method*,
+    /// and every *call site* so they agree — while the field stays `Message`.
+    /// Q-go-error-message: pre-S6b this emitted both `Message` field and
+    /// `Message()` method on `SimpleError`, which `go build` rejects.
+    #[test]
+    fn method_colliding_with_field_is_disambiguated() {
+        // record SimpleError { message: String }
+        let record_decl = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("SimpleError"),
+                generic_params: vec![],
+                fields: vec![bock_ast::RecordDeclField {
+                    id: 0,
+                    span: span(),
+                    name: ident("message"),
+                    ty: TypeExpr::Named {
+                        id: 0,
+                        span: span(),
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                    default: None,
+                }],
+            },
+        );
+        // trait Error { fn message(self) -> String }
+        let trait_decl = node(
+            2,
+            NodeKind::TraitDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_platform: false,
+                name: ident("Error"),
+                generic_params: vec![],
+                associated_types: vec![],
+                methods: vec![node(
+                    3,
+                    NodeKind::FnDecl {
+                        annotations: vec![],
+                        visibility: Visibility::Public,
+                        is_async: false,
+                        name: ident("message"),
+                        generic_params: vec![],
+                        params: vec![param_node(4, "self")],
+                        return_type: Some(Box::new(type_named_node(5, "String"))),
+                        effect_clause: vec![],
+                        where_clause: vec![],
+                        body: Box::new(block(6, vec![], None)),
+                    },
+                )],
+            },
+        );
+        // impl Error for SimpleError { public fn message(self) -> String { self.message } }
+        let method = node(
+            10,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("message"),
+                generic_params: vec![],
+                params: vec![param_node(11, "self")],
+                return_type: Some(Box::new(type_named_node(12, "String"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    13,
+                    vec![],
+                    Some(node(
+                        14,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(15, "self")),
+                            field: ident("message"),
+                        },
+                    )),
+                )),
+            },
+        );
+        let impl_block = node(
+            20,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                target: Box::new(type_named_node(21, "SimpleError")),
+                trait_path: Some(type_path(&["Error"])),
+                trait_args: vec![],
+                generic_params: vec![],
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        );
+        // fn read(e: SimpleError) -> String { e.message() }
+        let read_fn = node(
+            30,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("read"),
+                generic_params: vec![],
+                params: vec![typed_param_node(31, "e", "SimpleError")],
+                return_type: Some(Box::new(type_named_node(32, "String"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    33,
+                    vec![],
+                    Some(node(
+                        34,
+                        NodeKind::MethodCall {
+                            receiver: Box::new(id_node(35, "e")),
+                            method: ident("message"),
+                            type_args: vec![],
+                            args: vec![],
+                        },
+                    )),
+                )),
+            },
+        );
+        let out = gen(&module(
+            vec![],
+            vec![record_decl, trait_decl, impl_block, read_fn],
+        ));
+        // The field stays `Message`.
+        assert!(
+            out.contains("Message\tstring"),
+            "field should remain `Message`, got: {out}"
+        );
+        // The method (interface, receiver, call site) is disambiguated.
+        assert!(
+            out.contains("MessageMethod() string"),
+            "trait interface should declare `MessageMethod()`, got: {out}"
+        );
+        assert!(
+            out.contains("SimpleError) MessageMethod()"),
+            "receiver method should be `MessageMethod()`, got: {out}"
+        );
+        assert!(
+            out.contains(".MessageMethod()"),
+            "call site should be `.MessageMethod()`, got: {out}"
+        );
+        // The body still reads the field (`self.Message`), and no plain
+        // `Message()` method (the colliding form Go rejects) is emitted.
+        assert!(
+            out.contains("return self.Message"),
+            "method body should read the field `self.Message`, got: {out}"
+        );
+        assert!(
+            !out.contains(") Message() string"),
+            "must NOT emit a `Message()` method colliding with the field, got: {out}"
         );
     }
 

@@ -57,27 +57,30 @@ See §20.6.1.
 >   relative specifiers carry the `.js` extension Node requires), public
 >   declarations `export`ed, plus a shared `_bock_runtime.{js,ts}` for the
 >   concurrency/range helpers (and, for TS, the Optional/Result runtime
->   types). A minimal `package.json` `{"type":"module"}` is emitted at the
->   `build/<target>/` root so Node treats the tree as ES modules. JS runs
->   as `node main.js`; TS compiles with `tsc main.ts` (which follows the
->   import tree) then runs `node main.js`.
-> - **Rust** — a real Cargo crate: a minimal `Cargo.toml` (`[package]` +
->   a `[[bin]]`) plus a `src/`-rooted module tree (`src/main.rs`,
+>   types). A `package.json` (`{"type":"module"}` + test script + the
+>   selected test-framework dev-dependency) is emitted at the
+>   `build/<target>/` root so Node treats the tree as ES modules; TS also
+>   gets a `tsconfig.json`. JS runs as `node main.js`; TS compiles the
+>   project with `tsc -p .` (honoring the scaffolded `tsconfig.json`) then
+>   runs `node main.js`.
+> - **Rust** — a real Cargo crate: a `Cargo.toml` (`[package]` + a
+>   `[[bin]]`) plus a `src/`-rooted module tree (`src/main.rs`,
 >   `src/core/option.rs`, the `mod`/`pub mod` wiring files), with
 >   cross-module references resolved by `use crate::core::option::…;`. The
->   concurrency runtime, when used, lives once in `src/bock_runtime.rs`.
->   Built and run with `cargo run` from `build/rust/`.
-> - **Go** — a real Go module: a minimal `go.mod` (module name + go
->   version) plus flat per-module files all in one `package main`
->   (`main.go`, `core_option.go`, …, and a shared `bock_runtime.go` for the
+>   concurrency runtime, when used, lives once in `src/bock_runtime.rs` and
+>   pulls in `tokio`. Built and run with `cargo run` from `build/rust/`.
+> - **Go** — a real Go module: a `go.mod` (module path + go version) plus
+>   flat per-module files all in one `package main` (`main.go`,
+>   `core_option.go`, …, and a shared `bock_runtime.go` for the
 >   Optional/Result/concurrency/range runtimes). Same-package symbols are
 >   visible across files without an import. Run with `go run .` over
 >   `build/go/`.
 >
-> The minimal `Cargo.toml` / `go.mod` / `package.json` here are the bare
-> run affordances only — full project-mode scaffolding (richer manifests,
-> `tsconfig.json`, formatter configs, transpiled tests) is a later
-> milestone.
+> In project mode (the default) these manifests are the *rich* project-mode
+> scaffolding (test-framework references, formatter/linter configs, a README
+> first-contact) described under [Project-Mode Scaffolding](#project-mode-scaffolding)
+> below; `--source-only` emits none of them. The actual transpiled `@test`
+> *files* and the formatter-clean release gate are a later milestone.
 
 ### Output Modes
 
@@ -110,6 +113,42 @@ distribution, library-only consumers, security-sensitive contexts).
 > described by §20.6.2 but the flags are **not present** in the v1
 > `bock build --help`; treat them as Reserved for v1.x. See the
 > [CLI Reference](./cli.md#bock-build) for the flags that exist today.
+
+### Project-Mode Scaffolding
+
+In project mode (the default), `bock build` writes target-ecosystem
+scaffolding alongside the transpiled source so the output is runnable in
+the target's normal toolchain. Each target gets a manifest referencing its
+test framework, a formatter config where applicable, an opt-in linter
+config, and a `README.md` first-contact. The choices come from the
+per-target `[targets.<T>]` (deep) and `[targets.<T>.scaffolding]` (shallow)
+tables in `bock.project` (see [Project Schema](./project-schema.md));
+anything left unset takes the target-appropriate default below.
+
+| Target | Manifest | Test framework (default, alternatives) | Formatter (default) | Linter config (opt-in) | Package-manager hint (default) |
+| ------ | -------- | -------------------------------------- | ------------------- | ---------------------- | ------------------------------ |
+| JS     | `package.json` | Vitest, Jest | Prettier (`.prettierrc.json`; `none` disables) | ESLint (`eslint.config.js`) | npm, pnpm, yarn |
+| TS     | `package.json` + `tsconfig.json` | Vitest, Jest | Prettier | ESLint | npm, pnpm, yarn |
+| Python | `pyproject.toml` | pytest, unittest | Black (`[tool.black]`), Ruff format (`[tool.ruff.format]`), `none` | Ruff check, Pylint | pip, Poetry, uv |
+| Rust   | `Cargo.toml` | cargo test (universal) | rustfmt (universal — always on, no config) | Clippy (`clippy.toml`) | (cargo only) |
+| Go     | `go.mod` | `go test` / stdlib `testing` (universal) | gofmt (universal — always on, no config) | golangci-lint (`.golangci.yml`) | (go mod only) |
+
+Notes:
+
+- **Test framework** (deep config) changes what Bock emits. For Rust and
+  Go the framework is universal (`cargo test` / `go test`), so it is not
+  user-selectable; selecting one for those targets is a build error.
+- **Formatter** (deep config). Prettier (js/ts) and Black/Ruff (python)
+  emit a config file; `formatter = "none"` suppresses it. rustfmt and
+  gofmt are universal/always-on and emit no config.
+- **Linter** (shallow config) is **opt-in**: a config file is emitted only
+  when `[targets.<T>.scaffolding].linter` is set. Omitting it emits no
+  linter config.
+- **Package manager** (shallow config) affects only the README's
+  install/test commands; it does not change the emitted code.
+
+Unknown values in either table produce a build error pointing at the
+documented options for that target. See §20.6.2 for the normative matrix.
 
 ### Source Maps
 

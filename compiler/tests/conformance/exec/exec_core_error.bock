@@ -1,0 +1,45 @@
+// TEST: exec_core_error
+// EXPECT: output "boom;again: boom"
+// EXPECT: targets rust, go
+//
+// THE PAYOFF FIXTURE for `core.error`: a user program that `use`s the embedded
+// `core.error` stdlib module, constructs a `SimpleError` via the `error(...)`
+// constructor, and reads its message back through the `message()` method —
+// compiled + run on the targets where a struct field and a method may share a
+// name today (rust + go).
+//
+// Q-GO-ERROR-MESSAGE LOCK. `core.error` declares `record SimpleError { message:
+// String }` *and* `fn message(self) -> String` (the `Error` trait method). On
+// Go those previously both emitted `Message` on the `SimpleError` struct — a
+// field and a method with the same name, which `go build` rejects ("type
+// SimpleError has both field and method named Message"), so `.message()` never
+// compiled on Go. The Go backend now disambiguates the *method* to
+// `MessageMethod()` (at the trait interface, the receiver, and every call site)
+// while the field stays `Message`, so `go run .` compiles and runs. Rust allows
+// a field and a method to share a name, so it is a no-op regression guard there.
+//
+// TARGETS — rust + go only. The SAME field/method name collision is a
+// PRE-EXISTING bug on js, ts, and python (FOUND, surfaced for triage): on those
+// targets the emitted instance field shadows the same-named method (TS: a
+// `tsc` "Duplicate identifier" error; JS: `e.message` resolves to the string,
+// so `e.message()` is "not a function"; Python: the dataclass field overwrites
+// the method). The collision-disambiguation fix landed for Go here; the js/ts/
+// python equivalents are a separate follow-up, so this fixture restricts to the
+// two targets where `core.error.message()` works end to end.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.error.{SimpleError, error}
+
+fn read(e: SimpleError) -> String {
+  e.message()
+}
+
+fn main() -> Void {
+  let e = error("boom")
+  let direct: String = e.message()
+  let again: String = read(error("boom"))
+  println("${direct};again: ${again}")
+}

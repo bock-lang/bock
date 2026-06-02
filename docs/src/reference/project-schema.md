@@ -245,10 +245,15 @@ not enum-validated.
   files only, suitable for integration into an existing target-language
   project the user already manages.
 
-> The per-target scaffolding bodies are still being filled in. The
-> framework, mode gating, and `[targets.*]` config parsing/validation
-> are active; the rich per-target manifests, transpiled test files, and
-> formatter/linter config files land incrementally.
+In project mode each target now emits a rich manifest referencing its
+test framework, a formatter config where applicable, an opt-in linter
+config (only when `[targets.<T>.scaffolding].linter` is set), and a
+`README.md` first-contact honoring the package-manager hint — see
+[Project-Mode Scaffolding](./tooling.md#project-mode-scaffolding) for the
+per-target file list. The transpiled `@test` *files* (so `npm test` /
+`cargo test` / `pytest` / `go test` execute your Bock tests) and the
+formatter-clean release gate land in a later milestone; the manifests
+already reference the framework.
 
 The supported per-target variant matrix is also carried normatively in
 §20.6.2.
