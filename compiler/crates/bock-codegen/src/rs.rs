@@ -28,6 +28,16 @@ use crate::error::CodegenError;
 use crate::generator::{CodeGenerator, GeneratedCode, OutputFile, SourceMap};
 use crate::profile::TargetProfile;
 
+/// Prelude container value/type names the Rust backend lowers to **native**
+/// Rust (`Optional`/`Result` → `Option`/`Result`; `Some`/`None`/`Ok`/`Err` are
+/// native constructors) rather than to a cross-module import. The per-module
+/// `use`-emission pass skips these: they are not real exports of the declaring
+/// stdlib module, so a `use crate::core::option::Some;` would not resolve. The
+/// comparison `Ordering` enum is deliberately **absent** — `core.compare`
+/// genuinely declares (`public enum Ordering`) and exports it, so a cross-module
+/// use of it resolves through a real `use crate::core::compare::Ordering;`.
+const RS_NATIVE_PRELUDE_NAMES: &[&str] = &["Optional", "Result", "Some", "None", "Ok", "Err"];
+
 /// Conservative module scan for `Channel` / `spawn` references.
 fn rs_module_uses_concurrency(items: &[AIRNode]) -> bool {
     items.iter().any(|n| {
@@ -116,67 +126,356 @@ impl CodeGenerator for RsGenerator {
         })
     }
 
-    /// Bundle every module (stdlib + user, dependency-ordered) into one entry
-    /// file by FLATTENING all module items to the crate root (decision A1 —
-    /// matches today's single-module emission). `ImportDecl`s are dropped and
-    /// imported items resolve unqualified within the same crate root. The
-    /// crate-level `#![allow(...)]` attribute and `use std::{rc,sync}` imports
-    /// are emitted once by `finish` (a shared ctx accumulates the `needs_*`
-    /// flags across all modules). Rust uses a native `fn main`, so no entry
-    /// invocation is appended.
+    /// Emit a per-module **native Rust module tree** (spec §20.6.1; DQ19
+    /// resolved): each module the entry program reaches through a real `use` is
+    /// emitted to its **own** `.rs` file under `src/`, wired with Rust's native
+    /// module system (`mod <m>;` declarations + `use crate::<m>::<x>;` for
+    /// cross-module references) rather than the flatten-to-crate-root bundling
+    /// this replaces.
     ///
-    /// Diverges from spec §20.6.1 (one output file per module); see the
-    /// `OPEN: §20.6.1` note in the bundling PR.
+    /// ## Layout (cargo-idiomatic `src/`-rooted crate)
+    ///
+    /// The build root `build/rust/` is a runnable Cargo crate:
+    /// - `Cargo.toml` — a minimal manifest (`[package]` + a `[[bin]]` at
+    ///   `src/main.rs`) — just enough to `cargo run`.
+    /// - `src/main.rs` — the entry module's body, preceded by `mod <seg>;`
+    ///   declarations for every top-level namespace the tree contains.
+    /// - `src/<path>.rs` — one file per reached non-entry module, mirrored from
+    ///   its **declared** module-path (`module core.option` ⇒ `src/core/option.rs`).
+    /// - `src/<namespace>.rs` — a wiring file per intermediate namespace
+    ///   (`src/core.rs` declaring `pub mod option; pub mod iter; …`), since Rust
+    ///   requires every file be reached through a `mod` declaration.
+    ///
+    /// §20.6.1 allows "the target ecosystem's conventions," so the `src/`-rooted
+    /// mirror is the correct idiomatic layout. The crate is run via `cargo run`
+    /// from `build/rust/` (debug build — see the rust run plan in
+    /// `bock-build`'s `toolchain.rs`).
+    ///
+    /// ## Cross-module references
+    ///
+    /// Each emitted file lists its cross-module dependencies as
+    /// `use crate::<declared::path>::<symbol>;` at the top — both the explicit
+    /// `use`d symbols and the implicit §18.2-prelude names a module references
+    /// but does not `use` (e.g. a base trait in an `impl`). The symbols are then
+    /// referenced unqualified in the body exactly as the bundling path emitted
+    /// them, so the per-item lowering is unchanged.
+    ///
+    /// The concurrency runtime (used by `Channel`/`spawn` programs) is emitted
+    /// **once** into a shared `src/bock_runtime.rs`; modules referencing it
+    /// `use crate::bock_runtime::*;`. Rust uses a native `fn main`, so no entry
+    /// invocation is appended.
     fn generate_project(
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
-        // Bundle only modules the entry program actually `use`s (plus the entry
-        // itself) — never the prelude-only stdlib (see `reachable_modules`).
+        // Emit only modules the entry program actually `use`s (plus the entry
+        // itself), dependency-ordered — never the prelude-only stdlib.
         let reachable = crate::generator::reachable_modules(modules);
         let modules = reachable.as_slice();
-        let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
+        if modules.is_empty() {
             return Ok(GeneratedCode { files: vec![] });
-        };
+        }
 
-        let mut ctx = RsEmitCtx::new();
-        // Pre-scan enum variants across the whole bundle so a `use`d enum's
-        // variants resolve at a construction/pattern site in another module.
-        ctx.enum_variants = crate::generator::collect_enum_variants(modules);
-        // Pre-scan generic-type declarations so an `impl Box { ... }` recovers
-        // the `<T>` declared on `record Box[T]` even across module boundaries,
-        // and the clone-target set so `RecordDecl` emission can derive `Clone`.
-        ctx.generic_decls = crate::generator::collect_generic_decls(modules);
+        let entry_idx = modules
+            .iter()
+            .position(|(m, _)| crate::generator::module_declares_main_fn(m))
+            .unwrap_or(modules.len() - 1);
+
+        // Registries collected across the whole reachable set so a reference in
+        // one file to a type/variant/trait declared in another lowers
+        // identically to the bundling path.
+        let enum_variants = crate::generator::collect_enum_variants(modules);
+        let generic_decls = crate::generator::collect_generic_decls(modules);
         let trait_decls = crate::generator::collect_trait_decls(modules);
-        ctx.collect_self_operand_methods(&trait_decls);
-        ctx.trait_decls = trait_decls;
-        for (module, _) in modules {
-            ctx.collect_clone_targets(module);
-        }
-        for (i, (module, _)) in modules.iter().enumerate() {
-            if i > 0 && !ctx.buf.is_empty() && !ctx.buf.ends_with("\n\n") {
-                ctx.buf.push('\n');
-            }
-            ctx.emit_node(module)?;
-        }
-        let content = ctx.finish();
+        let public_symbols = crate::generator::collect_public_symbol_modules(modules);
 
-        let derived_name = out_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        let source_map = SourceMap {
-            generated_file: derived_name,
-            ..Default::default()
-        };
-        Ok(GeneratedCode {
-            files: vec![OutputFile {
+        // Map each trait's method names → (declaring module-path, trait name).
+        // A cross-module call of a trait method (`x.message()` where `Error` is
+        // declared in `core.error`) requires the *trait* to be in scope in Rust
+        // (`use crate::core::error::Error;`) — the bundling path had it for free
+        // (one crate root). The implicit-import scan only sees the *method* name
+        // (`message`) referenced, not the trait, so this lets the per-module
+        // emitter import the trait when its method is used. Built from the trait
+        // registry + the public-symbol map (which carries the declaring module).
+        let mut trait_method_owner: HashMap<String, (String, String)> = HashMap::new();
+        for (trait_name, info) in &trait_decls {
+            let Some(module_path) = public_symbols.get(trait_name) else {
+                continue; // a non-public / local-only trait needs no cross-module import
+            };
+            for m in &info.methods {
+                if let NodeKind::FnDecl { name, .. } = &m.kind {
+                    trait_method_owner
+                        .insert(name.name.clone(), (module_path.clone(), trait_name.clone()));
+                }
+            }
+        }
+
+        // Map each enum *variant* name → (declaring module-path, enum name). The
+        // Rust backend qualifies a variant as `Enum::Variant`, so a module that
+        // *constructs or matches* a cross-module enum's variant needs the **enum
+        // type** in scope (`use crate::core::compare::Ordering;`) — but the AIR
+        // it references names the *variant* (`Greater`), not the enum, so the
+        // plain implicit-import scan (which keys on the public *enum* name)
+        // misses it. This drives that import from a referenced variant. Built
+        // from the cross-module variant registry + the public-symbol map (which
+        // carries the enum's declaring module). Built-in Optional/Result/Ordering
+        // pre-seeds in the registry whose enum is not a real public symbol are
+        // skipped (they lower natively, not through a `use`).
+        let mut variant_enum_owner: HashMap<String, (String, String)> = HashMap::new();
+        for (variant, info) in &enum_variants {
+            if let Some(module_path) = public_symbols.get(&info.enum_name) {
+                variant_enum_owner.insert(
+                    variant.clone(),
+                    (module_path.clone(), info.enum_name.clone()),
+                );
+            }
+        }
+
+        // Self-operand + clone-target sets are global to the program (a generic
+        // helper in one module may take a clone-bound record from another), so
+        // collect them once into a template ctx and clone into each per-module
+        // ctx below.
+        let mut template = RsEmitCtx::new();
+        template.enum_variants = enum_variants;
+        template.generic_decls = generic_decls;
+        template.collect_self_operand_methods(&trait_decls);
+        template.trait_decls = trait_decls;
+        for (module, _) in modules {
+            template.collect_clone_targets(module);
+        }
+        // Effect-op resolution needs the whole reachable set: a bare op in one
+        // module may belong to an effect declared in another (cross-module
+        // effects, §10 + DV13).
+        template.seed_effect_registries(modules);
+
+        // The non-entry reached module-paths, for the `mod`-tree wiring.
+        let mut tree_paths: Vec<String> = Vec::new();
+        let mut needs_runtime = false;
+
+        let mut files: Vec<OutputFile> = Vec::with_capacity(modules.len() + 3);
+        for (i, (module, source_path)) in modules.iter().enumerate() {
+            let own_path = crate::generator::module_path_string(module).unwrap_or_default();
+            let mut ctx = template.fork();
+            ctx.per_module = true;
+            let mut imports =
+                crate::generator::implicit_imports_for(module, &public_symbols, &own_path);
+            // Also import a cross-module trait whose *method* this module calls
+            // (`x.message()` ⇒ `use crate::core::error::Error;`), so the trait is
+            // in scope for method resolution. Conservative: a structural scan for
+            // the method name as a quoted identifier; a dead `use` is harmless
+            // (`#![allow(unused_imports)]`).
+            let rendered = format!("{module:?}");
+            for (method, (trait_module, trait_name)) in &trait_method_owner {
+                if trait_module == &own_path {
+                    continue; // trait declared locally — already in scope
+                }
+                if rendered.contains(&format!("\"{method}\"")) {
+                    imports.push((trait_module.clone(), trait_name.clone()));
+                }
+            }
+            // And import the *enum type* whose cross-module *variant* this module
+            // constructs/matches (`Ordering::Greater` ⇒ `use
+            // crate::core::compare::Ordering;`) — the AIR names the variant, but
+            // Rust qualifies it through the enum, which must be in scope.
+            for (variant, (enum_module, enum_name)) in &variant_enum_owner {
+                if enum_module == &own_path {
+                    continue; // enum declared locally — already in scope
+                }
+                if rendered.contains(&format!("\"{variant}\"")) {
+                    imports.push((enum_module.clone(), enum_name.clone()));
+                }
+            }
+            ctx.implicit_imports = imports;
+            ctx.emit_node(module)?;
+            needs_runtime |= ctx.concurrency_runtime_emitted;
+            let body = ctx.finish_per_module();
+
+            // The entry module's body is `src/main.rs` (preceded by the
+            // `mod`-tree declarations, prepended below); every other module is
+            // placed under `src/` at its declared-path mirror.
+            let rel = if i == entry_idx {
+                PathBuf::from("main.rs")
+            } else {
+                tree_paths.push(own_path.clone());
+                crate::generator::module_tree_relpath(module, source_path, self.target())
+            };
+            let out_path = PathBuf::from("src").join(&rel);
+            let generated_file = out_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            files.push(OutputFile {
                 path: out_path,
-                content,
-                source_map: Some(source_map),
-            }],
-        })
+                content: body,
+                source_map: Some(SourceMap {
+                    generated_file,
+                    ..Default::default()
+                }),
+            });
+        }
+
+        // Build the `mod`-tree: `main.rs` gets `mod <top>;` for each top-level
+        // namespace; each intermediate namespace gets a `src/<ns>.rs` wiring
+        // file declaring `pub mod <child>;`. Add the shared runtime module too.
+        let mut tree = ModTree::default();
+        for p in &tree_paths {
+            tree.insert(p);
+        }
+        if needs_runtime {
+            tree.insert("bock_runtime");
+        }
+        let root_mods = tree.root_decls();
+        for (wiring_rel, decls) in tree.wiring_files() {
+            files.push(OutputFile {
+                path: PathBuf::from("src").join(&wiring_rel),
+                content: decls,
+                source_map: None,
+            });
+        }
+
+        // Insert the root `mod` declarations into `src/main.rs` *after* the
+        // leading `#![allow(...)]` inner attribute (an inner attribute must
+        // precede every item, so the `mod`s cannot go before it). They are
+        // placed at the top of the item region, ahead of the cross-module `use`s
+        // and the body.
+        if !root_mods.is_empty() {
+            if let Some(main_file) = files
+                .iter_mut()
+                .find(|f| f.path == PathBuf::from("src").join("main.rs"))
+            {
+                let block = format!("{root_mods}\n");
+                // The inner-attribute prefix ends at the first blank line after
+                // the `#![allow(...)]` line; insert the `mod`s right there. If
+                // (defensively) no inner attribute is present, prepend.
+                match main_file.content.find("]\n\n") {
+                    Some(idx) => {
+                        let at = idx + "]\n\n".len();
+                        main_file.content.insert_str(at, &block);
+                    }
+                    None => main_file.content.insert_str(0, &block),
+                }
+            }
+        }
+
+        // Shared concurrency runtime module (tokio-backed), emitted once.
+        if needs_runtime {
+            files.push(OutputFile {
+                path: PathBuf::from("src").join("bock_runtime.rs"),
+                content: format!("#![allow(unused_imports, dead_code)]\n{CONCURRENCY_RUNTIME_RS}"),
+                source_map: None,
+            });
+        }
+
+        // Minimal manifest: a `[package]` + a `[[bin]]` pointing at
+        // `src/main.rs`, just enough to `cargo run`. `tokio` is added only when
+        // a program uses the concurrency runtime (otherwise the crate has no
+        // dependencies). `edition = "2021"` matches the existing rust profile.
+        files.push(OutputFile {
+            path: PathBuf::from("Cargo.toml"),
+            content: cargo_toml(needs_runtime),
+            source_map: None,
+        });
+
+        Ok(GeneratedCode { files })
+    }
+}
+
+/// Render the minimal `Cargo.toml` for the emitted crate. A `[[bin]]` names the
+/// entry `main` at `src/main.rs`. `tokio` (with the `rt-multi-thread`/`macros`/
+/// `sync`/`time` features the concurrency runtime needs) is included only when
+/// the program uses `Channel`/`spawn`, so a non-concurrent program's crate has
+/// no dependencies and `cargo run` stays fast.
+fn cargo_toml(needs_tokio: bool) -> String {
+    let mut s = String::from(
+        "[package]\n\
+         name = \"bock_app\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2021\"\n\n\
+         [[bin]]\n\
+         name = \"bock_app\"\n\
+         path = \"src/main.rs\"\n",
+    );
+    if needs_tokio {
+        s.push_str(
+            "\n[dependencies]\n\
+             tokio = { version = \"1\", features = [\"rt-multi-thread\", \"macros\", \"sync\", \"time\"] }\n",
+        );
+    }
+    s
+}
+
+/// Builder for the Rust `mod` declaration tree of a per-module crate.
+///
+/// Rust requires every source file be reached through a `mod`/`pub mod`
+/// declaration from the crate root. Given the set of reached non-entry
+/// module-paths (`core.option`, `helper`, `bock_runtime`, …), this produces:
+/// - the root declarations for `src/main.rs` (`mod core;`, `mod helper;`, … —
+///   one per distinct top-level namespace), and
+/// - one wiring file per intermediate namespace (`src/core.rs` declaring
+///   `pub mod option;`, `pub mod iter;`, …).
+///
+/// All v1 modules are leaves under a namespace (`core.X`) or bare roots
+/// (`helper`), but the builder handles an arbitrarily deep tree.
+#[derive(Default)]
+struct ModTree {
+    /// Child namespaces keyed by dotted prefix. The empty string is the crate
+    /// root; `core` maps to the children declared in `src/core.rs`. Values are
+    /// the immediate child segment names (deduped, sorted on render).
+    children: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl ModTree {
+    /// Register a reached module-path, recording every parent→child edge so the
+    /// crate root and each intermediate namespace declare the right submodules.
+    fn insert(&mut self, dotted: &str) {
+        let segs: Vec<&str> = dotted.split('.').filter(|s| !s.is_empty()).collect();
+        let mut prefix = String::new();
+        for seg in &segs {
+            self.children
+                .entry(prefix.clone())
+                .or_default()
+                .insert((*seg).to_string());
+            if prefix.is_empty() {
+                prefix = (*seg).to_string();
+            } else {
+                prefix.push('.');
+                prefix.push_str(seg);
+            }
+        }
+    }
+
+    /// The crate-root `mod <seg>;` declarations (for `src/main.rs`), one per
+    /// distinct top-level namespace, newline-terminated. Empty when the program
+    /// has no cross-module dependencies.
+    fn root_decls(&self) -> String {
+        let mut out = String::new();
+        if let Some(roots) = self.children.get("") {
+            for seg in roots {
+                out.push_str(&format!("mod {seg};\n"));
+            }
+        }
+        out
+    }
+
+    /// One wiring file per intermediate namespace: `(relative path, contents)`
+    /// where the path is `<namespace>.rs` (e.g. `core.rs`) and the contents are
+    /// its `pub mod <child>;` declarations. Excludes the crate root (whose decls
+    /// go in `main.rs` via [`Self::root_decls`]).
+    fn wiring_files(&self) -> Vec<(PathBuf, String)> {
+        let mut files = Vec::new();
+        for (prefix, kids) in &self.children {
+            if prefix.is_empty() {
+                continue;
+            }
+            let mut content = String::new();
+            for kid in kids {
+                content.push_str(&format!("pub mod {kid};\n"));
+            }
+            let rel: PathBuf = prefix.split('.').collect::<PathBuf>().with_extension("rs");
+            files.push((rel, content));
+        }
+        files
     }
 }
 
@@ -283,6 +582,20 @@ struct RsEmitCtx {
     /// sealed-core conformance, which must be lowered to the Rust std trait /
     /// native operator (GAP-C). See [`crate::generator::is_unimplemented_sealed_core_trait`].
     trait_decls: crate::generator::TraitDeclRegistry,
+    /// True in the **per-module native-module** emission path (S3). When set,
+    /// the `Module` arm emits real `use crate::<m>::<x>;` for cross-module
+    /// references (explicit `use`s and the implicit prelude imports) at the top
+    /// of the file instead of dropping the `ImportDecl`s, and the concurrency
+    /// runtime is imported from the shared `bock_runtime` module rather than
+    /// inlined. When clear, the legacy flatten-to-crate-root bundling is used.
+    per_module: bool,
+    /// Implicit cross-module imports for the per-module path, as
+    /// `(module_path, symbol_name)` pairs — public names this module references
+    /// but neither declares locally nor imports via an explicit `use` (e.g. a
+    /// §18.2-prelude trait used as an `impl` base). The `Module` arm emits a
+    /// `use crate::<module_path>::<symbol_name>;` for each. Computed in
+    /// `generate_project`.
+    implicit_imports: Vec<(String, String)>,
 }
 
 impl RsEmitCtx {
@@ -307,6 +620,41 @@ impl RsEmitCtx {
             reused_match_bindings: std::collections::HashSet::new(),
             reused_let_bindings: std::collections::HashSet::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
+            per_module: false,
+            implicit_imports: Vec::new(),
+        }
+    }
+
+    /// Clone the cross-module *analysis* state (registries + the global
+    /// clone/self-operand sets) into a fresh emission context with an empty
+    /// buffer. Used by the per-module path to emit each module file from the
+    /// same pre-scanned program-wide context the bundling path built once, so a
+    /// reference in one file to a type/trait declared in another lowers
+    /// identically. The per-file state (`implicit_imports`, the runtime flag,
+    /// the buffer) starts fresh.
+    fn fork(&self) -> Self {
+        Self {
+            buf: String::with_capacity(4096),
+            indent: 0,
+            needs_rc_import: false,
+            needs_arc_import: false,
+            task_bound_names: std::collections::HashSet::new(),
+            effect_ops: self.effect_ops.clone(),
+            current_handler_vars: HashMap::new(),
+            fn_effects: self.fn_effects.clone(),
+            composite_effects: self.composite_effects.clone(),
+            concurrency_runtime_emitted: false,
+            enum_variants: self.enum_variants.clone(),
+            generic_decls: self.generic_decls.clone(),
+            clone_target_records: self.clone_target_records.clone(),
+            clone_bound_records: self.clone_bound_records.clone(),
+            in_clone_self_method: false,
+            self_operand_methods: self.self_operand_methods.clone(),
+            reused_match_bindings: std::collections::HashSet::new(),
+            reused_let_bindings: std::collections::HashSet::new(),
+            trait_decls: self.trait_decls.clone(),
+            per_module: false,
+            implicit_imports: Vec::new(),
         }
     }
 
@@ -720,6 +1068,149 @@ impl RsEmitCtx {
         }
         self.buf.insert_str(0, &prefix);
         self.buf
+    }
+
+    /// Finish one file of the per-module native tree (S3): prepend the per-file
+    /// `#![allow(...)]` inner attribute and any `use std::{rc,sync}` the body
+    /// needs, then return the buffer. The cross-module `use crate::<m>::<x>;`
+    /// statements (and the shared-runtime `use`) are emitted into the buffer by
+    /// the `Module` arm, so they already sit at the top of the body — this only
+    /// adds the crate/std-level preamble. `#![allow(...)]` is a module-level
+    /// inner attribute valid at the head of any module file (the crate root
+    /// `main.rs` *and* a submodule like `src/core/option.rs`).
+    fn finish_per_module(mut self) -> String {
+        if self.buf.is_empty() {
+            return self.buf;
+        }
+        let mut prefix = String::from(
+            "#![allow(unused_variables, unused_imports, unused_parens, dead_code, non_upper_case_globals)]\n\n",
+        );
+        if self.needs_rc_import {
+            prefix.push_str("use std::rc::Rc;\n");
+        }
+        if self.needs_arc_import {
+            prefix.push_str("use std::sync::Arc;\n");
+        }
+        if !prefix.ends_with("\n\n") {
+            prefix.push('\n');
+        }
+        self.buf.insert_str(0, &prefix);
+        self.buf
+    }
+
+    /// Pre-seed the effect registries (`effect_ops`, `composite_effects`) from
+    /// every module's top-level `EffectDecl`s. In the single-file bundling path
+    /// these are populated as each module body is emitted (dependency order, so
+    /// the effect's declaration precedes its use). In the per-module path each
+    /// module is emitted by its own forked context, so a bare op `log(...)` used
+    /// in `main` whose effect `Log` is declared in another module would not be
+    /// recognised as an effect op (and not rewritten to `__handler.log(...)`)
+    /// without pre-seeding from the whole reachable set. Mirrors how
+    /// `enum_variants` / `trait_decls` are collected across the bundle and the
+    /// Python / JS / TS backends' equivalents.
+    fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
+        for (module, _) in modules {
+            let NodeKind::Module { items, .. } = &module.kind else {
+                continue;
+            };
+            for item in items {
+                let NodeKind::EffectDecl {
+                    name,
+                    components,
+                    operations,
+                    ..
+                } = &item.kind
+                else {
+                    continue;
+                };
+                if !components.is_empty() {
+                    let comp_names: Vec<String> = components
+                        .iter()
+                        .map(|tp| {
+                            tp.segments
+                                .last()
+                                .map_or("effect".to_string(), |s| s.name.clone())
+                        })
+                        .collect();
+                    self.composite_effects.insert(name.name.clone(), comp_names);
+                    continue;
+                }
+                for op in operations {
+                    if let NodeKind::FnDecl { name: op_name, .. } = &op.kind {
+                        self.effect_ops
+                            .insert(op_name.name.clone(), name.name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Emit the per-module cross-module `use crate::<m>::<x>;` statements at the
+    /// top of the file: the explicit `use`d symbols and the implicit
+    /// §18.2-prelude names this module references but does not `use`. Grouped
+    /// one `use crate::<path>::{a, b};` per source module, deterministically
+    /// ordered. The dotted declared path `core.option` becomes the crate path
+    /// `crate::core::option`.
+    ///
+    /// Built-in prelude *value/type* names that lower to native Rust
+    /// (`Optional`/`Result` → `Option`/`Result`, `Some`/`None`/`Ok`/`Err`) are
+    /// skipped — they are not real exports of the declaring stdlib module, so a
+    /// `use crate::core::option::Some;` would not resolve. Cross-module
+    /// references to those resolve through the native lowering instead.
+    fn emit_cross_module_uses(&mut self, imports: &[AIRNode]) {
+        use std::collections::BTreeMap;
+        // crate-path → set of leaf symbol names (sorted, deduped on render).
+        let mut by_module: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+
+        // Explicit `use mod.{a, b}` imports.
+        for import in imports {
+            let NodeKind::ImportDecl { path, items } = &import.kind else {
+                continue;
+            };
+            let dotted = path
+                .segments
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            if dotted.is_empty() {
+                continue;
+            }
+            if let bock_ast::ImportItems::Named(named) = items {
+                for n in named {
+                    if RS_NATIVE_PRELUDE_NAMES.contains(&n.name.name.as_str()) {
+                        continue;
+                    }
+                    by_module
+                        .entry(dotted.clone())
+                        .or_default()
+                        .insert(n.name.name.clone());
+                }
+            }
+            // `use Foo` / `use Foo.*`: the referenced names are resolved as
+            // implicit imports below, so no statement is needed for the bare
+            // module/glob form.
+        }
+
+        // Implicit imports: prelude-visible names referenced but not `use`d.
+        for (module_path, name) in &self.implicit_imports {
+            if RS_NATIVE_PRELUDE_NAMES.contains(&name.as_str()) {
+                continue;
+            }
+            by_module
+                .entry(module_path.clone())
+                .or_default()
+                .insert(name.clone());
+        }
+
+        for (dotted, names) in by_module {
+            if names.is_empty() {
+                continue;
+            }
+            let crate_path = format!("crate::{}", dotted.replace('.', "::"));
+            let joined = names.into_iter().collect::<Vec<_>>().join(", ");
+            self.writeln(&format!("use {crate_path}::{{{joined}}};"));
+        }
     }
 
     fn indent_str(&self) -> String {
@@ -1703,17 +2194,33 @@ impl RsEmitCtx {
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         match &node.kind {
-            NodeKind::Module { items, .. } => {
-                // Cross-module `use` (DV13) → single-file bundling: every
-                // module's items are FLATTENED to the crate root (decision A1)
-                // and `ImportDecl`s are dropped. The imported items live in the
-                // same crate root, so `key(...)` / `Key` resolve unqualified.
-                // The concurrency runtime is emitted at most once across the
-                // bundle (a duplicate `struct __BockChannel` would not compile).
-                if !self.concurrency_runtime_emitted && rs_module_uses_concurrency(items) {
-                    self.buf.push_str(CONCURRENCY_RUNTIME_RS);
-                    self.buf.push('\n');
-                    self.concurrency_runtime_emitted = true;
+            NodeKind::Module { items, imports, .. } => {
+                if self.per_module {
+                    // Per-module native-module path (S3): each module is emitted
+                    // to its own `.rs` file. Record whether it references the
+                    // concurrency runtime (emitted once into `bock_runtime`) and,
+                    // if so, import it from there rather than inlining the
+                    // prelude (a duplicate `struct __BockChannel` across files is
+                    // a Rust redefinition error). Then emit real
+                    // `use crate::<m>::<x>;` for cross-module references.
+                    if rs_module_uses_concurrency(items) {
+                        self.concurrency_runtime_emitted = true;
+                        self.writeln("use crate::bock_runtime::*;");
+                    }
+                    self.emit_cross_module_uses(imports);
+                } else {
+                    // Cross-module `use` (DV13) → single-file bundling: every
+                    // module's items are FLATTENED to the crate root (decision
+                    // A1) and `ImportDecl`s are dropped. The imported items live
+                    // in the same crate root, so `key(...)` / `Key` resolve
+                    // unqualified. The concurrency runtime is emitted at most
+                    // once across the bundle (a duplicate `struct __BockChannel`
+                    // would not compile).
+                    if !self.concurrency_runtime_emitted && rs_module_uses_concurrency(items) {
+                        self.buf.push_str(CONCURRENCY_RUNTIME_RS);
+                        self.buf.push('\n');
+                        self.concurrency_runtime_emitted = true;
+                    }
                 }
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -1724,10 +2231,11 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::ImportDecl { .. } => {
-                // Resolved by bundling — the imported module's items are
-                // flattened into this same crate root — so the `use` is a no-op
-                // (DV13). A real `use core::compare::{...}` would not resolve:
-                // there is no `core` crate in a single-file `rustc main.rs`.
+                // Resolved either by bundling (the imported module's items are
+                // flattened into this same crate root) or, in the per-module
+                // path, by the real `use crate::<m>::<x>;` statements emitted up
+                // front by `emit_cross_module_uses` from the `Module` arm. Either
+                // way, the per-item visit here is a no-op.
                 Ok(())
             }
             NodeKind::FnDecl {
@@ -6677,5 +7185,180 @@ mod tests {
         );
         assert_eq!(RsEmitCtx::count_identifier_uses(&body, "x"), 2);
         assert_eq!(RsEmitCtx::count_identifier_uses(&body, "y"), 0);
+    }
+
+    // ── Per-module native-module tree (S3) ──────────────────────────────────
+
+    /// A module node with a declared dotted `path` (e.g. `core.option`), used by
+    /// the per-module emission tests where the file layout and `mod`/`use`
+    /// wiring are keyed on the declared module-path.
+    fn module_with_path(path: &[&str], imports: Vec<AIRNode>, items: Vec<AIRNode>) -> AIRNode {
+        node(
+            0,
+            NodeKind::Module {
+                path: Some(mod_path(path)),
+                annotations: vec![],
+                imports,
+                items,
+            },
+        )
+    }
+
+    /// An `import <path>.{ name }` AIR node (a single-item `Named` import).
+    fn import_named(id: u32, path: &[&str], name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::ImportDecl {
+                path: mod_path(path),
+                items: ImportItems::Named(vec![imported_name(name)]),
+            },
+        )
+    }
+
+    /// A bare `fn <name>() -> <tail>` declaration with the given visibility.
+    fn fn_decl_tail(id: u32, vis: Visibility, name: &str, tail: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: vis,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(id + 1, vec![], Some(tail))),
+            },
+        )
+    }
+
+    #[test]
+    fn per_module_emits_native_rust_module_tree() {
+        // entry `module main` uses `mathutil.add_one`; `module mathutil` exports
+        // a `public fn add_one`. Per-module emission must produce a Cargo crate:
+        // `Cargo.toml`, `src/main.rs` (with `mod mathutil;` + `use
+        // crate::mathutil::{add_one};`), and `src/mathutil.rs` — never a bundle.
+        let call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "add_one")),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(12, "6"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(5, &["mathutil"], "add_one")],
+            vec![fn_decl_tail(1, Visibility::Private, "main", call)],
+        );
+        let util_mod = module_with_path(
+            &["mathutil"],
+            vec![],
+            vec![fn_decl_tail(
+                20,
+                Visibility::Public,
+                "add_one",
+                int_lit(22, "7"),
+            )],
+        );
+
+        let gen = RsGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&util_mod, std::path::Path::new("src/mathutil.bock")),
+            ])
+            .unwrap();
+
+        let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
+        let main_file = by_name("src/main.rs").expect("src/main.rs emitted");
+        let util_file = by_name("src/mathutil.rs").expect("src/mathutil.rs emitted");
+        by_name("Cargo.toml").expect("Cargo.toml manifest emitted");
+
+        assert!(
+            main_file.content.contains("mod mathutil;"),
+            "main.rs must declare the sibling module; got:\n{}",
+            main_file.content
+        );
+        assert!(
+            main_file
+                .content
+                .contains("use crate::mathutil::{add_one};"),
+            "main.rs must `use` the cross-module fn; got:\n{}",
+            main_file.content
+        );
+        // The inner attribute must precede the `mod` declarations.
+        let attr = main_file.content.find("#![allow").expect("inner attr");
+        let modline = main_file.content.find("mod mathutil;").unwrap();
+        assert!(attr < modline, "inner attribute must precede `mod`");
+        assert!(
+            util_file.content.contains("pub fn add_one("),
+            "mathutil.rs must carry the exported fn; got:\n{}",
+            util_file.content
+        );
+    }
+
+    #[test]
+    fn per_module_builds_nested_mod_tree_wiring() {
+        // entry uses `core.option.get_or`. The nested `core.option` module must
+        // produce `src/core/option.rs` (the leaf), a `src/core.rs` wiring file
+        // declaring `pub mod option;`, and `mod core;` at the crate root.
+        let call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "get_or")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(5, &["core", "option"], "get_or")],
+            vec![fn_decl_tail(1, Visibility::Private, "main", call)],
+        );
+        let opt_mod = module_with_path(
+            &["core", "option"],
+            vec![],
+            vec![fn_decl_tail(
+                20,
+                Visibility::Public,
+                "get_or",
+                int_lit(22, "0"),
+            )],
+        );
+
+        let gen = RsGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&opt_mod, std::path::Path::new("src/core/option.bock")),
+            ])
+            .unwrap();
+        let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
+        by_name("src/core/option.rs").expect("nested leaf module file emitted");
+        let wiring = by_name("src/core.rs").expect("namespace wiring file emitted");
+        assert!(
+            wiring.content.contains("pub mod option;"),
+            "src/core.rs must declare `pub mod option;`; got:\n{}",
+            wiring.content
+        );
+        let main_file = by_name("src/main.rs").expect("src/main.rs emitted");
+        assert!(
+            main_file.content.contains("mod core;"),
+            "main.rs must declare `mod core;`; got:\n{}",
+            main_file.content
+        );
+        assert!(
+            main_file
+                .content
+                .contains("use crate::core::option::{get_or};"),
+            "main.rs must `use crate::core::option::{{get_or}};`; got:\n{}",
+            main_file.content
+        );
     }
 }

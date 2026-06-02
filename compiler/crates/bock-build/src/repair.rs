@@ -667,6 +667,7 @@ mod tests {
             version_args: vec!["--version".into()],
             compile_command: "not_a_real_binary_repair_xyz".into(),
             compile_args: vec![],
+            validate_per_project: false,
             run_plan: crate::toolchain::RunPlan {
                 steps: vec![crate::toolchain::RunStep::new(
                     "not_a_real_binary_repair_xyz",

@@ -41,13 +41,13 @@ points) is generated at the `build/<target>/` root per the target's
 conventions. By default `src/main.bock` is the entry point if present.
 See §20.6.1.
 
-> **v1 note (per-module output, in progress).** The per-module mirrored
-> tree above is the v1 output model (DQ19 resolved, §20.6.1), and it is
-> being delivered target by target. **Python, JavaScript, and TypeScript**
-> emit it today: a cross-module program compiles to one file per reached
-> module (mirrored from each module's declared path — `module core.option`
-> ⇒ `core/option.py` / `core/option.js` / `core/option.ts`), wired with
-> the target's native imports:
+> **v1 note (per-module output).** The per-module mirrored tree above is
+> the v1 output model (DQ19 resolved, §20.6.1), and **all five targets**
+> emit it: a cross-module program compiles to one file per reached module
+> (keyed on each module's *declared* path — `module core.option` ⇒
+> `core/option.<ext>`), wired with the target's native imports/modules,
+> plus the minimum manifest each needs to run as a project. A program that
+> imports nothing emits only its own entry module.
 >
 > - **Python** — package imports (`from core.option import …`), plus a
 >   shared `_bock_runtime.py` for the Optional/Result/Ordering/concurrency
@@ -58,17 +58,26 @@ See §20.6.1.
 >   declarations `export`ed, plus a shared `_bock_runtime.{js,ts}` for the
 >   concurrency/range helpers (and, for TS, the Optional/Result runtime
 >   types). A minimal `package.json` `{"type":"module"}` is emitted at the
->   `build/<target>/` root so Node treats the tree as ES modules; this is
->   the bare run affordance only — full project-mode scaffolding (the
->   richer `package.json`, `tsconfig.json`, etc.) is a later milestone. JS
->   runs as `node main.js`; TS compiles with `tsc main.ts` (which follows
->   the import tree) then runs `node main.js`.
+>   `build/<target>/` root so Node treats the tree as ES modules. JS runs
+>   as `node main.js`; TS compiles with `tsc main.ts` (which follows the
+>   import tree) then runs `node main.js`.
+> - **Rust** — a real Cargo crate: a minimal `Cargo.toml` (`[package]` +
+>   a `[[bin]]`) plus a `src/`-rooted module tree (`src/main.rs`,
+>   `src/core/option.rs`, the `mod`/`pub mod` wiring files), with
+>   cross-module references resolved by `use crate::core::option::…;`. The
+>   concurrency runtime, when used, lives once in `src/bock_runtime.rs`.
+>   Built and run with `cargo run` from `build/rust/`.
+> - **Go** — a real Go module: a minimal `go.mod` (module name + go
+>   version) plus flat per-module files all in one `package main`
+>   (`main.go`, `core_option.go`, …, and a shared `bock_runtime.go` for the
+>   Optional/Result/concurrency/range runtimes). Same-package symbols are
+>   visible across files without an import. Run with `go run .` over
+>   `build/go/`.
 >
-> The remaining two targets (`rust`, `go`) still **bundle** every reached
-> module (in dependency order, including imported `core.*` stdlib) into
-> the single entry file `build/<target>/main.<ext>`, dropping the import
-> statements, until their native-import paths land. A program that imports
-> nothing emits only its own entry module on every target.
+> The minimal `Cargo.toml` / `go.mod` / `package.json` here are the bare
+> run affordances only — full project-mode scaffolding (richer manifests,
+> `tsconfig.json`, formatter configs, transpiled tests) is a later
+> milestone.
 
 ### Output Modes
 

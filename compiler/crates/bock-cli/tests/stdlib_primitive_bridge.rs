@@ -333,7 +333,15 @@ fn build_source(root: &std::path::Path, target: &str, ext: &str) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let main_path = root.join("build").join(target).join(format!("main.{ext}"));
+    // The emitted entry is `main.<ext>` at the target build root for every
+    // target except rust, whose per-module output is a `src/`-rooted Cargo crate
+    // (S3) — its entry is `src/main.rs`.
+    let target_dir = root.join("build").join(target);
+    let main_path = if target == "rust" {
+        target_dir.join("src").join(format!("main.{ext}"))
+    } else {
+        target_dir.join(format!("main.{ext}"))
+    };
     fs::read_to_string(&main_path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", main_path.display()))
 }

@@ -289,11 +289,11 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
 
         // Optionally invoke target compiler
         if !options.source_only {
-            // Walk the output directory and invoke the toolchain on each generated file
-            let ext = target_file_extension(target);
-            let generated_files = find_files_with_extension(&output_dir, &ext)?;
-            for gen_file in &generated_files {
-                match toolchain_registry.invoke(target, gen_file, false) {
+            // Some targets (rust/go) emit a real project (Cargo crate / Go
+            // module) and validate the whole output dir at once; the rest
+            // validate each emitted source file independently.
+            if toolchain_registry.validates_per_project(target) {
+                match toolchain_registry.invoke_project(target, &output_dir, false) {
                     Ok(_result) => {}
                     Err(bock_build::toolchain::ToolchainError::NotFound {
                         install_hint, ..
@@ -302,11 +302,34 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
                             "  warning: {target} toolchain not found, skipping compilation.\n  \
                              hint: {install_hint}"
                         );
-                        break;
                     }
                     Err(e) => {
                         eprintln!("error: target compilation failed: {e}");
                         found_errors = true;
+                    }
+                }
+            } else {
+                // Walk the output directory and invoke the toolchain on each
+                // generated file.
+                let ext = target_file_extension(target);
+                let generated_files = find_files_with_extension(&output_dir, &ext)?;
+                for gen_file in &generated_files {
+                    match toolchain_registry.invoke(target, gen_file, false) {
+                        Ok(_result) => {}
+                        Err(bock_build::toolchain::ToolchainError::NotFound {
+                            install_hint,
+                            ..
+                        }) => {
+                            eprintln!(
+                                "  warning: {target} toolchain not found, skipping compilation.\n  \
+                                 hint: {install_hint}"
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("error: target compilation failed: {e}");
+                            found_errors = true;
+                        }
                     }
                 }
             }

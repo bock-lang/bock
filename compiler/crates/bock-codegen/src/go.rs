@@ -471,34 +471,261 @@ impl CodeGenerator for GoGenerator {
         })
     }
 
-    /// Bundle every module (stdlib + user, dependency-ordered) into one entry
-    /// file. Go has no single top-level scope across files, so a cross-module
-    /// `use` (DV13) cannot be a real `import "core/compare"` for a lone
-    /// `go run main.go`. Instead all module bodies are concatenated into one
-    /// `package main` file with a **single merged, deduped `import (...)` block**
-    /// (the union of each module's `fmt`/`sync`/`time` needs) and each runtime
-    /// prelude (Optional / concurrency) emitted **at most once**. `ImportDecl`s
-    /// are dropped. Go uses a native `func main`, so no entry invocation is
-    /// appended.
+    /// Emit a per-module **native Go package tree** (spec §20.6.1; DQ19
+    /// resolved): each module the entry program reaches through a real `use` is
+    /// emitted to its **own** `.go` file under `build/go/`, all in one
+    /// `package main`.
     ///
-    /// Diverges from spec §20.6.1 (one output file per module); see the
-    /// `OPEN: §20.6.1` note in the bundling PR.
+    /// ## Package model (flat, single `package main`)
+    ///
+    /// Go requires exactly one package per directory, and same-package symbols
+    /// are visible across files **without** any import. So the cleanest model
+    /// that is genuinely per-file and runs via `go run .` keeps every emitted
+    /// file in `build/go/` as `package main`: a function/record/enum declared
+    /// in `core.option`'s file is referenced directly from `main`'s file, no
+    /// inter-file import. The flat layout (filenames flatten the dotted module
+    /// path — `module core.option` ⇒ `core.option.go`) avoids the subdirectory
+    /// that would make Go treat a module as a *separate* package. §20.6.1 allows
+    /// "the target ecosystem's conventions," and one package across files is
+    /// Go's. (Project mode — S6 — may refine this toward real subpackages with
+    /// capitalized exports.)
+    ///
+    /// `ImportDecl`s therefore emit nothing (same package). The runtime preludes
+    /// (Optional / Result / numeric / Ordering / concurrency / range) are
+    /// emitted **once** into a shared `bock_runtime.go`; consuming files use the
+    /// runtime symbols directly (same package). A minimal `go.mod` (module name +
+    /// go version) is emitted at the build root so `go run .` resolves the
+    /// package. Go uses a native `func main`, so no entry invocation is appended.
     fn generate_project(
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
-        // Bundle only modules the entry program actually `use`s (plus the entry
-        // itself) — never the prelude-only stdlib (see `reachable_modules`).
+        // Emit only modules the entry program actually `use`s (plus the entry
+        // itself), dependency-ordered — never the prelude-only stdlib.
+        let reachable = crate::generator::reachable_modules(modules);
+        let modules = reachable.as_slice();
+        if modules.is_empty() {
+            return Ok(GeneratedCode { files: vec![] });
+        }
+
+        let entry_idx = modules
+            .iter()
+            .position(|(m, _)| crate::generator::module_declares_main_fn(m))
+            .unwrap_or(modules.len() - 1);
+
+        // Pre-scan async fns across ALL modules so cross-module calls between
+        // async functions route through the Async-suffix wrappers.
+        let mut global_async_fns: HashSet<String> = HashSet::new();
+        for (module, _) in modules {
+            if let NodeKind::Module { items, .. } = &module.kind {
+                for item in items {
+                    if let NodeKind::FnDecl {
+                        is_async: true,
+                        name,
+                        ..
+                    } = &item.kind
+                    {
+                        global_async_fns.insert(name.name.clone());
+                    }
+                }
+            }
+        }
+
+        // A template ctx carries the program-wide analysis (enum variants,
+        // generics, trait/method/Optional-return metadata) collected across the
+        // whole reachable set so a reference in one file to a symbol declared in
+        // another lowers identically to the bundling path. Each per-module ctx
+        // is forked from it.
+        let mut template = GoEmitCtx::new();
+        template.async_fns = global_async_fns;
+        template.enum_variants = crate::generator::collect_enum_variants(modules);
+        template.generic_decls = crate::generator::collect_generic_decls(modules);
+        template.trait_decls = crate::generator::collect_trait_decls(modules);
+        template.derive_self_param_traits();
+        for (module, _) in modules {
+            template.collect_methods(module);
+            template.collect_optional_returns(module);
+            template.collect_method_optional_returns(module);
+            template.collect_record_param_fields(module);
+            template.collect_fn_and_type_names(module);
+        }
+        // Effect-op resolution needs the whole reachable set: a bare op in one
+        // module may belong to an effect declared in another (§10 + DV13).
+        template.seed_effect_registries(modules);
+
+        let mut files: Vec<OutputFile> = Vec::with_capacity(modules.len() + 2);
+        for (i, (module, source_path)) in modules.iter().enumerate() {
+            let mut ctx = template.fork();
+            ctx.per_module = true;
+            ctx.emit_node(module)?;
+            let (body, needs) = ctx.into_parts();
+
+            // Each per-module file is `package main` with its own per-file
+            // `import (...)` block (Go imports are per-file).
+            let mut content = "package main\n".to_string();
+            content.push_str(&needs.render_block());
+            content.push('\n');
+            content.push_str(&body);
+
+            let rel = if i == entry_idx {
+                std::path::PathBuf::from("main.go")
+            } else {
+                go_module_filename(module, source_path, self.target())
+            };
+            let generated_file = rel
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            files.push(OutputFile {
+                path: rel,
+                content,
+                source_map: Some(SourceMap {
+                    generated_file,
+                    ..Default::default()
+                }),
+            });
+        }
+
+        // Shared runtime file: emit exactly the preludes the whole program uses,
+        // once, in their own `package main` file (same package → visible to all).
+        if let Some(runtime) = self.build_runtime_file(modules, &template) {
+            files.push(OutputFile {
+                path: std::path::PathBuf::from("bock_runtime.go"),
+                content: runtime,
+                source_map: None,
+            });
+        }
+
+        // Minimal manifest: module name + go version, enough for `go run .`.
+        files.push(OutputFile {
+            path: std::path::PathBuf::from("go.mod"),
+            content: GO_MOD.to_string(),
+            source_map: None,
+        });
+
+        Ok(GeneratedCode { files })
+    }
+}
+
+/// The minimal `go.mod` for the emitted per-module package: a module path and a
+/// go version, enough for `go run .` to resolve the package. The go version is
+/// intentionally conservative (1.21) so the output builds on a wide range of
+/// installed toolchains.
+const GO_MOD: &str = "module bock_app\n\ngo 1.21\n";
+
+/// The flat output filename for one non-entry module in the per-module Go
+/// package: the declared dotted module-path kept verbatim (`module core.option`
+/// ⇒ `core.option.go`), so every emitted file lives directly in `build/go/`
+/// (one package per directory — no subdirectory, which Go would treat as a
+/// separate package). A module with no declared path falls back to its
+/// source-mirrored file name.
+///
+/// The dots are **kept** (not flattened to `_`) deliberately: Go reserves the
+/// `_test.go` filename suffix for test files (excluded from a normal `go build`
+/// / `go run .`), so `module core.test` flattened to `core_test.go` would
+/// silently vanish from the build. `core.test.go` does not match `_test.go` and
+/// compiles as an ordinary package file. (Go also reserves `_GOOS.go` /
+/// `_GOARCH.go` suffixes, which the dot form likewise avoids.)
+fn go_module_filename(
+    module: &AIRModule,
+    source_path: &std::path::Path,
+    target: &TargetProfile,
+) -> std::path::PathBuf {
+    match crate::generator::module_path_string(module) {
+        Some(path) if !path.is_empty() => std::path::PathBuf::from(format!("{path}.go")),
+        _ => crate::generator::derive_output_path(source_path, target)
+            .file_name()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("module.go")),
+    }
+}
+
+impl GoGenerator {
+    /// Build the shared `bock_runtime.go` for the per-module path: `package main`
+    /// plus exactly the runtime preludes any reached module references, emitted
+    /// once (a duplicate `type __bockOption` / `__bockChannel` across files would
+    /// not compile). Returns `None` when no prelude is needed.
+    ///
+    /// The selection mirrors the bundling path's per-prelude gating:
+    /// numeric helpers are emitted when either container runtime is present
+    /// (both use them); the bespoke int-`Ordering` runtime is emitted only when
+    /// the real `core.compare.Ordering` enum is NOT reachable (otherwise that
+    /// user enum is authoritative and the int runtime would be dead + shadow it).
+    fn build_runtime_file(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+        template: &GoEmitCtx,
+    ) -> Option<String> {
+        let mut uses_concurrency = false;
+        let mut uses_optional = false;
+        let mut uses_result = false;
+        let mut uses_ordering = false;
+        let mut uses_range = false;
+        for (module, _) in modules {
+            if let NodeKind::Module { items, .. } = &module.kind {
+                uses_concurrency |= go_module_uses_concurrency(items);
+                uses_optional |= go_module_uses_optional(items);
+                uses_result |= go_module_uses_result(items);
+                uses_ordering |= go_module_uses_ordering(items);
+                uses_range |= go_module_uses_range(items);
+            }
+        }
+        // The real `core.compare.Ordering` enum is authoritative when reachable
+        // (its `Less` is a registered user variant in the shared registry).
+        let ordering_enum_reachable = template
+            .enum_variants
+            .get("Less")
+            .is_some_and(|info| info.enum_name == "Ordering");
+
+        let emit_ordering = uses_ordering && !ordering_enum_reachable;
+        if !(uses_concurrency || uses_optional || uses_result || uses_range || emit_ordering) {
+            return None;
+        }
+
+        let mut content = String::from("package main\n\n");
+        if uses_concurrency {
+            content.push_str(CONCURRENCY_RUNTIME_GO);
+            content.push('\n');
+        }
+        if uses_optional {
+            content.push_str(OPTIONAL_RUNTIME_GO);
+            content.push('\n');
+        }
+        if uses_result {
+            content.push_str(RESULT_RUNTIME_GO);
+            content.push('\n');
+        }
+        if uses_optional || uses_result {
+            content.push_str(NUMERIC_RUNTIME_GO);
+            content.push('\n');
+        }
+        if emit_ordering {
+            content.push_str(ORDERING_RUNTIME_GO);
+            content.push('\n');
+        }
+        if uses_range {
+            content.push_str(RANGE_RUNTIME_GO);
+            content.push('\n');
+        }
+        Some(content)
+    }
+}
+
+impl GoGenerator {
+    /// Legacy single-file bundle path, retained behind the per-module flag so
+    /// the transition fallback stays available until S4 retires bundling.
+    #[allow(dead_code)]
+    fn generate_bundle(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+    ) -> Result<GeneratedCode, CodegenError> {
         let reachable = crate::generator::reachable_modules(modules);
         let modules = reachable.as_slice();
         let Some(out_path) = crate::generator::bundle_output_path(modules, self.target()) else {
             return Ok(GeneratedCode { files: vec![] });
         };
 
-        // Pre-scan async fns across ALL modules so cross-module calls between
-        // async functions route through the Async-suffix wrappers, then seed a
-        // SINGLE shared ctx. Emitting every module through one ctx makes the
-        // runtime-once flags and the `needs_*` import flags dedup/merge for free.
         let mut global_async_fns: HashSet<String> = HashSet::new();
         for (module, _) in modules {
             if let NodeKind::Module { items, .. } = &module.kind {
@@ -517,15 +744,8 @@ impl CodeGenerator for GoGenerator {
 
         let mut ctx = GoEmitCtx::new();
         ctx.async_fns = global_async_fns;
-        // Pre-scan enum variants across the whole bundle so a `use`d enum's
-        // variants resolve at a construction/pattern site in another module.
         ctx.enum_variants = crate::generator::collect_enum_variants(modules);
-        // Pre-scan generic-type declarations so an `impl Box { ... }` recovers
-        // the `[T]` declared on `record Box[T]` even across module boundaries.
         ctx.generic_decls = crate::generator::collect_generic_decls(modules);
-        // Pre-scan method / Optional-return metadata across every module so a
-        // match whose scrutinee calls a function/method defined in another
-        // bundled module still type-asserts its payload correctly.
         ctx.trait_decls = crate::generator::collect_trait_decls(modules);
         ctx.derive_self_param_traits();
         for (module, _) in modules {
@@ -543,7 +763,6 @@ impl CodeGenerator for GoGenerator {
         }
         let (body, needs) = ctx.into_parts();
 
-        // One `package main`, one merged/deduped `import (...)` block.
         let mut content = "package main\n".to_string();
         content.push_str(&needs.render_block());
         content.push('\n');
@@ -571,6 +790,12 @@ impl CodeGenerator for GoGenerator {
 // ─── Emission context ────────────────────────────────────────────────────────
 
 /// Internal state for Go emission.
+///
+/// `Clone` is derived so the per-module path ([`GoGenerator::generate_project`])
+/// can pre-scan the whole program's cross-module analysis once into a template
+/// ctx and [`GoEmitCtx::fork`] it per module file (resetting only the per-file
+/// emission state). Every field is itself `Clone`.
+#[derive(Clone)]
 struct GoEmitCtx {
     buf: String,
     indent: usize,
@@ -879,6 +1104,13 @@ struct GoEmitCtx {
     /// before emitting such an argument, consumed (taken) by the lambda emit so
     /// it never leaks to a nested lambda. `None` for an ordinarily-typed lambda.
     expected_lambda_param_types: Option<Vec<String>>,
+    /// True in the **per-module native-package** emission path (S3). When set,
+    /// the `Module` arm does **not** inline the runtime preludes (they are
+    /// emitted once into the shared `bock_runtime.go` by `generate_project`) —
+    /// each module is its own `package main` file and same-package symbols are
+    /// visible without an import. When clear, the legacy single-file bundling is
+    /// used.
+    per_module: bool,
 }
 
 /// The set of Go stdlib packages the emitted body needs imported, gathered as
@@ -996,6 +1228,86 @@ impl GoEmitCtx {
             fn_return_go_types: HashMap::new(),
             expected_lambda_param_types: None,
             expected_collection_elem: None,
+            per_module: false,
+        }
+    }
+
+    /// Clone the program-wide cross-module *analysis* state into a fresh
+    /// emission context for one file of the per-module tree, resetting only the
+    /// per-file emission state (output buffer + indent, the `needs_*` per-file
+    /// import flags, and the runtime-once flags). The analysis registries
+    /// (`enum_variants`, `trait_decls`, method/Optional-return metadata, …) are
+    /// carried so a reference in one file to a symbol declared in another lowers
+    /// identically to the single-file bundling path.
+    fn fork(&self) -> Self {
+        let mut c = self.clone();
+        c.buf = String::with_capacity(4096);
+        c.indent = 0;
+        c.needs_fmt_import = false;
+        c.needs_sync_import = false;
+        c.needs_time_import = false;
+        c.needs_strings_import = false;
+        c.needs_utf8_import = false;
+        c.concurrency_runtime_emitted = false;
+        c.optional_runtime_emitted = false;
+        c.result_runtime_emitted = false;
+        c.numeric_runtime_emitted = false;
+        c.ordering_runtime_emitted = false;
+        c.range_runtime_emitted = false;
+        c.per_module = false;
+        c
+    }
+
+    /// Pre-seed the effect registries (`effect_ops`, `composite_effects`,
+    /// `void_effect_ops`) from every module's top-level `EffectDecl`s. In the
+    /// single-file bundling path these are populated as each module body is
+    /// emitted (dependency order); in the per-module path each module is emitted
+    /// by its own forked context, so a bare op `log(...)` used in `main` whose
+    /// effect `Log` is declared in another module must be recognised without
+    /// having emitted the declaring module first (cross-module effects, §10 +
+    /// DV13). Mirrors the Python / JS / TS / Rust backends' equivalents.
+    fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
+        for (module, _) in modules {
+            let NodeKind::Module { items, .. } = &module.kind else {
+                continue;
+            };
+            for item in items {
+                let NodeKind::EffectDecl {
+                    name,
+                    components,
+                    operations,
+                    ..
+                } = &item.kind
+                else {
+                    continue;
+                };
+                if !components.is_empty() {
+                    let comp_names: Vec<String> = components
+                        .iter()
+                        .map(|tp| {
+                            tp.segments
+                                .last()
+                                .map_or("effect".to_string(), |s| s.name.clone())
+                        })
+                        .collect();
+                    self.composite_effects.insert(name.name.clone(), comp_names);
+                    continue;
+                }
+                for op in operations {
+                    if let NodeKind::FnDecl {
+                        name: op_name,
+                        return_type,
+                        ..
+                    } = &op.kind
+                    {
+                        self.effect_ops
+                            .insert(op_name.name.clone(), name.name.clone());
+                        if return_type.as_deref().is_some_and(Self::is_void_type) {
+                            self.void_effect_ops.insert(op_name.name.clone());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -4025,6 +4337,23 @@ impl GoEmitCtx {
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         match &node.kind {
             NodeKind::Module { items, .. } => {
+                if self.per_module {
+                    // Per-module native-package path (S3): each module is its own
+                    // `package main` file and the runtime preludes live once in
+                    // the shared `bock_runtime.go` (same package → visible). So
+                    // this file inlines NO prelude; it just emits its own items.
+                    // `ImportDecl`s are a no-op (same package — no inter-file
+                    // import). The per-file `import (...)` block (fmt/sync/…) is
+                    // rendered by `into_parts` from the `needs_*` flags the body
+                    // sets as it emits.
+                    for (i, item) in items.iter().enumerate() {
+                        if i > 0 {
+                            self.buf.push('\n');
+                        }
+                        self.emit_node(item)?;
+                    }
+                    return Ok(());
+                }
                 // Cross-module `use` (DV13) → single-file bundling: every
                 // module's items are concatenated into the one entry file (one
                 // `package main`, one merged `import (...)` block built by the
@@ -11289,6 +11618,179 @@ mod tests {
         assert!(
             out.contains("Iter() ListIterator[T]"),
             "the method return must keep `[T]`, got: {out}"
+        );
+    }
+
+    // ── Per-module native-package tree (S3) ─────────────────────────────────
+
+    fn mod_path(segs: &[&str]) -> bock_ast::ModulePath {
+        bock_ast::ModulePath {
+            segments: segs.iter().map(|s| ident(s)).collect(),
+            span: span(),
+        }
+    }
+
+    /// A module node with a declared dotted `path` (e.g. `core.option`).
+    fn module_with_path(path: &[&str], imports: Vec<AIRNode>, items: Vec<AIRNode>) -> AIRNode {
+        node(
+            0,
+            NodeKind::Module {
+                path: Some(mod_path(path)),
+                annotations: vec![],
+                imports,
+                items,
+            },
+        )
+    }
+
+    /// An `import <path>.{ name }` AIR node (a single-item `Named` import).
+    fn import_named(id: u32, path: &[&str], name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::ImportDecl {
+                path: mod_path(path),
+                items: bock_ast::ImportItems::Named(vec![bock_ast::ImportedName {
+                    span: span(),
+                    name: ident(name),
+                    alias: None,
+                }]),
+            },
+        )
+    }
+
+    /// A bare `fn <name>() -> <tail>` declaration with the given visibility.
+    fn fn_decl_tail(id: u32, vis: Visibility, name: &str, tail: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: vis,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(id + 1, vec![], Some(tail))),
+            },
+        )
+    }
+
+    #[test]
+    fn per_module_emits_native_go_package_tree() {
+        // entry `module main` uses `mathutil.add_one`; `module mathutil` exports
+        // a `public fn add_one`. Per-module emission must produce a Go module:
+        // `go.mod`, `main.go` (one `package main`), and the flat `mathutil.go`
+        // (same package — the call site needs no import). Never a bundle.
+        let call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "add_one")),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(12, "6"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(5, &["mathutil"], "add_one")],
+            vec![fn_decl_tail(1, Visibility::Private, "main", call)],
+        );
+        let util_mod = module_with_path(
+            &["mathutil"],
+            vec![],
+            vec![fn_decl_tail(
+                20,
+                Visibility::Public,
+                "add_one",
+                int_lit(22, "7"),
+            )],
+        );
+
+        let gen = GoGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&util_mod, std::path::Path::new("src/mathutil.bock")),
+            ])
+            .unwrap();
+        let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
+        let main_file = by_name("main.go").expect("main.go emitted");
+        let util_file = by_name("mathutil.go").expect("flat mathutil.go emitted");
+        by_name("go.mod").expect("go.mod manifest emitted");
+
+        assert!(
+            main_file.content.starts_with("package main"),
+            "main.go must be `package main`; got:\n{}",
+            main_file.content
+        );
+        // Same package → the cross-module call needs no import statement.
+        assert!(
+            !main_file.content.contains("import \"mathutil\""),
+            "main.go must NOT import the sibling (same package); got:\n{}",
+            main_file.content
+        );
+        // The exported fn is PascalCased on emit; the call site matches.
+        assert!(
+            util_file.content.contains("func AddOne("),
+            "mathutil.go must carry the exported fn; got:\n{}",
+            util_file.content
+        );
+        assert!(
+            main_file.content.contains("AddOne("),
+            "main.go must call the cross-module fn; got:\n{}",
+            main_file.content
+        );
+    }
+
+    #[test]
+    fn per_module_nested_module_flattens_filename() {
+        // A nested `core.option` module flattens to a single flat file
+        // `core.option.go` (one package per dir — no subdirectory; dots kept so
+        // a `core.test` module never collides with Go's `_test.go` suffix).
+        let opt_mod = module_with_path(
+            &["core", "option"],
+            vec![],
+            vec![fn_decl_tail(
+                20,
+                Visibility::Public,
+                "get_or",
+                int_lit(22, "0"),
+            )],
+        );
+        let main_mod = module_with_path(
+            &["main"],
+            vec![import_named(5, &["core", "option"], "get_or")],
+            vec![fn_decl_tail(
+                1,
+                Visibility::Private,
+                "main",
+                node(
+                    10,
+                    NodeKind::Call {
+                        callee: Box::new(id_node(11, "get_or")),
+                        args: vec![],
+                        type_args: vec![],
+                    },
+                ),
+            )],
+        );
+        let gen = GoGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&opt_mod, std::path::Path::new("src/core/option.bock")),
+            ])
+            .unwrap();
+        let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
+        by_name("core.option.go").expect("nested module flattens to core.option.go");
+        // No subdirectory: there must be no `core/option.go`.
+        assert!(
+            by_name("core/option.go").is_none(),
+            "go must NOT emit a subdirectory package file"
         );
     }
 }

@@ -1160,6 +1160,150 @@ pub fn esm_relative_specifier(from_path: &str, to_path: &str, ext: &str) -> Stri
     spec
 }
 
+// ─── Native-module emission helpers (rust/go) ───────────────────────────────
+//
+// The Rust and Go backends emit a per-module **native module tree** (spec
+// §20.6.1; DQ19 resolved): each reachable module → its own target file,
+// cross-module references resolved with the target's native module system
+// (Rust `use crate::<m>::<x>;`; Go same-package symbol visibility). These
+// helpers are shared because the analysis — which public symbols a module
+// declares, and which symbols declared elsewhere a module references but never
+// `use`s explicitly — is purely over the AIR and identical for both targets.
+//
+// Unlike the ESM helpers, these carry no per-symbol declaration *kind*: Rust
+// and Go re-export every public top-level declaration uniformly (Rust via a
+// crate-path `use`; Go via the shared package scope), so a flat name→module
+// map suffices.
+
+/// Build a map from every **public top-level symbol name** declared across
+/// `modules` to the dotted declared module-path that declares it (e.g.
+/// `Iterable` → `core.iter`). Covers functions, records, enums (the **type**
+/// name), traits, classes, effects, type aliases, and consts.
+///
+/// The per-module native-module path needs this for **implicit imports**: in
+/// the single-file bundling path every reached module's top-level declarations
+/// shared one scope (Rust's flattened crate root / Go's one `package main`),
+/// so a §18.2-prelude trait used as an `impl` base (`impl Iterable for Bag`,
+/// with `Iterable` auto-imported per §18.2) resolved for free. Emitting one
+/// file per module breaks that for Rust — the consuming `main.rs` must
+/// `use crate::core::iter::Iterable;` even though `Iterable` never appears in
+/// an explicit `use`. (Go keeps one package across files, so a same-package
+/// symbol is visible without an import; Go uses this map only to know which
+/// names are cross-module, not to emit anything.) The map lets the backend add
+/// exactly those Rust `use`s for names a module references but neither declares
+/// locally nor imports explicitly.
+///
+/// Enum **variants** are intentionally *not* recorded as separate symbols:
+/// Rust accesses a variant through its type (`Ordering::Less`), so importing
+/// the enum type suffices, and a synthetic `Ordering_Less` is not a real Rust
+/// item to `use`. Go (same-package) needs no imports at all.
+///
+/// The first declarer wins for a name declared in several modules (the
+/// dependency order `modules` arrives in is deterministic — see
+/// [`reachable_modules`]).
+#[must_use]
+pub fn collect_public_symbol_modules(modules: &[(&AIRModule, &Path)]) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for (module, _) in modules {
+        let Some(module_path) = module_path_string(module) else {
+            continue;
+        };
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            let mut record = |name: &str| {
+                map.entry(name.to_string())
+                    .or_insert_with(|| module_path.clone());
+            };
+            match &item.kind {
+                NodeKind::FnDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::RecordDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::TraitDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::ClassDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::EffectDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::TypeAlias {
+                    visibility, name, ..
+                }
+                | NodeKind::ConstDecl {
+                    visibility, name, ..
+                }
+                | NodeKind::EnumDecl {
+                    visibility, name, ..
+                } => {
+                    if matches!(visibility, bock_ast::Visibility::Public) {
+                        record(&name.name);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    map
+}
+
+/// Compute the implicit cross-module imports for `module`: public symbols
+/// declared in *other* reachable modules that `module` references but neither
+/// declares locally nor imports explicitly. Returns `(module_path, name)`
+/// pairs.
+///
+/// "References" is a conservative structural scan of the module's debug
+/// rendering for the symbol name as a quoted identifier token (mirroring the
+/// Python / ESM equivalents). It can only *over*-import a name the program does
+/// not really use — harmless on Rust (a dead `use` is `allow`-ed by the
+/// crate-level `#![allow(unused_imports)]`) — never *under*-import, so it
+/// cannot reintroduce the unresolved reference it exists to fix.
+#[must_use]
+pub fn implicit_imports_for(
+    module: &AIRModule,
+    public_symbols: &HashMap<String, String>,
+    own_path: &str,
+) -> Vec<(String, String)> {
+    let local = locally_declared_names(module);
+    let explicit = explicitly_imported_names(module);
+    let rendered = format!("{module:?}");
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, declaring_module) in public_symbols {
+        if declaring_module == own_path || local.contains(name) || explicit.contains(name) {
+            continue;
+        }
+        if rendered.contains(&format!("\"{name}\"")) {
+            out.push((declaring_module.clone(), name.clone()));
+        }
+    }
+    out
+}
+
+/// Map a module's *declared* dotted path (`core.option`) to its **relative
+/// output path** in a per-module tree, with the target's file extension
+/// (`core/option.<ext>`). The entry module is laid out separately (always
+/// `main.<ext>` at a stable location), so callers pass non-entry modules here;
+/// a module with no declared path falls back to its source-mirrored path.
+#[must_use]
+pub fn module_tree_relpath(
+    module: &AIRModule,
+    source_path: &Path,
+    target: &TargetProfile,
+) -> PathBuf {
+    match module_path_string(module) {
+        Some(path) if !path.is_empty() => {
+            let rel: PathBuf = path.split('.').collect();
+            rel.with_extension(&target.conventions.file_extension)
+        }
+        _ => derive_output_path(source_path, target),
+    }
+}
+
 // ─── Statement-aware match helpers ──────────────────────────────────────────
 //
 // Some Bock `match` arms have *statement* bodies — `break`, `continue`,

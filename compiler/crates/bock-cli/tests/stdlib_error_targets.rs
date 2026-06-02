@@ -2,17 +2,18 @@
 //!
 //! For each v1 target, `bock build --source-only` over a `core.error`-importing
 //! project must succeed and emit `core.error`'s declarations — proving the
-//! embedded stdlib flows through codegen on every target. The emission *shape*
-//! depends on the target's migration state (per-module-output milestone, DQ19):
+//! embedded stdlib flows through codegen on every target. As of S3 **all five
+//! v1 targets** emit the per-module tree (DQ19 resolved): each module is emitted
+//! to its own file, so `SimpleError` (core.error's sole record) lives in the
+//! `core.error` module file and the entry wires to it with the target's native
+//! import/module mechanism:
 //!
-//! - **Bundling targets (`rust`/`go`):** the imported module is concatenated
-//!   into the single entry file `main.<ext>`, so that file carries the
-//!   `SimpleError` record (core.error's sole record).
-//! - **Per-module targets (`python` in S1, `js`/`ts` in S2):** each module is
-//!   emitted to its own file, so `SimpleError` lives in `core/error.{py,js,ts}`
-//!   and the entry carries a real cross-module import (Python `from core.error
-//!   import …`; js/ts `import … from "./core/error.js"`) rather than the bundled
-//!   record.
+//! - **python** — `core/error.py`; entry `from core.error import …`.
+//! - **js / ts** — `core/error.{js,ts}`; entry `import … from "./core/error.js"`.
+//! - **rust** — `src/core/error.rs`; entry `use crate::core::error::{…}`.
+//! - **go** — flat `core.error.go` in one `package main`; same-package symbols
+//!   are visible without an import, so the entry has no import statement — the
+//!   per-module *shape* is the separate module file (not an inlined record).
 //!
 //! This is *compile* (source-emission) verification only. Full conformance
 //! *execution* across targets (running the emitted code through each target's
@@ -65,23 +66,55 @@ fn make_project(tag: &str) -> PathBuf {
     root
 }
 
-/// Read the bundled entry file `build/<target>/main.<ext>`, if present.
-fn read_entry_bundle(build_dir: &Path, target: &str, ext: &str) -> Option<String> {
-    fs::read_to_string(build_dir.join(target).join(format!("main.{ext}"))).ok()
+/// Read the emitted entry file, if present. The entry is `main.<ext>` at the
+/// build root for every target except rust, whose per-module output is a
+/// `src/`-rooted Cargo crate (`src/main.rs`).
+fn read_entry(build_dir: &Path, target: &str, ext: &str) -> Option<String> {
+    let target_dir = build_dir.join(target);
+    let entry = if target == "rust" {
+        target_dir.join("src").join("main.rs")
+    } else {
+        target_dir.join(format!("main.{ext}"))
+    };
+    fs::read_to_string(entry).ok()
 }
 
-/// Whether `target` emits a per-module native import tree (vs. bundling). Kept
-/// in sync with the harness's `emits_per_module_tree`: S1 migrated `python`, S2
-/// adds `js`/`ts`.
-fn emits_per_module_tree(target: &str) -> bool {
-    matches!(target, "python" | "js" | "ts")
+/// Path to the per-module file for `module` (dotted, e.g. `core.error`) under
+/// `build/<target>/`, in the layout each target emits:
+/// - python/js/ts — mirrored tree `core/error.<ext>`.
+/// - rust — `src/`-rooted crate `src/core/error.rs`.
+/// - go — flat single package: `core.error.go` (dots kept).
+fn module_file_path(build_dir: &Path, target: &str, module: &str, ext: &str) -> PathBuf {
+    let target_dir = build_dir.join(target);
+    match target {
+        "rust" => {
+            let mut p = target_dir.join("src");
+            for seg in module.split('.') {
+                p = p.join(seg);
+            }
+            p.with_extension(ext)
+        }
+        // Go keeps the dotted module path in the flat filename (`core.test.go`)
+        // — flattening to `_` would hit Go's reserved `_test.go` suffix.
+        "go" => target_dir.join(format!("{module}.{ext}")),
+        _ => {
+            let mut p = target_dir;
+            let segs: Vec<&str> = module.split('.').collect();
+            for seg in &segs[..segs.len() - 1] {
+                p = p.join(seg);
+            }
+            p.join(format!("{}.{ext}", segs[segs.len() - 1]))
+        }
+    }
 }
 
-/// Assert the entry file carries a real cross-module import of `module` (the
-/// dotted declared path, e.g. `core.error`) in the per-module path, spelled the
-/// way the `target` emits it: Python `from core.error import …`; js/ts ESM
-/// `import … from "./core/error.js"` (the relative specifier always references
-/// the emitted `.js`, even for ts).
+/// Assert the entry file wires to the per-module `module` file (dotted path,
+/// e.g. `core.error`) the way `target` emits cross-module references:
+/// - python — `from core.error import …`.
+/// - js / ts — ESM `import … from "./core/error.js"` (always the `.js` ext).
+/// - rust — `use crate::core::error::{…};`.
+/// - go — same package, no import statement; the per-module *shape* (a separate
+///   module file carrying the symbol, asserted by the caller) is the evidence.
 fn assert_entry_imports_module(entry: &str, target: &str, module: &str) {
     match target {
         "python" => assert!(
@@ -95,6 +128,16 @@ fn assert_entry_imports_module(entry: &str, target: &str, module: &str) {
                 "target {target}: entry must `import … from \"{rel}\"`",
             );
         }
+        "rust" => {
+            let crate_path = format!("crate::{}::", module.replace('.', "::"));
+            assert!(
+                entry.contains(&format!("use {crate_path}")),
+                "target {target}: entry must `use {crate_path}…;`",
+            );
+        }
+        // Go's per-module files share one `package main`, so a cross-module
+        // reference needs no import — nothing to assert on the entry here.
+        "go" => {}
         other => panic!("assert_entry_imports_module: unexpected per-module target {other}"),
     }
 }
@@ -119,39 +162,23 @@ fn core_error_compiles_on_every_target() {
             String::from_utf8_lossy(&output.stderr),
         );
 
+        // Per-module tree (all five targets, S3): `core.error` is its own file
+        // carrying `SimpleError`, and the entry wires to it with the target's
+        // native import/module mechanism rather than inlining the record.
         let build_dir = root.join("build");
-        if emits_per_module_tree(target) {
-            // Per-module tree: `core.error` is its own file (`core/error.py`)
-            // carrying `SimpleError`, and the entry imports from it rather than
-            // inlining the record.
-            let module_file = build_dir
-                .join(target)
-                .join("core")
-                .join(format!("error.{ext}"));
-            let module_src = fs::read_to_string(&module_file).unwrap_or_else(|_| {
-                panic!(
-                    "target {target}: no per-module file {}",
-                    module_file.display()
-                )
-            });
-            assert!(
-                module_src.contains("SimpleError"),
-                "target {target}: core.error module file lacks `SimpleError`",
-            );
-            let entry = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
-                panic!("target {target}: no entry file build/{target}/main.{ext}")
-            });
-            assert_entry_imports_module(&entry, target, "core.error");
-        } else {
-            // Bundling: the imported `core.error` is concatenated into the entry
-            // file, so the `SimpleError` record must appear in `main.<ext>`.
-            let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
-                panic!("target {target}: no entry bundle build/{target}/main.{ext}")
-            });
-            assert!(
-                bundle.contains("SimpleError"),
-                "target {target}: core.error not bundled into main.{ext} (no `SimpleError`)",
-            );
-        }
+        let module_file = module_file_path(&build_dir, target, "core.error", ext);
+        let module_src = fs::read_to_string(&module_file).unwrap_or_else(|_| {
+            panic!(
+                "target {target}: no per-module file {}",
+                module_file.display()
+            )
+        });
+        assert!(
+            module_src.contains("SimpleError"),
+            "target {target}: core.error module file lacks `SimpleError`",
+        );
+        let entry = read_entry(&build_dir, target, ext)
+            .unwrap_or_else(|| panic!("target {target}: no entry file"));
+        assert_entry_imports_module(&entry, target, "core.error");
     }
 }

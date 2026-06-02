@@ -23,8 +23,21 @@ pub struct ToolchainSpec {
     /// Command and arguments used to validate/compile generated source.
     /// The source file path is appended as the last argument.
     pub compile_command: String,
-    /// Arguments for the compile command (source path appended).
+    /// Arguments for the compile command (source path appended unless
+    /// [`ToolchainSpec::validate_per_project`] is set).
     pub compile_args: Vec<String>,
+    /// Whether the compile/validation command operates on the **whole emitted
+    /// project directory** rather than one source file at a time.
+    ///
+    /// `false` (the default for interpreted/single-file targets) means the
+    /// build driver runs `compile_command compile_args <file>` once per emitted
+    /// source file (e.g. `node --check main.js`). `true` (rust/go, whose
+    /// per-module output is a real Cargo crate / Go module — S3) means it runs
+    /// `compile_command compile_args` **once** with the output directory as the
+    /// working directory and **no** appended file path (e.g. `cargo check` /
+    /// `go build` in `build/<target>/`); a per-file `src/<module>.rs` references
+    /// `crate::…` paths and does not type-check in isolation.
+    pub validate_per_project: bool,
     /// The plan for executing a built program and capturing its stdout.
     ///
     /// Distinct from [`ToolchainSpec::compile_command`]/[`ToolchainSpec::compile_args`],
@@ -355,6 +368,53 @@ impl ToolchainRegistry {
         invoke_compile(spec, source_path)
     }
 
+    /// Whether `target_id`'s validation runs once over the whole emitted project
+    /// directory (`cargo check` / `go build` for the per-module rust/go trees)
+    /// rather than once per source file. See
+    /// [`ToolchainSpec::validate_per_project`].
+    #[must_use]
+    pub fn validates_per_project(&self, target_id: &str) -> bool {
+        self.specs
+            .get(target_id)
+            .is_some_and(|s| s.validate_per_project)
+    }
+
+    /// Validate a whole emitted project directory at once (for targets whose
+    /// per-module output is a real project — rust's Cargo crate, go's module).
+    ///
+    /// Runs `compile_command compile_args` with `project_dir` as the working
+    /// directory and **no** appended file path. Used in place of the per-file
+    /// [`ToolchainRegistry::invoke`] loop for [`ToolchainSpec::validate_per_project`]
+    /// targets, where a lone `src/<module>.rs` does not type-check in isolation.
+    ///
+    /// If `source_only` is true, skips validation and returns success.
+    pub fn invoke_project(
+        &self,
+        target_id: &str,
+        project_dir: &Path,
+        source_only: bool,
+    ) -> Result<CompilationResult, ToolchainError> {
+        if source_only {
+            return Ok(CompilationResult {
+                target_id: target_id.to_string(),
+                command: "(source-only, compilation skipped)".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                success: true,
+            });
+        }
+        let spec = self
+            .specs
+            .get(target_id)
+            .ok_or_else(|| ToolchainError::NotFound {
+                target_id: target_id.to_string(),
+                binary_name: target_id.to_string(),
+                install_hint: format!("No toolchain registered for target '{target_id}'"),
+            })?;
+        detect_toolchain(spec)?;
+        invoke_compile_in_dir(spec, project_dir)
+    }
+
     /// Compile (if the target requires it) and execute a generated program,
     /// capturing the final step's stdout/stderr/exit.
     ///
@@ -422,6 +482,7 @@ fn builtin_javascript_spec() -> ToolchainSpec {
         version_args: vec!["--version".to_string()],
         compile_command: "node".to_string(),
         compile_args: vec!["--check".to_string()],
+        validate_per_project: false,
         // Run the emitted ESM/CJS entry directly with Node.
         run_plan: RunPlan {
             steps: vec![RunStep::new("node", &["main.js"])],
@@ -440,6 +501,7 @@ fn builtin_typescript_spec() -> ToolchainSpec {
         version_args: vec!["--version".to_string()],
         compile_command: "tsc".to_string(),
         compile_args: vec!["--noEmit".to_string()],
+        validate_per_project: false,
         // Emit `main.js` next to `main.ts`, then run it with Node.
         run_plan: RunPlan {
             steps: vec![
@@ -459,6 +521,7 @@ fn builtin_python_spec() -> ToolchainSpec {
         version_args: vec!["--version".to_string()],
         compile_command: "python3".to_string(),
         compile_args: vec!["-m".to_string(), "py_compile".to_string()],
+        validate_per_project: false,
         // Run the emitted module directly with the Python 3 interpreter.
         run_plan: RunPlan {
             steps: vec![RunStep::new("python3", &["main.py"])],
@@ -470,31 +533,26 @@ fn builtin_python_spec() -> ToolchainSpec {
 }
 
 fn builtin_rust_spec() -> ToolchainSpec {
-    // `rustc -o <name>` with an extension-less name produces `<name>` with NO
-    // `.exe` on Windows (verified: `rustc -o main_bin` → `main_bin`, never
-    // `main_bin.exe`). Windows can't spawn an extension-less file (CreateProcess
-    // appends `.exe` when searching), so give `-o` the platform exe suffix; the
-    // produced name then matches the artifact the run step spawns — `main_bin.exe`
-    // on Windows, `main_bin` on Unix (EXE_SUFFIX is empty there).
-    let out_name = format!("main_bin{}", std::env::consts::EXE_SUFFIX);
     ToolchainSpec {
         target_id: "rust".to_string(),
-        display_name: "Rust compiler".to_string(),
-        binary_name: "rustc".to_string(),
+        display_name: "Rust toolchain (cargo)".to_string(),
+        binary_name: "cargo".to_string(),
         version_args: vec!["--version".to_string()],
-        compile_command: "rustc".to_string(),
-        compile_args: vec!["--edition".to_string(), "2021".to_string()],
-        // Compile `main.rs` to a `main_bin` binary, then execute the produced
-        // artifact. The binary lives in `workdir` (named `main_bin` on Unix,
-        // `main_bin.exe` on Windows — rustc appends the platform exe suffix to
-        // an extension-less `-o` name), so the run step is an
-        // [`StepKind::Artifact`] spawned by its workdir path rather than a
-        // PATH-resolved `./main_bin`, which would fail on Windows.
+        // Per the per-module native tree (S3, §20.6.1 / DQ19), the rust build
+        // output under `build/rust/` is a real Cargo crate, so validation is at
+        // the *crate* level (`cargo check` in the output dir) rather than
+        // per-file `rustc` — a `src/<module>.rs` file references `crate::…`
+        // paths and does not type-check in isolation. `validate_per_project`
+        // makes the build driver invoke this once in the output dir.
+        compile_command: "cargo".to_string(),
+        compile_args: vec!["check".to_string(), "--quiet".to_string()],
+        validate_per_project: true,
+        // `cargo run` from the crate root compiles the whole module tree and
+        // runs the `bock_app` binary. `--quiet` keeps cargo's build progress off
+        // stdout (the program's own stdout is what the harness captures); a debug
+        // build keeps it fast. This replaces the single-file `rustc main.rs`.
         run_plan: RunPlan {
-            steps: vec![
-                RunStep::new("rustc", &["--edition", "2021", "main.rs", "-o", &out_name]),
-                RunStep::artifact("main_bin"),
-            ],
+            steps: vec![RunStep::new("cargo", &["run", "--quiet"])],
         },
         install_hint: "Install Rust via rustup: https://rustup.rs/".to_string(),
     }
@@ -506,16 +564,30 @@ fn builtin_go_spec() -> ToolchainSpec {
         display_name: "Go compiler".to_string(),
         binary_name: "go".to_string(),
         version_args: vec!["version".to_string()],
+        // Per the per-module native tree (S3), the go output under `build/go/`
+        // is a real Go module (`go.mod` + the per-module `.go` files in one
+        // `package main`), so it `go build`s as a *package* in the output dir
+        // rather than `go vet`-ing one file. `validate_per_project` makes the
+        // build driver invoke this once in the output dir.
         compile_command: "go".to_string(),
-        compile_args: vec!["vet".to_string()],
-        // `go run` compiles and executes the entry file in one step.
+        compile_args: vec!["build".to_string(), "-o".to_string(), os_devnull()],
+        validate_per_project: true,
+        // `go run .` compiles and executes the whole package in the dir in one
+        // step — replacing the single-file `go run main.go`.
         run_plan: RunPlan {
-            steps: vec![RunStep::new("go", &["run", "main.go"])],
+            steps: vec![RunStep::new("go", &["run", "."])],
         },
         install_hint: "Install Go from https://go.dev/dl/ or via your package manager \
                         (e.g., `brew install go`, `apt install golang`)"
             .to_string(),
     }
+}
+
+/// The platform null device (`/dev/null` on Unix, `NUL` on Windows). Used as
+/// `go build -o` so crate-level validation discards the produced binary instead
+/// of leaving an artifact in the output dir.
+fn os_devnull() -> String {
+    if cfg!(windows) { "NUL" } else { "/dev/null" }.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +651,65 @@ fn invoke_compile(
         spec.compile_command,
         spec.compile_args.join(" "),
         source_path.display()
+    );
+
+    let output = cmd.output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound
+            || e.kind() == std::io::ErrorKind::PermissionDenied
+        {
+            ToolchainError::NotFound {
+                target_id: spec.target_id.clone(),
+                binary_name: spec.compile_command.clone(),
+                install_hint: spec.install_hint.clone(),
+            }
+        } else {
+            ToolchainError::Io(e)
+        }
+    })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let success = output.status.success();
+
+    if !success {
+        return Err(ToolchainError::InvocationFailed {
+            target_id: spec.target_id.clone(),
+            command: full_command,
+            stdout: stdout.clone(),
+            stderr: stderr.clone(),
+            exit_code: output.status.code(),
+        });
+    }
+
+    Ok(CompilationResult {
+        target_id: spec.target_id.clone(),
+        command: full_command,
+        stdout,
+        stderr,
+        success,
+    })
+}
+
+/// Validate a whole emitted project directory at once: run
+/// `compile_command compile_args` with `project_dir` as the working directory
+/// and **no** appended file path (e.g. `cargo check` / `go build` in
+/// `build/<target>/`). Used for [`ToolchainSpec::validate_per_project`] targets
+/// (rust/go), whose per-module output is a real Cargo crate / Go module.
+fn invoke_compile_in_dir(
+    spec: &ToolchainSpec,
+    project_dir: &Path,
+) -> Result<CompilationResult, ToolchainError> {
+    let mut cmd = Command::new(&spec.compile_command);
+    for arg in &spec.compile_args {
+        cmd.arg(arg);
+    }
+    cmd.current_dir(project_dir);
+
+    let full_command = format!(
+        "{} {} (in {})",
+        spec.compile_command,
+        spec.compile_args.join(" "),
+        project_dir.display()
     );
 
     let output = cmd.output().map_err(|e| {
@@ -735,6 +866,7 @@ mod tests {
             version_args: vec!["--version".to_string()],
             compile_command: "customc".to_string(),
             compile_args: vec!["--check".to_string()],
+            validate_per_project: false,
             run_plan: RunPlan {
                 steps: vec![RunStep::new("customc", &["main.custom"])],
             },
@@ -767,6 +899,7 @@ mod tests {
             version_args: vec!["--version".to_string()],
             compile_command: "definitely_not_a_real_binary_xyz_123".to_string(),
             compile_args: vec![],
+            validate_per_project: false,
             run_plan: RunPlan {
                 steps: vec![RunStep::new("definitely_not_a_real_binary_xyz_123", &[])],
             },
@@ -890,14 +1023,18 @@ mod tests {
         let py = builtin_python_spec();
         assert_eq!(py.binary_name, "python3");
 
+        // Rust/Go emit a real project (Cargo crate / Go module — S3), so they
+        // build and validate via the project toolchain (`cargo` / `go`) at the
+        // crate/module level rather than per-file `rustc`/`go vet`.
         let rs = builtin_rust_spec();
-        assert_eq!(rs.binary_name, "rustc");
-        assert!(rs.compile_args.contains(&"--edition".to_string()));
-        assert!(rs.compile_args.contains(&"2021".to_string()));
+        assert_eq!(rs.binary_name, "cargo");
+        assert!(rs.compile_args.contains(&"check".to_string()));
+        assert!(rs.validate_per_project);
 
         let go = builtin_go_spec();
         assert_eq!(go.binary_name, "go");
-        assert!(go.compile_args.contains(&"vet".to_string()));
+        assert!(go.compile_args.contains(&"build".to_string()));
+        assert!(go.validate_per_project);
     }
 
     #[test]
@@ -926,6 +1063,7 @@ mod tests {
             version_args: vec!["--version".to_string()],
             compile_command: "not_a_real_binary_abc_999".to_string(),
             compile_args: vec![],
+            validate_per_project: false,
             run_plan: RunPlan {
                 steps: vec![RunStep::new("not_a_real_binary_abc_999", &[])],
             },
@@ -948,6 +1086,7 @@ mod tests {
             version_args: vec!["--version".to_string()],
             compile_command: "not_a_real_binary_zzz".to_string(),
             compile_args: vec!["--check".to_string()],
+            validate_per_project: false,
             run_plan: RunPlan {
                 steps: vec![RunStep::new("not_a_real_binary_zzz", &[])],
             },
@@ -975,25 +1114,29 @@ mod tests {
     }
 
     #[test]
-    fn rust_run_plan_is_two_step_compile_then_run() {
+    fn rust_run_plan_is_cargo_run() {
+        // Per the per-module native tree (S3), rust output is a Cargo crate run
+        // via a single `cargo run` step from the build dir — replacing the old
+        // two-step `rustc main.rs` + produced-artifact plan.
         let spec = builtin_rust_spec();
-        assert_eq!(
-            spec.run_plan.steps.len(),
-            2,
-            "rust runs compile then binary"
-        );
-        assert_eq!(spec.run_plan.steps[0].command, "rustc");
+        assert_eq!(spec.binary_name, "cargo");
+        assert_eq!(spec.run_plan.steps.len(), 1, "rust runs via `cargo run`");
+        assert_eq!(spec.run_plan.steps[0].command, "cargo");
         assert_eq!(spec.run_plan.steps[0].kind, StepKind::Toolchain);
-        assert!(spec.run_plan.steps[0].args.contains(&"main.rs".to_string()));
-        assert!(spec.run_plan.steps[0]
-            .args
-            .contains(&format!("main_bin{}", std::env::consts::EXE_SUFFIX)));
-        // The run step is a produced artifact (spawned by workdir path with the
-        // platform exe suffix), not a PATH-resolved `./main_bin` — this is the
-        // cross-platform fix. Its base name carries no `./` and no `.exe`.
-        assert_eq!(spec.run_plan.steps[1].command, "main_bin");
-        assert_eq!(spec.run_plan.steps[1].kind, StepKind::Artifact);
-        assert!(spec.run_plan.steps[1].args.is_empty());
+        assert!(spec.run_plan.steps[0].args.contains(&"run".to_string()));
+    }
+
+    #[test]
+    fn go_run_plan_is_go_run_dir() {
+        // Per the per-module native tree (S3), go output is a Go module run via
+        // `go run .` over the whole package dir — replacing `go run main.go`.
+        let spec = builtin_go_spec();
+        assert_eq!(spec.run_plan.steps.len(), 1, "go runs via `go run .`");
+        assert_eq!(spec.run_plan.steps[0].command, "go");
+        assert_eq!(
+            spec.run_plan.steps[0].args,
+            vec!["run".to_string(), ".".to_string()]
+        );
     }
 
     #[test]
@@ -1008,9 +1151,12 @@ mod tests {
 
     #[test]
     fn single_step_targets_run_one_command() {
+        // js/python run their entry directly; rust/go run their emitted project
+        // via a single `cargo run` / `go run .` step (S3).
         for spec in [
             builtin_javascript_spec(),
             builtin_python_spec(),
+            builtin_rust_spec(),
             builtin_go_spec(),
         ] {
             assert_eq!(
@@ -1045,6 +1191,7 @@ mod tests {
             version_args: vec!["--version".to_string()],
             compile_command: "not_a_real_binary_run_xyz".to_string(),
             compile_args: vec![],
+            validate_per_project: false,
             run_plan: RunPlan {
                 steps: vec![RunStep::new("not_a_real_binary_run_xyz", &[])],
             },
@@ -1072,6 +1219,7 @@ mod tests {
             version_args: vec!["%s".to_string(), "probe".to_string()],
             compile_command: "printf".to_string(),
             compile_args: vec![],
+            validate_per_project: false,
             run_plan: RunPlan {
                 steps: vec![RunStep::new("printf", &["%s", "captured-output"])],
             },
@@ -1099,6 +1247,7 @@ mod tests {
             version_args: vec![],
             compile_command: "false".to_string(),
             compile_args: vec![],
+            validate_per_project: false,
             run_plan: RunPlan {
                 steps: vec![
                     RunStep::new("false", &[]),
