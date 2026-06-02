@@ -14,6 +14,7 @@ pub mod js;
 pub mod profile;
 pub mod py;
 pub mod rs;
+pub mod scaffold;
 pub mod ts;
 
 // Re-export primary public API at crate root.
@@ -37,4 +38,8 @@ pub use profile::{
 };
 pub use py::PyGenerator;
 pub use rs::RsGenerator;
+pub use scaffold::{
+    run_scaffolder, scaffolder_for, ScaffoldConfig, ScaffoldContext, ScaffoldError, Scaffolder,
+    TargetScaffoldConfig, SCAFFOLD_TARGETS,
+};
 pub use ts::TsGenerator;

@@ -185,19 +185,14 @@ grammar.
 
 ## Per-Target Configuration `[targets.<T>]`
 
-> **Spec ahead of implementation.** Appendix A.1 and §20.7 describe
-> per-target configuration tables — `[targets.<T>]` for *deep* config
-> (`test_framework`, `formatter`, `package`, Go `module`) and
-> `[targets.<T>.scaffolding]` for *shallow* config (`linter`,
-> `package_manager`) — as part of the v1 `bock.project`. **The v1
-> compiler does not yet parse these tables:** `bock build` selects
-> targets from `--target` / `--all-targets` and uses target-appropriate
-> defaults, and the `[targets.*]` sections have no effect. They are
-> documented here for forward reference but should be treated as **not
-> yet active in v1**. This divergence is tracked as an OPEN item in the
-> docs-sync work (see the PR for this page).
-
-The intended shape, once implemented (per §20.7 / §20.6.2):
+The v1 compiler **parses and validates** the per-target configuration
+tables — `[targets.<T>]` for *deep* config (`test_framework`,
+`formatter`, `package`, Go `module`) and `[targets.<T>.scaffolding]`
+for *shallow* config (`linter`, `package_manager`). These tables
+configure project-mode output (see [Output Modes](#output-modes)
+below); `bock build` selects which targets to build from `--target` /
+`--all-targets` and applies target-appropriate defaults for any field
+left unset.
 
 ```toml
 [targets.go]
@@ -215,7 +210,48 @@ package_manager = "uv"                 # shallow: affects README only
 
 `[targets.<T>]` configures what Bock *emits* (deep); `[targets.<T>.
 scaffolding]` configures files added *alongside* the emitted code
-(shallow). The supported per-target variant matrix is in §20.6.2.
+(shallow).
+
+### Supported values (v1 matrix)
+
+The compiler validates every supplied value against the matrix below
+(§20.6.2). An unknown value is a **build error** that names the
+documented options for that target, raised before any output is
+written. Rust and Go formatters and test frameworks are universal and
+always-on (rustfmt/gofmt, `cargo test`/`go test`), so they are not
+user-selectable; supplying `formatter` or `test_framework` for those
+targets is an error.
+
+| Target | `test_framework`           | `formatter`                   | `linter`         | `package_manager`           |
+| ------ | -------------------------- | ----------------------------- | ---------------- | --------------------------- |
+| js     | `vitest` (def), `jest`     | `prettier` (def), `none`      | `eslint`         | `npm` (def), `pnpm`, `yarn` |
+| ts     | `vitest` (def), `jest`     | `prettier` (def), `none`      | `eslint`         | `npm` (def), `pnpm`, `yarn` |
+| python | `pytest` (def), `unittest` | `black` (def), `ruff`, `none` | `ruff`, `pylint` | `pip` (def), `poetry`, `uv` |
+| rust   | universal (`cargo test`)   | universal (rustfmt)           | `clippy`         | cargo only                  |
+| go     | universal (stdlib)         | universal (gofmt)             | `golangci-lint`  | go mod only                 |
+
+`package` (Python) and Go `module` are free-form identifiers and are
+not enum-validated.
+
+### Output Modes
+
+`bock build` produces output in one of two v1 modes (§20.6.2):
+
+- **Project mode** (default) — source files **plus** target-ecosystem
+  scaffolding (manifests, entry-point wiring, formatter configs, a
+  README), runnable in the target's normal toolchain. The
+  `[targets.*]` tables above configure this output.
+- **Source mode** (`--source-only`) — bare transpilation: target source
+  files only, suitable for integration into an existing target-language
+  project the user already manages.
+
+> The per-target scaffolding bodies are still being filled in. The
+> framework, mode gating, and `[targets.*]` config parsing/validation
+> are active; the rich per-target manifests, transpiled test files, and
+> formatter/linter config files land incrementally.
+
+The supported per-target variant matrix is also carried normatively in
+§20.6.2.
 
 ## Reserved for v1.x
 

@@ -20,7 +20,8 @@ use bock_ast::Visibility;
 use bock_build::dep_graph::{self, DepGraph};
 use bock_build::toolchain::ToolchainRegistry;
 use bock_codegen::{
-    CodeGenerator, GoGenerator, JsGenerator, PyGenerator, RsGenerator, SourceInfo, TsGenerator,
+    run_scaffolder, CodeGenerator, GoGenerator, JsGenerator, PyGenerator, RsGenerator,
+    ScaffoldConfig, SourceInfo, TsGenerator,
 };
 use bock_errors::{Diagnostic, DiagnosticBag, FileId, Severity, Span};
 use bock_lexer::Lexer;
@@ -79,6 +80,15 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
     } else {
         Strictness::Development
     };
+
+    // Project-mode scaffolding config (§20.6.2 / §20.7). Parsing + validating
+    // the per-target `[targets.<T>]` / `[targets.<T>.scaffolding]` tables up
+    // front means an unknown value (e.g. an unsupported `test_framework`)
+    // fails the build *before* any output is written, pointing the user at the
+    // documented options for that target. Source mode (`--source-only`) does
+    // not scaffold, but we still validate so a misconfigured field is caught
+    // in either mode.
+    let (scaffold_config, project_name) = read_scaffold_config()?;
 
     // §17.6 governance gate: in production strictness, fail early on
     // any unpinned build-scope decision. This runs before we touch the
@@ -230,6 +240,9 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
             .zip(module_source_paths.iter())
             .map(|(m, p)| (m, p.as_path()))
             .collect();
+        // Files emitted by codegen for this target — captured so the
+        // project-mode scaffolding pass can avoid clobbering them.
+        let mut emitted_files: Vec<bock_codegen::OutputFile> = Vec::new();
         match generator.generate_project(&module_inputs) {
             Ok(mut generated) => {
                 let emit_url_comment = matches!(target.as_str(), "js" | "ts");
@@ -274,6 +287,7 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
 
                     std::fs::write(&dest, &output_file.content)?;
                     total_files_written += 1;
+                    emitted_files.push(output_file.clone());
                 }
             }
             Err(e) => {
@@ -284,6 +298,42 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
 
         if found_errors {
             eprintln!("build: aborting due to codegen errors");
+            process::exit(1);
+        }
+
+        // ── Project-mode scaffolding pass (§20.6.2) ──────────────────────────
+        // Runs ONLY in the default (project) mode — never under
+        // `--source-only`, which emits "no manifests, scaffolding, or
+        // entry-point wiring." For S5 the per-target scaffolder bodies are
+        // minimal stubs (a placeholder README); S6 fills them with real
+        // manifests, transpiled tests, and formatter/linter configs.
+        if !options.source_only {
+            let target_config = scaffold_config.target(target).cloned().unwrap_or_default();
+            match run_scaffolder(
+                target,
+                &target_config,
+                &emitted_files,
+                project_name.as_deref(),
+            ) {
+                Ok(scaffold_files) => {
+                    for sf in &scaffold_files {
+                        let dest = output_dir.join(&sf.path);
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&dest, &sf.content)?;
+                        total_files_written += 1;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: scaffolding failed for target {target}: {e}");
+                    found_errors = true;
+                }
+            }
+        }
+
+        if found_errors {
+            eprintln!("build: aborting due to scaffolding errors");
             process::exit(1);
         }
 
@@ -362,6 +412,29 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
     let total_ms = total_start.elapsed().as_millis();
     println!("build: done ({total_ms}ms)");
     Ok(())
+}
+
+/// Read + validate the project-mode scaffolding config from `bock.project`.
+///
+/// Returns the validated [`ScaffoldConfig`] (per-target `[targets.<T>]` /
+/// `[targets.<T>.scaffolding]` tables — §20.6.2/§20.7) and the `[project] name`,
+/// if present. When no `bock.project` exists in the current directory (e.g. a
+/// bare `bock build` in a directory of `.bock` files, or the conformance
+/// harness), an all-default config and `None` name are returned — the build
+/// proceeds with target-appropriate defaults.
+///
+/// An unknown config value (e.g. an unsupported `test_framework`) is surfaced
+/// as a hard error here, before any output is written, with a message pointing
+/// at the documented options for that target (§20.6.2).
+fn read_scaffold_config() -> anyhow::Result<(ScaffoldConfig, Option<String>)> {
+    let path = Path::new("bock.project");
+    if !path.is_file() {
+        return Ok((ScaffoldConfig::default(), None));
+    }
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("could not read bock.project: {e}"))?;
+    ScaffoldConfig::from_project_toml_with_name(&source)
+        .map_err(|e| anyhow::anyhow!("invalid project-mode configuration: {e}"))
 }
 
 /// Run the §17.6 production validation step.
