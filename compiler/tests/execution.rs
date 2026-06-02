@@ -61,34 +61,21 @@ fn entry_relpath(target: &str) -> PathBuf {
 /// Stable ordering of the v1 targets for deterministic reporting.
 const TARGET_ORDER: &[&str] = &["js", "ts", "python", "rust", "go"];
 
-/// Whether `target` emits a **per-module native import tree** rather than a
-/// single bundled `main.<ext>`.
-///
-/// Per the per-module-output milestone (DQ19 resolved), a cross-module program
-/// compiles to one target file per reached module, wired with the target's
-/// native imports/modules, and runs through the target's normal runner from the
-/// build root. The migration landed target-by-target — **S1 Python**, **S2 JS +
-/// TS**, **S3 Rust + Go** — so **all five v1 targets** now emit the tree.
-///
-/// How each runs from the build dir (`ToolchainRegistry::run`'s `workdir`):
-/// - **python** — `python3 main.py`; sibling files (`core/option.py`,
-///   `_bock_runtime.py`) resolve as package imports (`core` is a PEP 420
-///   namespace package).
-/// - **js / ts** — `node main.js` (ts first `tsc main.ts`); a minimal
-///   `package.json` `{"type":"module"}` makes Node treat the `.js` tree as ESM,
-///   and the emitted `import … from "./core/option.js"` resolve relatively.
-/// - **rust** — `cargo run` over the emitted Cargo crate (`Cargo.toml` +
-///   `src/main.rs` + the `src/<module>.rs` tree wired with `mod`/`use crate::…`).
-/// - **go** — `go run .` over the emitted Go module (`go.mod` + the flat
-///   per-module `.go` files in one `package main`, plus a shared
-///   `bock_runtime.go`).
-///
-/// The predicate gates the per-module run path and the per-module *shape*
-/// assertion below; after S3 it covers every target (S4 retires the now-dead
-/// bundling path and the predicate itself).
-fn emits_per_module_tree(target: &str) -> bool {
-    matches!(target, "python" | "js" | "ts" | "rust" | "go")
-}
+// Per the per-module-output milestone (DQ19 resolved), every v1 target emits a
+// **per-module native import tree** — one target file per reached module, wired
+// with the target's native imports/modules — and runs through the target's
+// normal runner from the build root (`ToolchainRegistry::run`'s `workdir`):
+// - **python** — `python3 main.py`; sibling files (`core/option.py`,
+//   `_bock_runtime.py`) resolve as package imports (`core` is a PEP 420
+//   namespace package).
+// - **js / ts** — `node main.js` (ts first `tsc main.ts`); a minimal
+//   `package.json` `{"type":"module"}` makes Node treat the `.js` tree as ESM,
+//   and the emitted `import … from "./core/option.js"` resolve relatively.
+// - **rust** — `cargo run` over the emitted Cargo crate (`Cargo.toml` +
+//   `src/main.rs` + the `src/<module>.rs` tree wired with `mod`/`use crate::…`).
+// - **go** — `go run .` over the emitted Go module (`go.mod` + the flat
+//   per-module `.go` files in one `package main`, plus a shared
+//   `bock_runtime.go`).
 
 /// Locate the compiled `bock` CLI binary.
 ///
@@ -213,15 +200,13 @@ fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
         case.name,
     );
 
-    // Migrated (per-module-tree) targets: a multi-file fixture — one that ships
-    // an auxiliary `.bock` module via a `// FILE:` marker — must emit a real
-    // import tree, i.e. at least one sibling module file *in addition to* the
-    // entry `main.<ext>`. (A program that only uses the embedded `core.*`
+    // Every target emits a per-module tree: a multi-file fixture — one that
+    // ships an auxiliary `.bock` module via a `// FILE:` marker — must emit a
+    // real import tree, i.e. at least one sibling module file *in addition to*
+    // the entry `main.<ext>`. (A program that only uses the embedded `core.*`
     // stdlib also emits sibling files, but those live under `core/`; an aux
     // module guarantees a deterministic sibling regardless of stdlib layout.)
-    // Bundling targets, by contrast, collapse everything into the single entry
-    // file — so this shape check is gated on the predicate.
-    if emits_per_module_tree(target) && !case.aux_files.is_empty() {
+    if !case.aux_files.is_empty() {
         let ext = entry_extension(target);
         let mut sibling_count = 0usize;
         let mut walk = vec![build_dir.clone()];

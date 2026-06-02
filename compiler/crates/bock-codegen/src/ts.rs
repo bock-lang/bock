@@ -121,8 +121,9 @@ const __bockSpawn = <T>(x: Promise<T>): Promise<T> => x;
 /// TS has no native range value, so `for i in 0..n` lowers to
 /// `for (const i of range(0, n))`. `range` is half-open, `rangeInclusive`
 /// inclusive — matching Python's `range(lo, hi)` / `range(lo, hi + 1)` and
-/// Rust's `lo..hi` / `lo..=hi`. Emitted once per bundle, gated on a ctx flag
-/// (mirrors [`OPTIONAL_RUNTIME_TS`]).
+/// Rust's `lo..hi` / `lo..=hi`. Emitted once into the shared `_bock_runtime.ts`
+/// (per-module path) or inlined at most once (single-module path), gated on a
+/// ctx flag (mirrors [`OPTIONAL_RUNTIME_TS`]).
 const RANGE_RUNTIME_TS: &str = "\
 // ── Bock range runtime ──
 const range = (lo: number, hi: number): number[] => { const r: number[] = []; for (let i = lo; i < hi; i++) r.push(i); return r; };
@@ -440,41 +441,42 @@ struct TsEmitCtx {
     /// in the arm bodies. Re-emitting the scrutinee expression inline (the prior
     /// behavior) both double-evaluated it and defeated narrowing (TS2339 on `_0`).
     match_temp_counter: usize,
-    /// Set once the Optional runtime prelude has been emitted, so a single-file
-    /// **bundle** of several modules (cross-module `use`, DV13) emits it at most
-    /// once (a duplicate `type Option<T>` is a TS redeclaration error).
+    /// Set once the Optional runtime prelude has been emitted in the
+    /// single-module self-contained path ([`TsGenerator::generate_module`]), so
+    /// a module referencing it more than once still inlines it at most once (a
+    /// duplicate `type Option<T>` is a TS redeclaration error). The per-module
+    /// project path emits the runtime once into the shared `_bock_runtime.ts`.
     optional_runtime_emitted: bool,
-    /// Set once the `Result` runtime prelude has been emitted; deduped across a
-    /// bundle exactly as [`Self::optional_runtime_emitted`] (a duplicate
-    /// `type BockResult<T, E>` is a TS redeclaration error).
+    /// Set once the `Result` runtime prelude has been emitted; deduped exactly as
+    /// [`Self::optional_runtime_emitted`] (a duplicate `type BockResult<T, E>` is
+    /// a TS redeclaration error).
     result_runtime_emitted: bool,
-    /// Set once the concurrency runtime prelude has been emitted; deduped across
-    /// a bundle exactly as [`Self::optional_runtime_emitted`].
+    /// Set once the concurrency runtime prelude has been emitted; deduped exactly
+    /// as [`Self::optional_runtime_emitted`].
     concurrency_runtime_emitted: bool,
     /// Set once the range runtime prelude ([`RANGE_RUNTIME_TS`]) has been
-    /// emitted; deduped across a bundle exactly as
-    /// [`Self::optional_runtime_emitted`] (a duplicate `const range` is a
-    /// redeclaration error).
+    /// emitted; deduped exactly as [`Self::optional_runtime_emitted`] (a
+    /// duplicate `const range` is a redeclaration error).
     range_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Same role as the JS backend's: route
     /// a unit-variant reference to the `{enum}_{variant}` const, a struct/tuple
     /// construction to the factory, and recognise `RecordPat` arms as ADT.
     /// Built-in Optional/Result pre-seeds are filtered out where bespoke
-    /// lowering applies. Pre-scanned across the bundle.
+    /// lowering applies. Pre-scanned across the reached modules.
     enum_variants: crate::generator::EnumVariantRegistry,
     /// Generic-type declaration registry: a record/enum/class name → its
     /// declared generic params. An `impl Box { ... }` block carries no generic
     /// params of its own (the `T` is declared on `record Box[T]`); this lets the
     /// declaration-merged `interface Box<T>` and the `self: Box<T>` param type
     /// recover them so the merge lands on the generic class. Pre-scanned across
-    /// the bundle (mirrors [`Self::enum_variants`]).
+    /// the reached modules (mirrors [`Self::enum_variants`]).
     generic_decls: crate::generator::GenericDeclRegistry,
     /// Trait-declaration registry: a trait name → its declared generic params
     /// and methods. Used at each `impl Trait for Type` site to recover the
     /// trait's *default* methods (those carrying a body) so they can be
     /// synthesized onto the implementing type's prototype — the trait interface
     /// alone declares only signatures, so a type relying on an inherited default
-    /// would otherwise have no such method. Pre-scanned across the bundle.
+    /// would otherwise have no such method. Pre-scanned across the reached modules.
     trait_decls: crate::generator::TraitDeclRegistry,
     /// When `Some(target)`, a `Self` type (`TypeSelf`) renders as `target`
     /// rather than the default `this`. Set while emitting ANY `impl` method onto
@@ -490,7 +492,7 @@ struct TsEmitCtx {
     /// Names of `public` (exported) top-level types. The declaration-merging
     /// `interface Target { ... }` an `impl` emits must be `export`ed exactly
     /// when the `Target` class is — TS requires all declarations in a merged
-    /// declaration to agree on export-ness. Pre-scanned across the bundle.
+    /// declaration to agree on export-ness. Pre-scanned across the reached modules.
     exported_types: std::collections::HashSet<String>,
     /// The TS type a value-position expression is being assigned *into* (the
     /// declared type of a `let x: T = <value>`), when known. Set around the
@@ -506,12 +508,15 @@ struct TsEmitCtx {
     /// narrowed) `s`. `None` outside a typed value-binding context; restored
     /// after the value so it never leaks to a sibling/outer expression.
     current_expected_type: Option<String>,
-    /// True in the **per-module native-import** emission path (S2). When set, the
-    /// `Module` arm emits real ESM `import`/`import type` for cross-module
+    /// True in the **per-module native-import** emission path
+    /// ([`TsGenerator::generate_project`], the sole real-build path). When set,
+    /// the `Module` arm emits real ESM `import`/`import type` for cross-module
     /// references, records which shared-runtime helpers/types the module needs
     /// (instead of inlining them), and a trailing `export { … }` re-exports the
     /// module's enum-variant value names (every other declaration kind already
-    /// exports inline). When clear, the legacy single-file bundling is used.
+    /// exports inline). When clear, the module is emitted as a single
+    /// self-contained file with its runtime preludes inlined — the
+    /// [`TsGenerator::generate_module`] path used by unit tests.
     per_module: bool,
     /// In the per-module path, records that this module references the Optional /
     /// Result runtime *types* (`BockOption` / `BockResult`) — so they are emitted
@@ -592,8 +597,8 @@ impl TsEmitCtx {
     /// per-module path emits each module in its own context, so a bare op used in
     /// one module whose effect is declared in another must be recognised without
     /// having emitted the declaring module first. Mirrors how `enum_variants` /
-    /// `trait_decls` are collected across the bundle and the JS / Python
-    /// backends' equivalents.
+    /// `trait_decls` are collected across the reached modules and the JS /
+    /// Python backends' equivalents.
     fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
         for (module, _) in modules {
             let NodeKind::Module { items, .. } = &module.kind else {
@@ -2007,11 +2012,12 @@ impl TsEmitCtx {
         match &node.kind {
             NodeKind::Module { items, imports, .. } => {
                 if self.per_module {
-                    // Per-module native-import path (S2): each module is emitted
-                    // to its own `.ts` file and the runtime types/helpers live in
-                    // the shared `_bock_runtime.ts`. Record which the module
-                    // references; `generate_project` emits them once into the
-                    // shared module, and `emit_esm_imports` imports them here.
+                    // Per-module native-import path (the real build): each module
+                    // is emitted to its own `.ts` file and the runtime
+                    // types/helpers live in the shared `_bock_runtime.ts`. Record
+                    // which the module references; `generate_project` emits them
+                    // once into the shared module, and `emit_esm_imports` imports
+                    // them here.
                     if module_uses_optional(items) {
                         self.needs_runtime_optional = true;
                     }
@@ -2026,12 +2032,11 @@ impl TsEmitCtx {
                     }
                     self.emit_esm_imports(imports)?;
                 } else {
-                    // Cross-module `use` (DV13) → single-file bundling: every
-                    // module's top-level declarations are concatenated into the
-                    // one entry file and `ImportDecl`s are dropped. Each runtime
-                    // prelude is emitted at most once across the bundle, gated on
-                    // a ctx flag (a duplicate `type Option<T>` would be a TS
-                    // redeclaration).
+                    // Single-module self-contained emit (`generate_module`, used
+                    // by unit tests): the module's runtime preludes are inlined
+                    // into this one file and `ImportDecl`s are dropped. Each
+                    // prelude is inlined at most once, gated on a ctx flag (a
+                    // duplicate `type Option<T>` would be a TS redeclaration).
                     if !self.optional_runtime_emitted && module_uses_optional(items) {
                         self.buf.push_str(OPTIONAL_RUNTIME_TS);
                         self.buf.push('\n');
@@ -2067,9 +2072,9 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::ImportDecl { .. } => {
-                // Resolved either by bundling (declarations concatenated into the
-                // same file) or, in the per-module path, by the real ESM imports
-                // emitted up front by `emit_esm_imports`. Either way a no-op here.
+                // Resolved by the real ESM imports emitted up front by
+                // `emit_esm_imports` (per-module path), or dropped entirely in
+                // the single-module self-contained path. Either way a no-op here.
                 Ok(())
             }
             NodeKind::FnDecl {

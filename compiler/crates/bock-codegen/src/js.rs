@@ -52,7 +52,8 @@ const __bockSpawn = (x) => x;
 /// `range`/`rangeInclusive` as eager `Array` builders matching Bock's
 /// half-open (`range`) and inclusive (`rangeInclusive`) bound semantics — the
 /// same semantics Python's `range(lo, hi)` / `range(lo, hi + 1)` and Rust's
-/// `lo..hi` / `lo..=hi` produce. Emitted at most once per bundle, gated on a
+/// `lo..hi` / `lo..=hi` produce. Emitted once into the shared `_bock_runtime.js`
+/// (per-module path) or inlined at most once (single-module path), gated on a
 /// ctx flag (mirrors the concurrency runtime).
 const RANGE_RUNTIME_JS: &str = "\
 // ── Bock range runtime ──
@@ -140,8 +141,8 @@ impl CodeGenerator for JsGenerator {
     /// Emit a per-module **native ES-module import tree** (spec §20.6.1; DQ19
     /// resolved): each module the entry program reaches through a real `use` is
     /// emitted to its **own** `.js` file, and cross-module references resolve
-    /// through real ESM `import { … } from "./…"` rather than the single-file
-    /// bundling this replaces.
+    /// through real ESM `import { … } from "./…"`. This is the sole `bock build`
+    /// output path.
     ///
     /// Output-path mapping is keyed on each module's *declared* path, not its
     /// on-disk source path, so the file layout and the import specifier agree:
@@ -376,36 +377,41 @@ struct EmitCtx {
     /// in every arm (the prior behavior) double-evaluated it — a real bug for a
     /// scrutinee with side effects, e.g. a stateful iterator's `match next(it)`.
     match_temp_counter: usize,
-    /// Set once the concurrency runtime prelude has been emitted, so a
-    /// single-file **bundle** of several modules (cross-module `use`, DV13)
-    /// emits the runtime at most once. A lone-module build sets it on first use
-    /// exactly as before.
+    /// Set once the concurrency runtime prelude has been emitted in the
+    /// single-module self-contained path ([`JsGenerator::generate_module`]), so
+    /// a module that references the runtime more than once still inlines it at
+    /// most once. (The per-module project path emits the runtime once into the
+    /// shared `_bock_runtime.js` instead.)
     concurrency_runtime_emitted: bool,
     /// Set once the range runtime prelude ([`RANGE_RUNTIME_JS`]) has been
-    /// emitted, so a single-file bundle emits the `range`/`rangeInclusive`
-    /// helpers at most once (a duplicate `const range` would be a redeclaration
-    /// error). Deduped across a bundle exactly as
+    /// emitted in the single-module self-contained path, so the
+    /// `range`/`rangeInclusive` helpers inline at most once (a duplicate `const
+    /// range` would be a redeclaration error). Deduped exactly as
     /// [`Self::concurrency_runtime_emitted`].
     range_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Maps a variant name to its enum so a
     /// unit-variant reference lowers to the frozen `{enum}_{variant}` const, a
     /// struct/tuple construction lowers to the `{enum}_{variant}(..)` factory,
     /// and a `match` recognises struct-payload (`RecordPat`) arms as ADT
-    /// variants. Pre-scanned across the bundle. The built-in Optional/Result
-    /// pre-seeds are filtered out where bespoke lowering already applies.
+    /// variants. Pre-scanned across the reached modules. The built-in
+    /// Optional/Result pre-seeds are filtered out where bespoke lowering applies.
     enum_variants: crate::generator::EnumVariantRegistry,
     /// Trait-declaration registry. Used at each `impl Trait for Type` site to
     /// recover the trait's *default* methods (those carrying a body) so they can
     /// be attached to the target's prototype alongside the impl's own methods —
     /// a type relying on an inherited default would otherwise have no such
-    /// method. Pre-scanned across the bundle (mirrors [`Self::enum_variants`]).
+    /// method. Pre-scanned across the reached modules (mirrors
+    /// [`Self::enum_variants`]).
     trait_decls: crate::generator::TraitDeclRegistry,
-    /// True in the **per-module native-import** emission path (S2). When set, the
-    /// `Module` arm emits real ESM `import { … } from "./…"` for cross-module
-    /// references, records which shared-runtime helpers the module needs (instead
-    /// of inlining them), and a trailing `export { … }` re-exports the module's
-    /// public non-function declarations (functions export inline). When clear,
-    /// the legacy single-file bundling behaviour is used.
+    /// True in the **per-module native-import** emission path
+    /// ([`JsGenerator::generate_project`], the sole real-build path). When set,
+    /// the `Module` arm emits real ESM `import { … } from "./…"` for
+    /// cross-module references, records which shared-runtime helpers the module
+    /// needs (instead of inlining them), and a trailing `export { … }`
+    /// re-exports the module's public non-function declarations (functions
+    /// export inline). When clear, the module is emitted as a single
+    /// self-contained file with its runtime preludes inlined — the
+    /// [`JsGenerator::generate_module`] path used by unit tests.
     per_module: bool,
     /// In the per-module path, records that this module references the
     /// concurrency runtime (`Channel`/`spawn`) — so `generate_project` emits the
@@ -501,15 +507,13 @@ impl EmitCtx {
     }
 
     /// Pre-seed the effect registries (`effect_ops`, `composite_effects`) from
-    /// every module's top-level `EffectDecl`s. In the single-file bundling path
-    /// these are populated as each module body is emitted (dependency order, so
-    /// the effect's declaration precedes its use). In the per-module path each
+    /// every module's top-level `EffectDecl`s. In the per-module path each
     /// module is emitted by its own context, so a bare op `log(...)` used in
     /// `main` whose effect `Log` is declared in another module would not be
     /// recognised as an effect op (and not rewritten to `logger.log(...)`)
     /// without pre-seeding from the whole reachable set. Mirrors how
-    /// `enum_variants` / `trait_decls` are collected across the bundle, and the
-    /// Python backend's `PyEmitCtx::seed_effect_registries`.
+    /// `enum_variants` / `trait_decls` are collected across the reached modules,
+    /// and the Python backend's `PyEmitCtx::seed_effect_registries`.
     fn seed_effect_registries(&mut self, modules: &[(&AIRModule, &std::path::Path)]) {
         for (module, _) in modules {
             let NodeKind::Module { items, .. } = &module.kind else {
@@ -1705,13 +1709,12 @@ impl EmitCtx {
         match &node.kind {
             NodeKind::Module { items, imports, .. } => {
                 if self.per_module {
-                    // Per-module native-import path (S2): each module is emitted
-                    // to its own `.js` file and the runtime helpers live in the
-                    // shared `_bock_runtime.js`. Record which runtime helpers
-                    // this module references (the same structural scans the
-                    // bundling path uses); `generate_project` emits them once
-                    // into the shared module, and `emit_esm_imports` imports the
-                    // referenced names here.
+                    // Per-module native-import path (the real build): each module
+                    // is emitted to its own `.js` file and the runtime helpers
+                    // live in the shared `_bock_runtime.js`. Record which runtime
+                    // helpers this module references; `generate_project` emits
+                    // them once into the shared module, and `emit_esm_imports`
+                    // imports the referenced names here.
                     if self.module_uses_concurrency(items) {
                         self.needs_runtime_concurrency = true;
                     }
@@ -1722,11 +1725,10 @@ impl EmitCtx {
                     // at the top of the file, before any declaration.
                     self.emit_esm_imports(imports)?;
                 } else {
-                    // Cross-module `use` (DV13) is realized by single-file
-                    // bundling: every module body is concatenated into the one
-                    // entry file and `ImportDecl`s are dropped (the imported
-                    // symbols are present in the same file). The concurrency /
-                    // range runtimes are emitted at most once across the bundle,
+                    // Single-module self-contained emit (`generate_module`, used
+                    // by unit tests): the module's runtime preludes are inlined
+                    // into this one file and `ImportDecl`s are dropped. The
+                    // concurrency / range runtimes are inlined at most once,
                     // gated on a ctx flag.
                     if !self.concurrency_runtime_emitted && self.module_uses_concurrency(items) {
                         self.buf.push_str(CONCURRENCY_RUNTIME_JS);
@@ -1753,11 +1755,10 @@ impl EmitCtx {
                 Ok(())
             }
             NodeKind::ImportDecl { .. } => {
-                // Bock `use` is resolved either by bundling (the imported
-                // module's declarations are concatenated into this same file) or,
-                // in the per-module path, by the real ESM imports emitted up front
-                // by `emit_esm_imports` from the `Module` arm. Either way, the
-                // per-item visit here is a no-op.
+                // Bock `use` is resolved by the real ESM imports emitted up front
+                // by `emit_esm_imports` from the `Module` arm (per-module path),
+                // or dropped entirely in the single-module self-contained path.
+                // Either way, the per-item visit here is a no-op.
                 Ok(())
             }
             NodeKind::FnDecl {
@@ -2518,8 +2519,8 @@ impl EmitCtx {
                 } else if let Some(variant) = crate::generator::ordering_variant(&name.name) {
                     // Prelude `Ordering` variant → an inline tagged object, the
                     // same self-contained representation the primitive-bridge
-                    // `compare` and the `_tag`-switch match use (the
-                    // `core.compare` enum decl is not bundled single-file).
+                    // `compare` and the `_tag`-switch match use (when the
+                    // `core.compare` enum decl is not among the reached modules).
                     let _ = write!(self.buf, "{{ _tag: \"{variant}\" }}");
                 } else if let Some(enum_name) = self
                     .user_variant_for_name(&name.name)
@@ -6458,7 +6459,8 @@ mod tests {
         // entry `module main` uses `mathutil.add_one`; `module mathutil` exports a
         // `public fn add_one`. Per-module emission must produce `main.js` (with a
         // real `import { addOne } from "./mathutil.js"` — note the camelCase),
-        // `mathutil.js`, and a `package.json` run affordance — never a bundle.
+        // `mathutil.js`, and a `package.json` run affordance — a real import
+        // tree, not a single collapsed file.
         let call = node(
             10,
             NodeKind::Call {
