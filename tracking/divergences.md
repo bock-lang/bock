@@ -94,9 +94,11 @@ status(open | resolved→link)`
   comment-only; py `from core.x import` of nonexistent; rust `use core::x`; go `import`); the exec harness runs
   a single file. → **no cross-module program runs on any target**; the 3 "landed" stdlib modules
   (error/compare/convert) were `bock check` + `--source-only`-verified, never executed cross-module.
-- **Classification:** gap (foundational) · **Disposition:** RESOLVED — single-file bundling of `use`-reachable
-  modules (#132); per-target (Go one-package + deduped imports). §20.6.1 divergence → DQ19/Design. · **Status:**
-  resolved → #132
+- **Classification:** gap (foundational) · **Disposition:** RE-OPENED 2026-06-02 — bundling (#132) was the
+  transitional fix; DQ19 decided (owner) the v1 output is the **per-module native tree**, so DV13 is being closed
+  *properly* (native per-target cross-file imports that compile+run, not bundling). · **Status:** re-opened →
+  ItemB milestone S1–S4 (`plans/2026-06-02-itemB-per-module-projectmode-plan.md`); bundling retired as default at
+  S4 = DV13 CLOSED. Spec reconciled (§20.6.1, changelog `20260602-1608-per-module-output-dq19.md`).
 
 ### DV14 — User-defined enum codegen broken on ALL 5
 - **§:** §-enum · **impl-does:** no enum-variant registry in codegen. Variant construction (`Red`→lowercased

@@ -1617,3 +1617,27 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
     CLAUDE.md "Contributing guide" pointer (`docs/src/contributing.md` → `docs/src/contributing/index.md`).
   Blocked: none. 0 open PRs; worktrees == main; caches pruned (disk healthy). **NEXT critical path: ItemB (project-mode
     codegen) — UNBLOCKED now that D5 is done.**
+
+[2026-06-02 16:08 UTC] ItemB scoped → MS-projectmode milestone; 2 owner decisions (eyes-open); S0 spec/tracking reconcile
+  Input: operator "pick up where we left off" → ItemB (the next critical-path item after D5). Investigated scope before
+    dispatching: #28 landed §20.6.1 source-mirroring but DEFERRED §20.6.2 (project/deliverable modes); today's
+    `bock build` writes transpiled source only (NO scaffolding) — so §20.6.2 project mode IS the ItemB delta. Found two
+    scope forks worth the owner: (a) **DQ19** (escalated, unresolved) governs ItemB's output shape; (b) spec marks the
+    project-mode config tables + `--deliverable`/`--no-tests` Reserved-for-v1.x.
+  SURFACED RISK before letting the owner choose: read `2026-05-30-single-file-bundling.md` — bundling was the fix for
+    **DV13** (foundational cross-module *execution* gap); the ENTIRE 420-pair stdlib runs because `use core.X` bundles.
+    So "per-module tree" = **re-opening DV13** (native per-target imports must compile+run + harness rework), not a
+    cosmetic layout choice. Presented that explicitly; owner re-confirmed eyes-open.
+  DECISIONS (owner 2026-06-02): (1) **per-module native tree is the v1 output model** (NOT bundling) → DQ19 RESOLVED,
+    DV13 re-opened; (2) **config tables pulled forward into v1** (un-reserve `[targets.<T>]`/`.scaffolding`).
+    `--deliverable`/`--no-tests` stay v1.x.
+  S0 (this PR, orchestrator — spec leads impl): wrote 2 changelogs (`20260602-1608-per-module-output-dq19.md`,
+    `20260602-1608-projectmode-config-tables-v1.md`); reconciled spec §20.6.1 note (per-module normative; bundling
+    retired as default), §20.7 (tables parsed in v1), Appendix A.3 (removed the `[targets.<T>]` Reserved bullet);
+    tracking: DQ19 DECIDED, DV13 RE-OPENED, escalation RESOLVED, MS-projectmode milestone added, ItemB restructured
+    S0–S8 in queue, regen STATUS/ROADMAP. Authored the milestone plan `plans/2026-06-02-itemB-per-module-projectmode-plan.md`.
+  PLAN (staged, ~20–30 PRs): S0 reconcile → S1 native imports + harness multi-file run **pilot=python** → S2 js/ts →
+    S3 rust/go (+minimal manifest) → S4 flip default + retire bundling (DV13 CLOSED) → S5 scaffolding framework +
+    config parsing → S6 per-target scaffolders + deep-config branches → S7 transpiled tests + formatter-clean → S8 docs.
+    INVARIANT: 420/420 conformance every PR; bundling behind a flag until all 5 native; harness migrates target-by-target.
+  NEXT: merge S0; dispatch S1 (python pilot) engineer session.

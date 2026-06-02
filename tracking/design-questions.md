@@ -151,7 +151,12 @@ decided→link)`
 - **§:** §20.6.1 · **context:** surfaced by #132 (a non-normative §20.6.1 note + changelog were added). The
   single-file run model (the conformance harness + toolchain run plans run one `main.<ext>`) made bundling the
   pragmatic path. Non-blocking — bundling works on all 5.
-- **Status:** escalated → Design (escalations.md)
+- **Status:** **DECIDED 2026-06-02 (owner): per-module tree is the v1 output model** (both application + library
+  builds) — NOT bundling. This re-opens DV13 (native per-target cross-file imports must compile+run) and is realized
+  by the ItemB milestone (`plans/2026-06-02-itemB-per-module-projectmode-plan.md`, S1–S4). Spec reconciled: §20.6.1
+  note rewritten (per-module tree normative; bundling retired as default), changelog
+  `20260602-1608-per-module-output-dq19.md`. Bundling stays behind a flag until all 5 run natively, then removed
+  (DV13 CLOSED at S4).
 
 ### DQ20 — `expr?` (error-propagation operator) lowering
 - **Question:** the `?` operator (Propagate) is a no-op on js/ts/py/go (Rust emits native `?`). Correct lowering

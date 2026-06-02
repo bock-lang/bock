@@ -81,3 +81,18 @@ cross-module). Operator decided a **codegen-completeness MILESTONE** (`Q-codegen
 phased P0-P4) that must land before the stdlib resumes. Q-stdlib R1 PAUSED behind it; the for→Iterable desugar
 is proven (T1 ×5) and resumes after P0/P1. DQ16 resolved (keep List-backed floor; build the prerequisite).
 Links: DV1, DV10-DV15, Q-stdlib, Q-codegen-completeness, DQ5, DQ16, DQ18, #100, #129.
+
+## MS-projectmode — v1-BLOCKING (in flight, from 2026-06-02) — per-module output + project mode + config tables
+**v1.0's last engineering milestone** (ItemB, expanded). Two owner decisions 2026-06-02 (eyes-open, after the
+orchestrator surfaced the cost): (1) **DQ19 → per-module native tree is the v1 output model** (not bundling) —
+re-opens **DV13** (native per-target cross-file imports that compile+run); (2) **config tables pulled forward
+into v1** (`[targets.<T>]` deep + `[targets.<T>.scaffolding]` shallow) — un-reserved from v1.x (spec §20.6.2/
+§20.7/A.3 reconciled). **Plan:** `plans/2026-06-02-itemB-per-module-projectmode-plan.md`, staged **S0–S8**: S0
+spec/tracking reconcile (this entry) → S1 native imports + harness multi-file run, **pilot python** → S2 js/ts →
+S3 rust/go (with minimal manifest — those targets can't run multi-file without it) → S4 flip default + retire
+bundling (**DV13 CLOSED**) → S5 scaffolding framework + `bock.project` config parsing → S6 per-target scaffolders
++ deep-config branches (Vitest|Jest, Black|Ruff…) → S7 transpiled tests + formatter-clean gate → S8 internal docs.
+**Invariant:** `run-conformance.sh REQUIRE=all` stays 420/420 every PR; bundling kept behind a flag until all 5
+run natively; harness migrates target-by-target (no big-bang). ~20–30 PRs. **Still v1.x:** `--deliverable`,
+`--no-tests` (§20.1). External `/get-started` copy = **ItemD** (escalates). Links: ItemB, DV13, DQ19, §20.6.1/2,
+§20.7, changelogs `20260602-1608-per-module-output-dq19.md` + `20260602-1608-projectmode-config-tables-v1.md`.
