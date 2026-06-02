@@ -1,12 +1,16 @@
 //! Cross-target compile verification for the embedded `core.error` module.
 //!
 //! For each v1 target, `bock build --source-only` over a `core.error`-importing
-//! project must succeed and **bundle** `core.error`'s declarations into the one
-//! entry file — proving the embedded stdlib flows through codegen on every
-//! target. Under single-file bundling (DV13; see spec §20.6.1 divergence), the
-//! imported module is concatenated into `main.<ext>` rather than emitted as a
-//! separate `core/error/error.<ext>` file, so this asserts the bundled entry
-//! file carries the module's emitted symbol (the `SimpleError` record).
+//! project must succeed and emit `core.error`'s declarations — proving the
+//! embedded stdlib flows through codegen on every target. The emission *shape*
+//! depends on the target's migration state (per-module-output milestone, DQ19):
+//!
+//! - **Bundling targets (`js`/`ts`/`rust`/`go`):** the imported module is
+//!   concatenated into the single entry file `main.<ext>`, so that file carries
+//!   the `SimpleError` record (core.error's sole record).
+//! - **Per-module targets (`python`, migrated in S1):** each module is emitted
+//!   to its own file, so `SimpleError` lives in `core/error.py` and `main.py`
+//!   carries a real `from core.error import …` rather than the bundled record.
 //!
 //! This is *compile* (source-emission) verification only. Full conformance
 //! *execution* across targets (running the emitted code through each target's
@@ -64,6 +68,12 @@ fn read_entry_bundle(build_dir: &Path, target: &str, ext: &str) -> Option<String
     fs::read_to_string(build_dir.join(target).join(format!("main.{ext}"))).ok()
 }
 
+/// Whether `target` emits a per-module native import tree (vs. bundling). Kept
+/// in sync with the harness's `emits_per_module_tree`: S1 migrates `python`.
+fn emits_per_module_tree(target: &str) -> bool {
+    matches!(target, "python")
+}
+
 #[test]
 fn core_error_compiles_on_every_target() {
     for (target, ext) in TARGETS {
@@ -84,16 +94,42 @@ fn core_error_compiles_on_every_target() {
             String::from_utf8_lossy(&output.stderr),
         );
 
-        // Under bundling the imported `core.error` is concatenated into the
-        // entry file rather than emitted separately, so the `SimpleError`
-        // record (core.error's sole record) must appear in `main.<ext>`.
         let build_dir = root.join("build");
-        let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
-            panic!("target {target}: no entry bundle build/{target}/main.{ext}")
-        });
-        assert!(
-            bundle.contains("SimpleError"),
-            "target {target}: core.error not bundled into main.{ext} (no `SimpleError`)",
-        );
+        if emits_per_module_tree(target) {
+            // Per-module tree: `core.error` is its own file (`core/error.py`)
+            // carrying `SimpleError`, and the entry imports from it rather than
+            // inlining the record.
+            let module_file = build_dir
+                .join(target)
+                .join("core")
+                .join(format!("error.{ext}"));
+            let module_src = fs::read_to_string(&module_file).unwrap_or_else(|_| {
+                panic!(
+                    "target {target}: no per-module file {}",
+                    module_file.display()
+                )
+            });
+            assert!(
+                module_src.contains("SimpleError"),
+                "target {target}: core.error module file lacks `SimpleError`",
+            );
+            let entry = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
+                panic!("target {target}: no entry file build/{target}/main.{ext}")
+            });
+            assert!(
+                entry.contains("from core.error import"),
+                "target {target}: entry must import from the core.error module file",
+            );
+        } else {
+            // Bundling: the imported `core.error` is concatenated into the entry
+            // file, so the `SimpleError` record must appear in `main.<ext>`.
+            let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
+                panic!("target {target}: no entry bundle build/{target}/main.{ext}")
+            });
+            assert!(
+                bundle.contains("SimpleError"),
+                "target {target}: core.error not bundled into main.{ext} (no `SimpleError`)",
+            );
+        }
     }
 }

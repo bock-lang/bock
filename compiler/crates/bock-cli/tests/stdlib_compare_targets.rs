@@ -77,6 +77,12 @@ fn read_entry_bundle(build_dir: &Path, target: &str, ext: &str) -> Option<String
     fs::read_to_string(build_dir.join(target).join(format!("main.{ext}"))).ok()
 }
 
+/// Whether `target` emits a per-module native import tree (vs. bundling). Kept
+/// in sync with the harness's `emits_per_module_tree`: S1 migrates `python`.
+fn emits_per_module_tree(target: &str) -> bool {
+    matches!(target, "python")
+}
+
 #[test]
 fn core_compare_compiles_on_every_target() {
     for (target, ext) in TARGETS {
@@ -97,16 +103,40 @@ fn core_compare_compiles_on_every_target() {
             String::from_utf8_lossy(&output.stderr),
         );
 
-        // Under bundling the imported `core.compare` is concatenated into the
-        // entry file rather than emitted separately, so the `Key` record must
-        // appear in `main.<ext>`.
+        // The `Key` record must be emitted: bundled into the entry file on
+        // bundling targets, or in the separate `core/compare.<ext>` module file
+        // (with a real import in the entry) on per-module targets.
         let build_dir = root.join("build");
-        let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
-            panic!("target {target}: no entry bundle build/{target}/main.{ext}")
-        });
-        assert!(
-            bundle.contains("Key"),
-            "target {target}: core.compare not bundled into main.{ext} (no `Key`)",
-        );
+        if emits_per_module_tree(target) {
+            let module_file = build_dir
+                .join(target)
+                .join("core")
+                .join(format!("compare.{ext}"));
+            let module_src = fs::read_to_string(&module_file).unwrap_or_else(|_| {
+                panic!(
+                    "target {target}: no per-module file {}",
+                    module_file.display()
+                )
+            });
+            assert!(
+                module_src.contains("Key"),
+                "target {target}: core.compare module file lacks `Key`",
+            );
+            let entry = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
+                panic!("target {target}: no entry file build/{target}/main.{ext}")
+            });
+            assert!(
+                entry.contains("from core.compare import"),
+                "target {target}: entry must import from the core.compare module file",
+            );
+        } else {
+            let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
+                panic!("target {target}: no entry bundle build/{target}/main.{ext}")
+            });
+            assert!(
+                bundle.contains("Key"),
+                "target {target}: core.compare not bundled into main.{ext} (no `Key`)",
+            );
+        }
     }
 }

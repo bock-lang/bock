@@ -1,0 +1,44 @@
+// TEST: exec_transitive_cross_module
+// EXPECT: output "best=41;fallback=7"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Per-module native output (DQ19 resolved) — the S1 payoff fixture: an explicit
+// MULTI-FILE program proving TRANSITIVE cross-module execution. `main` `use`s a
+// sibling USER module `helper`, which itself `use`s the embedded `core.option`
+// stdlib module. So the reachable graph is `main → helper → core.option`, three
+// hops across module boundaries.
+//
+// On **python** (migrated to the native import tree in S1) this emits three
+// real files plus the shared runtime — `main.py`, `helper.py`, `core/option.py`,
+// `_bock_runtime.py` — wired with real Python imports (`from helper import
+// best`, `from core.option import get_or`, `from _bock_runtime import *`) and is
+// run as `python3 main.py` from the build root, where `core` resolves as a PEP
+// 420 namespace package. This is the regression guard for native cross-module
+// + cross-stdlib python execution.
+//
+// On the other four targets (js, ts, rust, go — still bundling pending S2/S3)
+// the same three reached modules are concatenated into the one entry file and
+// run as before, so the fixture is all-targets and proves both paths agree on
+// output.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale); `helper`'s `best` IS `public` — cross-module `use`
+// only resolves exported items.
+module main
+
+use helper.{best}
+
+fn main() -> Void {
+  let n: Int = best(Some(41), 0)
+  let m: Int = best(None, 7)
+  println("best=${n};fallback=${m}")
+}
+
+// FILE: helper.bock
+module helper
+
+use core.option.{get_or}
+
+public fn best(o: Optional[Int], dflt: Int) -> Int {
+  get_or(o, dflt)
+}

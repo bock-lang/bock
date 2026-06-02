@@ -41,14 +41,20 @@ points) is generated at the `build/<target>/` root per the target's
 conventions. By default `src/main.bock` is the entry point if present.
 See §20.6.1.
 
-> **v1 note.** For runnable builds the v1 compiler currently **bundles**
-> every module the entry program reaches through a `use` (in dependency
-> order, including imported `core.*` stdlib modules) into the single
-> entry file `build/<target>/main.<ext>`, dropping the import statements,
-> rather than emitting the per-module tree above. A program that imports
-> nothing emits only its own entry module. This is how a cross-module
-> program runs under the single-file run model; the per-module layout is
-> an open question for a future library-build mode (§20.6.1 note).
+> **v1 note (per-module output, in progress).** The per-module mirrored
+> tree above is the v1 output model (DQ19 resolved, §20.6.1), and it is
+> being delivered target by target. **Python** emits it today: a
+> cross-module program compiles to one `.py` file per reached module
+> (mirrored from each module's declared path — `module core.option` ⇒
+> `core/option.py`), wired with real Python imports (`from core.option
+> import …`), plus a shared `_bock_runtime.py` for the Optional/Result/
+> Ordering/concurrency runtimes. It runs as `python3 main.py` from the
+> build root, where `core` resolves as a namespace package. The other
+> four targets (`js`, `ts`, `rust`, `go`) still **bundle** every reached
+> module (in dependency order, including imported `core.*` stdlib) into
+> the single entry file `build/<target>/main.<ext>`, dropping the import
+> statements, until their native-import paths land. A program that
+> imports nothing emits only its own entry module on every target.
 
 ### Output Modes
 

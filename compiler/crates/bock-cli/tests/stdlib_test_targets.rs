@@ -74,6 +74,12 @@ fn read_entry_bundle(build_dir: &Path, target: &str, ext: &str) -> Option<String
     fs::read_to_string(build_dir.join(target).join(format!("main.{ext}"))).ok()
 }
 
+/// Whether `target` emits a per-module native import tree (vs. bundling). Kept
+/// in sync with the harness's `emits_per_module_tree`: S1 migrates `python`.
+fn emits_per_module_tree(target: &str) -> bool {
+    matches!(target, "python")
+}
+
 #[test]
 fn core_test_compiles_on_every_target() {
     for (target, ext) in TARGETS {
@@ -94,16 +100,41 @@ fn core_test_compiles_on_every_target() {
             String::from_utf8_lossy(&output.stderr),
         );
 
-        // Under bundling the imported `core.test` is concatenated into the entry
-        // file, so its fluent record (`Expectation`) must appear in `main.<ext>`.
-        // Casing differs per target (Go PascalCases), so match case-insensitively.
+        // `core.test`'s fluent record (`Expectation`) must be emitted: bundled
+        // into the entry file on bundling targets, or in the separate
+        // `core/test.<ext>` module file on per-module targets. Casing differs
+        // per target (Go PascalCases), so match case-insensitively.
         let build_dir = root.join("build");
-        let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
-            panic!("target {target}: no entry bundle build/{target}/main.{ext}")
-        });
-        assert!(
-            bundle.to_lowercase().contains("expectation"),
-            "target {target}: core.test not bundled into main.{ext} (no `Expectation`)",
-        );
+        if emits_per_module_tree(target) {
+            let module_file = build_dir
+                .join(target)
+                .join("core")
+                .join(format!("test.{ext}"));
+            let module_src = fs::read_to_string(&module_file).unwrap_or_else(|_| {
+                panic!(
+                    "target {target}: no per-module file {}",
+                    module_file.display()
+                )
+            });
+            assert!(
+                module_src.to_lowercase().contains("expectation"),
+                "target {target}: core.test module file lacks `Expectation`",
+            );
+            let entry = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
+                panic!("target {target}: no entry file build/{target}/main.{ext}")
+            });
+            assert!(
+                entry.contains("from core.test import"),
+                "target {target}: entry must import from the core.test module file",
+            );
+        } else {
+            let bundle = read_entry_bundle(&build_dir, target, ext).unwrap_or_else(|| {
+                panic!("target {target}: no entry bundle build/{target}/main.{ext}")
+            });
+            assert!(
+                bundle.to_lowercase().contains("expectation"),
+                "target {target}: core.test not bundled into main.{ext} (no `Expectation`)",
+            );
+        }
     }
 }
