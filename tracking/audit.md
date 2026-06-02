@@ -1641,3 +1641,26 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
     config parsing → S6 per-target scaffolders + deep-config branches → S7 transpiled tests + formatter-clean → S8 docs.
     INVARIANT: 420/420 conformance every PR; bundling behind a flag until all 5 native; harness migrates target-by-target.
   NEXT: merge S0; dispatch S1 (python pilot) engineer session.
+
+[2026-06-02 17:11 UTC] MS-projectmode S1 DONE (#182) — python per-module native tree, pilot landed
+  S0 merged (#181, main ee382df). Dispatched S1 as a foreground engineer sub-agent (python pilot) with a grounded
+    contract (per-module emission in py.rs, run-plan check in toolchain.rs, harness per-module-tree run path
+    python-only, invariant 420→425/0 under REQUIRE=all, full pre-PR gate, open-PR-don't-merge). All 5 toolchains
+    present on host (python3.12/node24/cargo1.95/go1.26/tsc6.0.3/npm11.9; only npx missing → matters at S6/S7).
+  VERIFY-before-merge (orchestrator, did NOT trust the agent's report): checked PR #182 — agent claimed `cargo fmt
+    --check` clean but **CI rustfmt FAILED** (one unformatted closure in a py.rs unit test; classic local-claim ≠
+    committed-state). Confirmed scope independently: only py.rs/generator.rs in codegen (js/ts/rs/go untouched ✓),
+    harness predicate `emits_per_module_tree` = python-only ✓. Fixed the fmt nit directly in the worktree
+    (a2b7629), pushed. Re-watched CI → full matrix green (ubuntu/macos/windows × stable/beta + rustfmt/clippy/doc/
+    mdbook/vscode), state CLEAN. Merged #182 (squash), main 68d79e3, re-synced; removed worktree + cargo cache;
+    deleted the merged remote+local branch.
+  RESULT: **S1 DONE.** Python emits + runs as a per-module native-import tree (425 exec pairs / 0 failed REQUIRE=all);
+    js/ts/rust/go still bundle (migrate target-by-target through S2-S4). Fan-out notes captured in queue ItemB block:
+    python run-plan needed no change (PEP 420 namespace pkgs); js/ts need an ESM run affordance, rust/go a manifest;
+    output paths key on declared `module` path; per-module emission loses bundling's single-context visibility
+    (re-seed effect-registries + implicit prelude imports). No OPEN/FOUND (one latent note: user module named like a
+    python stdlib top-level module — e.g. `logging` — shadows it; harmless here since script dir is sys.path[0]).
+  STANDING LESSON reinforced: orchestrator re-verifies the gate (esp. fmt/clippy/CI) on engineer PRs before merge —
+    the agent's "gate clean" report missed a committed rustfmt drift.
+  Open PRs: dependabot #178/#179/#180 (dev-dep bumps, off critical path — not actioned). worktrees == main.
+  NEXT: checkpoint with operator on pacing (continue autonomous fan-out S2→ vs pause to review S1 pattern), then S2.

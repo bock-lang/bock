@@ -12,10 +12,11 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-02 vs main 8305bf7 (**ItemB kicked off as MS-projectmode milestone** — 2 owner decisions
-2026-06-02: DQ19 → per-module native tree is the v1 output [re-opens DV13]; config tables pulled into v1. S0
-spec/tracking reconcile landing; S1 python pilot next. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`.
-— earlier: **D5 contributor docs DONE [#174]**; ItemB was UNBLOCKED. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
+_Last reconciled: 2026-06-02 vs main 68d79e3 (**MS-projectmode S0 [#181] + S1 [#182] DONE** — S0 reconciled spec
+[DQ19→per-module tree; config tables→v1] + tracking; S1 python pilot landed: per-module native-import tree runs
+×multi-file, 425 exec pairs / 0 failed REQUIRE=all. **Next = S2 (js→ts native imports).** Plan:
+`plans/2026-06-02-itemB-per-module-projectmode-plan.md`. — 2 owner decisions 2026-06-02 [eyes-open]: per-module
+native tree is the v1 output [re-opens DV13]; config tables pulled into v1. — earlier: **D5 [#174]**. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
 [#175]**; **Q-r2-codegen-residue (c) builtin-vs-user-method shadowing [#176, ×5]** + pinned Q-go-list-literal /
 Q-r2-(b) / Q-ts-generic-impl (verified already-fixed). New FOUND triaged: Q-allcaps-record-parse (parser),
 Q-arch-doc-drift (ARCHITECTURE.md/compiler-CLAUDE.md/CONTRIBUTING.md crate-name drift). Q-match-exprpos still
@@ -216,9 +217,15 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   engineering milestone.** Owner decided (eyes-open) the v1 output is the **per-module native tree** (DQ19 →
   re-opens DV13: native per-target cross-file imports that compile+run) AND **config tables pulled into v1**.
   Staged **S0–S8** (sequential through S0→S4; S6 fans out by target):
-  - **S0** — spec/tracking reconcile (DQ19 resolved, config tables un-reserved). **DONE this PR.**
-  - **S1** — native imports + harness multi-file run, **PILOT = python** · ready (dispatch next).
-  - **S2** — js then ts · blocked-by S1.
+  - **S0** — spec/tracking reconcile (DQ19 resolved, config tables un-reserved). **DONE → #181.**
+  - **S1** — native imports + harness multi-file run, **PILOT = python**. **DONE → #182** (425 exec pairs / 0
+    failed under REQUIRE=all; python emits a per-module native-import tree + runs as a multi-file project via the
+    `emits_per_module_tree(target)` harness predicate [python-only]; js/ts/rust/go unchanged/bundling). Notes for
+    fan-out: python run plan needed NO change (PEP 420 namespace pkgs resolve from build-dir root) — js/ts need an
+    ESM run affordance, rust/go need a manifest; output paths key on the declared `module` path (not source-mirrored);
+    per-module emission loses bundling's single-context visibility (re-seed via `seed_effect_registries` /
+    `implicit_imports_for`).
+  - **S2** — js then ts · **ready (dispatch next)** · was blocked-by S1.
   - **S3** — rust + go (+ minimal Cargo.toml/go.mod) · blocked-by S2.
   - **S4** — flip default to per-module; retire bundling (**DV13 CLOSED**) · blocked-by S3.
   - **S5** — scaffolding framework + `bock.project` config parsing · blocked-by S4.
