@@ -1664,3 +1664,32 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
     the agent's "gate clean" report missed a committed rustfmt drift.
   Open PRs: dependabot #178/#179/#180 (dev-dep bumps, off critical path — not actioned). worktrees == main.
   NEXT: checkpoint with operator on pacing (continue autonomous fan-out S2→ vs pause to review S1 pattern), then S2.
+
+[2026-06-02 20:00 UTC] MS-projectmode S2–S4 DONE → DV13 CLOSED (native per-module output, all 5 targets)
+  Operator chose autonomous pacing through S2–S4 (pause before S5). Ran the native-imports fan-out as foreground
+    engineer sub-agents, one merge at a time, re-verifying each gate before merging (orchestrator merge authority).
+  S2 (#184, js/ts ESM): per-module ES modules; js run affordance = minimal `package.json {"type":"module"}`; ts via
+    existing `tsc→node` (no toolchain.rs change). 425/0. (Engineer slipped editing main checkout first → relocated via
+    stash; I verified local main clean before merge.)
+  S3 (#185, rust/go — the hardest): rust = `src/`-rooted cargo crate + `mod`/`use crate::`, run `cargo run`; go = flat
+    `package main` + `go.mod`, run `go run .`; run-plans reworked to validate/run at project level (`cargo check`/`go
+    build`, `cargo run`/`go run .`). 425/0. FOUND (pre-existing, NOT regression; confirmed on pre-#185 output) →
+    Q-go-error-message: go `SimpleError` field+method `message`/`Message()` name collision → `.message()` won't compile
+    on go; not exercised by conformance. Triaged to queue (ready; candidate to fold into S6 go).
+  S4 (#186, retire bundling): MID-COURSE FINDING — discovered each backend's `generate_project` already sets
+    `per_module=true` unconditionally, so `bock build` defaulted to per-module on all 5 as of S3 → **DV13 functionally
+    closed at S3**. S4-as-planned (remove dead bundling) turned out to be a risk-bearing intertwined refactor, NOT the
+    "small cleanup" I'd estimated to the operator. Surfaced this at the (early) pre-S5 checkpoint; operator chose "do
+    S4 now (clean base)". Engineer removed the genuinely-dead multi-module bundling (trait-default generate_project,
+    bundle_output_path, append_entry_invocation, go::generate_bundle, the always-true emits_per_module_tree predicate;
+    ~170 net lines) and CORRECTLY KEPT (traced load-bearing) the single-module self-contained emit (`generate_module`
+    + `per_module` flag) used by ~250 unit tests — reframed terminology rather than force a 250-test rewrite. 425/0.
+  VERIFY-before-merge held throughout: confirmed local main clean + scope (no spec/tracking/stdlib in code PRs;
+    py/js/ts untouched by S3; rs/go untouched by S2) + full CI matrix green on each before squash-merging. Cleaned up
+    each worktree/cache/branch (remote+local).
+  RESULT: **DV13 CLOSED.** All 5 targets emit + run per-module native-import trees as the SOLE path; single-file
+    bundling retired. 425 exec pairs / 0 failed REQUIRE=all. Spec already reconciled in S0 (§20.6.1) — no further spec
+    change needed; DV13 marked CLOSED in divergences. STANDING LESSON reaffirmed: re-verify the gate (esp. CI rustfmt;
+    S1 had a drift) — engineers' "gate clean" reports are not authoritative.
+  NEXT: **pre-S5 operator checkpoint** (agreed pause point), then S5 (scaffolding framework + `bock.project` config
+    parsing) — the first project-mode-feature stage.
