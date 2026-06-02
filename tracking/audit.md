@@ -1693,3 +1693,22 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
     S1 had a drift) — engineers' "gate clean" reports are not authoritative.
   NEXT: **pre-S5 operator checkpoint** (agreed pause point), then S5 (scaffolding framework + `bock.project` config
     parsing) — the first project-mode-feature stage.
+
+[2026-06-02 20:47 UTC] MS-projectmode S5 DONE (#188) + dependabot cleared; pre-S6 checkpoint
+  Operator "go" at the pre-S5 checkpoint → dispatched S5 (autonomous through S5, pause before S6). Also actioned an
+    operator request to clear dependabot.
+  Dependabot: 0 open SECURITY alerts. Merged the 3 dev-dep version-bump PRs (#178 eslint, #179 typescript-eslint,
+    #180 wrangler) — #178/#179 full CI green, #180 (website) no CI by design; all MERGEABLE/CLEAN, routine patch bumps.
+    0 open PRs after.
+  S5 (#188): scoped FIRST by checking the source/project-mode boundary — harness builds `--source-only`, codegen emits
+    run-affordance manifests in ALL modes, build.rs gates only the toolchain on `!source_only`, no "project mode" concept
+    existed. Dispatched with scope = framework + config parsing (NOT rich per-target bodies). Engineer delivered:
+    `Scaffolder` trait + `scaffolder_for`/`run_scaffolder` in `bock-codegen/src/scaffold.rs`; project-mode hook in
+    `build.rs` gated `!source_only` (verified: README in project mode, absent in source mode); `[targets.<T>]` /
+    `[targets.<T>.scaffolding]` parsing + validation vs the §20.6.2 v1 matrix (unknown → error naming options; Rust/Go
+    non-configurable formatter/test_framework → distinct error; 26 unit tests). Per-target bodies STUBBED (placeholder
+    README) for S6. 425/0; all 5 gate cmds clean on final commit (verified scope + main-clean + full CI matrix myself).
+  TRIAGE: **DV18** (source-mode emits manifests vs §20.6.2 says none) — recorded, planned resolution S6/S7 (harness →
+    project-mode builds so source mode goes bare). Q-go-error-message still ready (fold into S6 go).
+  RESULT: S5 DONE; project-mode foundation in place. main 264e11e. NEXT: **pre-S6 operator checkpoint** (agreed), then
+    S6 — fill the 5 per-target scaffolder bodies + deep-config codegen branches (the per-target fan-out).

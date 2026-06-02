@@ -11,7 +11,7 @@ Live summary derived from `tracking/queue.md` (items per section):
 - Blocked: 5
 - Deferred: 1
 
-## Build status (as of main 8532e79, 2026-06-02)
+## Build status (as of main 264e11e, 2026-06-02)
 
 | What | State |
 |------|-------|
