@@ -19,7 +19,7 @@
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
     "typescript": "^6.0.3",
-    "wrangler": "^4.94.0"
+    "wrangler": "^4.96.0"
   },
   "overrides": {
     "vite": "^7"
