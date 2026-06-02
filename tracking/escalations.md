@@ -260,7 +260,12 @@ non-normative §20.6.1 note + changelog were added pending Design).
 future "library build" mode), or should §20.6.1 be preserved (requiring multi-file run/harness support)?
 **Recommendation:** none on merits (Design's). Bundling is the lower-friction v1 path given the run model.
 **Awaiting:** Design ratification; non-blocking.
-**Status:** pending
+**Status:** **RESOLVED 2026-06-02 (owner): per-module native tree is the v1 output model** (both app + library
+builds), NOT bundling — chosen eyes-open after the orchestrator surfaced that this re-opens DV13 (the foundational
+cross-module-execution gap the 420-pair stdlib rests on via bundling). Owner also pulled the project-mode config
+tables (`[targets.<T>]`/`.scaffolding`) forward into v1. Realized by the ItemB milestone (S0 spec/tracking
+reconcile → S1–S4 native imports + harness rework, pilot python → S5–S8 scaffolding + config tables + tests).
+Spec reconciled in S0 (changelogs `20260602-1608-per-module-output-dq19.md`, `20260602-1608-projectmode-config-tables-v1.md`).
 
 ## [2026-05-31 21:20 UTC] core.iter shipped surface refinements (DQ24) → Design
 

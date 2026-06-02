@@ -2079,18 +2079,19 @@ Target-specific scaffolding files (manifests, package descriptors, ecosystem-req
 
 Entry-point selection — which output file is invoked when running the build artifact — is a project-level concern documented in `bock.project`, not derived from the filename convention. By default, `src/main.bock` is the entry point if present.
 
-> **Implementation note (v1, OPEN — under Design review).** The v1 compiler does
-> not yet emit the per-module mirrored tree described above for *runnable* builds.
-> To make a cross-module program (one module `use`-ing another, including the
-> embedded `core.*` stdlib) actually run under the single-file run model — the
-> toolchain executes a single `main.<ext>` (`node main.js`, `python3 main.py`,
-> `rustc main.rs`, `go run main.go`) — `bock build` **bundles** every module the
-> entry program reaches through a `use` into the one entry file, in dependency
-> order, dropping the now-redundant import statements. A program that uses no
-> imported symbol emits only its own entry module. This diverges from the
-> one-file-per-module layout specified here; whether the per-module tree returns
-> as a future "library build" mode (with the bundle as the default "application
-> build") is an open question for Design. See `spec/changelogs/2026-05-30-single-file-bundling.md`.
+> **Implementation note (v1).** The per-module mirrored tree above is the v1 build
+> output for both application and library builds (DQ19, resolved 2026-06-02). A
+> cross-module program — one module `use`-ing another, including the embedded
+> `core.*` stdlib — compiles and runs by emitting each reached module to its own
+> target file and wiring the files with the target's **native** import mechanism
+> (ES module imports for js/ts, Rust `mod`/`use`, Go package imports, Python
+> package imports), then running the project through the target's normal runner
+> (`node`, `python`, `cargo run`, `go run .`). This supersedes the transitional
+> single-file *bundling* introduced 2026-05-30 (changelog
+> `2026-05-30-single-file-bundling.md`), which concatenated `use`-reachable modules
+> into one entry file to make cross-module programs runnable before native imports
+> landed; bundling is retired as the default once native per-target imports run on
+> all five targets. See `spec/changelogs/20260602-1608-per-module-output-dq19.md`.
 
 #### 20.6.2 — Output Modes
 
@@ -2191,7 +2192,7 @@ The generated `bock.project` includes a commented-out `[ai]` block that document
 
 The scaffolder does not prompt interactively for provider configuration during `bock new`. Interactive flows fail awkwardly in CI and scripted contexts and demand provider knowledge from users whose first interaction with Bock is project creation. Users who want AI-assisted codegen uncomment and complete the block; users who do not delete it.
 
-`bock.project` reserves several optional per-target fields that will influence project mode output (§20.6.2). **The v1 compiler does not yet parse these `[targets.<T>]` / `[targets.<T>.scaffolding]` tables — they are Reserved for v1.x** (consistent with Appendix A.3): v1 `bock build` selects targets from `--target` / `--all-targets` (which builds all five built-in targets) and uses target-appropriate defaults, so the tables below have no effect today. They are shown here for forward reference (the `[project] type` field is v1 — see Appendix A.1):
+`bock.project` supports several optional per-target fields that configure project mode output (§20.6.2). **v1 project mode parses these `[targets.<T>]` / `[targets.<T>.scaffolding]` tables** and derives target output from them; `bock build` selects targets from `--target` / `--all-targets` (which builds all five built-in targets) and applies target-appropriate defaults for any field left unset. (Earlier drafts Reserved these tables for v1.x; they were pulled into v1 with the project-mode build work — changelog `20260602-1608-projectmode-config-tables-v1.md`.) The `[project] type` field is v1 — see Appendix A.1:
 
 ```toml
 [project]
@@ -2220,7 +2221,7 @@ linter = "eslint"
 package_manager = "pnpm"
 ```
 
-The two sections per target are conceptually distinct: `[targets.<T>]` configures choices that change what Bock emits (deep configuration); `[targets.<T>.scaffolding]` configures choices that just add files alongside the emitted code (shallow configuration). See §20.6.2 for the planned v1-supported variant matrix per target. Both tables are **Reserved for v1.x** until the project-mode build work parses them.
+The two sections per target are conceptually distinct: `[targets.<T>]` configures choices that change what Bock emits (deep configuration); `[targets.<T>.scaffolding]` configures choices that just add files alongside the emitted code (shallow configuration). See §20.6.2 for the v1-supported variant matrix per target. Both tables are parsed by the v1 project-mode build.
 
 Inference rules and override semantics are specified in §20.6.2. `bock new` does not generate these fields by default — they're added by users when needed. Generated projects rely on inference and target-appropriate defaults for the common case.
 
@@ -2502,7 +2503,7 @@ TargetProfile {
 
 #### A.1 — `bock.project` (v1)
 
-The v1 compiler reads `[project]`, `[strictness]`, `[ai]`, and `[registries]`. The `[targets.<T>]` and `[targets.<T>.scaffolding]` tables shown below are **Reserved for v1.x** (see A.3): v1 `bock build` selects targets via `--target` / `--all-targets` (which builds all five built-in targets) and uses target-appropriate defaults; it does not parse these tables. They are kept in this example for forward reference.
+The v1 compiler reads `[project]`, `[strictness]`, `[ai]`, `[registries]`, and the per-target `[targets.<T>]` / `[targets.<T>.scaffolding]` tables shown below (project-mode configuration — §20.6.2/§20.7). `bock build` selects targets via `--target` / `--all-targets` (which builds all five built-in targets) and applies target-appropriate defaults for any field left unset.
 
 ```toml
 [project]
@@ -2569,7 +2570,6 @@ These fields appear in older spec drafts and may be implemented in v1.x or later
 
 - **`[project] authors`** — Author metadata. Activated alongside `bock pkg publish` (§19).
 - **`[strictness.overrides]`** — Per-path glob-based strictness mappings (e.g., `"src/experiments/**" = "sketch"`). v1 ships flat project-level strictness; layered strictness is v1.x.
-- **`[targets.<T>]` and `[targets.<T>.scaffolding]`** — Per-target deep configuration (`test_framework`, `formatter`, `package`, Go `module`) and shallow configuration (`linter`, `package_manager`). v1 `bock build` selects targets via `--target` / `--all-targets` (building all five built-in targets) and emits with target-appropriate defaults; it does not yet parse these tables. The variant matrix is specified in §20.6.2 and ships with the project-mode build work.
 - **`[paradigm]`** — Paradigm-mode selection (`FP`, `OOP`, `Multi`). v1 ships a single fixed paradigm equivalent to `Multi` mode, in which all language features are available and bindings are immutable by default; it does not parse this field or gate `class`, `mut`, or `@mutable` on a mode. Configurable paradigm modes are Reserved for v1.x pending a design pass for feature-gating semantics (§1.5).
 - **`[effects]` and `[effects.overrides.<env>]`** — Project-level effect handler routing. v1 ships inline + module-level handler resolution via §10 mechanisms; project-level routing may be unnecessary and will only be introduced if real-world usage demonstrates need.
 - **`[plugins]`** — Plugin declarations. Reserved pending the plugin loader (Appendix C describes the planned plugin system).

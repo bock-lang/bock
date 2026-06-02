@@ -12,8 +12,10 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-01 vs main 6a48848 (**D5 contributor docs DONE [#174]** → next critical path = ItemB
-project-mode codegen, now UNBLOCKED. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
+_Last reconciled: 2026-06-02 vs main 8305bf7 (**ItemB kicked off as MS-projectmode milestone** — 2 owner decisions
+2026-06-02: DQ19 → per-module native tree is the v1 output [re-opens DV13]; config tables pulled into v1. S0
+spec/tracking reconcile landing; S1 python pilot next. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`.
+— earlier: **D5 contributor docs DONE [#174]**; ItemB was UNBLOCKED. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
 [#175]**; **Q-r2-codegen-residue (c) builtin-vs-user-method shadowing [#176, ×5]** + pinned Q-go-list-literal /
 Q-r2-(b) / Q-ts-generic-impl (verified already-fixed). New FOUND triaged: Q-allcaps-record-parse (parser),
 Q-arch-doc-drift (ARCHITECTURE.md/compiler-CLAUDE.md/CONTRIBUTING.md crate-name drift). Q-match-exprpos still
@@ -207,10 +209,24 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 - **[D2-polish] D2 language-reference final polish** — docs · blocked ·
   `docs/src/language/` · blocked-by: (D2-FOUND mostly resolved — verify)
   · note: most D2-FOUND rows resolved per spec revision; confirm residue.
-- **[ItemB] Project-mode codegen (Phases 1-6)** — impl · **READY (UNBLOCKED 2026-06-01 — D5 done)** ·
-  `compiler/crates/bock-codegen/` · — · links #28 · note: **next critical-path item.**
-  Phase 1 then per-target Phases 2-5 (sub-agent fan-out), Phase 6.
-  Unblocks the §20.1-Reserved build flags (--deliverable/--no-tests).
+- **[ItemB] Per-module output + project-mode codegen + config tables** — impl · **IN FLIGHT (milestone
+  MS-projectmode, v1-BLOCKING; expanded by 2 owner decisions 2026-06-02)** · `compiler/crates/bock-codegen/`,
+  `bock-cli/src/build.rs`, `bock-build/src/toolchain.rs`, `compiler/tests/execution.rs` · — · links #28, #132,
+  DV13, DQ19, MS-projectmode · plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md` · note: **v1.0's last
+  engineering milestone.** Owner decided (eyes-open) the v1 output is the **per-module native tree** (DQ19 →
+  re-opens DV13: native per-target cross-file imports that compile+run) AND **config tables pulled into v1**.
+  Staged **S0–S8** (sequential through S0→S4; S6 fans out by target):
+  - **S0** — spec/tracking reconcile (DQ19 resolved, config tables un-reserved). **DONE this PR.**
+  - **S1** — native imports + harness multi-file run, **PILOT = python** · ready (dispatch next).
+  - **S2** — js then ts · blocked-by S1.
+  - **S3** — rust + go (+ minimal Cargo.toml/go.mod) · blocked-by S2.
+  - **S4** — flip default to per-module; retire bundling (**DV13 CLOSED**) · blocked-by S3.
+  - **S5** — scaffolding framework + `bock.project` config parsing · blocked-by S4.
+  - **S6** — per-target scaffolders + deep-config branches (Vitest|Jest, Black|Ruff…) · blocked-by S5.
+  - **S7** — transpiled tests + formatter-clean gate · blocked-by S6.
+  - **S8** — internal docs + close · blocked-by S7.
+  INVARIANT every PR: `run-conformance.sh REQUIRE=all` stays 420/420; bundling behind a flag until all 5 native;
+  harness migrates target-by-target. `--deliverable`/`--no-tests` stay v1.x. External `/get-started` = ItemD.
 - **[ItemD] /get-started project-mode evolution** — docs · blocked ·
   `docs/`, `website/` · blocked-by: ItemB Phase 6 · note: external-facing
   copy — escalate for approval.
