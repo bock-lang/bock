@@ -4632,11 +4632,7 @@ mod tests {
             .unwrap();
 
         // Two module files (no shared runtime needed here).
-        let by_name = |p: &str| {
-            out.files
-                .iter()
-                .find(|f| f.path == std::path::Path::new(p))
-        };
+        let by_name = |p: &str| out.files.iter().find(|f| f.path == std::path::Path::new(p));
         let main_file = by_name("main.py").expect("main.py emitted");
         let util_file = by_name("mathutil.py").expect("mathutil.py emitted");
         assert!(
