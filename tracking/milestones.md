@@ -36,7 +36,12 @@ the Bock identity.
   enums broken on ALL 5**, generics/Result/closures/Optional-methods on 3-4/5; the 3 "landed" stdlib modules
   are check-only. → **Q-codegen-completeness** (v1-blocking milestone, phased) must land before the stdlib.
   v1.0 acceptance now requires the codegen-completeness milestone + per-target EXECUTION (not check-only) of
-  the stdlib on every shipping target.
+  the stdlib on every shipping target. **UPDATE (2026-06-03):** the "20 examples build/test clean on ≥JS+Py+Rust"
+  acceptance gate is **NOT met** — an examples-compile audit found the `real-world/*` examples largely fail project-mode
+  build (ts 0/6, rust 0/6, go 0/6; js/py pass syntax-only validate). The 430/0 conformance was a NARROW slice again
+  (List `.map()`-method-with-closure mislowered = Q-list-method-codegen; rust Cargo.toml workspace = Q-rust-cargo-workspace;
+  examples not exec-tested = Q-examples-exec-coverage). An **examples-hardening workstream** (exec-gate the examples ×5 +
+  fix the codegen clusters) is a v1.0 prerequisite. v1.0 is further out than the ItemB-complete picture implied.
 
 ## v1.1 — Editor & Tooling Polish
 **Theme:** delight in the editor; close interpreter gaps.
