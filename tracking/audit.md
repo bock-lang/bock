@@ -1815,3 +1815,27 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
   NEXT: surfaced to operator (recommend examples-exec audit first → fix clusters); **awaiting direction** before driving
     the examples-hardening workstream. LESSON for the project: conformance fixtures must include real-world-shaped
     programs / the examples must be exec-tested — green conformance gave false confidence.
+
+═══ DAILY DIGEST / NIGHT PAUSE — 2026-06-03 ═══
+SHIPPED (this session, #181–#200, all gate-clean + CI-green): ★ **ItemB / the project-mode milestone COMPLETE** —
+  per-module native output on all 5 (DV13), project mode real (scaffolder manifests/configs/README + `@test`
+  transpiled per framework), source mode bare (DV18), config tables parsed, core.error fixed ×5 (#193), js/ts/python
+  project-mode CI-certified (#196, transpiled tests run-verify ×5), rust/go formatter-clean (#198). Plus: cleared
+  dependabot (#178/#179/#180); spec reconciled (DQ19→per-module, config tables→v1); ~9 tracking PRs.
+MAJOR FINDING (reframes v1.0): an examples-compile audit found the conformance fixtures are TOO NARROW — the
+  `real-world/*` examples largely don't compile in project mode (ts 0/6, rust 0/6, go 0/6; js/py "OK" = syntax-only
+  validate). Root causes filed: **Q-list-method-codegen** (HIGH — List `.map()`-with-closure mislowered, all 5, §20.4),
+  **Q-rust-cargo-workspace**, **Q-examples-exec-coverage** (HIGH), **Q-chat-protocol-allfail**. v1.0 is further out than
+  the green-conformance picture implied; an examples-hardening workstream is the prerequisite. (Memory:
+  conformance-green-is-not-sufficient.)
+INCIDENTS/LESSONS: (1) two engineer sub-agents reported "gate clean" with a committed rustfmt drift, and one STALLED
+  (backgrounded-and-waited) — caught all by re-verifying every PR before merge + taking over the stalled worktree
+  (memory: engineer-subagent-dispatch-discipline). (2) I leaked 192 example build artifacts onto main via `git add -A`
+  on a tracking PR (#199) — reverted in #200; process fix = explicit `git add` for tracking PRs, audit builds in temp.
+STATE AT PAUSE: main **b7d8720**, **0 open PRs**, worktrees == main, working tree clean. Box now has prettier+black
+  installed (for future examples-exec work). NOTE: stale pre-existing LOCAL branches (agent/*, docs/d*, feat/*) remain
+  — not from this session; optional housekeeping, left untouched (don't delete what I didn't create).
+AWAITING OPERATOR (2 decisions, nothing in flight): (1) **examples-hardening direction** — audit-first [recommended] /
+  fix Q-list-method-codegen first / reassess v1.0 scope; (2) **`.gitignore` policy** — gitignore `examples/**/build/` +
+  drop the stale `hello-world/build` snapshot? [recommend yes]. NEXT SESSION: pick up from the operator's answer; if
+  none, the recommended start is the examples-exec audit (read-only, becomes the Q-examples-exec-coverage CI gate).

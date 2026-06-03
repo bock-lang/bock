@@ -12,7 +12,9 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-03 vs main bf34070 + this S8 close PR (**★ ItemB COMPLETE — MS-projectmode DONE (S0–S8) ★** — per-module native
+_Last reconciled: 2026-06-03 — **NIGHT PAUSE** at main b7d8720 (0 open PRs, worktrees==main, clean). See the
+2026-06-03 DAILY DIGEST in audit.md. **Awaiting operator: (1) examples-hardening direction [audit-first recommended];
+(2) .gitignore policy for examples/**/build/.** Earlier today: (**★ ItemB COMPLETE — MS-projectmode DONE (S0–S8) ★** — per-module native
 output on all 5 [DV13]; project mode real [scaffolder-owned manifests/configs/README + transpiled @test files per
 framework], source mode bare [DV18]; config tables parsed; core.error fixed ×5 [#193]. 430 exec pairs / 0 failed
 REQUIRE=all. ItemB (the ProjectMode milestone) complete + js/ts/python CI-certified [#196] + rust/go formatter-clean
