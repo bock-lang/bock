@@ -1,0 +1,82 @@
+name: examples-exec
+
+# INFORMATIONAL gate. Builds + runs every example project under examples/ on all
+# five targets (js, ts, python, rust, go) and prints a PASS/FAIL matrix to the job
+# log and the run summary. It is intentionally NON-BLOCKING: the job is marked
+# `continue-on-error: true` and the audit script exits 0 by default, so it never
+# reds a PR while the codegen clusters it surfaces are still open.
+#
+# RATCHET TO BLOCKING (later): once a cluster of example fixes lands and the
+# baseline (tools/examples-exec-baseline.txt) is refreshed, flip this gate to
+# required by (a) removing `continue-on-error`, and (b) setting
+# BOCK_EXAMPLES_REQUIRE to the certified target set (e.g. "js,python" or "all")
+# on the audit step. In strict mode the script exits non-zero on any regression
+# of a required (example, target) pair below its recorded baseline status — so the
+# ratchet can only tighten, never silently loosen.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'spec/**'
+      - 'website/**'
+      - '**.md'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'spec/**'
+      - 'website/**'
+      - '**.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  examples-exec:
+    name: examples build+run matrix (informational)
+    runs-on: ubuntu-latest
+    # NON-BLOCKING: surfaces the matrix without failing the PR. Remove this line
+    # (and set BOCK_EXAMPLES_REQUIRE on the audit step) to ratchet to required.
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust toolchain (build bock + run rust examples)
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # Node 22 strips TS types natively (node --experimental-strip-types), so the
+      # ts examples run without tsx/ts-node. Also serves the js examples.
+      - name: Set up Node (js + ts examples)
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+
+      - name: Set up Go (go examples)
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.23'
+
+      # Python 3.x is preinstalled on ubuntu-latest; the audit runs `python3 main.py`.
+
+      - name: Build bock
+        run: cargo build -p bock --bin bock
+
+      - name: Run examples-exec audit (informational)
+        # The script exits 0 by default; continue-on-error above is belt-and-braces
+        # so an unexpected non-zero (e.g. setup error) still doesn't red the PR
+        # while this gate is informational.
+        run: ./tools/scripts/examples-exec-audit.sh

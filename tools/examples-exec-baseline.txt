@@ -1,0 +1,40 @@
+# examples-exec baseline — currently-passing (example, target) pairs.
+# Format: <example-path>  <target>  <status>   status in {pass, build}.
+#   pass  = builds AND runs clean
+#   build = builds clean (run failed, or no runtime present at record time)
+# Regenerate: BOCK_EXAMPLES_UPDATE_BASELINE=1 tools/scripts/examples-exec-audit.sh
+# The strict ratchet (BOCK_EXAMPLES_REQUIRE=...) fails CI if any listed
+# pair drops below its recorded status. Update this file when a codegen
+# cluster lands so the ratchet can only tighten, never loosen silently.
+#
+fundamentals/calculator	python	build
+fundamentals/fizzbuzz	js	build
+fundamentals/fizzbuzz	python	build
+fundamentals/fizzbuzz	rust	pass
+fundamentals/guessing-game	rust	build
+fundamentals/hello-world	js	pass
+fundamentals/hello-world	ts	pass
+fundamentals/hello-world	python	pass
+fundamentals/hello-world	rust	pass
+fundamentals/hello-world	go	pass
+fundamentals/todo-list	python	build
+real-world/data-pipeline	js	build
+real-world/data-pipeline	python	build
+real-world/expense-tracker	js	build
+real-world/expense-tracker	python	pass
+real-world/inventory-system	js	build
+real-world/inventory-system	python	build
+real-world/markdown-parser	js	build
+real-world/markdown-parser	python	pass
+real-world/task-api	python	pass
+spec-exercisers/effect-showcase	ts	pass
+spec-exercisers/effect-showcase	python	pass
+spec-exercisers/type-zoo	js	build
+spec-exercisers/type-zoo	python	build
+target-optimized/microservice	python	pass
+target-optimized/ml-data-prep	js	pass
+target-optimized/ml-data-prep	python	pass
+target-optimized/react-components	js	build
+target-optimized/react-components	python	build
+target-optimized/systems-allocator	js	build
+target-optimized/systems-allocator	python	build
