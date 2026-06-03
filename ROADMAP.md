@@ -123,6 +123,13 @@ exercises the stdlib's FREE functions but not the real-world-shaped method/closu
 **leverage order**; the examples-exec CI gate lands **informational-first**, ratcheting to blocking as clusters land.
 - **Acceptance:** all 20 `examples/` **compile AND run** on all 5 targets in CI (the Q-examples-exec-coverage gate,
   flipped to blocking); no regressions vs the ratchet.
+- **Progress (2026-06-03 20:25):** landed **11 PRs (#204–#214)** — adds Q-string-num-jstspygo (#213, §18.3 String/num/
+  Char/Bool methods on js/ts/py/go; conformance 476→480; **microservice ts FAIL→PASS**). An INCIDENT (merged #213 with a
+  failing windows-python lane — multibyte fixture output vs Windows-Python's codepage stdout) was caught + hotfixed (#214,
+  ASCII fixture; root issue filed → Q-py-windows-utf8); merge discipline tightened (gate on `mergeStateStatus=CLEAN`).
+  Runtime-working examples now **js 7 · ts 5 · py 9 · rust 8 · go 1 / 20**. **OPERATOR DECISION (2026-06-03): go HOLDS the
+  all-5 v1.0 bar** (not tiered) — commit to the full go chain. Remaining: J, K, **D (match-exprpos — deep, go-blocking)**,
+  go-Result-payload, Q-py-windows-utf8, Q-examples-codegen-misc (14 sub-items). [prior 18:01 progress below.]
 - **Progress (2026-06-03 18:01):** landed **8 PRs (#204–#211)** — gate (M), A+B+C (#205), Q-impl-body-typecheck (#207),
   **rust L/F/G (#210)**, **go E (#209)**, baseline ratchet (#211). Combined conformance **430→476** REQUIRE=all.
   Runtime-working examples: **js 2→7 · ts 2→4 · py 7→9 · RUST 2→8 · go 1→1** / 20. **rust jumped hard** (L cargo-workspace
