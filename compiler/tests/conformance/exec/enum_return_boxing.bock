@@ -1,0 +1,89 @@
+// TEST: exec_enum_return_boxing
+// EXPECT: output "GET /users/42;POST /users;NOT_FOUND;Image"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-go-enum-return-boxing regression. In Go a sealed enum is an interface with
+// a marker method (`isRoute`) and each variant is a struct implementing it. A
+// variant value produced in a value-position `if`/`match` arm (which Go lowers
+// to an immediately-invoked closure, since Go has no expression-`if`) must be
+// boxed into the sealed-interface type at the closure's return, and the closure
+// itself must be TYPED with that interface — not the `interface{}` fallback nor
+// the enclosing function's unrelated return type. Three defects this exercises:
+//
+//   1. An `if`/`else if` chain returning enum variants (`route_of`) lowered to
+//      nested `func() interface{}` closures, so `interface{}` did not satisfy
+//      the declared `Route` return (`interface{} does not implement Route`).
+//      Fix: the closure (and every nested branch closure) is typed `func() Route`.
+//
+//   2. A struct-payload variant (`GetUser { userId: "42" }`) produced in a
+//      value-position branch must likewise be boxed into the `Route` interface,
+//      not erased to `interface{}`.
+//
+//   3. An UNTYPED `let m = if (..) { Image } else { Text }` whose value is an
+//      `if`/`match` over variants inferred the closure's type from the enclosing
+//      function's return type. Fix: the variant's owning enum is inferred so the
+//      closure is typed `func() MessageType`.
+//
+// Printed (`;`-joined): the names of a struct-payload route built in an arm, a
+// unit route from a later arm, the fallthrough route, and an untyped-`let`
+// variant chosen by an `if`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Route {
+  GetUsers
+  GetUser { userId: String }
+  CreateUser
+  NotFound
+}
+
+enum MessageType {
+  Text
+  Image
+}
+
+// An if/else-if chain in value position returning enum variants — the variant
+// from each arm is boxed into the `Route` interface at the chain's tail,
+// including a struct-payload variant (`GetUser { ... }`) and unit variants.
+fn routeOf(method: String, path: String) -> Route {
+  if (method == "GET" && path == "/users") {
+    GetUser { userId: "42" }
+  } else if (method == "POST") {
+    CreateUser
+  } else {
+    NotFound
+  }
+}
+
+fn routeName(r: Route) -> String {
+  match r {
+    GetUsers => return "GET /users"
+    GetUser { userId } => return "GET /users/${userId}"
+    CreateUser => return "POST /users"
+    NotFound => return "NOT_FOUND"
+  }
+}
+
+// An untyped `let` bound to a value-position `if` over enum variants: the
+// binding's Go closure type is inferred as `MessageType`, not the enclosing
+// fn's `String` return.
+fn pickName(isImage: Bool) -> String {
+  let m = if (isImage) {
+    Image
+  } else {
+    Text
+  }
+  match m {
+    Image => "Image"
+    Text => "Text"
+  }
+}
+
+fn main() -> Void {
+  let a = routeOf("GET", "/users")
+  let b = routeOf("POST", "/anything")
+  let c = routeOf("DELETE", "/x")
+  println("${routeName(a)};${routeName(b)};${routeName(c)};${pickName(true)}")
+}
