@@ -16,13 +16,51 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::PathBuf;
 
-use bock_air::{AIRNode, AirInterpolationPart, EnumVariantPayload, NodeKind, ResultVariant};
+use bock_air::{
+    AIRNode, AirInterpolationPart, EnumVariantPayload, NodeKind, ResultVariant, Visitor,
+};
 use bock_ast::{AssignOp, BinOp, Literal, TypeExpr, UnaryOp, Visibility};
 use bock_types::AIRModule;
 
 use crate::error::CodegenError;
 use crate::generator::{CodeGenerator, GeneratedCode, OutputFile, SourceMap};
 use crate::profile::TargetProfile;
+
+/// Collects the value-identifier names *referenced* anywhere in a subtree.
+///
+/// Used by the Go emitter's unused-binding guard: Go rejects a `let`-bound local
+/// that is never read (`declared and not used`), which Bock permits (a binding
+/// kept only for its side effect, or shadowed later). After emitting such a
+/// binding we append `_ = name` iff the name is not referenced in the rest of the
+/// block — this collector computes that reference set.
+///
+/// Every [`NodeKind::Identifier`] is counted as a reference. Binding *patterns*
+/// (`let x = …`'s `x`) are not identifiers, so they are correctly excluded — only
+/// genuine *uses* land here. Conservative by construction: a name that appears in
+/// any form (a nested closure, a struct-field value, an interpolation) is seen, so
+/// the guard never silences a binding that is actually read.
+struct IdentUseCollector {
+    used: HashSet<String>,
+}
+
+impl Visitor for IdentUseCollector {
+    fn visit_node(&mut self, node: &AIRNode) {
+        if let NodeKind::Identifier { name } = &node.kind {
+            self.used.insert(name.name.clone());
+        }
+        bock_air::visitor::walk_node(self, node);
+    }
+}
+
+/// The set of value-identifier names referenced anywhere in `node` (see
+/// [`IdentUseCollector`]).
+fn collect_used_idents(node: &AIRNode) -> HashSet<String> {
+    let mut c = IdentUseCollector {
+        used: HashSet::new(),
+    };
+    c.visit_node(node);
+    c.used
+}
 
 /// Conservative module scan for `Channel` / `spawn` references.
 fn go_module_uses_concurrency(items: &[AIRNode]) -> bool {
@@ -448,6 +486,7 @@ impl CodeGenerator for GoGenerator {
         ctx.collect_record_param_fields(module);
         ctx.collect_async_fns(module);
         ctx.collect_methods(module);
+        ctx.collect_type_aliases(module);
         ctx.collect_optional_returns(module);
         ctx.collect_method_optional_returns(module);
         // `trait_decls` must precede `collect_fn_and_type_names` so the latter can
@@ -547,6 +586,12 @@ impl CodeGenerator for GoGenerator {
         template.trait_decls = crate::generator::collect_trait_decls(modules);
         template.const_names = crate::generator::collect_const_names(modules);
         template.derive_self_param_traits();
+        // Aliases first across the whole reachable set: a fn in one module may
+        // return a `type` alias declared in another, and the Optional/Result
+        // return scan below must see through it.
+        for (module, _) in modules {
+            template.collect_type_aliases(module);
+        }
         for (module, _) in modules {
             template.collect_methods(module);
             template.collect_optional_returns(module);
@@ -654,6 +699,12 @@ impl CodeGenerator for GoGenerator {
         template.trait_decls = crate::generator::collect_trait_decls(modules);
         template.const_names = crate::generator::collect_const_names(modules);
         template.derive_self_param_traits();
+        // Aliases first across the whole reachable set: a fn in one module may
+        // return a `type` alias declared in another, and the Optional/Result
+        // return scan below must see through it.
+        for (module, _) in modules {
+            template.collect_type_aliases(module);
+        }
         for (module, _) in modules {
             template.collect_methods(module);
             template.collect_optional_returns(module);
@@ -888,6 +939,14 @@ struct GoEmitCtx {
     switch_label_depth: usize,
     /// Monotonic counter for unique loop-label names.
     loop_label_counter: usize,
+    /// Depth of enclosing *expression-position* `loop` IIFEs (`let r = loop { …
+    /// break <v> }`). Bock's `loop` is a value-producing expression whose
+    /// `break <v>` yields the loop's value; Go's `for`+`break` carries no value.
+    /// When this is > 0 the innermost loop body is the IIFE's body, so a
+    /// `break <v>` lowers to `return <v>` (out of the IIFE), not a value-dropping
+    /// `break`. Saved/restored around nested statement-position loops, whose
+    /// `break <v>` is a different (still value-dropping) case.
+    loop_expr_depth: usize,
     /// Maps a function name → the Go element type of its `Optional[T]` return
     /// (`int64` for `-> Int?`). Pre-scanned across the module so a `match`
     /// whose scrutinee is a call (`match next(it) { Some(x) => ... }`) can
@@ -1002,6 +1061,17 @@ struct GoEmitCtx {
     /// Optional/Result pre-seeds are filtered out (Optional has its own
     /// `__bockOption` runtime). Pre-scanned across the reached modules.
     enum_variants: crate::generator::EnumVariantRegistry,
+    /// Type-alias registry: alias name → its underlying type-expression AIR node
+    /// (`type ParseResult = Result[MarkdownNode, ParseError]` →
+    /// `ParseResult → TypeNamed(Result[...])`). Go has no transparent alias to a
+    /// *runtime* type the way Bock does: a function returning the alias
+    /// `ParseResult` must lower to the `__bockResult` runtime struct (so a `match`
+    /// on its value dispatches on `.tag`), and `result_elem_go_types` /
+    /// `collect_optional_returns` must see *through* the alias to record the
+    /// Ok/Err payload types. The emitter resolves an alias name to its target via
+    /// this map. Pre-scanned across the reached modules (mirrors
+    /// [`Self::enum_variants`]).
+    type_aliases: HashMap<String, AIRNode>,
     /// Declared names of module-scope `const`s, pre-scanned across the reachable
     /// program. Emitted verbatim at both declaration and use so the two agree —
     /// `to_pascal_case` (`FIZZ_NUM` → `FIZZNUM`) at the def and `go_fn_name`
@@ -1154,6 +1224,15 @@ struct GoEmitCtx {
     /// before emitting such an argument, consumed (taken) by the lambda emit so
     /// it never leaks to a nested lambda. `None` for an ordinarily-typed lambda.
     expected_lambda_param_types: Option<Vec<String>>,
+    /// A forced Go return type for the *next* lambda emitted, consumed (taken) by
+    /// the `Lambda` arm. A predicate combinator (`filter`/`find`/`any`/`all`)
+    /// always takes a `Bool`-returning closure, but the body may be a method call
+    /// (`(p) => p.in_stock()`) or a `match` whose Go return type
+    /// [`Self::infer_go_expr_type`] cannot recover — leaving the closure typed
+    /// `func(T) interface{}`, which then fails `if __f(__x)` (`non-boolean
+    /// condition`). Setting this to `Some("bool")` pins the predicate's return so
+    /// the closure type-checks. `None` for an ordinarily-inferred lambda.
+    forced_lambda_ret: Option<String>,
     /// True in the **per-module native-package** emission path
     /// ([`GoGenerator::generate_project`], the sole real-build path). When set,
     /// the `Module` arm does **not** inline the runtime preludes (they are
@@ -1257,6 +1336,7 @@ impl GoEmitCtx {
             loop_labels: Vec::new(),
             switch_label_depth: 0,
             loop_label_counter: 0,
+            loop_expr_depth: 0,
             fn_optional_ret_elem: HashMap::new(),
             var_optional_elem: HashMap::new(),
             method_optional_ret_elem: HashMap::new(),
@@ -1274,6 +1354,7 @@ impl GoEmitCtx {
             ordering_runtime_emitted: false,
             range_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
+            type_aliases: HashMap::new(),
             const_names: std::collections::HashSet::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             var_go_type: HashMap::new(),
@@ -1292,6 +1373,7 @@ impl GoEmitCtx {
             fn_sealed_bound: std::collections::HashSet::new(),
             fn_return_go_types: HashMap::new(),
             expected_lambda_param_types: None,
+            forced_lambda_ret: None,
             expected_collection_elem: None,
             per_module: false,
         }
@@ -1790,9 +1872,82 @@ impl GoEmitCtx {
     /// scrutinee is a call to such a function (`match next(it) { Some(x) => ...
     /// }`) type-assert the bound payload to its concrete type. Must run before
     /// any match is emitted, so it covers forward references within the module.
+    /// Pre-scan every top-level `type X = …` alias, recording `X → underlying
+    /// type AIR node`. Lets the emitter resolve an alias *name* to its target Go
+    /// type ([`Self::resolve_type_alias`]) wherever it appears — a function
+    /// return/param type, or a `Result`/`Optional` element scan — so an alias to a
+    /// runtime container (`type ParseResult = Result[...]`) lowers identically to
+    /// the inlined container. Only non-generic aliases are recorded (a generic
+    /// alias `type Pair[A, B] = (A, B)` would need substitution the emitter does
+    /// not perform; it is left to fall through to its existing rendering).
+    fn collect_type_aliases(&mut self, module: &AIRNode) {
+        if let NodeKind::Module { items, .. } = &module.kind {
+            for item in items {
+                if let NodeKind::TypeAlias {
+                    name,
+                    generic_params,
+                    ty,
+                    ..
+                } = &item.kind
+                {
+                    if generic_params.is_empty() {
+                        self.type_aliases
+                            .entry(name.name.clone())
+                            .or_insert_with(|| (**ty).clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// If `node` is a `TypeNamed` naming a recorded non-generic type alias, return
+    /// its underlying type AIR node (following at most one level — Bock aliases do
+    /// not chain in practice, and a bounded depth avoids any cycle). `None` for a
+    /// non-alias or non-`TypeNamed` node.
+    fn resolve_type_alias(&self, node: &AIRNode) -> Option<&AIRNode> {
+        if let NodeKind::TypeNamed { path, args } = &node.kind {
+            if args.is_empty() {
+                if let Some(seg) = path.segments.last() {
+                    return self.type_aliases.get(&seg.name);
+                }
+            }
+        }
+        None
+    }
+
     fn collect_optional_returns(&mut self, module: &AIRNode) {
         if let NodeKind::Module { items, .. } = &module.kind {
             for item in items {
+                // Effect operations are dispatched by bare name (`read(key)` with
+                // the handler resolved implicitly), so the AIR lowers a call to one
+                // as `Call(Identifier "read", ...)` — indistinguishable from a free
+                // fn at the call site. Record each effect op's `Optional`/`Result`
+                // return into the by-name maps so a `match` on such a call (or on a
+                // binding of it) type-asserts the boxed payload concretely. Without
+                // this, the bound `interface{}` payload fails a later concrete use
+                // (effect-showcase: `raw := storage.read(key); match raw { Some(v)
+                // => return v }`, `v` wanted as `string`).
+                if let NodeKind::EffectDecl { operations, .. } = &item.kind {
+                    for op in operations {
+                        if let NodeKind::FnDecl {
+                            name,
+                            return_type: Some(rt),
+                            ..
+                        } = &op.kind
+                        {
+                            if let Some(elem) = self.optional_elem_go_type(rt) {
+                                self.fn_optional_ret_elem
+                                    .entry(name.name.clone())
+                                    .or_insert(elem);
+                            }
+                            if let Some(elems) = self.result_elem_go_types(rt) {
+                                self.fn_result_ret_elem
+                                    .entry(name.name.clone())
+                                    .or_insert(elems);
+                            }
+                        }
+                    }
+                }
                 if let NodeKind::FnDecl {
                     name,
                     return_type: Some(rt),
@@ -1930,6 +2085,11 @@ impl GoEmitCtx {
     /// lives in the `TypeOptional`/`Optional`-named node, unlike at the
     /// scrutinee expression (whose carried `type_info` is a stub).
     fn optional_elem_go_type(&self, node: &AIRNode) -> Option<String> {
+        // See through a `type X = Optional[T]` alias (mirrors
+        // `result_elem_go_types`).
+        if let Some(target) = self.resolve_type_alias(node) {
+            return self.optional_elem_go_type(target);
+        }
         match &node.kind {
             NodeKind::TypeOptional { inner } => Some(self.type_to_go(inner)),
             NodeKind::TypeNamed { path, args } => {
@@ -1953,6 +2113,11 @@ impl GoEmitCtx {
     /// payload of the Go Result runtime back to its concrete Ok/Err type at a
     /// `match` arm. A missing arg defaults to `interface{}`.
     fn result_elem_go_types(&self, node: &AIRNode) -> Option<(String, String)> {
+        // See through a `type X = Result[T, E]` alias so a fn declared to return
+        // the alias still records its Ok/Err payload types.
+        if let Some(target) = self.resolve_type_alias(node) {
+            return self.result_elem_go_types(target);
+        }
         if let NodeKind::TypeNamed { path, args } = &node.kind {
             if path.segments.last().is_some_and(|s| s.name == "Result") {
                 let ok = args
@@ -2150,6 +2315,42 @@ impl GoEmitCtx {
             return None;
         }
         Some((base, args))
+    }
+
+    /// Infer the `(ok, err)` Go payload types a `Result`-typed *value* expression
+    /// produces. The `Result` analogue of [`Self::value_map_kv_go_types`]:
+    /// resolves a bare `Ok(v)` / `Err(e)` constructor's present arm from the
+    /// payload expression (the absent arm stays `interface{}`), and a call to a
+    /// function whose declared return is a `Result` via the existing
+    /// [`Self::scrutinee_result_elems`] (fn-return / variable maps). Used to
+    /// record an *untyped* binding's `(ok, err)` into [`Self::var_result_elem`]
+    /// (`step1 := eval(...)`, with no `: Result[..]` annotation), so a later
+    /// `match step1 { Ok(v) => ...; Err(e) => ... }` type-asserts the
+    /// `interface{}` payload concretely rather than binding it bare (which leaves
+    /// `v` as `interface{}` and fails a later use expecting the concrete type).
+    fn value_result_elem_go_types(&self, value: &AIRNode) -> Option<(String, String)> {
+        if let NodeKind::Call { callee, args, .. } = &value.kind {
+            if let NodeKind::Identifier { name } = &callee.kind {
+                match name.name.as_str() {
+                    "Ok" => {
+                        let ok = args
+                            .first()
+                            .and_then(|a| self.infer_go_expr_type(&a.value))
+                            .unwrap_or_else(|| "interface{}".to_string());
+                        return Some((ok, "interface{}".to_string()));
+                    }
+                    "Err" => {
+                        let err = args
+                            .first()
+                            .and_then(|a| self.infer_go_expr_type(&a.value))
+                            .unwrap_or_else(|| "interface{}".to_string());
+                        return Some(("interface{}".to_string(), err));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.scrutinee_result_elems(value)
     }
 
     /// For a `List[T]` / `Set[T]` / `Map[K, V]` type expression, the declared
@@ -3917,7 +4118,22 @@ impl GoEmitCtx {
         closure: &AIRNode,
         param_types: &[String],
     ) -> Result<(String, Option<String>), CodegenError> {
-        let ret = if let NodeKind::Lambda { params, body } = &closure.kind {
+        self.render_typed_closure_go_ret(closure, param_types, None)
+    }
+
+    /// As [`Self::render_typed_closure_go`], but a `forced_ret` of `Some(ty)` pins
+    /// the closure's Go return type (a predicate combinator's `bool`) rather than
+    /// inferring it from the body. The returned `Option<String>` ret reflects the
+    /// forced type when given, so the caller's result-elem logic agrees.
+    fn render_typed_closure_go_ret(
+        &mut self,
+        closure: &AIRNode,
+        param_types: &[String],
+        forced_ret: Option<&str>,
+    ) -> Result<(String, Option<String>), CodegenError> {
+        let ret = if let Some(t) = forced_ret {
+            Some(t.to_string())
+        } else if let NodeKind::Lambda { params, body } = &closure.kind {
             let saved = self.enter_param_go_types_with_expected(params, Some(param_types));
             let r = self.infer_go_expr_type(body);
             self.var_go_type = saved;
@@ -3927,7 +4143,10 @@ impl GoEmitCtx {
         };
         let prev = self.expected_lambda_param_types.take();
         self.expected_lambda_param_types = Some(param_types.to_vec());
+        let prev_forced = self.forced_lambda_ret.take();
+        self.forced_lambda_ret = forced_ret.map(str::to_string);
         let code = self.expr_to_string(closure)?;
+        self.forced_lambda_ret = prev_forced;
         self.expected_lambda_param_types = prev;
         Ok((code, ret))
     }
@@ -4032,8 +4251,14 @@ impl GoEmitCtx {
                 let Some(cb) = rest.first() else {
                     return Ok(false);
                 };
-                let (f, _) =
-                    self.render_typed_closure_go(&cb.value, std::slice::from_ref(&elem))?;
+                // The predicate returns `Bool`; pin it so `if __f(__x)` is a Go
+                // boolean condition (the body may be a method call / `match` whose
+                // Go return type is otherwise erased to `interface{}`).
+                let (f, _) = self.render_typed_closure_go_ret(
+                    &cb.value,
+                    std::slice::from_ref(&elem),
+                    Some("bool"),
+                )?;
                 format!(
                     "func(__r {slice}) {slice} {{ \
                      __f := {f}; \
@@ -4046,8 +4271,11 @@ impl GoEmitCtx {
                 let Some(cb) = rest.first() else {
                     return Ok(false);
                 };
-                let (f, _) =
-                    self.render_typed_closure_go(&cb.value, std::slice::from_ref(&elem))?;
+                let (f, _) = self.render_typed_closure_go_ret(
+                    &cb.value,
+                    std::slice::from_ref(&elem),
+                    Some("bool"),
+                )?;
                 format!(
                     "func(__r {slice}) __bockOption {{ \
                      __f := {f}; \
@@ -4059,8 +4287,11 @@ impl GoEmitCtx {
                 let Some(cb) = rest.first() else {
                     return Ok(false);
                 };
-                let (f, _) =
-                    self.render_typed_closure_go(&cb.value, std::slice::from_ref(&elem))?;
+                let (f, _) = self.render_typed_closure_go_ret(
+                    &cb.value,
+                    std::slice::from_ref(&elem),
+                    Some("bool"),
+                )?;
                 // `any`: true if some element matches; `all`: true unless one fails.
                 if method == "any" {
                     format!(
@@ -4798,13 +5029,13 @@ impl GoEmitCtx {
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
-        let Some((recv, method, rest, _prim)) =
+        let Some((recv, method, rest, prim)) =
             crate::generator::primitive_bridge_call(node, callee, args)
         else {
             return Ok(false);
         };
         // A concrete primitive receiver uses the typed `__bockCompare` helper.
-        self.emit_bridge_method(recv, method, rest, false)
+        self.emit_bridge_method(recv, method, rest, false, Some(prim))
     }
 
     /// Lower a sealed-core-trait bridge method on a *bounded generic type
@@ -4827,7 +5058,9 @@ impl GoEmitCtx {
         else {
             return Ok(false);
         };
-        self.emit_bridge_method(recv, method, rest, true)
+        // A bounded *generic* type var has no concrete primitive kind; the
+        // Char-display special-case below does not apply.
+        self.emit_bridge_method(recv, method, rest, true, None)
     }
 
     /// Shared body of the primitive / trait-bound bridges. `generic` selects the
@@ -4841,6 +5074,7 @@ impl GoEmitCtx {
         method: &str,
         rest: &[bock_air::AirArg],
         generic: bool,
+        recv_prim: Option<&str>,
     ) -> Result<bool, CodegenError> {
         let recv_str = self.expr_to_string(recv)?;
         let code = match method {
@@ -4869,8 +5103,17 @@ impl GoEmitCtx {
                 format!("(({recv_str}) == ({other}))")
             }
             "to_string" | "display" => {
-                self.needs_fmt_import = true;
-                format!("fmt.Sprintf(\"%v\", {recv_str})")
+                // A `Char` lowers to Go `rune` (an alias of `int32`); `fmt.Sprintf
+                // ("%v", r)` would print its integer code point ('A' → "65"), not
+                // the character. `string(rune)` renders the scalar as its UTF-8
+                // text. Every other primitive keeps the `%v` formatting (an int
+                // prints as its digits, a float/bool/string as itself).
+                if recv_prim == Some("Char") {
+                    format!("string({recv_str})")
+                } else {
+                    self.needs_fmt_import = true;
+                    format!("fmt.Sprintf(\"%v\", {recv_str})")
+                }
             }
             _ => return Ok(false),
         };
@@ -5406,10 +5649,22 @@ impl GoEmitCtx {
             NodeKind::TypeAlias {
                 name,
                 generic_params,
+                ty,
                 ..
             } => {
-                let type_params = self.format_generic_params(generic_params);
-                self.writeln(&format!("type {}{type_params} = interface{{}}", name.name));
+                // Render the alias to its underlying Go type so a value of the
+                // alias type is the concrete container/struct (`type ParseResult =
+                // Result[...]` → `type ParseResult = __bockResult`, whose `.tag`
+                // a `match` reads). A *generic* alias keeps the prior `interface{}`
+                // erasure (the emitter does not substitute its params, and the
+                // alias registry skips it), so its param list is preserved.
+                if generic_params.is_empty() {
+                    let underlying = self.type_to_go(ty);
+                    self.writeln(&format!("type {} = {underlying}", name.name));
+                } else {
+                    let type_params = self.format_generic_params(generic_params);
+                    self.writeln(&format!("type {}{type_params} = interface{{}}", name.name));
+                }
                 Ok(())
             }
             NodeKind::ConstDecl {
@@ -6117,6 +6372,29 @@ impl GoEmitCtx {
                         self.var_record_type_args
                             .insert(self.pattern_to_binding_name(pattern), record_args);
                     }
+                    // Record an untyped `Result`-typed binding's `(ok, err)` Go
+                    // payload types when its value is a call to a `Result`-returning
+                    // fn (`step1 := eval(...)`) or a bare `Ok(v)`/`Err(e)`. Without
+                    // this, a later `match step1 { Ok(v) => ... }` binds `v` from the
+                    // boxed `interface{}` payload un-asserted, leaving `v` as
+                    // `interface{}` and failing a downstream use that expects the
+                    // concrete type (e.g. `eval(OpMul, v, 2.0)` wanting `float64`).
+                    if let Some(elems) = self.value_result_elem_go_types(value) {
+                        self.var_result_elem
+                            .insert(self.pattern_to_binding_name(pattern), elems);
+                    }
+                    // Record an untyped `Optional`-typed binding's element Go type
+                    // when its value is a call/method returning `Optional[T]`
+                    // (`raw := storage.read(key)`). Reuses the scrutinee resolver,
+                    // which already maps an effect-/user-method's `Optional[T]`
+                    // return to its concrete element. Without this, a later
+                    // `match raw { Some(v) => ... }` binds `v` from the boxed
+                    // `interface{}` un-asserted, so a typed-IIFE arm (`return v`
+                    // where `T` is `string`) fails the Go build.
+                    if let Some(elem) = self.scrutinee_optional_elem(value) {
+                        self.var_optional_elem
+                            .insert(self.pattern_to_binding_name(pattern), elem);
+                    }
                     // An untyped `let m = if (..) { Text } else { Image }` lowers
                     // its value to an expression IIFE. Without an expected type the
                     // IIFE falls back to the enclosing fn's return type
@@ -6139,7 +6417,43 @@ impl GoEmitCtx {
                         }
                     }
                     let ind = self.indent_str();
-                    let _ = write!(self.buf, "{ind}{binding} := ");
+                    // Bock `Int` is `int64`, but Go infers an *untyped integer
+                    // constant* (`0`, `lo + 1`) as the default `int` under `:=`.
+                    // A later mix with an `int64` value (`i >= int64(len(xs))`,
+                    // `total + p` where `p: Int`, or a struct field `Level int64`)
+                    // then fails `mismatched types int and int64`. When the value's
+                    // structural Go type is `int64`, pin the binding with an explicit
+                    // `var x int64 = …` and record it so downstream uses agree. Only
+                    // `int64` needs this — `float64`/`bool`/`string` literals already
+                    // infer to the matching Go type under `:=`. Skipped when the value
+                    // is an `if`/`match`/`loop` (those lower to a typed IIFE) or a
+                    // collection/record literal (handled above), to keep the targeted
+                    // surface minimal.
+                    //
+                    // Restricted to value kinds whose `int64` Go type is *reliable*:
+                    // an integer literal, integer arithmetic (`BinaryOp`/`UnaryOp`),
+                    // or a known-`int64` identifier. A *call* is deliberately
+                    // excluded — a generic fn (`firstOr[T](single(9), -1)`)
+                    // monomorphizes `T` to Go's untyped-constant default `int`, so
+                    // its *actual* return type is `int`, not the `int64`
+                    // `infer_go_expr_type` predicts from the Bock `Int`; pinning
+                    // `var x int64` there fails `cannot use … (int) as int64`.
+                    let pin_int64_kind = matches!(
+                        value.kind,
+                        NodeKind::Literal { .. }
+                            | NodeKind::BinaryOp { .. }
+                            | NodeKind::UnaryOp { .. }
+                            | NodeKind::Identifier { .. }
+                    );
+                    let pin_int64 = pin_int64_kind
+                        && self.infer_go_expr_type(value).as_deref() == Some("int64");
+                    if pin_int64 {
+                        self.var_go_type
+                            .insert(self.pattern_to_binding_name(pattern), "int64".to_string());
+                        let _ = write!(self.buf, "{ind}var {binding} int64 = ");
+                    } else {
+                        let _ = write!(self.buf, "{ind}{binding} := ");
+                    }
                     self.emit_expr(value)?;
                     self.current_expected_type = prev_expected_type;
                     self.buf.push('\n');
@@ -6235,6 +6549,12 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::Loop { body } => {
+                // A statement-position `loop` is a plain `for {}`. Its body is no
+                // longer the value-IIFE body of any enclosing expression-`loop`, so
+                // reset `loop_expr_depth` for the body: a `break <v>` here is the
+                // (value-dropping) statement case, not a `return`.
+                let saved_loop_expr = self.loop_expr_depth;
+                self.loop_expr_depth = 0;
                 self.emit_loop_label_prefix(body);
                 self.writeln("for {");
                 self.indent += 1;
@@ -6242,6 +6562,7 @@ impl GoEmitCtx {
                 self.indent -= 1;
                 self.writeln("}");
                 self.loop_labels.pop();
+                self.loop_expr_depth = saved_loop_expr;
                 Ok(())
             }
             NodeKind::Return { value } => {
@@ -6281,6 +6602,22 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::Break { value } => {
+                // Inside an expression-position `loop` IIFE, `break <v>` is the
+                // loop's value: lower it to `return <v>` (out of the IIFE). The
+                // value-dropping `// break value:` comment below would otherwise
+                // discard it and leave the IIFE with no return at all.
+                if self.loop_expr_depth > 0 {
+                    if let Some(val) = value {
+                        let ind = self.indent_str();
+                        let _ = write!(self.buf, "{ind}return ");
+                        self.emit_expr(val)?;
+                        self.buf.push('\n');
+                        return Ok(());
+                    }
+                    // A bare `break` inside a value `loop` cannot produce the
+                    // loop's value; fall through to the ordinary `break` below
+                    // (the IIFE's trailing `panic` covers the unreachable tail).
+                }
                 if let Some(val) = value {
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}// break value: ");
@@ -6850,15 +7187,30 @@ impl GoEmitCtx {
                 // `func(int64) int64` parameter at the use site.
                 let saved_go_types =
                     self.enter_param_go_types_with_expected(params, expected_params.as_deref());
-                let ret_ty = self
-                    .infer_go_expr_type(body)
-                    .unwrap_or_else(|| "interface{}".to_string());
+                // A predicate combinator pins the return type to `bool` (consumed
+                // here so it never leaks to a nested lambda); otherwise infer it.
+                let forced_ret = self.forced_lambda_ret.take();
+                let ret_ty = forced_ret.unwrap_or_else(|| {
+                    self.infer_go_expr_type(body)
+                        .unwrap_or_else(|| "interface{}".to_string())
+                });
                 let _ = write!(
                     self.buf,
                     "func({}) {ret_ty} {{ return ",
                     param_strs.join(", ")
                 );
+                // The lambda body is a fresh return scope: a `match`/`if`/`loop`
+                // in its tail lowers to an IIFE whose type is *this lambda's*
+                // return type, not the enclosing function's. Without resetting
+                // these, an inner match IIFE in a `filter`/`map` lambda inherited
+                // the outer fn's return type (chat-protocol: a `bool` match body
+                // typed `func() []Message`, the surrounding `filter`'s return).
+                let prev_ret = self.current_fn_ret_type.take();
+                let prev_expected = self.current_expected_type.take();
+                self.current_fn_ret_type = (ret_ty != "interface{}").then(|| ret_ty.clone());
                 self.emit_expr(body)?;
+                self.current_fn_ret_type = prev_ret;
+                self.current_expected_type = prev_expected;
                 self.buf.push_str(" }");
                 self.var_go_type = saved_go_types;
                 Ok(())
@@ -7303,11 +7655,22 @@ impl GoEmitCtx {
                 // `let` save/restores it, so it never wrongly overrides a binding.
                 let prev_expected = self.current_expected_type.take();
                 let arm_expected = (iife_ty != "interface{}").then(|| iife_ty.to_string());
+                // A user-enum match whose arms extract payload fields
+                // (`Heading { level, text } => …`) must narrow on `__v` so each
+                // case can read `__v.Level` / `__v.Text`. A payload-less enum
+                // match (the `core.compare.Ordering` unit variants) keeps the
+                // non-binding `switch x.(type)` (binding `__v` would be Go's
+                // "declared and not used").
+                let user_enum_binds = is_user_enum && Self::go_user_enum_match_binds_payload(arms);
                 let _ = write!(self.buf, "func() {iife_ty} {{ switch ");
-                if is_user_enum {
+                if user_enum_binds {
+                    self.buf.push_str("__v := ");
+                    self.emit_expr(scrutinee)?;
+                    self.buf.push_str(".(type) { ");
+                } else if is_user_enum {
                     // Non-binding type-switch (`switch x.(type)`): the
                     // `core.compare.Ordering` variants are unit (no payload), so
-                    // no `__m` binding is needed, which also avoids Go's
+                    // no `__v` binding is needed, which also avoids Go's
                     // "declared and not used" on a payload-less match.
                     self.emit_expr(scrutinee)?;
                     self.buf.push_str(".(type) { ");
@@ -7329,6 +7692,11 @@ impl GoEmitCtx {
                             self.buf.push_str("case ");
                             self.emit_match_case_condition(pattern)?;
                             self.buf.push_str(": ");
+                        }
+                        // Bind the narrowed `__v`'s payload fields for this arm
+                        // (`level := __v.Level; _ = level`) before the body.
+                        if user_enum_binds {
+                            self.emit_user_enum_arm_bindings(pattern)?;
                         }
                         self.current_expected_type = arm_expected.clone();
                         self.emit_arm_body_return(body, iife_ret.as_deref())?;
@@ -7397,6 +7765,43 @@ impl GoEmitCtx {
             }
             NodeKind::Error => {
                 self.buf.push_str("/* error */");
+                Ok(())
+            }
+            // An expression-position `loop` (`let r = loop { … break <v> }`):
+            // Bock's `loop` is a value-producing expression terminated by a
+            // `break <v>`. Go's `for` carries no value, so lower it to an IIFE
+            // `func() T { for { … } }()` whose body's `break <v>` becomes
+            // `return <v>` (handled via `loop_expr_depth` in the `Break` arm). The
+            // loop is infinite — it only leaves through a `break <v>` — so the
+            // trailing `panic("unreachable")` after the `for` is never reached but
+            // satisfies Go's "missing return" check.
+            NodeKind::Loop { body } => {
+                let iife_ret = self.expected_iife_type();
+                let iife_ty = iife_ret.as_deref().unwrap_or("interface{}");
+                // The IIFE consumes the expected type for its own return; the loop
+                // body re-types its own `break` values, so it must not leak into
+                // the statements within.
+                let prev_expected = self.current_expected_type.take();
+                let _ = writeln!(self.buf, "func() {iife_ty} {{");
+                self.indent += 1;
+                self.loop_expr_depth += 1;
+                self.emit_loop_label_prefix(body);
+                self.writeln("for {");
+                self.indent += 1;
+                self.emit_block_body(body)?;
+                self.indent -= 1;
+                self.writeln("}");
+                self.loop_labels.pop();
+                self.loop_expr_depth -= 1;
+                if iife_ty == "interface{}" {
+                    self.writeln("return nil");
+                } else {
+                    self.writeln("panic(\"unreachable\")");
+                }
+                self.indent -= 1;
+                self.write_indent();
+                self.buf.push_str("}()");
+                self.current_expected_type = prev_expected;
                 Ok(())
             }
             _ => {
@@ -7544,8 +7949,15 @@ impl GoEmitCtx {
         arms: &[AIRNode],
     ) -> Result<(), CodegenError> {
         let elem = self.scrutinee_optional_elem(scrutinee);
+        // Wrap the `__opt := …` binding + tag chain in a Go block so the scrutinee
+        // temp is scoped to this match. Two sequential statement matches in one
+        // function (`match a {…}` then `match b {…}`) otherwise both emit
+        // `__opt := …` in the same scope → `no new variables on left side of :=`.
         let ind = self.indent_str();
-        let _ = write!(self.buf, "{ind}__opt := ");
+        let _ = writeln!(self.buf, "{ind}{{");
+        self.indent += 1;
+        let ind2 = self.indent_str();
+        let _ = write!(self.buf, "{ind2}__opt := ");
         self.emit_expr(scrutinee)?;
         self.buf.push('\n');
         self.write_indent();
@@ -7558,6 +7970,8 @@ impl GoEmitCtx {
             None,
         )?;
         self.buf.push('\n');
+        self.indent -= 1;
+        self.writeln("}");
         Ok(())
     }
 
@@ -7731,8 +8145,14 @@ impl GoEmitCtx {
         arms: &[AIRNode],
     ) -> Result<(), CodegenError> {
         let elems = self.scrutinee_result_elems(scrutinee);
+        // Scope the `__res := …` temp to a Go block so sequential statement
+        // matches in one function don't collide on `__res` (`no new variables on
+        // left side of :=`). See `emit_optional_match_stmt`.
         let ind = self.indent_str();
-        let _ = write!(self.buf, "{ind}__res := ");
+        let _ = writeln!(self.buf, "{ind}{{");
+        self.indent += 1;
+        let ind2 = self.indent_str();
+        let _ = write!(self.buf, "{ind2}__res := ");
         self.emit_expr(scrutinee)?;
         self.buf.push('\n');
         self.write_indent();
@@ -7745,6 +8165,8 @@ impl GoEmitCtx {
             None,
         )?;
         self.buf.push('\n');
+        self.indent -= 1;
+        self.writeln("}");
         Ok(())
     }
 
@@ -8499,6 +8921,14 @@ impl GoEmitCtx {
     fn type_to_go(&self, node: &AIRNode) -> String {
         match &node.kind {
             NodeKind::TypeNamed { path, args } => {
+                // A non-generic `type X = …` alias renders as its underlying Go
+                // type (`type ParseResult = Result[...]` → `__bockResult`), so a
+                // value of the alias type is the runtime container a `match`
+                // dispatches on. Resolved before the collection/runtime mapping so
+                // an alias to `List[T]`/`Result`/`Optional` lowers correctly.
+                if let Some(target) = self.resolve_type_alias(node) {
+                    return self.type_to_go(target);
+                }
                 let name = path
                     .segments
                     .iter()
@@ -8726,8 +9156,31 @@ impl GoEmitCtx {
                 self.writeln("// empty");
                 return Ok(());
             }
-            for s in stmts {
+            for (i, s) in stmts.iter().enumerate() {
                 self.emit_node(s)?;
+                // Go rejects a `let`-bound local never read (`declared and not
+                // used`); Bock permits it (a binding kept for its call's side
+                // effect, e.g. context-audit's `let payment = process(...)`). When
+                // a simple `let x = …` binding's name is referenced nowhere in the
+                // rest of this block, emit `_ = x` to satisfy Go without dropping
+                // the side-effecting initializer. Restricted to a plain `BindPat`
+                // (not `_`, tuple/record patterns, or a `:=`-from-`if let` form):
+                // the conservative reference scan over the *remaining* siblings and
+                // tail never silences a name that is actually used.
+                if let NodeKind::LetBinding { pattern, .. } = &s.kind {
+                    if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                        let go_name = go_value_ident(&name.name);
+                        if go_name != "_" {
+                            let used_after = stmts[i + 1..]
+                                .iter()
+                                .chain(tail.as_deref())
+                                .any(|n| collect_used_idents(n).contains(&name.name));
+                            if !used_after {
+                                self.writeln(&format!("_ = {go_name}"));
+                            }
+                        }
+                    }
+                }
             }
             if let Some(t) = tail {
                 // A statement tail (`return`/`break`/`continue`/assignment) is
@@ -9951,7 +10404,10 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![l]));
-        assert!(out.contains("x := 42"), "got: {out}");
+        // An untyped integer-literal binding is pinned to `int64` (Bock `Int`):
+        // a bare `x := 42` would be Go's default `int`, which then fails to mix
+        // with an `int64` value downstream. See the `pin_int64` path.
+        assert!(out.contains("var x int64 = 42"), "got: {out}");
     }
 
     #[test]

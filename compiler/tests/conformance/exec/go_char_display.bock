@@ -1,0 +1,18 @@
+// TEST: exec_go_char_display
+// EXPECT: output "c=A;up=Z;lo=q"
+// EXPECT: targets js, ts, python, rust, go
+//
+// `Char` display (this session's cluster 5). A `Char` lowers to Go `rune` (an
+// alias of `int32`); `Char.to_string()` / display previously emitted
+// `fmt.Sprintf("%v", r)`, which prints the integer code point ('A' → "65") not
+// the character. The Go backend now emits `string(rune)`, rendering the scalar as
+// its UTF-8 text. Exercised on all five targets so the character value (not its
+// code point) is asserted directly.
+module main
+
+fn main() -> Void {
+  let c = 'A'.to_string()
+  let up = 'z'.to_upper().to_string()
+  let lo = 'Q'.to_lower().to_string()
+  println("c=${c};up=${up};lo=${lo}")
+}
