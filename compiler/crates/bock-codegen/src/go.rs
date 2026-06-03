@@ -2547,6 +2547,77 @@ impl GoEmitCtx {
         subst.get(elem).cloned().unwrap_or_else(|| elem.to_string())
     }
 
+    /// Infer the Go value type produced by an `if`/`match` expression by
+    /// inferring the type of each branch/arm's *tail* (value) and requiring them
+    /// to agree. Used to type an untyped `let m = if (..) { Text } else { Image }`
+    /// binding's IIFE: the inferred enum (`MessageType`) becomes the IIFE return
+    /// type so a variant value is assignable, rather than the `interface{}` /
+    /// enclosing-fn-return fallback. Returns `None` when any branch's type can't
+    /// be inferred or the branches disagree (the caller then leaves the binding
+    /// untyped, preserving the prior behavior — never a wrong type). Branches
+    /// that *only* early-return (no value tail, e.g. a `return Err(..)` arm) are
+    /// skipped: they exit the enclosing function rather than contributing a value.
+    fn infer_branchy_expr_type(&self, node: &AIRNode) -> Option<String> {
+        match &node.kind {
+            NodeKind::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                let then_ty = self.infer_block_tail_type(then_block);
+                let else_ty = else_block
+                    .as_deref()
+                    .and_then(|e| self.infer_block_tail_type(e));
+                match (then_ty, else_ty) {
+                    (Some(a), Some(b)) if a == b => Some(a),
+                    // One branch only early-returns (no value) — adopt the other.
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    _ => None,
+                }
+            }
+            NodeKind::Match { arms, .. } => {
+                let mut common: Option<String> = None;
+                for arm in arms {
+                    let NodeKind::MatchArm { body, .. } = &arm.kind else {
+                        continue;
+                    };
+                    let Some(ty) = self.infer_block_tail_type(body) else {
+                        // A value-less arm (early-return) does not constrain.
+                        continue;
+                    };
+                    match &common {
+                        Some(c) if *c != ty => return None,
+                        Some(_) => {}
+                        None => common = Some(ty),
+                    }
+                }
+                common
+            }
+            _ => None,
+        }
+    }
+
+    /// Infer the Go type of a block's value tail: for a `Block` the tail
+    /// expression's type (a value-producing tail only — a statement tail like an
+    /// early `return` yields `None`, as the block contributes no value), and for
+    /// a bare expression body the expression's type. A nested `if`/`match` tail
+    /// recurses through [`Self::infer_branchy_expr_type`]. `None` when no value
+    /// type is determinable.
+    fn infer_block_tail_type(&self, node: &AIRNode) -> Option<String> {
+        match &node.kind {
+            NodeKind::Block { tail, .. } => {
+                let t = tail.as_deref()?;
+                if crate::generator::node_is_statement(t) {
+                    return None;
+                }
+                self.infer_block_tail_type(t)
+            }
+            NodeKind::If { .. } | NodeKind::Match { .. } => self.infer_branchy_expr_type(node),
+            _ => self.infer_go_expr_type(node),
+        }
+    }
+
     fn infer_go_expr_type(&self, node: &AIRNode) -> Option<String> {
         match &node.kind {
             NodeKind::Literal { lit } => match lit {
@@ -2558,7 +2629,19 @@ impl GoEmitCtx {
                 Literal::Unit => None,
             },
             NodeKind::Identifier { name } => {
-                self.var_go_type.get(&go_value_ident(&name.name)).cloned()
+                // A bare reference to a *unit* user-enum variant (`Text`,
+                // `HealthCheck`) types to its owning sealed-interface enum
+                // (`MessageType`, `Route`), so an untyped `let t = Text` — or an
+                // `if`/`match` whose arms yield such variants — infers the enum
+                // type rather than collapsing to `interface{}`/the enclosing fn's
+                // return type. Bound locals/params still win (a variable shadowing
+                // is impossible — variant names are PascalCase, value idents are
+                // camelCase — but check the var map first for symmetry).
+                if let Some(t) = self.var_go_type.get(&go_value_ident(&name.name)) {
+                    return Some(t.clone());
+                }
+                self.user_variant_for_name(&name.name)
+                    .map(|info| info.enum_name.clone())
             }
             NodeKind::Interpolation { .. } => Some("string".to_string()),
             NodeKind::UnaryOp { op, operand } => match op {
@@ -2634,6 +2717,14 @@ impl GoEmitCtx {
             // per-element record); a generic param not directly typed by a field
             // falls back to `any`, matching the emission's loose-but-valid form.
             NodeKind::RecordConstruct { path, fields, .. } => {
+                // A struct-payload variant construction (`GetUser { id: id }`)
+                // types to its owning sealed-interface enum (`Route`), not the
+                // variant struct (`RouteGetUser`): the value is boxed into the
+                // interface at its use site, so an untyped binding / `if`-`else`
+                // branch infers the assignable enum type.
+                if let Some(info) = self.user_variant_for_path(path) {
+                    return Some(info.enum_name.clone());
+                }
                 let type_name = self.record_construct_go_type_name(path);
                 let type_args = self.infer_construct_type_args(&type_name, fields);
                 Some(format!("{type_name}{type_args}"))
@@ -2646,6 +2737,13 @@ impl GoEmitCtx {
                 let NodeKind::Identifier { name } = &callee.kind else {
                     return None;
                 };
+                // A tuple-payload variant construction (`Circle(10)`) types to its
+                // owning sealed-interface enum (`Shape`), mirroring the unit /
+                // struct-payload variant cases — the variant struct is boxed into
+                // the interface at its use site.
+                if let Some(info) = self.user_variant_for_name(&name.name) {
+                    return Some(info.enum_name.clone());
+                }
                 // A non-generic fn (`key`) resolves directly to its recorded Go
                 // return type — no type-param binding needed. This is what types a
                 // `[key(3), key(1)]` literal as `[]Key`.
@@ -5772,9 +5870,31 @@ impl GoEmitCtx {
                         self.var_record_type_args
                             .insert(self.pattern_to_binding_name(pattern), record_args);
                     }
+                    // An untyped `let m = if (..) { Text } else { Image }` lowers
+                    // its value to an expression IIFE. Without an expected type the
+                    // IIFE falls back to the enclosing fn's return type
+                    // (`current_fn_ret_type`, e.g. `__bockResult` inside a
+                    // `Result`-returning fn), which a user-enum variant value
+                    // (`MessageType`) is not assignable to. Infer the value's Go
+                    // type structurally (the enum a variant branch/arm yields) and
+                    // record it as the binding's expected type so the IIFE is typed
+                    // `func() MessageType { … }`. Scoped to the value emit; never
+                    // leaks. Only `if`/`match` values need this — a direct value
+                    // emit is already concretely typed.
+                    let prev_expected_type = self.current_expected_type.take();
+                    if matches!(value.kind, NodeKind::If { .. } | NodeKind::Match { .. }) {
+                        if let Some(inferred) = self.infer_branchy_expr_type(value) {
+                            self.current_expected_type = Some(inferred.clone());
+                            // Also record it for the binding so a later use of the
+                            // binding (e.g. as a struct field) resolves to the enum.
+                            self.var_go_type
+                                .insert(self.pattern_to_binding_name(pattern), inferred);
+                        }
+                    }
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}{binding} := ");
                     self.emit_expr(value)?;
+                    self.current_expected_type = prev_expected_type;
                     self.buf.push('\n');
                 }
                 Ok(())
@@ -6810,19 +6930,31 @@ impl GoEmitCtx {
                 let iife_ty = self
                     .expected_iife_type()
                     .unwrap_or_else(|| "interface{}".to_string());
-                // Consume the expected type for THIS IIFE's return only; the
-                // branch bodies are separately typed (and may re-set it via a
-                // nested `let`), so it must not leak into them.
+                // Each branch of an `if`-expression produces the SAME type as the
+                // whole `if`, so a nested `if`/`match` in a branch tail must
+                // inherit this IIFE's concrete type — otherwise it falls back to
+                // the enclosing fn's return type (e.g. a nested
+                // `func() __bockResult` inside an `else` of a `MessageType` `if`).
+                // Propagate the concrete type into the branch bodies (a nested
+                // `let` save/restores it, so it never wrongly overrides a binding
+                // type); the `interface{}` fallback is left absent so the branches
+                // keep inferring their own types.
                 let prev_expected = self.current_expected_type.take();
+                let branch_expected = (iife_ty != "interface{}").then(|| iife_ty.clone());
+                // A non-`interface{}` IIFE type is the typed-zero source for a
+                // void-call branch tail (`emit_arm_body_return`).
+                let iife_ret = (iife_ty != "interface{}").then(|| iife_ty.clone());
                 let _ = write!(self.buf, "func() {iife_ty} {{ if ");
                 self.emit_expr(condition)?;
-                self.buf.push_str(" { return ");
-                self.emit_block_as_expr(then_block)?;
-                self.buf.push_str(" } else { return ");
+                self.buf.push_str(" { ");
+                self.current_expected_type = branch_expected.clone();
+                self.emit_arm_body_return(then_block, iife_ret.as_deref())?;
+                self.buf.push_str(" } else { ");
                 if let Some(eb) = else_block {
-                    self.emit_block_as_expr(eb)?;
+                    self.current_expected_type = branch_expected;
+                    self.emit_arm_body_return(eb, iife_ret.as_deref())?;
                 } else {
-                    self.buf.push_str("nil");
+                    self.buf.push_str("return nil");
                 }
                 self.buf.push_str(" } }()");
                 self.current_expected_type = prev_expected;
@@ -6834,14 +6966,51 @@ impl GoEmitCtx {
                         return self.emit_expr(t);
                     }
                 }
-                // Fallback: IIFE.
-                self.buf.push_str("func() interface{} { return ");
-                if let Some(t) = tail {
-                    self.emit_expr(t)?;
-                } else {
-                    self.buf.push_str("nil");
+                // A block with statements in expression position (e.g. an
+                // `if`/`match` arm body `{ let id = ...; GetUser { id: id } }`)
+                // lowers to an IIFE that runs the statements then returns the
+                // tail. The earlier `func() interface{} { return <tail> }` form
+                // both DROPPED the statements (so a `let` binding used by the tail
+                // was `undefined`) and erased the result to `interface{}` (so a
+                // variant struct returned as the tail was not assignable to the
+                // enclosing sealed-interface IIFE type, e.g. `Route`). Type the
+                // IIFE with the expected type — the binding's `current_expected_type`
+                // or the enclosing fn's return type (`expected_iife_type`) — and
+                // emit the full block body via `emit_block_body_return`, which runs
+                // the statements and returns the (typed) tail. A typed IIFE closes
+                // with `panic("unreachable")` (it always returns through the tail);
+                // the untyped form keeps `return nil`.
+                let iife_ret = self.expected_iife_type();
+                let iife_ty = iife_ret.as_deref().unwrap_or("interface{}");
+                // Consume the expected type for THIS IIFE's return only; the block
+                // body re-types its own tail (and may re-set it via a nested
+                // `let`), so it must not leak into the statements.
+                let prev_expected = self.current_expected_type.take();
+                // The body's tail terminates the IIFE when it is a value
+                // expression (emitted as `return <tail>`) or a terminating
+                // statement (`return`/`break`/`continue`). Only when the block can
+                // fall through (no tail, or an assignment tail) do we need the
+                // trailing fallback — emitting it unconditionally would leave dead
+                // code after a `return`. (Go does not reject unreachable code, but
+                // the conditional keeps the output clean.)
+                let body_falls_through = match tail {
+                    Some(t) => crate::generator::node_is_statement(t) && !Self::tail_terminates(t),
+                    None => true,
+                };
+                let _ = writeln!(self.buf, "func() {iife_ty} {{");
+                self.indent += 1;
+                self.emit_block_body_return(node)?;
+                if body_falls_through {
+                    if iife_ty == "interface{}" {
+                        self.writeln("return nil");
+                    } else {
+                        self.writeln("panic(\"unreachable\")");
+                    }
                 }
-                self.buf.push_str(" }()");
+                self.indent -= 1;
+                self.write_indent();
+                self.buf.push_str("}()");
+                self.current_expected_type = prev_expected;
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => {
@@ -6874,9 +7043,13 @@ impl GoEmitCtx {
                 let iife_ret = self.expected_iife_type();
                 let iife_ty = iife_ret.as_deref().unwrap_or("interface{}");
                 // Consume the expected type for THIS IIFE's return only; the
-                // scrutinee and arm bodies are separately typed (and may re-set
-                // it via a nested `let`), so it must not leak into them.
+                // scrutinee is a different (matched) type and must not inherit it.
+                // Each arm produces the SAME type as the whole match, so a nested
+                // `if`/`match` in an arm tail DOES inherit the concrete IIFE type
+                // (else it falls back to the enclosing fn's return type). A nested
+                // `let` save/restores it, so it never wrongly overrides a binding.
                 let prev_expected = self.current_expected_type.take();
+                let arm_expected = (iife_ty != "interface{}").then(|| iife_ty.to_string());
                 let _ = write!(self.buf, "func() {iife_ty} {{ switch ");
                 if is_user_enum {
                     // Non-binding type-switch (`switch x.(type)`): the
@@ -6898,13 +7071,14 @@ impl GoEmitCtx {
                 for arm in arms {
                     if let NodeKind::MatchArm { pattern, body, .. } = &arm.kind {
                         if matches!(pattern.kind, NodeKind::WildcardPat) {
-                            self.buf.push_str("default: return ");
+                            self.buf.push_str("default: ");
                         } else {
                             self.buf.push_str("case ");
                             self.emit_match_case_condition(pattern)?;
-                            self.buf.push_str(": return ");
+                            self.buf.push_str(": ");
                         }
-                        self.emit_block_as_expr(body)?;
+                        self.current_expected_type = arm_expected.clone();
+                        self.emit_arm_body_return(body, iife_ret.as_deref())?;
                         self.buf.push_str("; ");
                     }
                 }
@@ -7041,6 +7215,7 @@ impl GoEmitCtx {
             elem.as_deref(),
             iife_ret.is_some(),
             iife_coll.as_ref(),
+            iife_ret.as_deref(),
         )?;
         self.buf.push_str(" }()");
         self.current_expected_type = prev_expected;
@@ -7121,7 +7296,14 @@ impl GoEmitCtx {
         self.emit_expr(scrutinee)?;
         self.buf.push('\n');
         self.write_indent();
-        self.emit_optional_match_arms(arms, /*as_expr=*/ false, elem.as_deref(), false, None)?;
+        self.emit_optional_match_arms(
+            arms,
+            /*as_expr=*/ false,
+            elem.as_deref(),
+            false,
+            None,
+            None,
+        )?;
         self.buf.push('\n');
         Ok(())
     }
@@ -7130,6 +7312,7 @@ impl GoEmitCtx {
     /// [`emit_optional_match_stmt`]: an if/else chain on the option tag. In
     /// expression mode each arm body is `return`ed; in statement mode the arm
     /// body is emitted as a block.
+    #[allow(clippy::too_many_arguments)]
     fn emit_optional_match_arms(
         &mut self,
         arms: &[AIRNode],
@@ -7137,6 +7320,7 @@ impl GoEmitCtx {
         some_elem_ty: Option<&str>,
         typed_iife: bool,
         iife_coll: Option<&(String, Option<String>)>,
+        iife_ty: Option<&str>,
     ) -> Result<(), CodegenError> {
         // Save the caller's pending collection-element hint: the arm bodies
         // re-set it per-arm (`iife_coll`), so it must be restored on exit rather
@@ -7221,13 +7405,14 @@ impl GoEmitCtx {
                 }
             }
             if as_expr {
-                self.buf.push_str("return ");
                 // Re-apply the IIFE's collection element per arm: a list/map/set
                 // literal `take()`s the hint, so without re-setting it only the
                 // first arm's literal would adopt the `[]T` element (`to_list`'s
                 // `Some` arm), leaving the `None` arm's `[]` as `[]interface{}`.
                 self.expected_collection_elem = iife_coll.cloned();
-                self.emit_block_as_expr(body)?;
+                // A void-call arm tail emits as a statement + discarded zero
+                // (`return println(..)` is a Go arity error).
+                self.emit_arm_body_return(body, iife_ty)?;
                 self.buf.push(' ');
             } else {
                 self.buf.push('\n');
@@ -7278,6 +7463,7 @@ impl GoEmitCtx {
             elems.as_ref(),
             iife_ret.is_some(),
             iife_coll.as_ref(),
+            iife_ret.as_deref(),
         )?;
         self.buf.push_str(" }()");
         self.current_expected_type = prev_expected;
@@ -7297,7 +7483,14 @@ impl GoEmitCtx {
         self.emit_expr(scrutinee)?;
         self.buf.push('\n');
         self.write_indent();
-        self.emit_result_match_arms(arms, /*as_expr=*/ false, elems.as_ref(), false, None)?;
+        self.emit_result_match_arms(
+            arms,
+            /*as_expr=*/ false,
+            elems.as_ref(),
+            false,
+            None,
+            None,
+        )?;
         self.buf.push('\n');
         Ok(())
     }
@@ -7306,6 +7499,7 @@ impl GoEmitCtx {
     /// result tag. `Ok(v)` binds `v` from `__res.v` asserted to the Ok type;
     /// `Err(e)` binds `e` asserted to the Err type. Mirrors
     /// [`Self::emit_optional_match_arms`].
+    #[allow(clippy::too_many_arguments)]
     fn emit_result_match_arms(
         &mut self,
         arms: &[AIRNode],
@@ -7313,6 +7507,7 @@ impl GoEmitCtx {
         elems: Option<&(String, String)>,
         typed_iife: bool,
         iife_coll: Option<&(String, Option<String>)>,
+        iife_ty: Option<&str>,
     ) -> Result<(), CodegenError> {
         // See `emit_optional_match_arms`: preserve the caller's pending
         // collection-element hint across the per-arm re-application.
@@ -7385,12 +7580,14 @@ impl GoEmitCtx {
                 }
             }
             if as_expr {
-                self.buf.push_str("return ");
                 // See `emit_optional_match_arms`: re-apply the IIFE collection
                 // element per arm so every arm's literal adopts it, not just the
                 // first.
                 self.expected_collection_elem = iife_coll.cloned();
-                self.emit_block_as_expr(body)?;
+                // A void-call arm tail (`Err(e) => println(..)`) must emit the
+                // call as a statement + discarded zero, not `return println(..)`
+                // (a Go arity error: `fmt.Println` returns `(int, error)`).
+                self.emit_arm_body_return(body, iife_ty)?;
                 self.buf.push(' ');
             } else {
                 self.buf.push('\n');
@@ -8389,6 +8586,63 @@ impl GoEmitCtx {
         Ok(())
     }
 
+    /// Whether a statement-position tail node *unconditionally terminates* its
+    /// enclosing block — a `return`/`break`/`continue`. Used by the block
+    /// expression-IIFE to decide whether a trailing fallback
+    /// (`return nil` / `panic("unreachable")`) is reachable: when the tail
+    /// terminates, the fallback would be dead code after a `return`. An
+    /// assignment tail (the other statement-tail shape) does not terminate, so
+    /// the fallback is still needed there.
+    fn tail_terminates(node: &AIRNode) -> bool {
+        matches!(
+            node.kind,
+            NodeKind::Return { .. } | NodeKind::Break { .. } | NodeKind::Continue
+        )
+    }
+
+    /// Emit an `if`/`match` arm body as the value of its enclosing expression
+    /// IIFE — i.e. as a `return <expr>`, but with a void-call tail handled
+    /// correctly. A `println(...)` / void effect-op call returns `(int, error)`
+    /// (Go's `fmt.Println`) or nothing, so `return println(...)` is a Go arity
+    /// error (`too many return values have (int, error) want T`). When the body's
+    /// effective tail is a void call, emit the call as a *statement* followed by
+    /// `return <zero>` (the IIFE result is discarded — these arise only when the
+    /// whole match/if is in statement position). Otherwise emit the normal
+    /// `return <body>`. `iife_ty` is the enclosing IIFE's return type; a non-`None`
+    /// value uses a typed zero, `None` uses `nil`.
+    fn emit_arm_body_return(
+        &mut self,
+        body: &AIRNode,
+        iife_ty: Option<&str>,
+    ) -> Result<(), CodegenError> {
+        // The effective tail is the block tail (when the body is a `{ ... }`
+        // block) or the body itself (a bare expression arm).
+        let tail = match &body.kind {
+            NodeKind::Block { tail: Some(t), .. } => t.as_ref(),
+            NodeKind::Block { tail: None, .. } => body, // emitted below as-is
+            _ => body,
+        };
+        if self.is_void_call(tail) {
+            // Emit any leading block statements, then the void call as a
+            // statement, then a discarded zero return.
+            if let NodeKind::Block { stmts, .. } = &body.kind {
+                for s in stmts {
+                    self.emit_node(s)?;
+                    self.buf.push_str("; ");
+                }
+            }
+            self.emit_expr(tail)?;
+            self.buf.push_str("; return ");
+            match iife_ty {
+                Some(ty) => self.zero_value_for(ty),
+                None => self.buf.push_str("nil"),
+            }
+            return Ok(());
+        }
+        self.buf.push_str("return ");
+        self.emit_block_as_expr(body)
+    }
+
     /// Returns `true` if the expression is a call to a known void function
     /// (prelude or a Void-returning effect operation).
     fn is_void_call(&self, node: &AIRNode) -> bool {
@@ -9075,6 +9329,156 @@ mod tests {
             "got: {out}"
         );
         assert!(out.contains("func (ShapeNone) isShape() {}"), "got: {out}");
+    }
+
+    /// Q-go-enum-return-boxing: a value-position `if` whose branches yield enum
+    /// variants, returned where the declared type is the sealed enum interface,
+    /// must lower to a `func() Shape { ... }()` closure (not `func() interface{}`),
+    /// so the boxed variant struct is assignable to the `Shape` return.
+    #[test]
+    fn enum_variant_if_branches_box_into_sealed_interface() {
+        // enum Shape { Circle, Square }  (both unit for brevity)
+        let e = node(
+            1,
+            NodeKind::EnumDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Shape"),
+                generic_params: vec![],
+                variants: vec![
+                    node(
+                        2,
+                        NodeKind::EnumVariant {
+                            name: ident("Circle"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                    node(
+                        3,
+                        NodeKind::EnumVariant {
+                            name: ident("Square"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                ],
+            },
+        );
+        // fn pick(big: Bool) -> Shape { if (big) { Circle } else { Square } }
+        let if_expr = node(
+            10,
+            NodeKind::If {
+                let_pattern: None,
+                condition: Box::new(id_node(11, "big")),
+                then_block: Box::new(block(12, vec![], Some(id_node(13, "Circle")))),
+                else_block: Some(Box::new(block(14, vec![], Some(id_node(15, "Square"))))),
+            },
+        );
+        let f = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("pick"),
+                generic_params: vec![],
+                params: vec![typed_param_node(21, "big", "Bool")],
+                return_type: Some(Box::new(node(
+                    22,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Shape"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(23, vec![], Some(if_expr))),
+            },
+        );
+        let out = gen(&module(vec![], vec![e, f]));
+        assert!(
+            out.contains("func() Shape {"),
+            "the value-position if must be a `func() Shape` closure (boxed into \
+             the sealed interface), not a bare-interface closure, got: {out}"
+        );
+        assert!(
+            !out.contains("func() interface{} { if "),
+            "the if-closure must not fall back to a bare interface, got: {out}"
+        );
+        assert!(
+            out.contains("return ShapeCircle{}") && out.contains("return ShapeSquare{}"),
+            "each branch returns its variant struct, got: {out}"
+        );
+    }
+
+    /// Q-go-enum-return-boxing: an UNTYPED `let m = if (..) { Circle } else
+    /// { Square }` infers the variant's owning enum, so the value closure is
+    /// typed `func() Shape` rather than the enclosing fn's unrelated return type.
+    #[test]
+    fn untyped_let_if_over_variants_infers_enum_iife_type() {
+        let e = node(
+            1,
+            NodeKind::EnumDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Shape"),
+                generic_params: vec![],
+                variants: vec![
+                    node(
+                        2,
+                        NodeKind::EnumVariant {
+                            name: ident("Circle"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                    node(
+                        3,
+                        NodeKind::EnumVariant {
+                            name: ident("Square"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                ],
+            },
+        );
+        // fn run() -> Void { let m = if (true) { Circle } else { Square } }
+        let let_binding = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "m")),
+                ty: None,
+                value: Box::new(node(
+                    12,
+                    NodeKind::If {
+                        let_pattern: None,
+                        condition: Box::new(bool_lit(13, true)),
+                        then_block: Box::new(block(14, vec![], Some(id_node(15, "Circle")))),
+                        else_block: Some(Box::new(block(16, vec![], Some(id_node(17, "Square"))))),
+                    },
+                )),
+            },
+        );
+        let f = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("run"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(23, vec![let_binding], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![e, f]));
+        assert!(
+            out.contains("m := func() Shape {"),
+            "an untyped let over variant branches infers the `Shape` closure \
+             type, got: {out}"
+        );
     }
 
     #[test]
