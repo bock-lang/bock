@@ -3305,6 +3305,17 @@ impl RsEmitCtx {
             } = &p.kind
             {
                 let name = to_snake_case(&self.pattern_to_binding_name(pattern));
+                // A `mut`-bound param (`fn f(mut items: …)`) may reassign its
+                // binding in the body (`items = …`). Rust requires the binding
+                // be declared `mut` or the reassignment is E0384. The borrow
+                // form (`&Target`) takes the operand by shared reference and is
+                // never reassigned, so it never gets `mut`.
+                let mut_kw =
+                    if !borrow && matches!(&pattern.kind, NodeKind::BindPat { is_mut: true, .. }) {
+                        "mut "
+                    } else {
+                        ""
+                    };
                 let amp = if borrow { "&" } else { "" };
                 let type_ann = ty
                     .as_ref()
@@ -3316,11 +3327,11 @@ impl RsEmitCtx {
                     ctx.indent = self.indent;
                     if ctx.emit_expr(def).is_ok() {
                         let def_str = ctx.buf;
-                        result.push(format!("{name}{type_ann} /* = {def_str} */"));
+                        result.push(format!("{mut_kw}{name}{type_ann} /* = {def_str} */"));
                         continue;
                     }
                 }
-                result.push(format!("{name}{type_ann}"));
+                result.push(format!("{mut_kw}{name}{type_ann}"));
             }
         }
         result
@@ -3551,18 +3562,38 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::Guard {
+                let_pattern,
                 condition,
                 else_block,
-                ..
             } => {
                 let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}if !(");
-                self.emit_expr(condition)?;
-                self.buf.push_str(") {\n");
-                self.indent += 1;
-                self.emit_block_body(else_block)?;
-                self.indent -= 1;
-                self.writeln("}");
+                if let Some(pat) = let_pattern {
+                    // `guard (let PAT = EXPR) else { … }` lowers to Rust's
+                    // `let-else`: `let PAT = EXPR else { … };`. The pattern's
+                    // bindings stay in scope for the rest of the enclosing
+                    // block (the whole point of guard-let), and the else arm
+                    // must diverge — which Bock's guard semantics already
+                    // guarantee. Lowering it to a boolean `if !(cond)` instead
+                    // drops the bindings (E0425) and negates a non-bool value
+                    // (E0600); `let-else` is the faithful form.
+                    let _ = write!(self.buf, "{ind}let ");
+                    self.emit_pattern(pat)?;
+                    self.buf.push_str(" = ");
+                    self.emit_expr(condition)?;
+                    self.buf.push_str(" else {\n");
+                    self.indent += 1;
+                    self.emit_block_body(else_block)?;
+                    self.indent -= 1;
+                    self.writeln("};");
+                } else {
+                    let _ = write!(self.buf, "{ind}if !(");
+                    self.emit_expr(condition)?;
+                    self.buf.push_str(") {\n");
+                    self.indent += 1;
+                    self.emit_block_body(else_block)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => self.emit_match(scrutinee, arms),
@@ -4362,9 +4393,18 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => {
-                // Match in expression position.
+                // Match in expression position. Mirror `emit_match`: when any
+                // arm matches with a list pattern, match on the scrutinee's
+                // `.as_slice()` so the slice patterns match `&[T]` rather than
+                // `Vec<T>` (E0529).
                 self.buf.push_str("match ");
-                self.emit_expr(scrutinee)?;
+                if arms.iter().any(Self::arm_matches_list) {
+                    self.buf.push('(');
+                    self.emit_expr(scrutinee)?;
+                    self.buf.push_str(").as_slice()");
+                } else {
+                    self.emit_expr(scrutinee)?;
+                }
                 self.buf.push_str(" {\n");
                 self.indent += 1;
                 for arm in arms {
@@ -4605,7 +4645,20 @@ impl RsEmitCtx {
     fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
         let ind = self.indent_str();
         let _ = write!(self.buf, "{ind}match ");
-        self.emit_expr(scrutinee)?;
+        // Bock list/array values are `Vec<T>` in this backend, but Rust slice
+        // patterns (`[]`, `[head, ..tail]`) only match `[T]`/`&[T]`, not
+        // `Vec<T>` (E0529). When any arm matches with a list pattern, match on
+        // the scrutinee's `.as_slice()` (`&[T]`): default binding modes then
+        // bind elements by shared reference, and a `rest @ ..` tail binds to a
+        // sized `&[T]` (a by-value `[T]` tail would be unsized — E0277).
+        let slice_match = arms.iter().any(Self::arm_matches_list);
+        if slice_match {
+            self.buf.push('(');
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str(").as_slice()");
+        } else {
+            self.emit_expr(scrutinee)?;
+        }
         self.buf.push_str(" {\n");
         self.indent += 1;
         for arm in arms {
@@ -4614,6 +4667,28 @@ impl RsEmitCtx {
         self.indent -= 1;
         self.writeln("}");
         Ok(())
+    }
+
+    /// Whether a match arm's pattern is (or, under `|`/guard, contains) a list
+    /// pattern — the signal to match on the scrutinee's `.as_slice()`. See
+    /// [`Self::emit_match`].
+    fn arm_matches_list(arm: &AIRNode) -> bool {
+        if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
+            Self::pattern_is_list(pattern)
+        } else {
+            false
+        }
+    }
+
+    /// Whether `pat` is a list pattern, looking through `|`-alternatives and a
+    /// trailing pattern guard.
+    fn pattern_is_list(pat: &AIRNode) -> bool {
+        match &pat.kind {
+            NodeKind::ListPat { .. } => true,
+            NodeKind::OrPat { alternatives } => alternatives.iter().any(Self::pattern_is_list),
+            NodeKind::GuardPat { pattern, .. } => Self::pattern_is_list(pattern),
+            _ => false,
+        }
     }
 
     fn emit_match_arm(&mut self, arm: &AIRNode) -> Result<(), CodegenError> {

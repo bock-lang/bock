@@ -1,0 +1,33 @@
+// TEST: exec_rust_list_pattern_match
+// EXPECT: output "empty;one:7;head:1,tail:3"
+// EXPECT: targets rust
+//
+// List patterns in a `match` (ownership-demo regression, Rust backend). Bock
+// list values are `Vec<T>` in the Rust backend, but Rust slice patterns
+// (`[]`, `[head, ..tail]`) only match `[T]`/`&[T]`, not `Vec<T>`
+// (`E0529 expected an array or slice`). The backend now matches on the
+// scrutinee's `.as_slice()` when any arm uses a list pattern, so the slice
+// patterns match `&[T]` and a `..tail` rest binds to a sized `&[T]`. Exercised
+// in both statement and expression position.
+//
+// Rust-targeted: list/array patterns in `match` are also currently mis-lowered
+// on the js / ts / python / go backends (ts/js/go fail to compile, python
+// matches the empty arm for every input), but those are distinct cross-backend
+// defects out of this fix's scope (Rust-only). Tracked separately — see the
+// PR's OPEN note.
+module main
+
+fn describe(items: List[Int]) -> String {
+  match items {
+    [] => "empty"
+    [only] => "one:${only}"
+    [first, ..rest] => "head:${first},tail:${rest.len()}"
+  }
+}
+
+fn main() -> Void {
+  let a = describe([])
+  let b = describe([7])
+  let c = describe([1, 2, 3, 4])
+  println("${a};${b};${c}")
+}

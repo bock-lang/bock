@@ -1,0 +1,28 @@
+// TEST: exec_rust_mut_param
+// EXPECT: output "append:4;double:2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// A `mut`-bound parameter may reassign its binding in the body
+// (ownership-demo regression, Rust backend). `fn f(mut items: List[Int])` that
+// does `items = items + [v]` requires the Rust parameter be declared `mut`, or
+// the reassignment is `E0384 cannot assign twice to immutable variable`. The
+// backend now emits `mut` on a `mut`-bound param. The feature is
+// target-agnostic; only the Rust lowering changed, so all five targets must
+// agree on the observable output.
+module main
+
+fn append_item(mut items: List[Int], value: Int) -> List[Int] {
+  items = items + [value]
+  items
+}
+
+fn double_all(mut items: List[Int]) -> List[Int] {
+  items = items.map((x) => x * 2)
+  items
+}
+
+fn main() -> Void {
+  let appended = append_item([1, 2, 3], 4)
+  let doubled = double_all([10, 20])
+  println("append:${appended.len()};double:${doubled.len()}")
+}
