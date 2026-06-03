@@ -1,0 +1,34 @@
+// TEST: exec_ts_loop_value_binding
+// EXPECT: output "found:4"
+// EXPECT: targets ts
+//
+// Restricted to `ts`: a `loop` used as a value is currently mishandled by every
+// other backend (js/python emit `/* unsupported */`; rust/go mis-shape it) — the
+// same shared limitation this TS fix addresses, surfaced as a shared-AIR-desugar
+// OPEN. Widen to all five once the shared desugar lands.
+//
+// A `let` initialised by a `loop` expression that produces its value through
+// `break v` (the context-audit cluster). A `loop` has no TS *expression* form,
+// so the earlier lowering emitted `const r = /* unsupported */;` (`tsc` TS2322 /
+// "Expression expected") and dropped every `break value` into an inert comment,
+// leaving `r` unassigned. The fix lowers the initialiser in *statement* position
+// — `let r; while (true) { … r = v; break; … }` — wiring each `break v` to the
+// loop's result binding.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn first_even_double(n: Int) -> Int {
+  let mut i = 0
+  let result = loop {
+    if (i >= n) { break 0 }
+    if (i % 2 == 0 && i > 0) { break i * 2 }
+    i = i + 1
+  }
+  result
+}
+
+fn main() -> Void {
+  println("found:${first_even_double(10)}")
+}

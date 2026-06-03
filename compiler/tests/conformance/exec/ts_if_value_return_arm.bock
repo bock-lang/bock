@@ -1,0 +1,47 @@
+// TEST: exec_ts_if_value_return_arm
+// EXPECT: output "ok:14;err"
+// EXPECT: targets ts
+//
+// Restricted to `ts`: expression-position control flow with a diverging branch
+// is currently mishandled by *every other* backend too (js/python emit an empty
+// ternary / `/* unsupported */`; rust/go mis-shape the value). That is the same
+// root limitation this TS fix addresses, surfaced as a shared-AIR-desugar OPEN.
+// Widen to all five once the shared desugar lands.
+//
+// A `let` whose initialiser is an expression-position `if`/`else if` chain whose
+// innermost `else` *diverges* with an early `return`. This is the chat-protocol
+// cluster: the value branches yield a value (`x * 2`), but one branch is a
+// `return` statement, which has no TS *expression* form. The earlier TS lowering
+// emitted the `if` as a ternary and rendered the `return` arm as an empty
+// `/* unsupported */` branch (`cond ? v : )`, `tsc` TS1109 "Expression
+// expected"). The fix lowers such an initialiser in *statement* position —
+// `let r; if (cond) { r = …; } else { return … }` — keeping the `return` in the
+// enclosing function's scope (an IIFE would have captured it).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn classify(n: Int) -> Result[Int, String] {
+  let doubled = if (n > 0) {
+    n * 2
+  } else {
+    if (n == 0) {
+      0
+    } else {
+      return Err("err")
+    }
+  }
+  Ok(doubled)
+}
+
+fn show(r: Result[Int, String]) -> String {
+  match r {
+    Ok(v) => "ok:${v}"
+    Err(e) => e
+  }
+}
+
+fn main() -> Void {
+  println("${show(classify(7))};${show(classify(-1))}")
+}

@@ -1,0 +1,38 @@
+// TEST: exec_ts_match_value_return_arm
+// EXPECT: output "v:5;early"
+// EXPECT: targets ts
+//
+// Restricted to `ts`: an expression-position `match` with a diverging arm is
+// mishandled by every other backend too (js duplicates the value; python emits
+// `# unsupported`; go mis-shapes the return) — the same shared limitation this
+// TS fix addresses, surfaced as a shared-AIR-desugar OPEN. Widen to all five
+// once the shared desugar lands.
+//
+// A `let` initialised by an expression-position `match` one of whose arms
+// *diverges* with an early `return` while the others yield a value (the
+// match-exprpos cluster, the `match` form of ts_if_value_return_arm). An
+// IIFE-with-value lowering cannot express the `return` arm (it would `return`
+// from the IIFE, not the function); the earlier ternary/`switch` lowering left
+// the diverging arm as `/* unsupported */`. The fix lowers such a value-`match`
+// in statement position (`let r; switch (…) { case …: r = v; … default: return …
+// }`), delivering each value arm to the binding and keeping the `return` in the
+// enclosing function's scope.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Sig { Go, Stop, Wait }
+
+fn step(s: Sig) -> String {
+  let amount = match s {
+    Go => 5
+    Wait => 1
+    Stop => return "early"
+  }
+  "v:${amount}"
+}
+
+fn main() -> Void {
+  println("${step(Go)};${step(Stop)}")
+}

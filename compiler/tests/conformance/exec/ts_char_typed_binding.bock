@@ -1,0 +1,25 @@
+// TEST: exec_ts_char_typed_binding
+// EXPECT: output "A:a"
+// EXPECT: targets js, ts, python
+//
+// A binding explicitly annotated with the `Char` type (the type-zoo cluster). A
+// `Char` literal emits as a single-character string and every `Char` method is a
+// string op, but the *type* `Char` had no TS mapping, so `let c: Char = 'A'`
+// emitted `const c: Char = …` — `tsc` TS2304 "Cannot find name 'Char'". The fix
+// maps `Char` to `string`, validated here against the (untyped) js/python emits.
+//
+// Restricted to js/ts/python: the rust and go backends do not yet map a
+// `Char`-typed binding (rust emits `let c: Char` rather than `char`; go fails to
+// type the binding) — a separate, pre-existing backend gap reported as an OPEN
+// in the PR introducing this fixture. Once those are fixed this should widen to
+// all five targets.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let c: Char = 'A'
+  let lower: Char = c.to_lower()
+  println("${c}:${lower}")
+}
