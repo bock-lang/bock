@@ -1,0 +1,37 @@
+// TEST: js_match_range_and_mut_arm
+// EXPECT: output "lo;mid;hi;42"
+// EXPECT: targets js
+//
+// JS regression guard for two `match` lowering bugs the dup-default audit
+// surfaced (pattern-lab example):
+//   * Range-pattern arms (`1..10`, `10..100`) have no single `switch`
+//     discriminant, so each previously collapsed to a `default:` → "more than
+//     one default clause". The js emitter now routes range matches to the
+//     if/else-if chain with a `x >= lo && x < hi` test (`<=` when inclusive).
+//   * A `mut x` bind arm whose body reassigns the binding (`x = x + 1`) was
+//     emitted as `const x = …` → "Assignment to constant variable". The arm
+//     binding now honors `mut` and emits `let`.
+// Targeted at js because the other backends do not yet lower range patterns
+// (shared gap reported as an OPEN).
+module main
+
+fn band(n: Int) -> String {
+  match n {
+    1..10 => "lo"
+    10..100 => "mid"
+    _ => "hi"
+  }
+}
+
+fn bumped(n: Int) -> Int {
+  match n {
+    mut x => {
+      x = x + 1
+      x
+    }
+  }
+}
+
+fn main() -> Void {
+  println("${band(5)};${band(50)};${band(500)};${bumped(41)}")
+}

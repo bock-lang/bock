@@ -1,0 +1,47 @@
+// TEST: js_reserved_word_and_guard
+// EXPECT: output "9;neg;zero;pos7;ok:hi;bad"
+// EXPECT: targets js
+//
+// JS regression guard for three js-emitter fixes from the examples audit:
+//   * Reserved-word / strict-mode identifier: a Bock `fn eval(…)` emitted
+//     `function eval(…)`, a strict-mode `SyntaxError` ("Unexpected eval … in
+//     strict mode", the calculator example). `eval`/`arguments` are now escaped
+//     to `eval_`/`arguments_` like other JS keywords.
+//   * Guarded-match self-binding: `match n { n if (n < 0) => … }` re-bound the
+//     scrutinee to itself in the guard IIFE (`const n = n`) → a TDZ
+//     "Cannot access 'n' before initialization" (the pattern-lab example). A
+//     bind whose name equals the scrutinee access is now skipped.
+//   * `guard (let Ok(v) = …) else { … }` ignored its pattern entirely — the
+//     bound name `v` was never introduced (ReferenceError, the ownership-demo
+//     example). The guard now tests the pattern and binds its names into the
+//     enclosing scope.
+// Targeted at js because each is a JS-surface fix.
+module main
+
+fn eval(op: String, a: Int, b: Int) -> Int {
+  if (op == "add") { a + b } else { a - b }
+}
+
+fn classify(n: Int) -> String {
+  match n {
+    n if (n < 0) => "neg"
+    n if (n == 0) => "zero"
+    n => "pos${n}"
+  }
+}
+
+fn parse_it(s: String) -> Result[String, String] {
+  if (s == "") { Err("empty") } else { Ok(s) }
+}
+
+fn first_ok(s: String) -> String {
+  guard (let Ok(v) = parse_it(s)) else {
+    return "bad"
+  }
+  "ok:${v}"
+}
+
+fn main() -> Void {
+  let a = eval("add", 4, 5)
+  println("${a};${classify(-3)};${classify(0)};${classify(7)};${first_ok("hi")};${first_ok("")}")
+}

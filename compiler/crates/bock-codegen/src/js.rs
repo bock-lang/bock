@@ -531,6 +531,26 @@ struct EmitCtx {
     /// name. Populated at the start of the `Module` arm (shared collector with
     /// go/ts/py).
     field_method_collisions: HashSet<String>,
+    /// Per-JS-lexical-block stack of simple `let`/`const` binding state. Bock
+    /// permits re-binding (`let x = …; let x = …`) which shadows the prior
+    /// binding in the same scope; JS `const`/`let` forbid re-declaration in one
+    /// block scope. Each frame records the JS idents already declared in the
+    /// block and, of those, which need `let` (because they are re-bound or
+    /// assigned later). The first declaration of a re-bound name uses `let`;
+    /// every subsequent binding of the same name emits a plain assignment
+    /// (`x = …`) rather than a redeclaration. See [`LetScope`].
+    let_scopes: Vec<LetScope>,
+}
+
+/// One JS lexical block's `let`/`const` binding state — see
+/// [`EmitCtx::let_scopes`].
+#[derive(Default)]
+struct LetScope {
+    /// Simple JS idents already emitted as a declaration in this block.
+    declared: HashSet<String>,
+    /// Of the block's simple bindings, those that are re-bound or assigned and
+    /// so must be declared with `let` (not `const`) at their first declaration.
+    needs_let: HashSet<String>,
 }
 
 impl EmitCtx {
@@ -565,6 +585,7 @@ impl EmitCtx {
             self_module_path: String::new(),
             export_names: Vec::new(),
             field_method_collisions: HashSet::new(),
+            let_scopes: Vec::new(),
         }
     }
 
@@ -2327,6 +2348,22 @@ impl EmitCtx {
                         name.name,
                         comp_names.join(" + ")
                     ));
+                    // A composite effect is a compile-time grouping with no
+                    // runtime representation (functions expand it to its
+                    // component handler params). But a *public* composite
+                    // effect appears in this module's `export { … }` list, so
+                    // it still needs a concrete binding to export — otherwise
+                    // the ESM export references an undefined name. Emit a frozen
+                    // marker object recording the component names.
+                    let marker = comp_names
+                        .iter()
+                        .map(|c| format!("\"{c}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.writeln(&format!(
+                        "const {} = Object.freeze({{ __composite: [{}] }});",
+                        name.name, marker
+                    ));
                     self.composite_effects.insert(name.name.clone(), comp_names);
                     return Ok(());
                 }
@@ -2453,7 +2490,7 @@ impl EmitCtx {
             self.current_handler_vars
                 .insert(ename.clone(), to_camel_case(ename));
         }
-        self.emit_block_body(body)?;
+        self.emit_fn_body_seeded(params, body)?;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         self.writeln("}");
@@ -2489,7 +2526,7 @@ impl EmitCtx {
                 self.current_handler_vars
                     .insert(ename.clone(), to_camel_case(ename));
             }
-            self.emit_block_body(body)?;
+            self.emit_fn_body_seeded(params, body)?;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
             self.writeln("}");
@@ -2641,9 +2678,30 @@ impl EmitCtx {
                 value,
                 ..
             } => {
+                let ind = self.indent_str();
+                // A simple `let name = …` is subject to JS redeclaration rules.
+                // Bock allows re-binding the same name in one scope (shadowing);
+                // JS does not, so the second-and-later binding of a simple name
+                // becomes a plain assignment, and the first declaration uses
+                // `let` (not `const`) when the name is later re-bound/assigned.
+                if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                    let js_name = js_value_ident(&name.name);
+                    if self.simple_let_redeclared(&js_name) {
+                        let _ = write!(self.buf, "{ind}{js_name} = ");
+                        self.emit_expr(value)?;
+                        self.buf.push_str(";\n");
+                        return Ok(());
+                    }
+                    let needs_let = *is_mut || self.simple_let_needs_let(&js_name);
+                    let kw = if needs_let { "let" } else { "const" };
+                    self.mark_simple_let_declared(&js_name);
+                    let _ = write!(self.buf, "{ind}{kw} {js_name} = ");
+                    self.emit_expr(value)?;
+                    self.buf.push_str(";\n");
+                    return Ok(());
+                }
                 let kw = if *is_mut { "let" } else { "const" };
                 let binding = self.pattern_to_js_destructure(pattern);
-                let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}{kw} {binding} = ");
                 self.emit_expr(value)?;
                 self.buf.push_str(";\n");
@@ -2776,24 +2834,53 @@ impl EmitCtx {
                 Ok(())
             }
             NodeKind::Guard {
+                let_pattern,
                 condition,
                 else_block,
-                ..
             } => {
-                let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}if (!(");
-                self.emit_expr(condition)?;
-                self.buf.push_str(")) {\n");
-                self.indent += 1;
-                self.emit_block_body(else_block)?;
-                self.indent -= 1;
-                self.writeln("}");
+                if let Some(pat) = let_pattern {
+                    // `guard (let pat = expr) else { … }`: evaluate `expr` once,
+                    // run the else (which must diverge) when `pat` does not
+                    // match, then bind `pat`'s names into the *enclosing* scope
+                    // so they are in scope for the statements after the guard.
+                    self.match_temp_counter += 1;
+                    let tmp = format!("__guard{}", self.match_temp_counter);
+                    let ind = self.indent_str();
+                    let _ = write!(self.buf, "{ind}const {tmp} = ");
+                    self.emit_expr(condition)?;
+                    self.buf.push_str(";\n");
+                    let test = self.pattern_test_js(pat, &tmp);
+                    // A bare bind / wildcard pattern always matches → no `if`.
+                    if !test.is_empty() {
+                        let ind = self.indent_str();
+                        let _ = writeln!(self.buf, "{ind}if (!({test})) {{");
+                        self.indent += 1;
+                        self.emit_block_body(else_block)?;
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                    // Bindings land in the enclosing scope (no nested block).
+                    self.pattern_binds_js(pat, &tmp)?;
+                } else {
+                    let ind = self.indent_str();
+                    let _ = write!(self.buf, "{ind}if (!(");
+                    self.emit_expr(condition)?;
+                    self.buf.push_str(")) {\n");
+                    self.indent += 1;
+                    self.emit_block_body(else_block)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => self.emit_match(scrutinee, arms),
             NodeKind::Block { stmts, tail } => {
+                // A statement-position block is its own JS `{}` lexical scope, so
+                // it gets its own `let` scope frame (a name re-bound inside is
+                // independent of the enclosing block's bindings).
                 self.writeln("{");
                 self.indent += 1;
+                self.enter_let_scope(node);
                 for s in stmts {
                     self.emit_node(s)?;
                 }
@@ -2802,6 +2889,7 @@ impl EmitCtx {
                     self.emit_expr(t)?;
                     self.buf.push_str(";\n");
                 }
+                self.leave_let_scope();
                 self.indent -= 1;
                 self.writeln("}");
                 Ok(())
@@ -3396,9 +3484,14 @@ impl EmitCtx {
                 Ok(())
             }
             NodeKind::Block { stmts, tail } => {
-                // Blocks in expression position → IIFE.
+                // Blocks in expression position → IIFE. The IIFE body is its own
+                // JS lexical scope, so it gets its own `let` scope frame — a name
+                // re-bound across two *sibling* IIFEs (e.g. two arms of an
+                // expression-position `match`) is two independent declarations,
+                // not a redeclaration.
                 self.buf.push_str("(() => {\n");
                 self.indent += 1;
+                self.enter_let_scope(node);
                 for s in stmts {
                     self.emit_node(s)?;
                 }
@@ -3408,6 +3501,7 @@ impl EmitCtx {
                     self.emit_expr(t)?;
                     self.buf.push_str(";\n");
                 }
+                self.leave_let_scope();
                 self.indent -= 1;
                 self.write_indent();
                 self.buf.push_str("})()");
@@ -3513,7 +3607,14 @@ impl EmitCtx {
         // to an if/else-if chain instead. Additive: the proven Optional /
         // Result / user-enum / value `switch` fast-path is kept for everything
         // else (see `match_needs_ifchain`).
-        if crate::generator::match_needs_ifchain(arms) {
+        if crate::generator::match_needs_ifchain(arms) || match_has_unswitchable_pattern(arms) {
+            // List patterns (`[]`, `[first, ..rest]`) and range patterns
+            // (`1..10`) have no single switch discriminant — every arm would
+            // collapse to a `default:`, emitting more than one `default` clause
+            // (a JS `SyntaxError`). The shared `match_needs_ifchain`
+            // (generator.rs) does not yet recognise these, so the js emitter
+            // routes them to the if/else-if chain itself. See OPEN in the PR
+            // body for the shared-side gap.
             return self.emit_match_ifchain(scrutinee, arms);
         }
 
@@ -3602,12 +3703,15 @@ impl EmitCtx {
                 NodeKind::WildcardPat => {
                     self.writeln("default: {");
                 }
-                NodeKind::BindPat { name, .. } if !is_adt => {
-                    // Bind pattern as default with variable binding.
+                NodeKind::BindPat { name, is_mut } if !is_adt => {
+                    // Bind pattern as default with variable binding. A `mut x`
+                    // arm binding may be reassigned in the body (`x = x + 1`),
+                    // so it must be declared `let`, not `const`.
                     self.writeln("default: {");
                     self.indent += 1;
+                    let kw = if *is_mut { "let" } else { "const" };
                     let ind = self.indent_str();
-                    let _ = write!(self.buf, "{ind}const {} = ", name.name);
+                    let _ = write!(self.buf, "{ind}{kw} {} = ", js_value_ident(&name.name));
                     self.emit_scrutinee_ref(scrutinee, temp)?;
                     self.buf.push_str(";\n");
                     self.indent -= 1;
@@ -3864,6 +3968,32 @@ impl EmitCtx {
                 }
                 tests.join(" && ")
             }
+            NodeKind::ListPat { elems, rest } => {
+                // `[a, b]` requires an array of exactly len(elems); `[a, ..rest]`
+                // requires at least len(elems). Element sub-patterns are tested
+                // positionally; the rest binds the slice and adds no test.
+                let n = elems.len();
+                let len_test = if rest.is_some() {
+                    format!("{access}.length >= {n}")
+                } else {
+                    format!("{access}.length === {n}")
+                };
+                let mut tests = vec![format!("Array.isArray({access})"), len_test];
+                for (i, e) in elems.iter().enumerate() {
+                    let sub = self.pattern_test_js(e, &format!("{access}[{i}]"));
+                    if !sub.is_empty() {
+                        tests.push(sub);
+                    }
+                }
+                tests.join(" && ")
+            }
+            NodeKind::RangePat { lo, hi, inclusive } => {
+                // `lo..hi` → `access >= lo && access < hi`; `lo..=hi` uses `<=`.
+                let lo_s = range_bound_to_js(lo);
+                let hi_s = range_bound_to_js(hi);
+                let upper = if *inclusive { "<=" } else { "<" };
+                format!("{access} >= {lo_s} && {access} {upper} {hi_s}")
+            }
             NodeKind::OrPat { alternatives } => {
                 let alts: Vec<String> = alternatives
                     .iter()
@@ -3889,12 +4019,15 @@ impl EmitCtx {
     fn pattern_binds_js(&mut self, pat: &AIRNode, access: &str) -> Result<(), CodegenError> {
         match &pat.kind {
             NodeKind::BindPat { name, .. } => {
-                let ind = self.indent_str();
-                let _ = writeln!(
-                    self.buf,
-                    "{ind}const {} = {access};",
-                    js_value_ident(&name.name)
-                );
+                let js = js_value_ident(&name.name);
+                // Skip a self-binding (`const n = n`): when an arm's bind name
+                // equals the scrutinee access (e.g. `match n { n if … }`), the
+                // name already refers to the value. Emitting `const n = n` is
+                // both redundant and a `let`/`const` TDZ self-reference error.
+                if js != access {
+                    let ind = self.indent_str();
+                    let _ = writeln!(self.buf, "{ind}const {js} = {access};");
+                }
             }
             NodeKind::ConstructorPat { fields, .. } => {
                 for (i, field) in fields.iter().enumerate() {
@@ -3920,6 +4053,24 @@ impl EmitCtx {
                     self.pattern_binds_js(e, &format!("{access}[{i}]"))?;
                 }
             }
+            NodeKind::ListPat { elems, rest } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.pattern_binds_js(e, &format!("{access}[{i}]"))?;
+                }
+                // `..rest` binds the remaining elements as a slice; a bare `..`
+                // (RestPat) or absent rest binds nothing.
+                if let Some(r) = rest {
+                    if let NodeKind::BindPat { name, .. } = &r.kind {
+                        let ind = self.indent_str();
+                        let _ = writeln!(
+                            self.buf,
+                            "{ind}const {} = {access}.slice({});",
+                            js_value_ident(&name.name),
+                            elems.len()
+                        );
+                    }
+                }
+            }
             NodeKind::OrPat { alternatives } => {
                 if let Some(first) = alternatives.first() {
                     self.pattern_binds_js(first, access)?;
@@ -3943,7 +4094,12 @@ impl EmitCtx {
     fn collect_binds_js(&self, pat: &AIRNode, access: &str, out: &mut String) {
         match &pat.kind {
             NodeKind::BindPat { name, .. } => {
-                let _ = write!(out, "const {} = {access}; ", js_value_ident(&name.name));
+                let js = js_value_ident(&name.name);
+                // Skip a self-binding (`const n = n`) — redundant and a TDZ
+                // error inside the guard-evaluating IIFE. See `pattern_binds_js`.
+                if js != access {
+                    let _ = write!(out, "const {js} = {access}; ");
+                }
             }
             NodeKind::ConstructorPat { fields, .. } => {
                 for (i, field) in fields.iter().enumerate() {
@@ -3964,6 +4120,21 @@ impl EmitCtx {
             NodeKind::TuplePat { elems } => {
                 for (i, e) in elems.iter().enumerate() {
                     self.collect_binds_js(e, &format!("{access}[{i}]"), out);
+                }
+            }
+            NodeKind::ListPat { elems, rest } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.collect_binds_js(e, &format!("{access}[{i}]"), out);
+                }
+                if let Some(r) = rest {
+                    if let NodeKind::BindPat { name, .. } = &r.kind {
+                        let _ = write!(
+                            out,
+                            "const {} = {access}.slice({}); ",
+                            js_value_ident(&name.name),
+                            elems.len()
+                        );
+                    }
                 }
             }
             NodeKind::OrPat { alternatives } => {
@@ -4011,7 +4182,113 @@ impl EmitCtx {
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
+    /// Returns true if `js_name` has already been declared in the innermost
+    /// `let` scope, so a further binding of it must be a plain assignment rather
+    /// than a `const`/`let` re-declaration (which JS rejects).
+    fn simple_let_redeclared(&self, js_name: &str) -> bool {
+        self.let_scopes
+            .last()
+            .is_some_and(|s| s.declared.contains(js_name))
+    }
+
+    /// Returns true if `js_name` is re-bound or assigned later in its block, so
+    /// its first declaration must use `let` (not `const`) to allow reassignment.
+    fn simple_let_needs_let(&self, js_name: &str) -> bool {
+        self.let_scopes
+            .last()
+            .is_some_and(|s| s.needs_let.contains(js_name))
+    }
+
+    /// Record that `js_name` has now been declared in the innermost `let` scope.
+    fn mark_simple_let_declared(&mut self, js_name: &str) {
+        if let Some(s) = self.let_scopes.last_mut() {
+            s.declared.insert(js_name.to_string());
+        }
+    }
+
+    /// Push a fresh `let` scope for a JS block, pre-scanning `block`'s direct
+    /// statements to find which simple `let`-bound names are re-bound or
+    /// assigned within the block (so their first declaration emits `let`). Only
+    /// the block's own statements are scanned — nested blocks open their own
+    /// scopes, so a name re-bound only in a nested block does not force `let`
+    /// here. Returns the depth to which [`Self::leave_let_scope`] should unwind.
+    fn enter_let_scope(&mut self, block: &AIRNode) {
+        let mut needs_let = HashSet::new();
+        if let NodeKind::Block { stmts, tail } = &block.kind {
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut visit = |n: &AIRNode, needs_let: &mut HashSet<String>| {
+                match &n.kind {
+                    NodeKind::LetBinding { pattern, .. } => {
+                        if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                            let js = js_value_ident(&name.name);
+                            // A re-binding of an already-seen name needs `let`.
+                            if !seen.insert(js.clone()) {
+                                needs_let.insert(js);
+                            }
+                        }
+                    }
+                    NodeKind::Assign { target, .. } => {
+                        if let NodeKind::Identifier { name } = &target.kind {
+                            needs_let.insert(js_value_ident(&name.name));
+                        }
+                    }
+                    _ => {}
+                }
+            };
+            for s in stmts {
+                visit(s, &mut needs_let);
+            }
+            if let Some(t) = tail {
+                visit(t, &mut needs_let);
+            }
+        }
+        self.let_scopes.push(LetScope {
+            declared: HashSet::new(),
+            needs_let,
+        });
+    }
+
+    /// Pop the innermost `let` scope pushed by [`Self::enter_let_scope`].
+    fn leave_let_scope(&mut self) {
+        self.let_scopes.pop();
+    }
+
     fn emit_block_body(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        self.enter_let_scope(node);
+        let r = self.emit_block_body_inner(node);
+        self.leave_let_scope();
+        r
+    }
+
+    /// Emit a function/method body whose top-level `let` scope is pre-seeded with
+    /// the function's `params` as already-declared names. A Bock `let x = …` that
+    /// shadows a parameter `x` is the same block scope as the JS parameter, so it
+    /// must lower to a plain assignment (`x = …`) rather than a `let`/`const`
+    /// redeclaration (which JS rejects). Used by [`Self::emit_fn_decl`] /
+    /// [`Self::emit_class_method`] in place of [`Self::emit_block_body`].
+    fn emit_fn_body_seeded(
+        &mut self,
+        params: &[AIRNode],
+        body: &AIRNode,
+    ) -> Result<(), CodegenError> {
+        self.enter_let_scope(body);
+        if let Some(scope) = self.let_scopes.last_mut() {
+            for p in params {
+                if let NodeKind::Param { pattern, .. } = &p.kind {
+                    if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                        let js = js_value_ident(&name.name);
+                        scope.needs_let.insert(js.clone());
+                        scope.declared.insert(js);
+                    }
+                }
+            }
+        }
+        let r = self.emit_block_body_inner(body);
+        self.leave_let_scope();
+        r
+    }
+
+    fn emit_block_body_inner(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         if let NodeKind::Block { stmts, tail } = &node.kind {
             for s in stmts {
                 self.emit_node(s)?;
@@ -4141,11 +4418,22 @@ fn is_time_method_name(name: &str) -> bool {
 /// the escaped name is used uniformly; member/method names use bare
 /// [`to_camel_case`] (a keyword is legal as a member name). See
 /// [`crate::generator::escape_target_keyword`].
+///
+/// Beyond the shared reserved-word set, JS forbids `eval` and `arguments` as a
+/// binding or function name in strict mode (and every emitted ESM module is
+/// strict). These are not reserved *keywords*, so they are not in the shared
+/// list; the js emitter escapes them here so e.g. a Bock `fn eval(...)` emits
+/// `function eval_(...)` rather than the strict-mode `SyntaxError`.
 fn js_value_ident(name: &str) -> String {
-    crate::generator::escape_target_keyword(
+    let escaped = crate::generator::escape_target_keyword(
         &to_camel_case(name),
         crate::generator::KeywordTarget::Js,
-    )
+    );
+    if matches!(escaped.as_str(), "eval" | "arguments") {
+        format!("{escaped}_")
+    } else {
+        escaped
+    }
 }
 
 /// Spell `name` the way the JS backend emits the symbol's declaration / call
@@ -4154,6 +4442,21 @@ fn js_value_ident(name: &str) -> String {
 /// (records, enum variants, classes, traits, effects, consts) keeps its raw
 /// name. A free function (not a method) so both `EmitCtx` and `generate_project`
 /// helpers can call it.
+/// True if any arm of `arms` matches against a list pattern (`[]`, `[a, ..b]`)
+/// or a range pattern (`1..10`, `1..=10`). Neither has a single `switch`
+/// discriminant — every such arm lowers to a `default:`, which is a JS
+/// `SyntaxError` ("more than one default clause") once there are two of them.
+/// The js emitter routes these to the if/else-if chain instead.
+fn match_has_unswitchable_pattern(arms: &[AIRNode]) -> bool {
+    arms.iter().any(|arm| {
+        matches!(
+            &arm.kind,
+            NodeKind::MatchArm { pattern, .. }
+                if matches!(pattern.kind, NodeKind::ListPat { .. } | NodeKind::RangePat { .. })
+        )
+    })
+}
+
 fn esm_emit_name_static(name: &str, is_fn: bool) -> String {
     if is_fn {
         js_value_ident(name)
@@ -4217,6 +4520,18 @@ fn escape_js_string(s: &str) -> String {
 
 /// Render a literal as a JS value expression — used by the if-chain match
 /// lowering to compare a scrutinee against a literal pattern (`<access> === …`).
+/// Render a `RangePat` bound (`lo`/`hi`) as a JS expression. Range bounds are
+/// literals (`1..10`) or a const identifier (`MIN..MAX`); anything else falls
+/// back to the wrapped literal/identifier text, or `0` for an unrecognised node.
+fn range_bound_to_js(node: &AIRNode) -> String {
+    match &node.kind {
+        NodeKind::LiteralPat { lit } => js_literal(lit),
+        NodeKind::Literal { lit } => js_literal(lit),
+        NodeKind::Identifier { name } => js_value_ident(&name.name),
+        _ => "0".to_string(),
+    }
+}
+
 fn js_literal(lit: &Literal) -> String {
     match lit {
         Literal::Int(s) | Literal::Float(s) => s.clone(),
@@ -6582,6 +6897,16 @@ mod tests {
             !out.contains("class ServiceStack"),
             "composite effect should NOT generate a class, got: {out}"
         );
+        // A *public* composite effect is also listed in the per-module
+        // `export { … }`, so it must have a concrete binding to export (an
+        // unbound name is an ESM "Export 'X' is not defined" error). It emits a
+        // frozen marker object recording its component names.
+        assert!(
+            out.contains(
+                "const ServiceStack = Object.freeze({ __composite: [\"Logger\", \"Clock\"] });"
+            ),
+            "composite effect should emit an exportable binding, got: {out}"
+        );
 
         // serve should have expanded handler params for Logger + Clock.
         assert!(
@@ -7240,6 +7565,389 @@ mod tests {
         assert!(
             out.contains("return self.message;"),
             "method body should read the field `self.message`, got: {out}"
+        );
+    }
+
+    // ── js codegen fixes (examples audit) ────────────────────────────────────
+
+    /// Helpers for the audit-fix tests below.
+    fn let_binding(id: u32, name: &str, is_mut: bool, value: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::LetBinding {
+                is_mut,
+                pattern: Box::new(node(
+                    id + 1,
+                    NodeKind::BindPat {
+                        name: ident(name),
+                        is_mut,
+                    },
+                )),
+                ty: None,
+                value: Box::new(value),
+            },
+        )
+    }
+
+    fn fn_decl(id: u32, name: &str, params: Vec<AIRNode>, body: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params,
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
+    }
+
+    fn match_arm(id: u32, pattern: AIRNode, guard: Option<AIRNode>, body: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::MatchArm {
+                pattern: Box::new(pattern),
+                guard: guard.map(Box::new),
+                body: Box::new(body),
+            },
+        )
+    }
+
+    #[test]
+    fn rebound_let_lowers_to_assignment_not_redeclaration() {
+        // fn f() { let acc = 1; let acc = 2; let acc = 3 }
+        let body = block(
+            1,
+            vec![
+                let_binding(10, "acc", false, int_lit(11, "1")),
+                let_binding(20, "acc", false, int_lit(21, "2")),
+                let_binding(30, "acc", false, int_lit(31, "3")),
+            ],
+            None,
+        );
+        let out = gen(&module(vec![], vec![fn_decl(2, "f", vec![], body)]));
+        // First binding declares `let` (re-bound later), subsequent ones assign.
+        assert!(
+            out.contains("let acc = 1;"),
+            "first re-bound `let` should declare with `let`, got: {out}"
+        );
+        assert_eq!(
+            out.matches("acc = ").count(),
+            3,
+            "all three bindings should reference `acc`, got: {out}"
+        );
+        assert!(
+            !out.contains("const acc"),
+            "a re-bound binding must not emit `const acc`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn let_shadowing_a_param_lowers_to_assignment() {
+        // fn f(x) { let x = x + 1; x }  — `let x` shadows the param in the same
+        // JS block scope, so it must become an assignment, not a redeclaration.
+        let rebind = let_binding(
+            10,
+            "x",
+            false,
+            node(
+                12,
+                NodeKind::BinaryOp {
+                    op: BinOp::Add,
+                    left: Box::new(id_node(13, "x")),
+                    right: Box::new(int_lit(14, "1")),
+                },
+            ),
+        );
+        let body = block(1, vec![rebind], Some(id_node(15, "x")));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(2, "f", vec![param_node(3, "x")], body)],
+        ));
+        assert!(
+            out.contains("x = (x + 1);"),
+            "let shadowing a param should assign, got: {out}"
+        );
+        assert!(
+            !out.contains("let x = (x + 1)") && !out.contains("const x = (x + 1)"),
+            "let shadowing a param must not redeclare `x`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn sibling_iife_blocks_do_not_share_let_scope() {
+        // Two arms of an expression-position match each `let x = …`. Lowered to
+        // sibling IIFEs, each is its own scope, so both may use a fresh `const`.
+        let arm1 = match_arm(
+            40,
+            node(
+                41,
+                NodeKind::LiteralPat {
+                    lit: Literal::Int("0".into()),
+                },
+            ),
+            None,
+            block(
+                42,
+                vec![let_binding(43, "x", false, int_lit(44, "1"))],
+                Some(id_node(45, "x")),
+            ),
+        );
+        let arm2 = match_arm(
+            50,
+            node(51, NodeKind::WildcardPat),
+            None,
+            block(
+                52,
+                vec![let_binding(53, "x", false, int_lit(54, "2"))],
+                Some(id_node(55, "x")),
+            ),
+        );
+        let m = node(
+            60,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(61, "n")),
+                arms: vec![arm1, arm2],
+            },
+        );
+        let body = block(1, vec![], Some(m));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(2, "f", vec![param_node(3, "n")], body)],
+        ));
+        // Both arm bodies independently declare `const x` (separate IIFE scopes);
+        // neither is rewritten into an assignment against the other.
+        assert_eq!(
+            out.matches("const x = ").count(),
+            2,
+            "sibling IIFE arms should each declare their own `const x`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn list_pattern_match_routes_to_ifchain() {
+        // match xs { [] => 0; [first, ..rest] => first }
+        let empty_arm = match_arm(
+            10,
+            node(
+                11,
+                NodeKind::ListPat {
+                    elems: vec![],
+                    rest: None,
+                },
+            ),
+            None,
+            block(12, vec![], Some(int_lit(13, "0"))),
+        );
+        let cons_arm = match_arm(
+            20,
+            node(
+                21,
+                NodeKind::ListPat {
+                    elems: vec![bind_pat(22, "first")],
+                    rest: Some(Box::new(bind_pat(23, "rest"))),
+                },
+            ),
+            None,
+            block(24, vec![], Some(id_node(25, "first"))),
+        );
+        let m = node(
+            30,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(31, "xs")),
+                arms: vec![empty_arm, cons_arm],
+            },
+        );
+        let body = block(1, vec![], Some(m));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(2, "f", vec![param_node(3, "xs")], body)],
+        ));
+        // List-pattern matches must use the if/else-if chain (never a `switch`
+        // with multiple `default`s), with array length tests and a `..rest`
+        // slice binding.
+        assert!(
+            !out.contains("switch"),
+            "list-pattern match must not lower to a switch, got: {out}"
+        );
+        assert!(
+            out.contains("xs.length === 0"),
+            "empty-list arm should test `length === 0`, got: {out}"
+        );
+        // The cons arm is the final unguarded arm, so it is the chain's `else`
+        // (Bock matches are exhaustive) — no explicit length test, but it binds
+        // the head element and the `..rest` slice.
+        assert!(
+            out.contains("const first = xs[0];"),
+            "cons arm should bind the head element, got: {out}"
+        );
+        assert!(
+            out.contains("const rest = xs.slice(1);"),
+            "`..rest` should bind the trailing slice, got: {out}"
+        );
+    }
+
+    #[test]
+    fn range_pattern_match_routes_to_ifchain() {
+        // match n { 1..10 => "lo"; _ => "hi" }
+        let range_arm = match_arm(
+            10,
+            node(
+                11,
+                NodeKind::RangePat {
+                    lo: Box::new(int_lit(12, "1")),
+                    hi: Box::new(int_lit(13, "10")),
+                    inclusive: false,
+                },
+            ),
+            None,
+            block(14, vec![], Some(str_lit(15, "lo"))),
+        );
+        let wild_arm = match_arm(
+            20,
+            node(21, NodeKind::WildcardPat),
+            None,
+            block(22, vec![], Some(str_lit(23, "hi"))),
+        );
+        let m = node(
+            30,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(31, "n")),
+                arms: vec![range_arm, wild_arm],
+            },
+        );
+        let body = block(1, vec![], Some(m));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(2, "f", vec![param_node(3, "n")], body)],
+        ));
+        assert!(
+            !out.contains("switch"),
+            "range-pattern match must not lower to a switch, got: {out}"
+        );
+        assert!(
+            out.contains("n >= 1 && n < 10"),
+            "exclusive range should test `>= lo && < hi`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn mut_bind_arm_emits_let_not_const() {
+        // match n { mut x => { x = x + 1; x } }
+        let mut_pat = node(
+            11,
+            NodeKind::BindPat {
+                name: ident("x"),
+                is_mut: true,
+            },
+        );
+        let assign = node(
+            12,
+            NodeKind::Assign {
+                op: AssignOp::Assign,
+                target: Box::new(id_node(13, "x")),
+                value: Box::new(node(
+                    14,
+                    NodeKind::BinaryOp {
+                        op: BinOp::Add,
+                        left: Box::new(id_node(15, "x")),
+                        right: Box::new(int_lit(16, "1")),
+                    },
+                )),
+            },
+        );
+        let arm = match_arm(
+            10,
+            mut_pat,
+            None,
+            block(17, vec![assign], Some(id_node(18, "x"))),
+        );
+        let m = node(
+            30,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(31, "n")),
+                arms: vec![arm],
+            },
+        );
+        let body = block(1, vec![], Some(m));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(2, "f", vec![param_node(3, "n")], body)],
+        ));
+        assert!(
+            out.contains("let x = n;"),
+            "a `mut` arm binding should declare with `let`, got: {out}"
+        );
+        assert!(
+            !out.contains("const x = n;"),
+            "a `mut` arm binding must not be `const`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn guard_let_binds_pattern_into_enclosing_scope() {
+        // fn f(s) { guard (let Ok(v) = parse(s)) else { return }; v }
+        let guard = node(
+            10,
+            NodeKind::Guard {
+                let_pattern: Some(Box::new(node(
+                    11,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Ok"]),
+                        fields: vec![bind_pat(12, "v")],
+                    },
+                ))),
+                condition: Box::new(node(
+                    13,
+                    NodeKind::Call {
+                        callee: Box::new(id_node(14, "parse")),
+                        type_args: vec![],
+                        args: vec![AirArg {
+                            label: None,
+                            value: id_node(15, "s"),
+                        }],
+                    },
+                )),
+                else_block: Box::new(block(
+                    16,
+                    vec![node(17, NodeKind::Return { value: None })],
+                    None,
+                )),
+            },
+        );
+        let body = block(1, vec![guard], Some(id_node(18, "v")));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(2, "f", vec![param_node(3, "s")], body)],
+        ));
+        // The pattern is tested and `v` is bound for use *after* the guard.
+        assert!(
+            out.contains("._tag === \"Ok\""),
+            "guard should test the constructor tag, got: {out}"
+        );
+        assert!(
+            out.contains("const v = "),
+            "guard should bind `v` into the enclosing scope, got: {out}"
+        );
+    }
+
+    #[test]
+    fn eval_identifier_is_escaped_for_strict_mode() {
+        // fn eval() { 0 }
+        let body = block(1, vec![], Some(int_lit(11, "0")));
+        let out = gen(&module(vec![], vec![fn_decl(2, "eval", vec![], body)]));
+        assert!(
+            out.contains("function eval_("),
+            "a fn named `eval` must be escaped to `eval_` (strict mode), got: {out}"
+        );
+        assert!(
+            !out.contains("function eval("),
+            "bare `function eval(` is a strict-mode SyntaxError, got: {out}"
         );
     }
 }
