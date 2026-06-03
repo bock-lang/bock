@@ -1,0 +1,36 @@
+// TEST: exec_py_match_exprpos_diverging_arm
+// EXPECT: output "zero;one;BAILED"
+// EXPECT: targets python
+//
+// Expression-position `match` bound into a `let` whose final arm DIVERGES
+// (`_ => { return … }`). On Python this previously emitted an invalid ternary
+// IIFE — `(lambda __v: "zero" if __v == 0 else ("one" if __v == 1 else (# unsupported)))(n)`
+// — because the diverging arm body (a `return`) has no expression form, so the
+// emitter fell through to `# unsupported`, a `SyntaxError`.
+//
+// The py fix hoists the whole `let x = match …` into statement form: it
+// pre-declares the binding (`label = None`) then emits a real `match`/`case`
+// statement whose value arms assign `label` and whose diverging arm emits the
+// bare `return`.
+//
+// PYTHON-ONLY: js/ts/go still emit `/* unsupported */` for a value-`match` with
+// a diverging arm, and rust mis-lowers it — a shared AIR temp-hoist desugar is
+// the proper cross-backend fix (surfaced as an OPEN). This fixture locks in the
+// Python lowering until that lands.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn classify(n: Int) -> String {
+  let label = match n {
+    0 => "zero"
+    1 => "one"
+    _ => { return "BAILED" }
+  }
+  label
+}
+
+fn main() -> Void {
+  println("${classify(0)};${classify(1)};${classify(9)}")
+}

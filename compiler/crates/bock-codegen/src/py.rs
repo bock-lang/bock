@@ -363,6 +363,471 @@ fn explicitly_imported_names(module: &AIRModule) -> std::collections::HashSet<St
     names
 }
 
+/// Tally, per identifier name, how many times that name appears purely as a
+/// **record/enum/class field label** anywhere in `module` — i.e. in a position
+/// that names a *field*, never a cross-module symbol. Covers the four label
+/// positions:
+///
+/// - record / class / enum-struct-variant field **declarations**
+///   (`record R { total_value: Float }`),
+/// - record-construction labels (`R { total_value: v }`),
+/// - record-pattern field labels (`R { total_value }`),
+/// - field **access** (`r.total_value`).
+///
+/// The implicit-import scan ([`implicit_imports_for`]) matches a public symbol
+/// name against the module's debug rendering. A field label produces the same
+/// quoted-identifier token as a genuine reference, so a record field whose name
+/// collides with a sibling module's public function (e.g. `InventorySummary`'s
+/// `total_value` field vs. `service.total_value`) was spuriously "referenced",
+/// pulling in `from service import total_value`. Because `service` already
+/// imports `models`, that creates a Python import **cycle**
+/// (`ImportError: cannot import name … (circular import)`).
+///
+/// Subtracting these label occurrences from the total lets the scan keep its
+/// "over-import is harmless" property for true references while never importing
+/// a name that appears *only* as a field label.
+fn field_label_occurrences(module: &AIRModule) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    fn bump(counts: &mut HashMap<String, usize>, name: &str) {
+        *counts.entry(name.to_string()).or_insert(0) += 1;
+    }
+    fn walk_decl_fields(counts: &mut HashMap<String, usize>, fields: &[bock_ast::RecordDeclField]) {
+        for f in fields {
+            bump(counts, &f.name.name);
+        }
+    }
+    fn walk(counts: &mut HashMap<String, usize>, node: &AIRNode) {
+        match &node.kind {
+            NodeKind::RecordDecl { fields, .. } | NodeKind::ClassDecl { fields, .. } => {
+                walk_decl_fields(counts, fields);
+            }
+            NodeKind::EnumVariant {
+                payload: bock_air::EnumVariantPayload::Struct(fields),
+                ..
+            } => {
+                walk_decl_fields(counts, fields);
+            }
+            NodeKind::FieldAccess { field, object } => {
+                bump(counts, &field.name);
+                walk(counts, object);
+            }
+            NodeKind::RecordConstruct { fields, spread, .. } => {
+                for f in fields {
+                    bump(counts, &f.name.name);
+                    if let Some(v) = &f.value {
+                        walk(counts, v);
+                    }
+                }
+                if let Some(s) = spread {
+                    walk(counts, s);
+                }
+            }
+            NodeKind::RecordPat { fields, .. } => {
+                for f in fields {
+                    bump(counts, &f.name.name);
+                    if let Some(p) = &f.pattern {
+                        walk(counts, p);
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Recurse into every child node. The match above handles the
+        // label-bearing kinds; this generic descent reaches the rest. We render
+        // children via the structural API rather than enumerating every
+        // `NodeKind`, so new expression kinds are covered automatically.
+        for child in child_nodes(node) {
+            walk(counts, child);
+        }
+    }
+    walk(&mut counts, module);
+    counts
+}
+
+/// The directly-owned child `AIRNode`s of `node`, for the field-label walk in
+/// [`field_label_occurrences`]. Returns the kind-specific children; the
+/// label-bearing kinds (record/field-access/construct/pattern) are descended by
+/// the caller's `match`, so here they are skipped to avoid double-counting their
+/// label idents.
+fn child_nodes(node: &AIRNode) -> Vec<&AIRNode> {
+    let mut out: Vec<&AIRNode> = Vec::new();
+    macro_rules! p {
+        ($e:expr) => {
+            out.push($e)
+        };
+    }
+    macro_rules! popt {
+        ($e:expr) => {
+            if let Some(n) = $e {
+                out.push(n)
+            }
+        };
+    }
+    macro_rules! pvec {
+        ($e:expr) => {
+            for n in $e {
+                out.push(n)
+            }
+        };
+    }
+    match &node.kind {
+        NodeKind::Module { imports, items, .. } => {
+            pvec!(imports);
+            pvec!(items);
+        }
+        NodeKind::FnDecl {
+            params,
+            return_type,
+            body,
+            ..
+        } => {
+            pvec!(params);
+            popt!(return_type.as_deref());
+            p!(body);
+        }
+        NodeKind::EnumDecl { variants, .. } => {
+            pvec!(variants);
+        }
+        // Tuple-payload element types are descended; struct-payload field labels
+        // are handled by the caller's match (so they are counted, not skipped).
+        NodeKind::EnumVariant {
+            payload: EnumVariantPayload::Tuple(types),
+            ..
+        } => {
+            pvec!(types);
+        }
+        NodeKind::ClassDecl { methods, .. } => {
+            // Field labels handled by caller; descend into methods only.
+            pvec!(methods);
+        }
+        NodeKind::TraitDecl { methods, .. } => {
+            pvec!(methods);
+        }
+        NodeKind::ImplBlock {
+            target, methods, ..
+        } => {
+            p!(target);
+            pvec!(methods);
+        }
+        NodeKind::EffectDecl { operations, .. } => {
+            pvec!(operations);
+        }
+        NodeKind::TypeAlias { ty, .. } => p!(ty),
+        NodeKind::ConstDecl { ty, value, .. } => {
+            p!(ty);
+            p!(value);
+        }
+        NodeKind::ModuleHandle { handler, .. } => p!(handler),
+        NodeKind::PropertyTest { body, .. } => p!(body),
+        NodeKind::Param {
+            pattern,
+            ty,
+            default,
+        } => {
+            p!(pattern);
+            popt!(ty.as_deref());
+            popt!(default.as_deref());
+        }
+        NodeKind::TypeNamed { args, .. } => {
+            pvec!(args);
+        }
+        NodeKind::TypeTuple { elems } => {
+            pvec!(elems);
+        }
+        NodeKind::TypeFunction { params, ret, .. } => {
+            pvec!(params);
+            p!(ret);
+        }
+        NodeKind::TypeOptional { inner } => p!(inner),
+        NodeKind::BinaryOp { left, right, .. } => {
+            p!(left);
+            p!(right);
+        }
+        NodeKind::UnaryOp { operand, .. } => p!(operand),
+        NodeKind::Assign { target, value, .. } => {
+            p!(target);
+            p!(value);
+        }
+        NodeKind::Call {
+            callee,
+            args,
+            type_args,
+        } => {
+            p!(callee);
+            for a in args {
+                out.push(&a.value);
+            }
+            pvec!(type_args);
+        }
+        NodeKind::MethodCall {
+            receiver,
+            type_args,
+            args,
+            ..
+        } => {
+            p!(receiver);
+            pvec!(type_args);
+            for a in args {
+                out.push(&a.value);
+            }
+        }
+        NodeKind::Index { object, index } => {
+            p!(object);
+            p!(index);
+        }
+        NodeKind::Propagate { expr }
+        | NodeKind::Await { expr }
+        | NodeKind::Move { expr }
+        | NodeKind::Borrow { expr }
+        | NodeKind::MutableBorrow { expr } => p!(expr),
+        NodeKind::Lambda { params, body } => {
+            pvec!(params);
+            p!(body);
+        }
+        NodeKind::Pipe { left, right } | NodeKind::Compose { left, right } => {
+            p!(left);
+            p!(right);
+        }
+        NodeKind::Range { lo, hi, .. } | NodeKind::RangePat { lo, hi, .. } => {
+            p!(lo);
+            p!(hi);
+        }
+        NodeKind::ListLiteral { elems }
+        | NodeKind::SetLiteral { elems }
+        | NodeKind::TupleLiteral { elems }
+        | NodeKind::TuplePat { elems } => {
+            pvec!(elems);
+        }
+        NodeKind::MapLiteral { entries } => {
+            for e in entries {
+                out.push(&e.key);
+                out.push(&e.value);
+            }
+        }
+        NodeKind::Interpolation { parts } => {
+            for part in parts {
+                if let bock_air::AirInterpolationPart::Expr(n) = part {
+                    out.push(n.as_ref());
+                }
+            }
+        }
+        NodeKind::ResultConstruct { value, .. }
+        | NodeKind::Return { value }
+        | NodeKind::Break { value } => {
+            popt!(value.as_deref());
+        }
+        NodeKind::If {
+            let_pattern,
+            condition,
+            then_block,
+            else_block,
+        } => {
+            popt!(let_pattern.as_deref());
+            p!(condition);
+            p!(then_block);
+            popt!(else_block.as_deref());
+        }
+        NodeKind::Guard {
+            let_pattern,
+            condition,
+            else_block,
+        } => {
+            popt!(let_pattern.as_deref());
+            p!(condition);
+            p!(else_block);
+        }
+        NodeKind::Match { scrutinee, arms } => {
+            p!(scrutinee);
+            pvec!(arms);
+        }
+        NodeKind::MatchArm {
+            pattern,
+            guard,
+            body,
+        } => {
+            p!(pattern);
+            popt!(guard.as_deref());
+            p!(body);
+        }
+        NodeKind::For {
+            pattern,
+            iterable,
+            body,
+        } => {
+            p!(pattern);
+            p!(iterable);
+            p!(body);
+        }
+        NodeKind::While { condition, body } => {
+            p!(condition);
+            p!(body);
+        }
+        NodeKind::Loop { body } => p!(body),
+        NodeKind::Block { stmts, tail } => {
+            pvec!(stmts);
+            popt!(tail.as_deref());
+        }
+        NodeKind::LetBinding {
+            pattern, ty, value, ..
+        } => {
+            p!(pattern);
+            popt!(ty.as_deref());
+            p!(value);
+        }
+        NodeKind::EffectOp { args, .. } => {
+            for a in args {
+                out.push(&a.value);
+            }
+        }
+        NodeKind::HandlingBlock { handlers, body } => {
+            for h in handlers {
+                out.push(&h.handler);
+            }
+            p!(body);
+        }
+        NodeKind::ConstructorPat { fields, .. } => {
+            pvec!(fields);
+        }
+        NodeKind::ListPat { elems, rest } => {
+            pvec!(elems);
+            popt!(rest.as_deref());
+        }
+        NodeKind::OrPat { alternatives } => {
+            pvec!(alternatives);
+        }
+        NodeKind::GuardPat { pattern, guard } => {
+            p!(pattern);
+            p!(guard);
+        }
+        // Leaf / label-bearing kinds with no extra children to descend (the
+        // latter are handled by the caller's `match`).
+        NodeKind::ImportDecl { .. }
+        | NodeKind::RecordDecl { .. }
+        | NodeKind::FieldAccess { .. }
+        | NodeKind::RecordConstruct { .. }
+        | NodeKind::RecordPat { .. }
+        | NodeKind::TypeSelf
+        | NodeKind::Literal { .. }
+        | NodeKind::Identifier { .. }
+        | NodeKind::Placeholder
+        | NodeKind::Unreachable
+        | NodeKind::Continue
+        | NodeKind::WildcardPat
+        | NodeKind::BindPat { .. }
+        | NodeKind::LiteralPat { .. }
+        | NodeKind::RestPat
+        | NodeKind::Error
+        | NodeKind::EffectRef { .. } => {}
+        // `NodeKind` is `#[non_exhaustive]`. A future kind we have not taught
+        // this walker about contributes no field-label children, so the scan
+        // falls back to its old (harmless over-import) behavior for it — never
+        // under-import.
+        _ => {}
+    }
+    out
+}
+
+/// Count quoted-identifier-token occurrences of `name` in `rendered` — the
+/// number of `"name"` substrings in the AIR debug dump.
+fn quoted_token_count(rendered: &str, name: &str) -> usize {
+    rendered.matches(&format!("\"{name}\"")).count()
+}
+
+/// Whether a value expression in **binding/expression position** must be lowered
+/// to Python *statements* (assigning the binding) rather than emitted as a
+/// Python expression.
+///
+/// Python has no statement-admitting expression form (no value-`loop`, no
+/// IIFE), so these constructs cannot ride inside a `let x = …` expression:
+///
+/// - a `match` whose arms include a statement / diverging body
+///   (`_ => { return … }`, see [`crate::generator::match_has_statement_arm`]);
+/// - a `loop` / `while` (a value-`loop` yields via `break <v>`, which Python's
+///   valueless `break` cannot express);
+/// - an `if` that is itself a statement (both branches statement bodies) —
+///   it produces no expression value;
+/// - a `Block` carrying statements (a tail-only block is fine as an expression).
+///
+/// When true, [`PyEmitCtx::emit_value_binding`] hoists the construct into real
+/// Python statements. Otherwise the existing expression lowering (including the
+/// ternary `match`/`if` paths) is used unchanged.
+fn value_needs_stmt_form(value: &AIRNode) -> bool {
+    match &value.kind {
+        NodeKind::Match { arms, .. } => {
+            crate::generator::match_has_statement_arm(arms) || control_flow_has_raise_branch(value)
+        }
+        NodeKind::Loop { .. } | NodeKind::While { .. } => true,
+        NodeKind::If { .. } => {
+            crate::generator::node_is_statement(value) || control_flow_has_raise_branch(value)
+        }
+        NodeKind::Block { stmts, .. } => !stmts.is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether `node` lowers to a Python **`raise` statement** — a diverging
+/// expression that yields no value: a `todo()` / `unreachable()` prelude call
+/// (see [`PyEmitCtx::map_prelude_call`]), or the `unreachable` AIR node. Such an
+/// expression is valid as a statement but **not** after `return` / `= `
+/// (`return raise NotImplementedError()` is a `SyntaxError`), so in value/tail
+/// position it must be emitted bare. The fall-through value is supplied by the
+/// surrounding control flow — the function simply never returns past the raise.
+fn is_raise_expr(node: &AIRNode) -> bool {
+    match &node.kind {
+        NodeKind::Unreachable => true,
+        NodeKind::Call { callee, .. } => matches!(
+            &callee.kind,
+            NodeKind::Identifier { name }
+                if matches!(name.name.as_str(), "todo" | "unreachable")
+        ),
+        _ => false,
+    }
+}
+
+/// The tail/block value of `node` (for an `if`/`match` arm body), unwrapping a
+/// single-tail `Block`.
+fn unwrap_block_tail(node: &AIRNode) -> &AIRNode {
+    if let NodeKind::Block {
+        stmts,
+        tail: Some(t),
+    } = &node.kind
+    {
+        if stmts.is_empty() {
+            return t;
+        }
+    }
+    node
+}
+
+/// Whether an **expression-position** `if` (or `match`) has a branch/arm body
+/// that lowers to a diverging Python `raise` (`todo()` / `unreachable()`).
+/// Such a construct cannot ride inside a ternary (`return raise … if … else …`
+/// is a `SyntaxError`), so it must be hoisted to a statement-form `if`/`match`
+/// whose non-diverging branches `return` while the diverging branch `raise`s.
+fn control_flow_has_raise_branch(node: &AIRNode) -> bool {
+    match &node.kind {
+        NodeKind::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            is_raise_expr(unwrap_block_tail(then_block))
+                || control_flow_has_raise_branch(then_block)
+                || else_block.as_ref().is_some_and(|eb| {
+                    is_raise_expr(unwrap_block_tail(eb)) || control_flow_has_raise_branch(eb)
+                })
+        }
+        NodeKind::Match { arms, .. } => arms.iter().any(|arm| {
+            if let NodeKind::MatchArm { body, .. } = &arm.kind {
+                is_raise_expr(unwrap_block_tail(body)) || control_flow_has_raise_branch(body)
+            } else {
+                false
+            }
+        }),
+        _ => false,
+    }
+}
+
 /// Compute the implicit cross-module imports for `module`: public symbols
 /// declared in *other* reachable modules that `module` references but neither
 /// declares locally nor imports explicitly. Returns `(module_path, name)`
@@ -373,6 +838,15 @@ fn explicitly_imported_names(module: &AIRModule) -> std::collections::HashSet<St
 /// [`py_module_uses_optional`] and friends). It can only *over*-import a name
 /// the program does not really use, which is harmless (a dead import), never
 /// *under*-import — so it cannot reintroduce the `NameError` it exists to fix.
+///
+/// Exception: a name that appears *only* as a record/enum/class **field label**
+/// (declaration, construction, pattern, or `.field` access — see
+/// [`field_label_occurrences`]) is **not** a cross-module symbol reference.
+/// Importing it anyway was the root cause of a Python import cycle when a record
+/// field collided with a sibling module's public function (e.g.
+/// `InventorySummary.total_value` vs. `service.total_value`, making `models`
+/// import `service` which already imports `models`). We subtract the field-label
+/// occurrences so such names are skipped while genuine references still import.
 fn implicit_imports_for(
     module: &AIRModule,
     public_symbols: &HashMap<String, String>,
@@ -381,14 +855,20 @@ fn implicit_imports_for(
     let local = locally_declared_names(module);
     let explicit = explicitly_imported_names(module);
     let rendered = format!("{module:?}");
+    let field_labels = field_label_occurrences(module);
     let mut out: Vec<(String, String)> = Vec::new();
     for (name, declaring_module) in public_symbols {
         if declaring_module == own_path || local.contains(name) || explicit.contains(name) {
             continue;
         }
         // Identifier-token match: the AIR debug rendering quotes identifier
-        // names, so `"Iterable"` appears iff the name is referenced.
-        if rendered.contains(&format!("\"{name}\"")) {
+        // names, so `"Iterable"` appears iff the name is referenced. Subtract
+        // the field-label occurrences: a name reached *only* through field
+        // labels is not a cross-module reference and must not be imported (it
+        // would create an import cycle for field/function name collisions).
+        let total = quoted_token_count(&rendered, name);
+        let labels = field_labels.get(name).copied().unwrap_or(0);
+        if total > labels {
             out.push((declaring_module.clone(), name.clone()));
         }
     }
@@ -585,6 +1065,11 @@ impl CodeGenerator for PyGenerator {
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let mut ctx = PyEmitCtx::new();
             ctx.per_module = true;
+            // Entry module (declares `main`, emitted as `main.py`) gets the
+            // Windows UTF-8 stdout guard in its preamble — entry-only, since it
+            // is a process-global side effect.
+            ctx.is_entry_module =
+                i == entry_idx && crate::generator::module_declares_main_fn(module);
             ctx.enum_variants = enum_variants.clone();
             ctx.trait_decls = trait_decls.clone();
             ctx.const_names = const_names.clone();
@@ -992,6 +1477,24 @@ struct PyEmitCtx {
     /// `Module` arm for the single-module `generate_module` path). Shared policy
     /// with go/js/ts.
     field_method_collisions: std::collections::HashSet<String>,
+    /// Set on the **entry** module (the one declaring `main`, emitted as
+    /// `main.py`) in the per-module path. When set, `finish` prepends a
+    /// `sys.stdout.reconfigure(encoding="utf-8")` guard so unicode `print`
+    /// output is correct on Windows, whose Python defaults stdout to the locale
+    /// codepage rather than UTF-8. Entry-only: the reconfigure is a
+    /// process-global side effect, so it belongs at the single program entry,
+    /// not in every imported module.
+    is_entry_module: bool,
+    /// Stack of "current loop's value target" used to lower an
+    /// **expression-position `loop`** assigned to a binding
+    /// (`let r = loop { … break v }`). Python's `break` carries no value, so a
+    /// `loop` that yields a value cannot be an expression. When such a loop is
+    /// hoisted to statement form by [`Self::emit_value_binding`], the target
+    /// variable is pushed here; a `break <value>` inside then lowers to
+    /// `<target> = <value>` followed by `break`. `None` is pushed for ordinary
+    /// statement-position loops (no value), so a bare `break` stays a bare
+    /// `break`. Only the innermost frame is consulted.
+    loop_value_targets: Vec<Option<String>>,
     /// Declared names of module-scope `const`s, pre-scanned across the reachable
     /// program. A const is emitted verbatim at both its declaration and every use
     /// so the two agree — the def's `to_snake_case` (`FIZZ_NUM` → `fizz_num`) and
@@ -1041,6 +1544,8 @@ impl PyEmitCtx {
             implicit_imports: Vec::new(),
             field_method_collisions: std::collections::HashSet::new(),
             const_names: std::collections::HashSet::new(),
+            is_entry_module: false,
+            loop_value_targets: Vec::new(),
         }
     }
 
@@ -1075,6 +1580,23 @@ impl PyEmitCtx {
         // references never evaluate eagerly. It must be the first statement in
         // the module, so it is prepended ahead of every other import.
         preamble.push_str("from __future__ import annotations\n");
+        // Windows UTF-8 stdout (entry module only). On Windows, Python's stdout
+        // defaults to the locale codepage, so a unicode `print` (`✓`, `→`, CJK,
+        // …) raises `UnicodeEncodeError` or mojibakes. Reconfiguring stdout/stderr
+        // to UTF-8 (py3.7+ `TextIOWrapper.reconfigure`) makes output consistent
+        // with the POSIX targets. It is a process-global side effect, so it is
+        // emitted only at the single program entry, never in imported modules.
+        // The `getattr` guard keeps it a no-op when the stream is not a
+        // reconfigurable `TextIOWrapper` (e.g. already wrapped/redirected).
+        if self.is_entry_module {
+            preamble.push_str(
+                "import sys as _sys\n\
+                 if hasattr(_sys.stdout, \"reconfigure\"):\n    \
+                 _sys.stdout.reconfigure(encoding=\"utf-8\")\n\
+                 if hasattr(_sys.stderr, \"reconfigure\"):\n    \
+                 _sys.stderr.reconfigure(encoding=\"utf-8\")\n",
+            );
+        }
         // Per-module native-import path: pull the runtime-prelude names this
         // module references from the shared `_bock_runtime` module so the
         // tagged runtime classes are shared (and `isinstance`-compatible)
@@ -3407,6 +3929,25 @@ impl PyEmitCtx {
                     .as_ref()
                     .map(|t| format!(": {}", self.type_to_py(t)))
                     .unwrap_or_default();
+                // Expression-position control flow (a value-`loop`, a `match`
+                // with a diverging/statement arm, a statement-`if`) cannot be a
+                // Python expression. Pre-declare the binding (so it is always
+                // bound, including the diverging-arm path) and fill it in via
+                // real statements. See `value_needs_stmt_form`.
+                if value_needs_stmt_form(value) {
+                    let ind = self.indent_str();
+                    let _ = writeln!(self.buf, "{ind}{binding}{type_hint} = None");
+                    return self.emit_value_binding(&binding, value);
+                }
+                // `let x = todo()` — the value diverges (a `raise`), so it cannot
+                // sit on the RHS of `=`. Emit the raise bare; the binding is never
+                // reached.
+                if is_raise_expr(value) {
+                    self.write_indent();
+                    self.emit_expr(value)?;
+                    self.buf.push('\n');
+                    return Ok(());
+                }
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}{binding}{type_hint} = ");
                 let wrap_task = matches!(&value.kind, NodeKind::Call { .. })
@@ -3472,7 +4013,9 @@ impl PyEmitCtx {
                 self.emit_expr(iterable)?;
                 self.buf.push_str(":\n");
                 self.indent += 1;
+                self.loop_value_targets.push(None);
                 self.emit_block_body(body)?;
+                self.loop_value_targets.pop();
                 self.indent -= 1;
                 Ok(())
             }
@@ -3482,14 +4025,21 @@ impl PyEmitCtx {
                 self.emit_expr(condition)?;
                 self.buf.push_str(":\n");
                 self.indent += 1;
+                self.loop_value_targets.push(None);
                 self.emit_block_body(body)?;
+                self.loop_value_targets.pop();
                 self.indent -= 1;
                 Ok(())
             }
             NodeKind::Loop { body } => {
                 self.writeln("while True:");
                 self.indent += 1;
+                // Statement-position loop yields no value; push a `None` frame so
+                // a bare `break` inside stays a bare `break` (and isn't mistaken
+                // for an enclosing value-loop's break).
+                self.loop_value_targets.push(None);
                 self.emit_block_body(body)?;
+                self.loop_value_targets.pop();
                 self.indent -= 1;
                 Ok(())
             }
@@ -3506,12 +4056,25 @@ impl PyEmitCtx {
             }
             NodeKind::Break { value } => {
                 if let Some(val) = value {
-                    // Python break doesn't support values; emit as comment + break.
-                    let ind = self.indent_str();
-                    let _ = write!(self.buf, "{ind}# break value: ");
-                    self.emit_expr(val)?;
-                    self.buf.push('\n');
-                    self.writeln("break");
+                    // A value-`loop` hoisted by `emit_value_binding` records its
+                    // assignment target; `break <v>` lowers to `<target> = <v>`
+                    // then `break`. Python's `break` itself carries no value.
+                    if let Some(Some(target)) = self.loop_value_targets.last() {
+                        let target = target.clone();
+                        let ind = self.indent_str();
+                        let _ = write!(self.buf, "{ind}{target} = ");
+                        self.emit_expr(val)?;
+                        self.buf.push('\n');
+                        self.writeln("break");
+                    } else {
+                        // No value target in scope (statement-position loop):
+                        // record the value as a comment, then break.
+                        let ind = self.indent_str();
+                        let _ = write!(self.buf, "{ind}# break value: ");
+                        self.emit_expr(val)?;
+                        self.buf.push('\n');
+                        self.writeln("break");
+                    }
                 } else {
                     self.writeln("break");
                 }
@@ -3522,10 +4085,35 @@ impl PyEmitCtx {
                 Ok(())
             }
             NodeKind::Guard {
+                let_pattern,
                 condition,
                 else_block,
-                ..
             } => {
+                if let Some(pat) = let_pattern {
+                    // `guard (let PAT = EXPR) else { ELSE }` — a refutable
+                    // binding guard. Lower to a two-arm `match` so PAT's bindings
+                    // (e.g. `val` in `Ok(val)`) are extracted on success and stay
+                    // in scope after the guard (Python `match` bindings persist as
+                    // ordinary assignments); the `_` arm runs the diverging ELSE.
+                    let ind = self.indent_str();
+                    let _ = write!(self.buf, "{ind}match ");
+                    self.emit_expr(condition)?;
+                    self.buf.push_str(":\n");
+                    self.indent += 1;
+                    let ind = self.indent_str();
+                    let _ = write!(self.buf, "{ind}case ");
+                    self.emit_pattern(pat)?;
+                    self.buf.push_str(":\n");
+                    self.indent += 1;
+                    self.writeln("pass");
+                    self.indent -= 1;
+                    self.writeln("case _:");
+                    self.indent += 1;
+                    self.emit_block_body(else_block)?;
+                    self.indent -= 1;
+                    self.indent -= 1;
+                    return Ok(());
+                }
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}if not (");
                 self.emit_expr(condition)?;
@@ -4383,6 +4971,36 @@ impl PyEmitCtx {
                     self.emit_pattern(alt)?;
                 }
             }
+            // Python `match`/`case` sequence patterns: `case []:`,
+            // `case [only]:`, `case [first, *rest]:`. Without this, every list
+            // pattern fell through to the `_` catch-all below, so `[]` and
+            // `[first, ..rest]` both became `case _:` — the first shadowing the
+            // rest ("wildcard makes remaining patterns unreachable"). The `*rest`
+            // star-capture mirrors Bock's `..rest`; a `..` with no binding maps to
+            // an anonymous `*_`.
+            NodeKind::ListPat { elems, rest } => {
+                self.buf.push('[');
+                for (i, e) in elems.iter().enumerate() {
+                    if i > 0 {
+                        self.buf.push_str(", ");
+                    }
+                    self.emit_pattern(e)?;
+                }
+                if let Some(r) = rest {
+                    if !elems.is_empty() {
+                        self.buf.push_str(", ");
+                    }
+                    match &r.kind {
+                        NodeKind::BindPat { name, .. } => {
+                            let _ = write!(self.buf, "*{}", py_value_ident(&name.name));
+                        }
+                        // `..` rest with no binding (or a wildcard) captures and
+                        // discards the tail.
+                        _ => self.buf.push_str("*_"),
+                    }
+                }
+                self.buf.push(']');
+            }
             _ => {
                 self.buf.push('_');
             }
@@ -4828,6 +5446,21 @@ impl PyEmitCtx {
                     self.emit_node(t)?;
                     return Ok(());
                 }
+                // A diverging `raise` expression (`todo()` / `unreachable()`)
+                // yields no value: emit it bare, never `return raise …` (a
+                // `SyntaxError`).
+                if is_raise_expr(t) {
+                    self.write_indent();
+                    self.emit_expr(t)?;
+                    self.buf.push('\n');
+                    return Ok(());
+                }
+                // A value-`if`/`match` with a diverging `raise` branch can't be a
+                // ternary (`return raise … if … else …`). Hoist it to a
+                // statement-form `if`/`match` whose branches `return`/`raise`.
+                if control_flow_has_raise_branch(t) {
+                    return self.emit_tail_control_flow(t);
+                }
                 // A `match` with statement arms yields no value: emit a Python
                 // `match`/`case` statement, not a `return (lambda ...)`.
                 if let NodeKind::Match { scrutinee, arms } = &t.kind {
@@ -4844,6 +5477,12 @@ impl PyEmitCtx {
         } else if crate::generator::node_is_statement(node) {
             // A bare statement body (`break`/`continue`/`return`/assignment).
             self.emit_node(node)?;
+        } else if is_raise_expr(node) {
+            self.write_indent();
+            self.emit_expr(node)?;
+            self.buf.push('\n');
+        } else if control_flow_has_raise_branch(node) {
+            return self.emit_tail_control_flow(node);
         } else if let NodeKind::Match { scrutinee, arms } = &node.kind {
             if crate::generator::match_has_statement_arm(arms) {
                 self.emit_match(scrutinee, arms)?;
@@ -4860,6 +5499,296 @@ impl PyEmitCtx {
             self.emit_expr(node)?;
             self.buf.push('\n');
         }
+        Ok(())
+    }
+
+    /// Emit a value-position `if`/`match` that carries a diverging `raise`
+    /// branch (`todo()` / `unreachable()`) in **tail/return** position as
+    /// statement-form Python: each branch/arm recurses through
+    /// [`Self::emit_block_body`], so a non-diverging branch `return`s its value
+    /// while the diverging branch `raise`s. This replaces the invalid ternary
+    /// (`return raise … if … else …`).
+    fn emit_tail_control_flow(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        match &node.kind {
+            NodeKind::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}if ");
+                self.emit_expr(condition)?;
+                self.buf.push_str(":\n");
+                self.indent += 1;
+                self.emit_block_body(then_block)?;
+                self.indent -= 1;
+                if let Some(eb) = else_block {
+                    if matches!(eb.kind, NodeKind::If { .. }) {
+                        let ind = self.indent_str();
+                        let _ = write!(self.buf, "{ind}el");
+                        // Chain `elif` by re-emitting the nested `if` inline.
+                        return self.emit_tail_control_flow_inline(eb);
+                    }
+                    self.writeln("else:");
+                    self.indent += 1;
+                    self.emit_block_body(eb)?;
+                    self.indent -= 1;
+                }
+                Ok(())
+            }
+            NodeKind::Match { scrutinee, arms } => self.emit_match(scrutinee, arms),
+            // Not a control-flow node — fall back to a plain `return`.
+            _ => {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}return ");
+                self.emit_expr(node)?;
+                self.buf.push('\n');
+                Ok(())
+            }
+        }
+    }
+
+    /// `elif`-chaining tail for [`Self::emit_tail_control_flow`]: the caller has
+    /// already written the `el` prefix, so emit `if <cond>: … (elif/else)`.
+    fn emit_tail_control_flow_inline(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        let NodeKind::If {
+            condition,
+            then_block,
+            else_block,
+            ..
+        } = &node.kind
+        else {
+            return self.emit_tail_control_flow(node);
+        };
+        self.buf.push_str("if ");
+        self.emit_expr(condition)?;
+        self.buf.push_str(":\n");
+        self.indent += 1;
+        self.emit_block_body(then_block)?;
+        self.indent -= 1;
+        if let Some(eb) = else_block {
+            if matches!(eb.kind, NodeKind::If { .. }) {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}el");
+                return self.emit_tail_control_flow_inline(eb);
+            }
+            self.writeln("else:");
+            self.indent += 1;
+            self.emit_block_body(eb)?;
+            self.indent -= 1;
+        }
+        Ok(())
+    }
+
+    /// Emit a block (or bare body) in statement position, **assigning** its
+    /// value to `target` instead of `return`ing it — the value-producing twin of
+    /// [`Self::emit_block_body`]. Used by [`Self::emit_value_binding`] to hoist
+    /// an expression-position control-flow construct into Python statements.
+    ///
+    /// A *diverging* body (one ending in `return`/`break`/`continue`, or a
+    /// statement-only block) is emitted as-is with **no** assignment: control
+    /// leaves the construct before the binding is read, exactly as in Bock where
+    /// such an arm has type `Never` and unifies with the binding's type.
+    fn emit_block_body_assigning(
+        &mut self,
+        target: &str,
+        node: &AIRNode,
+    ) -> Result<(), CodegenError> {
+        if let NodeKind::Block { stmts, tail } = &node.kind {
+            let task_bindings = Self::collect_task_bindings(stmts);
+            let prev = std::mem::replace(&mut self.task_bound_names, task_bindings);
+            for s in stmts {
+                self.emit_node(s)?;
+            }
+            self.task_bound_names = prev;
+            match tail {
+                None => {
+                    // No tail value. If the block had no statements either, keep
+                    // the suite non-empty.
+                    if stmts.is_empty() {
+                        self.writeln("pass");
+                    }
+                }
+                Some(t) if crate::generator::node_is_statement(t) => {
+                    // Diverging / statement tail: emit as a statement (it leaves
+                    // the construct; nothing is assigned).
+                    self.emit_node(t)?;
+                }
+                Some(t) => self.emit_value_assign(target, t)?,
+            }
+        } else if crate::generator::node_is_statement(node) {
+            self.emit_node(node)?;
+        } else {
+            self.emit_value_assign(target, node)?;
+        }
+        Ok(())
+    }
+
+    /// Emit `<target> = <expr>` for a value expression, recursing through nested
+    /// control-flow that itself needs statement form (so an arm whose value is
+    /// another `match`/`loop`/`if`-statement assigns the same target).
+    fn emit_value_assign(&mut self, target: &str, expr: &AIRNode) -> Result<(), CodegenError> {
+        if value_needs_stmt_form(expr) {
+            return self.emit_value_binding(target, expr);
+        }
+        // A diverging `raise` (`todo()`/`unreachable()`) cannot be assigned;
+        // emit it bare (the assignment target is never reached).
+        if is_raise_expr(expr) {
+            self.write_indent();
+            self.emit_expr(expr)?;
+            self.buf.push('\n');
+            return Ok(());
+        }
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}{target} = ");
+        self.emit_expr(expr)?;
+        self.buf.push('\n');
+        Ok(())
+    }
+
+    /// Lower an **expression-position control-flow** value (`match` with
+    /// statement/diverging arms, a value-`loop`, or a statement-form `if`) bound
+    /// to `target` into Python statements that assign `target`.
+    ///
+    /// Python has no statement-admitting expression form, so
+    /// `let r = loop { … break v }` / `let l = match n { _ => { return … } }`
+    /// cannot be emitted as a ternary/IIFE. Callers ([`Self::emit_stmt`]'s
+    /// `LetBinding` arm) first declare `target = None` so it is always bound,
+    /// then call this to fill it in via real `if`/`while`/`match` statements.
+    fn emit_value_binding(&mut self, target: &str, value: &AIRNode) -> Result<(), CodegenError> {
+        match &value.kind {
+            NodeKind::Block { .. } => self.emit_block_body_assigning(target, value),
+            NodeKind::Match { scrutinee, arms } => {
+                self.emit_match_assigning(target, scrutinee, arms)
+            }
+            NodeKind::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}if ");
+                self.emit_expr(condition)?;
+                self.buf.push_str(":\n");
+                self.indent += 1;
+                self.emit_block_body_assigning(target, then_block)?;
+                self.indent -= 1;
+                if let Some(eb) = else_block {
+                    if matches!(eb.kind, NodeKind::If { .. }) {
+                        let ind = self.indent_str();
+                        let _ = write!(self.buf, "{ind}el");
+                        // Re-enter via `emit_value_binding` to chain `elif`.
+                        self.emit_value_binding_if_chain(target, eb)?;
+                    } else {
+                        self.writeln("else:");
+                        self.indent += 1;
+                        self.emit_block_body_assigning(target, eb)?;
+                        self.indent -= 1;
+                    }
+                }
+                Ok(())
+            }
+            NodeKind::Loop { body } => {
+                self.writeln("while True:");
+                self.indent += 1;
+                self.loop_value_targets.push(Some(target.to_string()));
+                self.emit_block_body(body)?;
+                self.loop_value_targets.pop();
+                self.indent -= 1;
+                Ok(())
+            }
+            NodeKind::While { condition, body } => {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}while ");
+                self.emit_expr(condition)?;
+                self.buf.push_str(":\n");
+                self.indent += 1;
+                self.loop_value_targets.push(Some(target.to_string()));
+                self.emit_block_body(body)?;
+                self.loop_value_targets.pop();
+                self.indent -= 1;
+                Ok(())
+            }
+            // Not a hoisted construct: plain assignment.
+            _ => self.emit_value_assign(target, value),
+        }
+    }
+
+    /// Helper for [`Self::emit_value_binding`]'s `elif` chaining: emit the
+    /// keyword tail of an `if` (`if <cond>: … elif …`) for an `else if`. The
+    /// caller has already written the `el` prefix.
+    fn emit_value_binding_if_chain(
+        &mut self,
+        target: &str,
+        node: &AIRNode,
+    ) -> Result<(), CodegenError> {
+        let NodeKind::If {
+            condition,
+            then_block,
+            else_block,
+            ..
+        } = &node.kind
+        else {
+            return self.emit_value_binding(target, node);
+        };
+        self.buf.push_str("if ");
+        self.emit_expr(condition)?;
+        self.buf.push_str(":\n");
+        self.indent += 1;
+        self.emit_block_body_assigning(target, then_block)?;
+        self.indent -= 1;
+        if let Some(eb) = else_block {
+            if matches!(eb.kind, NodeKind::If { .. }) {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}el");
+                self.emit_value_binding_if_chain(target, eb)?;
+            } else {
+                self.writeln("else:");
+                self.indent += 1;
+                self.emit_block_body_assigning(target, eb)?;
+                self.indent -= 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Emit a `match` (statement form) whose arms **assign** `target` rather than
+    /// `return`. Mirrors [`Self::emit_match`] but uses
+    /// [`Self::emit_block_body_assigning`] for arm bodies.
+    fn emit_match_assigning(
+        &mut self,
+        target: &str,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<(), CodegenError> {
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}match ");
+        self.emit_expr(scrutinee)?;
+        self.buf.push_str(":\n");
+        self.indent += 1;
+        for arm in arms {
+            if let NodeKind::MatchArm {
+                pattern,
+                guard,
+                body,
+            } = &arm.kind
+            {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}case ");
+                self.emit_pattern(pattern)?;
+                if let Some(g) = guard {
+                    self.buf.push_str(" if ");
+                    self.emit_expr(g)?;
+                }
+                self.buf.push_str(":\n");
+                self.indent += 1;
+                self.emit_block_body_assigning(target, body)?;
+                self.indent -= 1;
+            }
+        }
+        self.indent -= 1;
         Ok(())
     }
 
@@ -8126,6 +9055,151 @@ mod tests {
         assert!(
             !out.contains("def message(self)"),
             "must NOT emit a `def message(self)` clobbered by the field, got: {out}"
+        );
+    }
+
+    // ── Python-specific control-flow / import lowering ──────────────────────
+
+    fn call_no_args(id: u32, name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::Call {
+                callee: Box::new(id_node(id + 1, name)),
+                args: vec![],
+                type_args: vec![],
+            },
+        )
+    }
+
+    /// `todo()` / `unreachable()` are diverging `raise` expressions; an arbitrary
+    /// call or the `Unreachable` node is not (the latter *prints* a `raise` but
+    /// is the dedicated node, recognised separately).
+    #[test]
+    fn is_raise_expr_recognises_todo_and_unreachable() {
+        assert!(is_raise_expr(&call_no_args(1, "todo")));
+        assert!(is_raise_expr(&call_no_args(3, "unreachable")));
+        assert!(is_raise_expr(&node(5, NodeKind::Unreachable)));
+        assert!(!is_raise_expr(&call_no_args(6, "compute")));
+        assert!(!is_raise_expr(&int_lit(8, "1")));
+    }
+
+    /// A `let x = todo()` body emits a bare `raise`, never `x = raise …` (a
+    /// `SyntaxError`), and a `todo()` function tail emits a bare `raise`, never
+    /// `return raise …`.
+    #[test]
+    fn todo_in_return_and_let_position_emits_bare_raise() {
+        // Tail position: `fn f() { todo() }`.
+        let f = fn_decl_tail(1, Visibility::Private, "f", call_no_args(10, "todo"));
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("raise NotImplementedError()"),
+            "expected a `raise`, got: {out}"
+        );
+        assert!(
+            !out.contains("return raise"),
+            "must NOT emit `return raise …`, got: {out}"
+        );
+    }
+
+    /// An expression-position `loop` bound into a `let`, yielding via `break v`,
+    /// is hoisted to a `while True:` whose `break v` becomes `<target> = v` then
+    /// `break` — never the invalid expression `let x = <loop>`.
+    #[test]
+    fn value_loop_break_hoists_to_while_assign() {
+        // `fn f() { let r = loop { break 5 }  r }`
+        let break_node = node(
+            30,
+            NodeKind::Break {
+                value: Some(Box::new(int_lit(31, "5"))),
+            },
+        );
+        let loop_node = node(
+            20,
+            NodeKind::Loop {
+                body: Box::new(block(21, vec![], Some(break_node))),
+            },
+        );
+        let let_r = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "r")),
+                ty: None,
+                value: Box::new(loop_node),
+            },
+        );
+        let body = block(2, vec![let_r], Some(id_node(40, "r")));
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("while True:"),
+            "value-loop should hoist to `while True:`, got: {out}"
+        );
+        assert!(
+            out.contains("r = 5"),
+            "break value should assign the target `r = 5`, got: {out}"
+        );
+        assert!(
+            out.contains("break"),
+            "the loop should still `break`, got: {out}"
+        );
+        assert!(
+            !out.contains("# unsupported"),
+            "must NOT emit `# unsupported`, got: {out}"
+        );
+    }
+
+    /// A record field declaration whose name matches a sibling-module public
+    /// function must NOT be counted as a reference: the field-label occurrence is
+    /// subtracted, so the implicit-import scan does not pull in
+    /// `from <sibling> import <name>` (which closes a Python import cycle).
+    #[test]
+    fn field_label_does_not_trigger_implicit_import() {
+        // `module models` declares `record Summary { total: Int }`. `total` is a
+        // FIELD name; it must not match a sibling `fn total`.
+        let summary = node(
+            5,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Summary"),
+                generic_params: vec![],
+                fields: vec![bock_ast::RecordDeclField {
+                    id: 6,
+                    span: span(),
+                    name: ident("total"),
+                    ty: bock_ast::TypeExpr::Named {
+                        id: 7,
+                        span: span(),
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                    default: None,
+                }],
+            },
+        );
+        let models = module_with_path(&["models"], vec![], vec![summary]);
+        // Public-symbol map says `total` is declared by `service`.
+        let mut public_symbols = HashMap::new();
+        public_symbols.insert("total".to_string(), "service".to_string());
+        let imports = implicit_imports_for(&models, &public_symbols, "models");
+        assert!(
+            imports.is_empty(),
+            "a field named `total` must not implicit-import `service.total`, got: {imports:?}"
         );
     }
 }

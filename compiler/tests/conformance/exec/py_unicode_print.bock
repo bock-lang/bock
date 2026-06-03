@@ -1,0 +1,20 @@
+// TEST: exec_py_unicode_print
+// EXPECT: output "check=✓ arrow=→ yen=¥"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Prints multibyte (non-ASCII) characters. On POSIX every target encodes stdout
+// as UTF-8, so this passes regardless. Its real purpose is to lock in the
+// Python entry-point UTF-8 stdout guard (Q-py-windows-utf8): on Windows, Python
+// defaults stdout to the locale codepage, so a unicode `print` raises
+// `UnicodeEncodeError` / mojibakes. The entry module (`main.py`) now emits
+// `sys.stdout.reconfigure(encoding="utf-8")`, making Windows output match the
+// POSIX targets. The fixture's assertion only DIFFERS on Windows, but it is a
+// durable regression marker that unicode output round-trips byte-for-byte.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  println("check=✓ arrow=→ yen=¥")
+}

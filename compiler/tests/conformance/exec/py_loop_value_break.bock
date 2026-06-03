@@ -1,0 +1,36 @@
+// TEST: exec_py_loop_value_break
+// EXPECT: output "found=30"
+// EXPECT: targets python
+//
+// Expression-position `loop` bound into a `let`, yielding its value via
+// `break <v>` (`let r = loop { … break v }`). Python's `break` carries no
+// value and Python has no value-`loop`, so this previously emitted `# unsupported`
+// (a `SyntaxError`) in the `let r = …` RHS.
+//
+// The py fix hoists the value-`loop` into a `while True:` statement and records
+// the binding as the loop's value target, so `break v` lowers to
+// `r = v` followed by `break`.
+//
+// PYTHON-ONLY: js/ts/rust/go all emit `/* unsupported */` for a value-`loop`
+// bound into a `let` (the same shared gap behind inventory-system's
+// `fast_search`); a shared AIR temp-hoist desugar is the proper cross-backend
+// fix (surfaced as an OPEN). This fixture locks in the Python lowering meanwhile.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn first_over(items: List[Int], threshold: Int) -> Int {
+  let mut i = 0
+  let found = loop {
+    if (i >= items.len()) { break 0 }
+    if (items.get(i).unwrap() > threshold) { break items.get(i).unwrap() }
+    i = i + 1
+  }
+  found
+}
+
+fn main() -> Void {
+  let nums = [10, 20, 30, 40]
+  println("found=${first_over(nums, 25)}")
+}
