@@ -1984,3 +1984,30 @@ AWAITING OPERATOR (2 decisions, nothing in flight): (1) **examples-hardening dir
     Worth deciding whether go holds the same v1.0 "examples green" bar or tiers to v1.1. SESSION IS LONG → recommend a
     checkpoint/digest here before the next batch.
   NEXT: land this tracking PR + #211; checkpoint with operator (go bar + next batch: Q-string-num-jstspygo is the unblock).
+
+[2026-06-03 20:25 UTC] Q-string-num-jstspygo DONE (#213) + windows-python INCIDENT + hotfix (#214); go-bar decided
+  Input: operator chose "dispatch Q-string-num-jstspygo" + "go HOLDS the all-5 v1.0 bar." Dispatched one worktree
+    engineer session (foreground, Opus 4.8).
+  #213 (Q-string-num-jstspygo): §18.3 String + numeric/Char/Bool methods now lower to native on js/ts/python/go (was
+    rust-only #210), gating on `recv_kind="Primitive:<Ty>"` (try_emit_string_method/try_emit_numeric_method);
+    generator.rs untouched. Fixture promoted to all-5; conformance 476→480. **microservice ts FAIL→PASS** (the slice
+    3-arg fix). go advanced past String.slice (now match-binding + Result-payload). Examples: js7·ts5·py9·rust8·go1.
+  ★ INCIDENT (my error): I merged #213 while its **windows-python lane was still failing**. Cause — a merge script that
+    PRINTED `gh pr checks` states then ran `gh pr merge` UNCONDITIONALLY in the same step; `gh pr checks --watch` had
+    exited 0 (= checks *finished*, not *passed*). The failure: the all-5 `string_num_methods` fixture printed a multibyte
+    slice result; **Windows-Python stdout defaults to the locale codepage, not UTF-8** → output mismatch (ubuntu+macos
+    python passed, so it looked green). main's windows lane went red.
+  RECOVERY: diagnosed from the failed-job log (output-mismatch on python, the multibyte `é`). Forward-fixed via **#214**
+    — made the fixture ASCII-output (`"hello world"`), NOT a revert (the #213 codegen is correct; only the fixture's
+    stdout was platform-divergent). Verified local conformance 480/0, pushed, **watched ALL lanes incl. windows to pass,
+    then merged GATED on `mergeStateStatus=CLEAN` + fails=0**. main 6806edc, windows green.
+  TRIAGE: Q-string-num-jstspygo → DONE. NEW **Q-py-windows-utf8** (real product gap: Bock-generated python should
+    `sys.stdout.reconfigure(encoding="utf-8")` at entry so unicode output works on Windows). go-Char-display OPEN → folded
+    into Q-examples-codegen-misc (n). Multibyte rune-correctness fixture deferred (ASCII per #214) until Q-py-windows-utf8
+    + the go Char-payload gap close. Memory updated (engineer-subagent-dispatch-discipline): GATE the merge on actual
+    pass/fail, never on "--watch finished"; watch the windows lane specifically (cross-platform stdout-encoding trap).
+  DECISION RECORDED: **go holds the all-5 v1.0 bar** (operator, eyes-open re: the go chain depth — Q-string-num [done] +
+    D match-exprpos + go-Result-payload before any go example completes).
+  STATE: main 6806edc, 0 open PRs (after this tracking PR), clean. 11 PRs this session (#204–#214), 0 net regressions.
+    NEXT: SESSION HAS RUN VERY LONG — checkpoint + session-end digest; do NOT auto-start the next cluster. Remaining
+    leverage order: D (match-exprpos, deep, go-blocking, biggest remaining) · J · K · go-Result-payload · Q-py-windows-utf8.

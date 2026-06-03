@@ -12,16 +12,17 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-03 18:01 — **MS-examples-hardening: gate + A/B/C + Q-impl-body-typecheck + rust L/F/G + go E
-LANDED (8 PRs #204–#211).** main a7a0083. Latest: #209 (E go-enum-boxing) + #210 (L cargo-workspace, F move/borrow,
-G rust String/num) merged; combined-state conformance **476/0** REQUIRE=all; baseline ratcheted (#211). **Examples
-matrix now: runtime-working js 7 · ts 4 · py 9 · RUST 2→8 · go 1 / 20** (rust jumped hard from L/F/G; **go STILL 1 — E
-was necessary but go examples hit a deeper barrier chain**: string-methods §18.3 + match-exprpos + Result-payload). 0
-regressions. **Remaining leverage order:** Q-string-num-jstspygo (string/num on js/ts/py/**go** — unblocks go +
-js/ts/py runtime) · Q-js-effect-export (J) · Q-py-circular-import (K) · Q-match-exprpos (D, deep, all-backend — biggest
-remaining + go-blocking) · Q-examples-codegen-misc (now 13 sub-items: incl. rust guard-let/mut-param/list-pattern from
-#210, go Result-payload from #209). **STRATEGIC: go is the lone stuck target (1/20) — needs Q-string-num-jstspygo + D +
-go Result-payload chained before ANY go example completes; worth an operator check on the go v1.0 bar.** — Earlier
+_Last reconciled: 2026-06-03 20:25 — **MS-examples-hardening: 11 PRs landed (#204–#214).** main 6806edc. Latest:
+**Q-string-num-jstspygo DONE (#213** — §18.3 String/num/Char/Bool methods on js/ts/py/go; conformance 476→480;
+**microservice ts FAIL→PASS**). **INCIDENT+RECOVERY:** #213 was merged with a failing windows-python lane (the all-5
+fixture printed multibyte slice output; Windows-Python stdout=codepage not UTF-8) — caused by an ungated merge script;
+**hotfix #214** (ASCII-output fixture) restored main green, merge properly gated on `mergeStateStatus=CLEAN`. Root
+product issue filed → **Q-py-windows-utf8**. **Examples matrix: runtime-working js 7 · ts 4→5 · py 9 · rust 8 · go 1 /
+20** (ts +1 microservice; go still 1 — advanced past String.slice, now hits match-binding + Result-payload). **OPERATOR
+DECISION (2026-06-03): go HOLDS the all-5 v1.0 bar** (not tiered) — commit to the full go chain. **Remaining leverage
+order:** Q-js-effect-export (J) · Q-py-circular-import (K) · **Q-match-exprpos (D, deep, all-backend — biggest remaining,
+go-blocking)** · go Result-payload + Q-py-windows-utf8 + Q-examples-codegen-misc (14 sub-items). 0 regressions across the
+workstream. — Earlier
 2026-06-03 13:44: **EXAMPLES-EXEC AUDIT COMPLETE + operator decisions** (see audit.md 2026-06-03 13:44). The full 20×5 audit (built in /tmp, project mode) gives the TRUE matrix: js 10/20 compile·2/10 run,
 ts 2/20·2/2, py 15/20·7/15, **rust 3/20·2/3 (in-repo 0/20 — workspace bug masks), go 1/20·1/1** — hello-world the only
 all-5. Worse than the digest's 6-example sample, and **rust/go fail on REAL codegen, not just the env bug** (proven:
@@ -426,12 +427,22 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `to_float`/`to_int`/`abs`/`min`/`max`/`clamp`/`floor`/`ceil`/`round`/`sqrt`/… to native rust; new checker `string_concat`
   stamp lowers `String + String` to `format!`. Fixture `exec_rust_string_num_methods` (rust-only). **The same lowerings
   are MISSING on js/ts/python/go → split out to Q-string-num-jstspygo (below).**
-- **[Q-string-num-jstspygo] String/numeric method lowering missing on js/ts/python/go (§18.3)** — bug · ready ·
-  `compiler/crates/bock-codegen/` (js/ts/py/go) · — · links MS-examples-hardening, #210, §18.3 · note: FOUND 2026-06-03
-  (#210). #210 lowered the §18.3 String/numeric methods (`slice`/`substring`/`char_at`/`index_of`/`to_float`/`to_int`/…)
-  to native code on RUST only; js/ts/python/go still emit `s.slice(...)`/`n.toFloat()` (undefined on those targets — e.g.
-  go `microservice` now hits `String.slice` unimplemented after the boxing fix). Grow the same per-backend lowerings,
-  routed by `recv_kind`. Contributes to go (and js/ts/py runtime) example failures. Worth a single cross-backend session.
+- **[Q-string-num-jstspygo] String/numeric method lowering missing on js/ts/python/go (§18.3)** — bug ·
+  **DONE → #213 (hotfix #214)** · `compiler/crates/bock-codegen/` (js/ts/py/go) · — · links MS-examples-hardening, #210,
+  #213, #214, §18.3, Q-py-windows-utf8 · note: FIXED by #213 — String + numeric/Char/Bool §18.3 methods now lower to each
+  target's native idiom on js/ts/python/go (was rust-only #210), gating on `recv_kind = "Primitive:<Ty>"` via
+  `try_emit_string_method`/`try_emit_numeric_method`; `generator.rs` untouched. Fixture promoted to all-5
+  (`string_num_methods.bock`); conformance 476→480. **microservice ts FAIL→PASS** (the `slice` 3-arg fix); go advanced
+  past `String.slice` (now hits the deeper chain — match-binding + Result-payload). **INCIDENT: #213 merged with a
+  failing windows-python lane** (the all-5 fixture printed multibyte slice output; Windows-Python stdout = locale codepage,
+  not UTF-8 → mismatch). Hotfix **#214** made the fixture ASCII-output; main green. Root product issue → Q-py-windows-utf8.
+- **[Q-py-windows-utf8] Bock-generated Python should force UTF-8 stdout (cross-platform unicode)** — bug · ready ·
+  `compiler/crates/bock-codegen/` (py) · — · links #213, #214, MS-examples-hardening · note: FOUND 2026-06-03 (#214
+  incident). Windows-Python defaults stdout to the locale codepage, so a Bock program that `print`s multibyte/unicode
+  emits mismatched/garbled bytes on Windows (passes on Linux/macOS). Emit a stdout UTF-8 reconfigure at the Python entry
+  point (`sys.stdout.reconfigure(encoding="utf-8")`, py3.7+, entry module only) so unicode output is cross-platform. Real
+  product correctness gap; surfaced when the string_num_methods fixture printed a multibyte slice. Re-enables a
+  multibyte-rune-correctness fixture (currently ASCII-only per #214).
 - **[Q-js-effect-export] JS: effect-group/stack export referenced but not emitted** — bug · ready ·
   `compiler/crates/bock-codegen/` (js) · — · links MS-examples-hardening, #155, #157 · note: FOUND 2026-06-03 (audit).
   `SyntaxError: Export 'AppEffects'/'ApiEffects'/'ServiceStack' is not defined in module` — an effect-group/stack symbol
@@ -460,7 +471,10 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   todo-list js); (j) **[from #210]** rust: guard-`let` pattern lowered to a boolean guard → E0600/E0425 unbound `val`/`val2`
   (ownership-demo); (k) **[from #210]** rust: `mut <param>` not emitted as `mut` → E0384 (ownership-demo); (l) **[from #210]**
   rust: list-pattern emitted as a slice pattern → E0529 (ownership-demo); (m) **[from #209]** go: Result-payload
-  type-assert error after the boxing fix (calculator, effect-showcase go). Triage each as its own fix or example correction.
+  type-assert error after the boxing fix (calculator, effect-showcase go); (n) **[from #213]** go: `Char.to_string()`/
+  `display` emits `fmt.Sprintf("%v", rune)` → prints the code-point integer (`65`) not the char (`A`); pre-existing
+  primitive-*bridge* path (not the method lowering), compounded by the boxed-Optional Char payload. Triage each as its
+  own fix or example correction.
 - **[Q-chat-protocol-allfail] `chat-protocol` fails build on all 5 — DIAGNOSED → folded into Q-match-exprpos** — bug ·
   **RESOLVED-AS-DUP (diagnosed 2026-06-03 13:44)** · — · links Q-match-exprpos · note: the all-5 failure (js `Unexpected
   token ')'`, py `'(' was never closed`, ts `Expression expected`, go enum-return) is the **expression-position
