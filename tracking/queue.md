@@ -12,7 +12,10 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-03 23:05 — **MS-examples-hardening: 17 PRs landed (#204–#221).** main e2117ee. Latest: a
+_**SESSION-END PAUSE (2026-06-03 23:25) — main e1e776d, 0 open PRs, clean, CI green, nothing in flight.** Next session:
+the SHARED-lowering phase (sequential) — **Q-exprpos-shared-desugar** first (go-blocking). See the SESSION-END digest in
+audit.md. ↓ —
+Last reconciled: 2026-06-03 23:05 — **MS-examples-hardening: 17 PRs landed (#204–#221).** main e2117ee. Latest: a
 **5-WAY PARALLEL FAN-OUT — one cluster-batch per backend (#216 rust · #217 js · #218 py · #219 ts · #220 go), all
 file-disjoint, generator.rs untouched in every one.** Combined-state conformance **0 failed across 124 fixtures**
 (REQUIRE=all, verified on merged main). **Examples matrix LEAPT: runtime-working js 7→14 · ts 5→7 · py 9→12 · rust 8→9 ·
