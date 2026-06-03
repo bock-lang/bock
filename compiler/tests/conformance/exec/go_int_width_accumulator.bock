@@ -1,0 +1,31 @@
+// TEST: exec_go_int_width_accumulator
+// EXPECT: output "total=60;cmp=yes"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Integer-width unification at an untyped `let` (this session's cluster 3). Bock
+// `Int` is `int64`, but Go infers an untyped integer constant (`let total = 0`)
+// as the default `int` under `:=`. A later mix with an `int64` value — a `+ p`
+// where `p` ranges a `[]int64`, or `>= int64(len(xs))` — then fails `mismatched
+// types int and int64`. The Go backend now pins such a binding to
+// `var total int64 = 0`. This is the context-audit `calculate_total` /
+// `fast_search` shape.
+module main
+
+fn calculate_total(prices: List[Int]) -> Int {
+  let mut total = 0
+  for p in prices {
+    total = total + p
+  }
+  total
+}
+
+fn at_least_len(xs: List[Int], n: Int) -> Bool {
+  let count = xs.len()
+  n >= count
+}
+
+fn main() -> Void {
+  let xs = [10, 20, 30]
+  let cmp = if (at_least_len(xs, 3)) { "yes" } else { "no" }
+  println("total=${calculate_total(xs)};cmp=${cmp}")
+}

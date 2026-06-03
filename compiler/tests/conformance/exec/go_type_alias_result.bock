@@ -1,0 +1,41 @@
+// TEST: exec_go_type_alias_result
+// EXPECT: output "ok:7;err:bad;ok:9"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Type alias to a runtime container + sequential statement `match`es (this
+// session's bonus go advancements, surfaced by markdown-parser). Two issues:
+//
+//  1. `type R = Result[Int, String]` used as a fn return: Go has no transparent
+//     alias to a *runtime* struct, so a value of the alias type must lower to the
+//     `__bockResult` runtime (whose `.tag` a match reads) and the Ok/Err payload
+//     scan must see *through* the alias. Before the fix the alias rendered as
+//     `interface{}`, so `__res.tag` was undefined.
+//  2. Two sequential statement-position `match`es in one function both emitted
+//     `__res := …` in the same scope (`no new variables on left side of :=`);
+//     each is now scoped to its own Go block.
+module main
+
+type R = Result[Int, String]
+
+fn parse(s: String) -> R {
+  if (s == "x") { return Err("bad") }
+  if (s == "a") { return Ok(7) }
+  return Ok(9)
+}
+
+fn describe(s: String) -> String {
+  let first = parse(s)
+  let out = match first {
+    Ok(n) => "ok:${n}"
+    Err(e) => "err:${e}"
+  }
+  let second = parse("a")
+  match second {
+    Ok(n) => return "${out}"
+    Err(e) => return "${out}"
+  }
+}
+
+fn main() -> Void {
+  println("${describe("a")};${describe("x")};${describe("b")}")
+}

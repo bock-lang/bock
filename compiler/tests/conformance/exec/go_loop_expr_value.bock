@@ -1,0 +1,37 @@
+// TEST: exec_go_loop_expr_value
+// EXPECT: output "found=20;none=-1"
+// EXPECT: targets go
+//
+// Expression-position `loop { … break <v> }` as a value (this session's cluster
+// 2). Bock's `loop` is a value-producing expression terminated by `break <v>`;
+// Go's `for` carries no value. The Go backend lowers it to an IIFE
+// `func() T { for { … } }()` whose `break <v>` becomes `return <v>`. Before the
+// fix the Go emitter produced `result := /* unsupported */` (a syntax error:
+// "expected operand, found 'return'"), which is the context-audit example's
+// `fast_search` shape distilled here.
+//
+// GO-TARGETED: the js/ts/python/rust backends emit their own `/* unsupported */`
+// for an expression-position value `loop` (the same gap, unfixed here — this
+// session's boundary is `go.rs` only). Reported as an OPEN in the PR so a future
+// session lowers the value-`loop` on the other four backends.
+module main
+
+fn find_at(items: List[Int], target: Int) -> Int {
+  let mut i = 0
+  let result = loop {
+    if (i >= items.len()) { break (0 - 1) }
+    match items.get(i) {
+      Some(v) => {
+        if (v == target) { break v }
+      }
+      None => { break (0 - 1) }
+    }
+    i = i + 1
+  }
+  result
+}
+
+fn main() -> Void {
+  let xs = [10, 20, 30]
+  println("found=${find_at(xs, 20)};none=${find_at(xs, 99)}")
+}

@@ -1,0 +1,25 @@
+// TEST: exec_go_unused_let_binding
+// EXPECT: output "done:3"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Unused `let` binding (this session's cluster 4). Go rejects a local that is
+// declared and never read (`declared and not used`); Bock permits it — a binding
+// kept only for its initializer's call. The Go backend now appends `_ = x` after
+// such a binding when its name is referenced nowhere in the rest of the block.
+// This is the guessing-game / context-audit `main` shape: several calls bound and
+// never reused. The calls still run (their result is computed) — only the unused
+// *binding* is the point; here each returns 1 and the total is asserted so the
+// side effect is observable without depending on print order.
+module main
+
+fn score(label: String) -> Int {
+  1
+}
+
+fn main() -> Void {
+  let a = score("one")
+  let b = score("two")
+  let c = score("three")
+  let total = score("a") + score("b") + score("c")
+  println("done:${total}")
+}

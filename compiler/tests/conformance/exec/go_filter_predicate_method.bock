@@ -1,0 +1,36 @@
+// TEST: exec_go_filter_predicate_method
+// EXPECT: output "instock=2;any=yes"
+// EXPECT: targets js, ts, python, rust, go
+//
+// `filter`/`any` predicate return-type pinning (this session's bonus go
+// advancement, surfaced by inventory-system / chat-protocol). A predicate whose
+// body is a *method call* (`(p) => p.in_stock()`) has a Go return type the
+// inference erased to `interface{}`, so the closure rendered as
+// `func(T) interface{}` and `if __f(__x)` failed with `non-boolean condition`.
+// The Go backend now pins the predicate's return type to `bool`. The list is
+// declared `List[Product]` so its Go element type is the concrete `Product`
+// (an untyped record-literal list would infer `[]interface{}`, an orthogonal gap
+// not exercised here).
+module main
+
+record Product {
+  name: String
+  qty: Int
+}
+
+impl Product {
+  fn in_stock(self) -> Bool {
+    self.qty > 0
+  }
+}
+
+fn main() -> Void {
+  let products: List[Product] = [
+    Product { name: "a", qty: 5 },
+    Product { name: "b", qty: 0 },
+    Product { name: "c", qty: 3 }
+  ]
+  let available = products.filter((p) => p.in_stock())
+  let anyAvail = if (products.any((p) => p.in_stock())) { "yes" } else { "no" }
+  println("instock=${available.len()};any=${anyAvail}")
+}

@@ -1,0 +1,40 @@
+// TEST: exec_go_result_payload_untyped_let
+// EXPECT: output "sum=14;err=boom"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go Result/Optional payload type-assertion at an *untyped* `let` binding (this
+// session's cluster 1). A `let r = step(...)` with no `: Result[..]` annotation
+// binds a boxed payload that, when later `match`ed, must be asserted to the
+// concrete Ok/Err type — otherwise the Go binding stays `interface{}` and a
+// downstream concrete use (`eval(.., v, ..)` wanting `float64`/`int64`) fails to
+// compile. The fix records an untyped binding's `(ok, err)` elems from the
+// Result-returning call, mirroring the typed-let path.
+//
+// This is the calculator example's "chained" shape distilled: a Result-returning
+// fn's value bound untyped, matched, and its Ok payload reused in arithmetic.
+module main
+
+fn checked_add(a: Int, b: Int) -> Result[Int, String] {
+  if (a > 100) {
+    return Err("boom")
+  }
+  return Ok(a + b)
+}
+
+fn run(a: Int) -> String {
+  let step1 = checked_add(a, 4)
+  match step1 {
+    Ok(v) => {
+      let step2 = checked_add(v, 6)
+      match step2 {
+        Ok(total) => return "sum=${total}"
+        Err(e) => return "err=${e}"
+      }
+    }
+    Err(e) => return "err=${e}"
+  }
+}
+
+fn main() -> Void {
+  println("${run(4)};${run(200)}")
+}

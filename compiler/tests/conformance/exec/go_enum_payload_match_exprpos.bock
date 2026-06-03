@@ -1,0 +1,39 @@
+// TEST: exec_go_enum_payload_match_exprpos
+// EXPECT: output "h:2:Hi;t:body;f"
+// EXPECT: targets go
+//
+// GO-TARGETED: the Python backend has the *same* expression-position payload-bind
+// gap this fixes for Go (its value-IIFE drops the `level`/`text` bindings →
+// `NameError`); fixing that is the Python backend's job (this session is
+// `go.rs`-only). Reported as an OPEN in the PR. js/rust/go all pass.
+//
+// Enum-variant *record-pattern* field binding in an *expression-position* match
+// (this session's bonus go advancement, surfaced by markdown-parser / micro-
+// service). A `match d { Heading { level, text } => "${level}:${text}" }` used as
+// a value lowers to an IIFE `func() string { switch __v := d.(type) { case
+// DocHeading: level := __v.Level; text := __v.Text; … } }()`. Before the fix the
+// expression-position user-enum match emitted a *non-binding* `switch d.(type)`
+// and dropped the payload bindings, so `level`/`text` were undefined. (The enum
+// is `Doc`, not `Node`: `Node` collides with the TS DOM built-in type.)
+module main
+
+enum Doc {
+  Heading { level: Int, text: String }
+  Para { body: String }
+  Rule
+}
+
+fn render(n: Doc) -> String {
+  match n {
+    Heading { level, text } => "h:${level}:${text}"
+    Para { body } => "t:${body}"
+    Rule => "f"
+  }
+}
+
+fn main() -> Void {
+  let a = render(Heading { level: 2, text: "Hi" })
+  let b = render(Para { body: "body" })
+  let c = render(Rule)
+  println("${a};${b};${c}")
+}
