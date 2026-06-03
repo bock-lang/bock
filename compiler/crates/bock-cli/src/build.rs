@@ -337,6 +337,51 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
             process::exit(1);
         }
 
+        // ── Transpiled-test pass (§20.6.2) ───────────────────────────────────
+        // Project mode transpiles each Bock `@test` function into the target's
+        // idiomatic test framework so `cargo test` / `go test` / `npm test` /
+        // `pytest` run them. Skipped under `--source-only` (bare transpilation,
+        // no scaffolding). The framework variant comes from the validated deep
+        // config (defaulting per §20.6.2) so the emitted test files match the
+        // scaffolded manifest.
+        if !options.source_only {
+            let target_config = scaffold_config.target(target).cloned().unwrap_or_default();
+            let framework = bock_codegen::effective_test_framework(target, &target_config);
+            match generator.generate_tests(&module_inputs, &framework) {
+                Ok(artifacts) => {
+                    for tf in &artifacts.files {
+                        let dest = output_dir.join(&tf.path);
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&dest, &tf.content)?;
+                        total_files_written += 1;
+                    }
+                    // Some targets (Rust) wire their inline test module into the
+                    // entry file. Append the snippet to the already-written entry.
+                    if let Some(append) = &artifacts.entry_append {
+                        if let Some(entry_rel) = entry_file_rel(target) {
+                            let entry_path = output_dir.join(entry_rel);
+                            if entry_path.exists() {
+                                let mut content = std::fs::read_to_string(&entry_path)?;
+                                content.push_str(append);
+                                std::fs::write(&entry_path, content)?;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: test transpilation failed for target {target}: {e}");
+                    found_errors = true;
+                }
+            }
+        }
+
+        if found_errors {
+            eprintln!("build: aborting due to test-transpilation errors");
+            process::exit(1);
+        }
+
         // Optionally invoke target compiler
         if !options.source_only {
             // Some targets (rust/go) emit a real project (Cargo crate / Go
@@ -364,6 +409,15 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
                 let ext = target_file_extension(target);
                 let generated_files = find_files_with_extension(&output_dir, &ext)?;
                 for gen_file in &generated_files {
+                    // The transpiled test files (`bock.test.{js,ts}`,
+                    // `test_bock.py`) are validated by the test framework
+                    // (`npm test` / `pytest`), not by the build-time per-file
+                    // toolchain check that targets the runtime source tree: they
+                    // import the test framework (which may be absent) and use the
+                    // framework's module-resolution semantics. Skip them here.
+                    if is_transpiled_test_file(gen_file) {
+                        continue;
+                    }
                     match toolchain_registry.invoke(target, gen_file, false) {
                         Ok(_result) => {}
                         Err(bock_build::toolchain::ToolchainError::NotFound {
@@ -412,6 +466,20 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
     let total_ms = total_start.elapsed().as_millis();
     println!("build: done ({total_ms}ms)");
     Ok(())
+}
+
+/// The build-root-relative path of the entry file a target's transpiled-test
+/// pass appends its inline-test wiring to, or `None` for targets that place
+/// tests in standalone files (no entry wiring needed).
+///
+/// Only Rust wires an inline `#[cfg(test)] mod bock_tests;` into `src/main.rs`
+/// (see [`bock_codegen::TestArtifacts::entry_append`]); js/ts/python/go emit
+/// freestanding test files the framework discovers on its own.
+fn entry_file_rel(target: &str) -> Option<&'static str> {
+    match target {
+        "rust" | "rs" => Some("src/main.rs"),
+        _ => None,
+    }
 }
 
 /// Read + validate the project-mode scaffolding config from `bock.project`.
@@ -769,6 +837,17 @@ fn create_generator(target: &str) -> anyhow::Result<Box<dyn CodeGenerator>> {
             );
         }
     }
+}
+
+/// Whether `path` is one of the transpiled-test files (S7) — `bock.test.js`,
+/// `bock.test.ts`, or `test_bock.py`. These are exercised by the target's test
+/// framework (`npm test` / `pytest`), not by the build-time per-file toolchain
+/// validation that targets the runtime source tree.
+fn is_transpiled_test_file(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|s| s.to_str()),
+        Some("bock.test.js" | "bock.test.ts" | "test_bock.py")
+    )
 }
 
 /// Get the file extension for a target's generated files.

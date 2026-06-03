@@ -296,6 +296,61 @@ impl CodeGenerator for JsGenerator {
 
         Ok(GeneratedCode { files })
     }
+
+    /// Transpile `@test` functions into a Vitest/Jest `bock.test.js` file (S7).
+    ///
+    /// `framework` selects the idiom: `"jest"` uses Jest's global `describe`/
+    /// `it`/`expect`; anything else uses Vitest (`import { describe, it, expect }
+    /// from "vitest"`). Both share the `expect(actual).toEqual/toBe(...)` API, so
+    /// the per-assertion lowering is identical; only the framework import differs.
+    /// The functions under test are imported by name from their emitted modules.
+    fn generate_tests(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+        framework: &str,
+    ) -> Result<crate::generator::TestArtifacts, CodegenError> {
+        crate::generator::js_ts_generate_tests(
+            modules,
+            framework,
+            &self.target().conventions.file_extension,
+            // JS imports the emitted `.js` siblings directly.
+            "js",
+            |module, source_path, is_entry| self.module_output_path(module, source_path, is_entry),
+            |ctx_modules| {
+                let enum_variants = crate::generator::collect_enum_variants(ctx_modules);
+                let trait_decls = crate::generator::collect_trait_decls(ctx_modules);
+                let record_names = crate::generator::collect_record_names(ctx_modules);
+                let mut field_method_collisions = HashSet::new();
+                for (module, _) in ctx_modules {
+                    field_method_collisions.extend(crate::generator::collect_record_field_names(
+                        module,
+                        to_camel_case,
+                    ));
+                }
+                let mut ctx = EmitCtx::new();
+                ctx.per_module = true;
+                ctx.enum_variants = enum_variants;
+                ctx.trait_decls = trait_decls;
+                ctx.record_names = record_names;
+                ctx.field_method_collisions = field_method_collisions;
+                ctx.seed_effect_registries(ctx_modules);
+                Box::new(JsTestEmitter { ctx })
+            },
+        )
+    }
+}
+
+/// Adapter wrapping a JS [`EmitCtx`] so the shared js/ts test-file builder
+/// ([`crate::generator::js_ts_generate_tests`]) can drive expression lowering
+/// without depending on the concrete (private) emit-context type.
+struct JsTestEmitter {
+    ctx: EmitCtx,
+}
+
+impl crate::generator::JsTsExprEmitter for JsTestEmitter {
+    fn expr_to_string(&mut self, node: &AIRNode) -> Result<String, CodegenError> {
+        self.ctx.expr_to_string(node)
+    }
 }
 
 impl JsGenerator {
@@ -1798,10 +1853,19 @@ impl EmitCtx {
                         self.range_runtime_emitted = true;
                     }
                 }
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
+                // `@test` functions are transpiled separately into Vitest/Jest
+                // test files (project mode, §20.6.2 — see `generate_tests`), never
+                // into the runtime module tree: their `expect(...)` assertion DSL
+                // has no runtime definition in the emitted source.
+                let mut first = true;
+                for item in items.iter() {
+                    if crate::generator::fn_is_test(item) {
+                        continue;
+                    }
+                    if !first {
                         self.buf.push('\n');
                     }
+                    first = false;
                     self.emit_node(item)?;
                 }
                 // Per-module path: re-export the public non-function declarations

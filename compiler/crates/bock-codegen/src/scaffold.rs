@@ -563,6 +563,27 @@ fn python_names(project_name: Option<&str>, package_override: Option<&str>) -> (
     (dist, module)
 }
 
+/// The effective test framework for `target` given its validated config,
+/// applying the §20.6.2 target-appropriate default for any unset choice.
+///
+/// This is the single source of truth the build driver uses to pick which
+/// idiom [`crate::CodeGenerator::generate_tests`] emits, so the transpiled test
+/// files match the scaffolded manifest (e.g. a `package.json` with the Jest
+/// dev-dependency gets Jest-shaped test files). Returns:
+/// - js/ts: `"vitest"` (default) or `"jest"`,
+/// - python: `"pytest"` (default) or `"unittest"`,
+/// - rust: `"cargo"` (universal), go: `"go"` (universal).
+#[must_use]
+pub fn effective_test_framework(target: &str, cfg: &TargetScaffoldConfig) -> String {
+    match target {
+        "js" | "javascript" | "ts" | "typescript" => js_test_framework(cfg).to_string(),
+        "python" | "py" => py_test_framework(cfg).to_string(),
+        "rust" | "rs" => "cargo".to_string(),
+        "go" | "golang" => "go".to_string(),
+        _ => String::new(),
+    }
+}
+
 /// The JS/TS test-framework default per §20.6.2 (Vitest), honoring an explicit
 /// `test_framework` choice (`vitest` | `jest`).
 fn js_test_framework(cfg: &TargetScaffoldConfig) -> &str {

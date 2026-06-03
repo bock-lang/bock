@@ -628,6 +628,133 @@ impl CodeGenerator for PyGenerator {
 
         Ok(GeneratedCode { files })
     }
+
+    /// Transpile `@test` functions into a `test_bock.py` file (S7).
+    ///
+    /// `framework`: `"unittest"` emits a `unittest.TestCase` subclass with
+    /// `self.assertEqual`/`assertTrue`/…; anything else (default `"pytest"`)
+    /// emits module-level `def test_xxx():` with bare `assert` — both discovered
+    /// by `pytest` and `python -m unittest`. Functions under test are imported by
+    /// name from their emitted modules; the Optional/Result predicate assertions
+    /// import the runtime tag classes from `_bock_runtime`.
+    fn generate_tests(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+        framework: &str,
+    ) -> Result<crate::generator::TestArtifacts, CodegenError> {
+        let reachable = crate::generator::reachable_modules(modules);
+        let modules = reachable.as_slice();
+        let tests = crate::generator::collect_test_fns(modules);
+        if tests.is_empty() {
+            return Ok(crate::generator::TestArtifacts::default());
+        }
+        let entry_idx = modules
+            .iter()
+            .position(|(m, _)| crate::generator::module_declares_main_fn(m))
+            .unwrap_or(modules.len().saturating_sub(1));
+
+        // Cross-module registries, mirroring `generate_project`, so the test
+        // bodies lower references identically to the runtime tree.
+        let enum_variants = crate::generator::collect_enum_variants(modules);
+        let trait_decls = crate::generator::collect_trait_decls(modules);
+        let mut field_method_collisions = std::collections::HashSet::new();
+        for (module, _) in modules {
+            field_method_collisions.extend(crate::generator::collect_record_field_names(
+                module,
+                to_snake_case,
+            ));
+        }
+        let mut ctx = PyEmitCtx::new();
+        ctx.per_module = true;
+        ctx.enum_variants = enum_variants;
+        ctx.trait_decls = trait_decls;
+        ctx.field_method_collisions = field_method_collisions;
+        ctx.seed_effect_registries(modules);
+
+        // Import the functions under test, snake_cased, from each module.
+        let mut import_lines: Vec<String> = Vec::new();
+        for (i, (module, _)) in modules.iter().enumerate() {
+            let fn_names: Vec<String> = crate::generator::exportable_value_names(module)
+                .into_iter()
+                .filter(|e| e.is_fn)
+                .map(|e| to_snake_case(&e.name))
+                .collect();
+            if fn_names.is_empty() {
+                continue;
+            }
+            let module_import = if i == entry_idx {
+                "main".to_string()
+            } else {
+                crate::generator::module_path_string(module).unwrap_or_else(|| "main".to_string())
+            };
+            import_lines.push(format!(
+                "from {module_import} import {}",
+                fn_names.join(", ")
+            ));
+        }
+        import_lines.sort_unstable();
+        import_lines.dedup();
+
+        // Import only the Optional/Result runtime tag classes the assertions
+        // actually reference — `_bock_runtime.py` only defines the runtimes the
+        // program uses, so importing an absent class (e.g. `_BockOk` in an
+        // Optional-only program) would be an ImportError at test load.
+        let mut runtime_imports: std::collections::BTreeSet<&str> =
+            std::collections::BTreeSet::new();
+        for (test_fn, _) in &tests {
+            if let NodeKind::FnDecl { body, .. } = &test_fn.kind {
+                collect_runtime_tag_imports(body, &mut runtime_imports);
+            }
+        }
+
+        let is_unittest = framework == "unittest";
+        let mut out = String::new();
+        if is_unittest {
+            out.push_str("import unittest\n");
+        }
+        if !runtime_imports.is_empty() {
+            let names: Vec<&str> = runtime_imports.iter().copied().collect();
+            out.push_str(&format!("from _bock_runtime import {}\n", names.join(", ")));
+        }
+        for line in &import_lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+
+        if is_unittest {
+            out.push_str("class TestBock(unittest.TestCase):\n");
+            for (i, (test_fn, _module_path)) in tests.iter().enumerate() {
+                let NodeKind::FnDecl { name, body, .. } = &test_fn.kind else {
+                    continue;
+                };
+                if i > 0 {
+                    out.push('\n');
+                }
+                out.push_str(&format!("    def {}(self):\n", to_snake_case(&name.name)));
+                ctx.emit_py_test_body(body, true, 2, &mut out)?;
+            }
+            out.push_str("\n\nif __name__ == \"__main__\":\n    unittest.main()\n");
+        } else {
+            for (test_fn, _module_path) in &tests {
+                let NodeKind::FnDecl { name, body, .. } = &test_fn.kind else {
+                    continue;
+                };
+                out.push_str(&format!("def {}():\n", to_snake_case(&name.name)));
+                ctx.emit_py_test_body(body, false, 1, &mut out)?;
+                out.push('\n');
+            }
+        }
+
+        Ok(crate::generator::TestArtifacts {
+            files: vec![OutputFile {
+                path: PathBuf::from("test_bock.py"),
+                content: out,
+                source_map: None,
+            }],
+            entry_append: None,
+        })
+    }
 }
 
 impl PyGenerator {
@@ -913,6 +1040,87 @@ impl PyEmitCtx {
             self.buf.insert_str(0, &preamble);
         }
         self.buf
+    }
+
+    /// Emit a `@test` function body (S7) into `out`, lowering `expect(...)`
+    /// assertion chains to pytest-style `assert` (or `self.assert*` for
+    /// unittest) and other statements to plain expression/`=` statements.
+    ///
+    /// `use_self` selects the unittest idiom (`self.assertEqual(a, e)`); `indent`
+    /// is the base indentation level (1 for a module-level `def`, 2 for a method
+    /// inside a `TestCase`). A body with no statements emits `pass`.
+    fn emit_py_test_body(
+        &mut self,
+        body: &AIRNode,
+        use_self: bool,
+        indent: usize,
+        out: &mut String,
+    ) -> Result<(), CodegenError> {
+        let pad = "    ".repeat(indent);
+        let stmts: Vec<&AIRNode> = match &body.kind {
+            NodeKind::Block { stmts, tail } => stmts.iter().chain(tail.as_deref()).collect(),
+            _ => vec![body],
+        };
+        let mut emitted_any = false;
+        for stmt in stmts {
+            emitted_any = true;
+            if let Some((assertion, actual, expected)) = crate::generator::classify_assertion(stmt)
+            {
+                let a = self.expr_to_string(actual)?;
+                use crate::generator::TestAssertion as T;
+                let line = if use_self {
+                    match assertion {
+                        T::Equal => {
+                            let e = match expected {
+                                Some(e) => self.expr_to_string(e)?,
+                                None => "None".to_string(),
+                            };
+                            format!("self.assertEqual({a}, {e})")
+                        }
+                        T::BeTrue => format!("self.assertTrue({a})"),
+                        T::BeFalse => format!("self.assertFalse({a})"),
+                        T::BeSome => format!("self.assertIsInstance({a}, _BockSome)"),
+                        T::BeNone => format!("self.assertIsInstance({a}, _BockNone)"),
+                        T::BeOk => format!("self.assertIsInstance({a}, _BockOk)"),
+                        T::BeErr => format!("self.assertIsInstance({a}, _BockErr)"),
+                    }
+                } else {
+                    match assertion {
+                        T::Equal => {
+                            let e = match expected {
+                                Some(e) => self.expr_to_string(e)?,
+                                None => "None".to_string(),
+                            };
+                            format!("assert ({a}) == ({e})")
+                        }
+                        T::BeTrue => format!("assert ({a}) is True"),
+                        T::BeFalse => format!("assert ({a}) is False"),
+                        T::BeSome => format!("assert isinstance({a}, _BockSome)"),
+                        T::BeNone => format!("assert isinstance({a}, _BockNone)"),
+                        T::BeOk => format!("assert isinstance({a}, _BockOk)"),
+                        T::BeErr => format!("assert isinstance({a}, _BockErr)"),
+                    }
+                };
+                out.push_str(&format!("{pad}{line}\n"));
+            } else if let NodeKind::LetBinding { pattern, value, .. } = &stmt.kind {
+                let name = match &pattern.kind {
+                    NodeKind::BindPat { name, .. } => to_snake_case(&name.name),
+                    _ => {
+                        emitted_any = false;
+                        continue;
+                    }
+                };
+                let v = self.expr_to_string(value)?;
+                out.push_str(&format!("{pad}{name} = {v}\n"));
+            } else {
+                let s = self.expr_to_string(stmt)?;
+                out.push_str(&format!("{pad}{s}\n"));
+            }
+        }
+        if !emitted_any {
+            out.push_str(&format!("{pad}pass\n"));
+        }
+        Ok(())
     }
 
     /// Pre-seed the effect registries (`effect_ops`, `composite_effects`) from
@@ -2007,6 +2215,14 @@ impl PyEmitCtx {
                 }
                 for (i, item) in items.iter().enumerate() {
                     if consumed_impls.contains(&item.id) {
+                        continue;
+                    }
+                    // `@test` functions are transpiled separately into pytest/
+                    // unittest test files (project mode, §20.6.2 — see
+                    // `generate_tests`), never into the runtime module tree: their
+                    // `expect(...)` assertion DSL has no runtime definition in the
+                    // emitted source.
+                    if crate::generator::fn_is_test(item) {
                         continue;
                     }
                     if i > 0 && !self.buf.is_empty() && !self.buf.ends_with("\n\n") {
@@ -4343,6 +4559,39 @@ fn is_time_method_name(name: &str) -> bool {
             | "elapsed"
             | "duration_since"
     )
+}
+
+/// Walk a `@test` body and record the Optional/Result runtime tag classes its
+/// predicate assertions (`to_be_some`/`to_be_none`/`to_be_ok`/`to_be_err`)
+/// reference, so the Python test file imports exactly those from
+/// `_bock_runtime` (which only defines the runtimes the program uses).
+fn collect_runtime_tag_imports(node: &AIRNode, out: &mut std::collections::BTreeSet<&'static str>) {
+    if let Some((assertion, _actual, _expected)) = crate::generator::classify_assertion(node) {
+        use crate::generator::TestAssertion as T;
+        match assertion {
+            T::BeSome => {
+                out.insert("_BockSome");
+            }
+            T::BeNone => {
+                out.insert("_BockNone");
+            }
+            T::BeOk => {
+                out.insert("_BockOk");
+            }
+            T::BeErr => {
+                out.insert("_BockErr");
+            }
+            _ => {}
+        }
+    }
+    if let NodeKind::Block { stmts, tail } = &node.kind {
+        for s in stmts {
+            collect_runtime_tag_imports(s, out);
+        }
+        if let Some(t) = tail {
+            collect_runtime_tag_imports(t, out);
+        }
+    }
 }
 
 fn to_snake_case(s: &str) -> String {

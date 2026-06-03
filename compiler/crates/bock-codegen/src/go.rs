@@ -606,6 +606,110 @@ impl CodeGenerator for GoGenerator {
 
         Ok(GeneratedCode { files })
     }
+
+    /// Transpile `@test` functions into a `bock_test.go` file (S7).
+    ///
+    /// `go test` runs `func TestXxx(t *testing.T)` in `package main` (same
+    /// package → the test can call the program's unexported functions). Each
+    /// Bock `@test` becomes one such function, with `expect(...)` assertion
+    /// chains lowered to `if <neg> { t.Errorf(...) }`. `framework` is ignored:
+    /// `go test` (stdlib `testing`) is the universal Go framework (§20.6.2).
+    fn generate_tests(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+        _framework: &str,
+    ) -> Result<crate::generator::TestArtifacts, CodegenError> {
+        let reachable = crate::generator::reachable_modules(modules);
+        let modules = reachable.as_slice();
+        let tests = crate::generator::collect_test_fns(modules);
+        if tests.is_empty() {
+            return Ok(crate::generator::TestArtifacts::default());
+        }
+
+        // Same program-wide analysis `generate_project` builds, so test bodies
+        // lower references (function casing, enum variants, Optional returns)
+        // identically to the runtime package.
+        let mut global_async_fns: HashSet<String> = HashSet::new();
+        for (module, _) in modules {
+            if let NodeKind::Module { items, .. } = &module.kind {
+                for item in items {
+                    if let NodeKind::FnDecl {
+                        is_async: true,
+                        name,
+                        ..
+                    } = &item.kind
+                    {
+                        global_async_fns.insert(name.name.clone());
+                    }
+                }
+            }
+        }
+        let mut template = GoEmitCtx::new();
+        template.async_fns = global_async_fns;
+        template.enum_variants = crate::generator::collect_enum_variants(modules);
+        template.generic_decls = crate::generator::collect_generic_decls(modules);
+        template.trait_decls = crate::generator::collect_trait_decls(modules);
+        template.derive_self_param_traits();
+        for (module, _) in modules {
+            template.collect_methods(module);
+            template.collect_optional_returns(module);
+            template.collect_method_optional_returns(module);
+            template.collect_record_param_fields(module);
+            template.collect_fn_and_type_names(module);
+        }
+        template.seed_effect_registries(modules);
+
+        let mut ctx = template.fork();
+        ctx.per_module = true;
+        for (test_fn, _module_path) in &tests {
+            let NodeKind::FnDecl { name, body, .. } = &test_fn.kind else {
+                continue;
+            };
+            let go_name = go_test_fn_name(&name.name);
+            ctx.buf.push('\n');
+            ctx.writeln(&format!("func {go_name}(t *testing.T) {{"));
+            ctx.indent += 1;
+            ctx.emit_go_test_body(body)?;
+            ctx.indent -= 1;
+            ctx.writeln("}");
+        }
+
+        let (body, needs) = ctx.into_parts();
+        // The test file is `package main`; build its import block (testing plus
+        // whatever the test bodies pull in — fmt/strings/…). gofmt-sorted order.
+        let mut imports: Vec<&str> = vec!["\"testing\""];
+        if needs.fmt {
+            imports.push("\"fmt\"");
+        }
+        if needs.strings {
+            imports.push("\"strings\"");
+        }
+        if needs.sync {
+            imports.push("\"sync\"");
+        }
+        if needs.time {
+            imports.push("\"time\"");
+        }
+        if needs.utf8 {
+            imports.push("\"unicode/utf8\"");
+        }
+        imports.sort_unstable();
+        let mut content = String::from("package main\n\nimport (\n");
+        for imp in &imports {
+            content.push_str(&format!("\t{imp}\n"));
+        }
+        content.push_str(")\n");
+        content.push_str(&body);
+
+        Ok(crate::generator::TestArtifacts {
+            files: vec![OutputFile {
+                path: std::path::PathBuf::from("bock_test.go"),
+                content,
+                source_map: None,
+            }],
+            entry_append: None,
+        })
+    }
 }
 
 /// The flat output filename for one non-entry module in the per-module Go
@@ -702,6 +806,10 @@ impl GoGenerator {
             content.push_str(RANGE_RUNTIME_GO);
             content.push('\n');
         }
+        // Each runtime block is joined with a trailing `\n`, which leaves a blank
+        // line at EOF; gofmt wants exactly one terminating newline (§20.6.2
+        // codegen-formatter agreement — the output must be gofmt-clean).
+        let content = format!("{}\n", content.trim_end());
         Some(content)
     }
 }
@@ -4312,10 +4420,20 @@ impl GoEmitCtx {
                     // import). The per-file `import (...)` block (fmt/sync/…) is
                     // rendered by `into_parts` from the `needs_*` flags the body
                     // sets as it emits.
-                    for (i, item) in items.iter().enumerate() {
-                        if i > 0 {
+                    //
+                    // `@test` functions are transpiled separately into `go test`
+                    // files (project mode, §20.6.2 — see `generate_tests`), never
+                    // into the runtime package: their `expect(...)` assertion DSL
+                    // has no runtime definition in the emitted source.
+                    let mut first = true;
+                    for item in items.iter() {
+                        if crate::generator::fn_is_test(item) {
+                            continue;
+                        }
+                        if !first {
                             self.buf.push('\n');
                         }
+                        first = false;
                         self.emit_node(item)?;
                     }
                     return Ok(());
@@ -4372,10 +4490,18 @@ impl GoEmitCtx {
                     self.buf.push('\n');
                     self.range_runtime_emitted = true;
                 }
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
+                // `@test` functions are transpiled separately into `go test` files
+                // (project mode, §20.6.2 — see `generate_tests`), never into the
+                // runtime package.
+                let mut first = true;
+                for item in items.iter() {
+                    if crate::generator::fn_is_test(item) {
+                        continue;
+                    }
+                    if !first {
                         self.buf.push('\n');
                     }
+                    first = false;
                     self.emit_node(item)?;
                 }
                 Ok(())
@@ -7783,6 +7909,74 @@ impl GoEmitCtx {
         self.emit_block_body_inner(node, false)
     }
 
+    /// Emit a `@test` function body (S7), lowering `expect(...)` assertion chains
+    /// to Go `if <neg> { t.Errorf(...) }` guards and falling back to the normal
+    /// statement emitter for any other statement. Sets `needs_reflect` when an
+    /// equality assertion (`reflect.DeepEqual`) is emitted.
+    fn emit_go_test_body(&mut self, body: &AIRNode) -> Result<(), CodegenError> {
+        let stmts_and_tail: Vec<&AIRNode> = match &body.kind {
+            NodeKind::Block { stmts, tail } => stmts.iter().chain(tail.as_deref()).collect(),
+            _ => vec![body],
+        };
+        for stmt in stmts_and_tail {
+            if let Some((assertion, actual, expected)) = crate::generator::classify_assertion(stmt)
+            {
+                let a = self.expr_to_string(actual)?;
+                use crate::generator::TestAssertion as T;
+                match assertion {
+                    T::Equal => {
+                        // Go `==` follows the constant-conversion rules (an
+                        // untyped literal `3` compares equal to an `int64`), so it
+                        // handles ints/floats/strings/bools and comparable structs
+                        // (the `__bockOption`/`__bockResult` value runtimes) without
+                        // the type-mismatch `reflect.DeepEqual(int64, int)` pitfall.
+                        // Slice/map equality (uncommon in `@test`) would need
+                        // `reflect.DeepEqual`; that is a known follow-up.
+                        let e = match expected {
+                            Some(e) => self.expr_to_string(e)?,
+                            None => "nil".to_string(),
+                        };
+                        self.writeln(&format!("if ({a}) != ({e}) {{"));
+                        self.indent += 1;
+                        self.writeln(&format!("t.Errorf(\"expected %v, got %v\", {e}, {a})"));
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                    T::BeTrue => {
+                        self.writeln(&format!("if !({a}) {{"));
+                        self.indent += 1;
+                        self.writeln("t.Errorf(\"expected true, got false\")");
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                    T::BeFalse => {
+                        self.writeln(&format!("if {a} {{"));
+                        self.indent += 1;
+                        self.writeln("t.Errorf(\"expected false, got true\")");
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                    T::BeSome | T::BeNone | T::BeOk | T::BeErr => {
+                        let tag = match assertion {
+                            T::BeSome => "Some",
+                            T::BeNone => "None",
+                            T::BeOk => "Ok",
+                            _ => "Err",
+                        };
+                        self.writeln(&format!("if ({a}).tag != \"{tag}\" {{"));
+                        self.indent += 1;
+                        self.writeln(&format!("t.Errorf(\"expected {tag}, got %v\", ({a}).tag)"));
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                }
+            } else {
+                self.emit_node(stmt)?;
+            }
+        }
+        Ok(())
+    }
+
     fn emit_block_body_return(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         self.emit_block_body_inner(node, true)
     }
@@ -7984,6 +8178,27 @@ impl GoEmitCtx {
 }
 
 // ─── Utility functions ───────────────────────────────────────────────────────
+
+/// Map a Bock `@test` function name to a valid Go test function name
+/// (`TestXxx`), as `go test` requires (S7).
+///
+/// A leading `test`/`test_` is stripped so the conventional `test_add` does not
+/// become the stuttering `TestTestAdd`; the remainder is PascalCased and
+/// `Test`-prefixed. A name that is *only* `test` (no suffix) keeps a stable
+/// disambiguating form (`TestTest` → `Test_` is invalid, so it becomes
+/// `TestCase`). Empty input falls back to `TestCase`.
+fn go_test_fn_name(bock_name: &str) -> String {
+    let stripped = bock_name
+        .strip_prefix("test_")
+        .or_else(|| bock_name.strip_prefix("test"))
+        .unwrap_or(bock_name);
+    let pascal = to_pascal_case(stripped);
+    if pascal.is_empty() {
+        "TestCase".to_string()
+    } else {
+        format!("Test{pascal}")
+    }
+}
 
 /// True for Bock's built-in Optional/Result constructors, which must be
 /// emitted verbatim (PascalCase preserved) so generated Go code can match
