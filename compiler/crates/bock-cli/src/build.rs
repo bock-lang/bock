@@ -382,6 +382,25 @@ pub fn run(options: &BuildOptions) -> anyhow::Result<()> {
             process::exit(1);
         }
 
+        // ── Post-emit formatter pass (§20.6.2 codegen-formatter agreement) ───
+        // For Rust and Go the formatter is universal and always-on: emitted
+        // output must pass `rustfmt --check` / `gofmt -l` cleanly as a
+        // release-readiness baseline. Rather than hand-match each formatter's
+        // alignment/wrapping algorithm in codegen, project mode runs the
+        // formatter in-place (`gofmt -w` / `rustfmt`) over the emitted tree as
+        // a bounded post-emit step. The formatter ships with the target's
+        // toolchain (which project mode already invokes to validate), so it is
+        // present whenever the target is being built; if it is somehow absent,
+        // we warn and skip rather than fail the build. Go has no source-map
+        // dependency (the `//# sourceMappingURL` affordance is js/ts-only), so
+        // reformatting is always safe. Skipped under `--source-only` (bare
+        // transpilation, no scaffolding).
+        if !options.source_only {
+            if let Err(e) = format_output_tree(target, &output_dir) {
+                eprintln!("  warning: post-emit formatting skipped for {target}: {e}");
+            }
+        }
+
         // Optionally invoke target compiler
         if !options.source_only {
             // Some targets (rust/go) emit a real project (Cargo crate / Go
@@ -479,6 +498,64 @@ fn entry_file_rel(target: &str) -> Option<&'static str> {
     match target {
         "rust" | "rs" => Some("src/main.rs"),
         _ => None,
+    }
+}
+
+/// Run the post-emit formatter over a target's emitted output tree
+/// (§20.6.2 codegen-formatter agreement).
+///
+/// For Rust and Go the formatter is universal and always-on, so project mode
+/// reformats the emitted tree in place rather than trying to hand-match each
+/// formatter's exact alignment/wrapping output in codegen. This guarantees
+/// `gofmt -l` / `rustfmt --check`-clean output without a brittle dependency on
+/// reproducing the formatter's algorithm.
+///
+/// - **go** — runs `gofmt -w <output_dir>`, which recursively rewrites every
+///   `.go` file in place. `gofmt` ships with the Go toolchain (the same
+///   toolchain project mode invokes to validate), so it is present whenever the
+///   go target is built.
+/// - **rust** — runs `rustfmt --edition 2021` on each emitted `.rs` file.
+///   Rust codegen is already `rustfmt`-clean; this is belt-and-suspenders against
+///   future drift, and a no-op on already-clean output.
+/// - **other targets** — no-op (js/ts/python formatting is user-optional per
+///   §20.6.2 and is left to the user's configured formatter; post-emit prettier
+///   would also break js/ts source maps).
+///
+/// A missing formatter binary is reported as an error so the caller can downgrade
+/// it to a non-fatal warning — the build does not hard-fail on an absent
+/// formatter. Returns `Ok(())` for targets with no universal formatter.
+fn format_output_tree(target: &str, output_dir: &Path) -> anyhow::Result<()> {
+    match target {
+        "go" => {
+            // `gofmt -w` rewrites every .go file under the directory in place.
+            let status = process::Command::new("gofmt")
+                .arg("-w")
+                .arg(output_dir)
+                .status()
+                .map_err(|e| anyhow::anyhow!("gofmt not available: {e}"))?;
+            if !status.success() {
+                anyhow::bail!("gofmt -w exited with status {status}");
+            }
+            Ok(())
+        }
+        "rust" | "rs" => {
+            // rustfmt operates per file; collect every emitted .rs file and
+            // format them in a single invocation.
+            let rs_files = find_files_with_extension(output_dir, "rs")?;
+            if rs_files.is_empty() {
+                return Ok(());
+            }
+            let status = process::Command::new("rustfmt")
+                .args(["--edition", "2021"])
+                .args(&rs_files)
+                .status()
+                .map_err(|e| anyhow::anyhow!("rustfmt not available: {e}"))?;
+            if !status.success() {
+                anyhow::bail!("rustfmt exited with status {status}");
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 

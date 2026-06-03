@@ -533,7 +533,65 @@ fn rust_test_file_is_rustfmt_clean() {
     }
 }
 
-// ── FORMATTER-CLEAN GATE: go (gofmt -l) ───────────────────────────────────────
+/// The **whole** emitted rust tree must pass `rustfmt --check` cleanly — the
+/// §20.6.2 universal-formatter baseline for rust, guaranteed by the build's
+/// post-emit `rustfmt` pass (rust codegen is already clean, so this is
+/// belt-and-suspenders against future drift). Uses the same representative
+/// project as the go full-tree gate (record + tag-returning match).
+#[test]
+fn rust_full_tree_is_rustfmt_clean() {
+    if !proceed_or_skip(
+        "rust",
+        "rustfmt",
+        have("rustfmt"),
+        "rustup component add rustfmt",
+    ) {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    write_gofmt_representative_project(dir.path());
+    let build_dir = build_target_in(dir.path(), "rust");
+    // rustfmt --check operates per file; collect every emitted .rs file and
+    // assert none would change. Walk the src tree (entry, modules, tests).
+    let mut rs_files = Vec::new();
+    collect_files_with_ext(&build_dir, "rs", &mut rs_files);
+    assert!(
+        !rs_files.is_empty(),
+        "expected emitted .rs files under {}",
+        build_dir.display()
+    );
+    for file in &rs_files {
+        let output = Command::new("rustfmt")
+            .args(["--check", "--edition", "2021"])
+            .arg(file)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "rustfmt --check flagged `{}` in the emitted rust tree (§20.6.2 \
+             universal-formatter baseline):\n{}",
+            file.display(),
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+/// Recursively collect files with extension `ext` under `dir` into `out`.
+fn collect_files_with_ext(dir: &Path, ext: &str, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_with_ext(&path, ext, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+            out.push(path);
+        }
+    }
+}
+
+// ── FORMATTER-CLEAN GATE: go (gofmt -l, full emitted tree) ────────────────────
 
 #[test]
 fn go_test_file_is_gofmt_clean() {
@@ -560,6 +618,91 @@ fn go_test_file_is_gofmt_clean() {
         "gofmt -l flagged the emitted go test file (§20.6.2 codegen-formatter \
          agreement):\n{listed}"
     );
+}
+
+/// The **whole** emitted go tree (runtime source, entry, scaffolding, AND
+/// transpiled tests) must pass `gofmt -l` cleanly — not just the test file.
+/// This is the §20.6.2 universal-formatter baseline ("Bock's codegen for [go]
+/// must produce output that passes `gofmt -l` cleanly as a release-readiness
+/// baseline"), guaranteed by the build's post-emit `gofmt -w` pass. A
+/// representative project (struct fields needing column alignment, an
+/// enum-tag-dispatch closure gofmt expands to multi-line) is built so the gate
+/// exercises the alignment + body-expansion categories, not a trivial file.
+#[test]
+fn go_full_tree_is_gofmt_clean() {
+    if !proceed_or_skip(
+        "go",
+        "gofmt",
+        have("gofmt"),
+        "install the Go toolchain (provides gofmt)",
+    ) {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    write_gofmt_representative_project(dir.path());
+    let build_dir = build_target_in(dir.path(), "go");
+    // `gofmt -l <dir>` recurses, printing the path of every .go file that would
+    // change under `gofmt -w`. A clean tree prints nothing on stdout.
+    let output = Command::new("gofmt")
+        .args(["-l"])
+        .arg(&build_dir)
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&output.stdout);
+    let errs = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && listed.trim().is_empty(),
+        "gofmt -l flagged files in the emitted go tree (§20.6.2 universal-formatter \
+         baseline) — the post-emit `gofmt -w` pass should have left it clean:\n\
+         flagged:\n{listed}\nstderr:\n{errs}"
+    );
+}
+
+/// Write a project whose go output exercises the gofmt categories the post-emit
+/// pass exists to fix: a record (→ struct whose fields gofmt column-aligns) and
+/// a tag-returning match (→ a switch gofmt expands from one line to multi-line).
+/// Kept compiler-clean so codegen emits valid, parseable go and the project-mode
+/// `go build` validation succeeds.
+fn write_gofmt_representative_project(dir: &Path) {
+    let src = "\
+module main
+
+record Point {
+  x: Int
+  y: Int
+  label: String
+}
+
+public fn classify(n: Int) -> String {
+  match (n) {
+    0 => \"zero\"
+    1 => \"one\"
+    _ => \"many\"
+  }
+}
+
+public fn make(x: Int, y: Int) -> Point {
+  Point { x: x, y: y, label: \"p\" }
+}
+
+fn main() {
+  let p = make(1, 2)
+  println(classify(p.x))
+  println(p.label)
+}
+
+@test
+fn test_classify() {
+  expect(classify(0)).to_equal(\"zero\")
+}
+";
+    let mut f = fs::File::create(dir.join("main.bock")).unwrap();
+    f.write_all(src.as_bytes()).unwrap();
+    f.flush().unwrap();
+    let project = "[project]\nname = \"gofmt-tree-demo\"\nversion = \"0.1.0\"\n";
+    let mut p = fs::File::create(dir.join("bock.project")).unwrap();
+    p.write_all(project.as_bytes()).unwrap();
+    p.flush().unwrap();
 }
 
 // ── FORMATTER-CLEAN GATE: js + ts (prettier --check) ──────────────────────────
