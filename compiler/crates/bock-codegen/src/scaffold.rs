@@ -901,6 +901,14 @@ impl RustScaffolder {
     /// name — the emitted `src/main.rs` and the toolchain run plan reference the
     /// `bock_app` bin), independent of the project name.
     fn cargo_toml(needs_tokio: bool) -> String {
+        // An explicit empty `[workspace]` table makes the generated crate its own
+        // workspace root. Without it, `cargo` walks up the directory tree looking
+        // for a parent `[workspace]`; when the build output lands inside a parent
+        // Cargo workspace (e.g. the Bock repo's own `temp/` scratch tree, or any
+        // user repo that is itself a workspace) cargo errors with "current package
+        // believes it's in a workspace when it's not". Declaring an empty
+        // `[workspace]` opts the generated crate out of any enclosing workspace so
+        // `cargo build`/`cargo run` work regardless of where the output is placed.
         let mut s = String::from(
             "[package]\n\
              name = \"bock_app\"\n\
@@ -908,7 +916,8 @@ impl RustScaffolder {
              edition = \"2021\"\n\n\
              [[bin]]\n\
              name = \"bock_app\"\n\
-             path = \"src/main.rs\"\n",
+             path = \"src/main.rs\"\n\n\
+             [workspace]\n",
         );
         if needs_tokio {
             s.push_str(
@@ -1403,6 +1412,9 @@ formatter = "prettier"
         assert!(cargo.content.contains("[package]"));
         assert!(cargo.content.contains("name = \"bock_app\""));
         assert!(cargo.content.contains("path = \"src/main.rs\""));
+        // Empty `[workspace]` table opts the crate out of any enclosing Cargo
+        // workspace so the build works wherever the output is placed.
+        assert!(cargo.content.contains("[workspace]"));
         // No concurrency runtime emitted ⇒ no tokio dependency.
         assert!(!cargo.content.contains("tokio"));
         let readme = file(&files, "README.md");

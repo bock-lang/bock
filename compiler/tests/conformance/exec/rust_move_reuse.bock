@@ -1,0 +1,60 @@
+// TEST: exec_rust_move_reuse
+// EXPECT: output "Add:7;Mul:12;reuse:3-3"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Move-then-reuse regression (Rust by-value-reuse, #149 follow-up). A non-`Copy`
+// generated enum/record passed by value to one callee and then *reused* in a
+// later by-value call moves it out at the first call site, so Rust rejects the
+// second use (`E0382: use of moved value`). The Rust backend now clones a reused
+// binding at each by-value pass (every generated type derives `Clone`):
+//
+//   - `op` (a generated enum) is passed to `apply(op, …)` and then to
+//     `op_label(op)` — the calculator pattern that originally failed.
+//   - a `String` parameter `tag` is passed by value to a helper and then reused
+//     in interpolation (a borrow-after-move).
+//
+// All five targets must agree; only Rust's lowering changed (clone insertion),
+// the observable result is identical everywhere.
+module main
+
+enum Op {
+  Add,
+  Mul
+}
+
+fn op_label(op: Op) -> String {
+  match op {
+    Add => "Add"
+    Mul => "Mul"
+  }
+}
+
+fn apply(op: Op, a: Int, b: Int) -> Int {
+  match op {
+    Add => a + b
+    Mul => a * b
+  }
+}
+
+// `op` is used twice by value: once in `apply`, once in `op_label`.
+fn show(op: Op, a: Int, b: Int) -> String {
+  let r = apply(op, a, b)
+  "${op_label(op)}:${r}"
+}
+
+fn echo(tag: String) -> String {
+  tag
+}
+
+// `tag` passed by value to `echo`, then reused in interpolation.
+fn reuse_string(tag: String) -> String {
+  let first = echo(tag)
+  "reuse:${first}-${tag}"
+}
+
+fn main() -> Void {
+  let s1 = show(Add, 3, 4)
+  let s2 = show(Mul, 3, 4)
+  let s3 = reuse_string("3")
+  println("${s1};${s2};${s3}")
+}

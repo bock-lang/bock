@@ -100,6 +100,17 @@ pub const RECV_KIND_META_KEY: &str = "recv_kind";
 /// is element-type-agnostic.
 pub const LIST_CONCAT_META_KEY: &str = "list_concat";
 
+/// Metadata key stamped on a `+` `BinaryOp` node whose operands resolve to
+/// `String`, marking it as string concatenation. Bock's `+` on strings is
+/// concatenation, but Rust's `String + String` does not compile (`Add<String>`
+/// is unimplemented — only `String + &str`), so the Rust backend reads this stamp
+/// to lower the operator to `format!("{}{}", l, r)` regardless of whether each
+/// side is an owned `String` or a `&str`. A purely syntactic check in codegen
+/// cannot see that a bare identifier/parameter (`result + sep`) is `String`-typed,
+/// so the type-aware checker records it here. The other backends concatenate
+/// strings with `+` natively and ignore this key.
+pub const STRING_CONCAT_META_KEY: &str = "string_concat";
+
 /// Base node id for AIR nodes the checker synthesizes (the `for`-over-`Iterable`
 /// desugar). Chosen high enough to sit far above the dense, zero-based ids the
 /// lowerer assigns to real nodes, so synthesized nodes never collide with real
@@ -1970,6 +1981,18 @@ impl TypeChecker {
                     if is_list(&result) || is_list(&lt) || is_list(&rt) {
                         node.metadata
                             .insert(LIST_CONCAT_META_KEY.to_string(), Value::Bool(true));
+                    }
+                    // String `+` is concatenation. Stamp it so the Rust backend
+                    // lowers it to `format!` (Rust has no `String + String`). The
+                    // result *or* either operand resolving to `String` is
+                    // sufficient (an operand may still be an open var while the
+                    // other side is already concrete `String`).
+                    let is_string = |t: &Type| {
+                        matches!(self.subst.apply(t), Type::Primitive(PrimitiveType::String))
+                    };
+                    if is_string(&result) || is_string(&lt) || is_string(&rt) {
+                        node.metadata
+                            .insert(STRING_CONCAT_META_KEY.to_string(), Value::Bool(true));
                     }
                 }
                 result
