@@ -1766,3 +1766,25 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
     runway is CLEAR.** Remaining for v1.0 = release actions (ALL escalate to operator) + 2 non-blocking pre-release
     follow-ups (Q-ci-projectmode-tooling, Q-go-gofmt-listclosure). ItemD (external get-started) unblocked but escalates.
   NEXT: present ItemB-complete to operator; await direction on v1.0 release prep (escalates) and/or the follow-ups.
+
+[2026-06-03 04:48 UTC] Q-ci-projectmode-tooling DONE (#196) — js/ts/python project-mode CI-certified
+  Operator: clear the dependabot (done earlier) + wire CI tooling for project-mode-readiness. Before dispatching I
+    probed the host: rust/go/tsc present; PEP-668 blocks bare `pip install` (use venv/pipx — pipx 1.4.3 present); `npx`
+    absent (use `npm exec` / project-local `npm install`). Gave the operator the local-install commands.
+  Dispatched the engineer to (a) install the tooling in-worktree to verify locally, (b) extend the S7 transpiled-test
+    verification to RUN-verify js/ts/python (skip-if-absent + a require flag), (c) extend the formatter-clean gate to
+    prettier/black, (d) wire ci.yml, (e) fix-or-report any js/ts/python test-codegen bugs the actual runs expose.
+  RESULT (#196, all 12 CI jobs green incl. ubuntu lanes run-verifying all 5 with `BOCK_PROJECTMODE_REQUIRE=all`):
+    ★ **js/ts/python transpiled tests PASS as-emitted — NO execution-codegen bugs.** The only fixes were
+    formatter-cleanliness of the emitted *test files* (js/ts redundant tag-predicate parens; py blank-line spacing).
+    New flag `BOCK_PROJECTMODE_REQUIRE` (falls back to `BOCK_CONFORMANCE_REQUIRE`). ci.yml: ubuntu lane installs
+    prettier/black/ruff/pytest+node, require=all; macos/windows skip-if-absent. Also added the missing `rustfmt`
+    component to the test toolchain (require=all surfaced it on the beta lane). Verified scope + checks myself; merged.
+    main a063216.
+  TRIAGE: the #196 FOUND ("full emitted tree not formatter-clean") + the old Q-go-gofmt-listclosure are the SAME
+    theme → consolidated into **Q-formatter-clean-tree** (full PROGRAM+runtime tree formatter-clean on all 5 per
+    §20.6.2; the test files + rust/go entry are gated, the rest isn't; larger per-backend emit-hygiene effort).
+  STATE: ItemB complete; both original v1.0 follow-ups resolved/reframed — js/ts/python project-mode CI-certified;
+    the remaining pre-v1.0 quality item is Q-formatter-clean-tree (larger; grown beyond the original go-only scope).
+    NEXT: checkpoint with operator — Q-formatter-clean-tree (do now / defer v1.x / scope-first) + v1.0 release actions
+    (all escalate). We are at "v1.0 engineering essentially done; release is operator-driven."

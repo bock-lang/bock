@@ -16,8 +16,10 @@ _Last reconciled: 2026-06-03 vs main bf34070 + this S8 close PR (**★ ItemB COM
 output on all 5 [DV13]; project mode real [scaffolder-owned manifests/configs/README + transpiled @test files per
 framework], source mode bare [DV18]; config tables parsed; core.error fixed ×5 [#193]. 430 exec pairs / 0 failed
 REQUIRE=all. ItemB was v1.0's last mapped ENGINEERING item → v1.0 engineering runway clear; remaining = release
-actions [escalate]. Pre-v1.0 follow-ups (non-blocking): Q-ci-projectmode-tooling, Q-go-gofmt-listclosure. ItemD
-[external get-started] now UNBLOCKED but escalates. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
+actions [escalate]. **Q-ci-projectmode-tooling DONE [#196] — js/ts/python project-mode CI-certified (transpiled
+tests run-verify ×5; they pass as-emitted).** Remaining pre-v1.0 (non-blocking): **Q-formatter-clean-tree** (full
+emitted tree formatter-clean on all 5 per §20.6.2; subsumes the go-gofmt gap; larger codegen effort — operator
+checkpoint pending). ItemD [external get-started] UNBLOCKED but escalates. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
 [#175]**; **Q-r2-codegen-residue (c) builtin-vs-user-method shadowing [#176, ×5]** + pinned Q-go-list-literal /
 Q-r2-(b) / Q-ts-generic-impl (verified already-fixed). New FOUND triaged: Q-allcaps-record-parse (parser),
 Q-arch-doc-drift (ARCHITECTURE.md/compiler-CLAUDE.md/CONTRIBUTING.md crate-name drift). Q-match-exprpos still
@@ -276,23 +278,28 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
     transpiled tests); tooling.md/project-schema.md already updated by S5–S7. mdbook clean. Tracking closed (this PR).
   INVARIANT (held every PR): `run-conformance.sh REQUIRE=all` green (**430/430**). `--deliverable`/`--no-tests`
   stay v1.x. **★ ItemB COMPLETE (S0–S8) — DV13 + DV18 CLOSED; project mode real on all 5. ★** Remaining for v1.0
-  release-readiness (NOT blocking ItemB): Q-ci-projectmode-tooling (certify js/ts/python project-mode via real
-  test-runs) + Q-go-gofmt-listclosure (go output gofmt-clean per §20.6.2). **ItemD now UNBLOCKED** (external — escalates).
+  release-readiness: Q-ci-projectmode-tooling **DONE (#196 — js/ts/python project-mode CI-certified)**; remaining =
+  Q-formatter-clean-tree (full emitted tree formatter-clean ×5 per §20.6.2). **ItemD now UNBLOCKED** (external — escalates).
 - **[ItemD] /get-started project-mode evolution** — docs · **READY-but-ESCALATES (UNBLOCKED 2026-06-03 — ItemB done)** ·
   `docs/`, `website/` · — · note: external-facing copy (website get-started) — **escalate for approval before any
   website change**; do not action autonomously. Now that project mode is real, the website get-started can evolve to
   show the scaffolded-project flow (`bock build` → `npm test`/`cargo run`).
-- **[Q-ci-projectmode-tooling] CI must provision js/ts/python test+format tooling** — chore/test-infra · ready ·
-  `.github/workflows/` · — · links #194, §20.6.2 · note: FOUND in S7. The host/CI lacks `vitest`/`jest`/`npx`,
-  `pytest`, `prettier`, `black`/`ruff`, so transpiled-test RUN-verification + the formatter-clean `--check` gate are
-  only certified for **rust+go**; js/ts/python are compile-verified only. Per §20.6.2 a target is project-mode-ready
-  when its Tier-2 (transpiled) tests PASS — so to certify js/ts/python project mode for v1.0, CI must install those
-  runners/formatters and run them. Pre-v1.0 release-readiness; not a Bock codegen gap.
-- **[Q-go-gofmt-listclosure] Go: emitted list-method inline closures aren't gofmt-clean** — bug · ready ·
-  `compiler/crates/bock-codegen/src/go.rs` · — · links #194, §20.6.2 · note: FOUND in S7 (pre-existing). The Go
-  list-method inline-closure pretty-printing in emitted program code (`main.go`) isn't `gofmt`-clean (S7's emitted
-  *test* files + `bock_runtime.go` ARE clean). §20.6.2 codegen-formatter agreement requires go output to pass
-  `gofmt -l` — general codegen hygiene; pre-v1.0.
+- **[Q-ci-projectmode-tooling] CI provisions js/ts/python test+format tooling** — chore/test-infra · **DONE (#196)** ·
+  `.github/workflows/ci.yml` · note: CI ubuntu lane now installs prettier/black/ruff/pytest + node and sets
+  **`BOCK_PROJECTMODE_REQUIRE=all`** so the transpiled-test verification RUN-verifies + formatter-gates **all 5**
+  (macos/windows stay skip-if-absent). ★ **Key finding: js/ts/python transpiled tests PASS as-emitted** — NO
+  execution-codegen bugs; the only fixes were formatter-cleanliness of the emitted *test files* (js/ts tag-predicate
+  parens; py blank-line spacing). Also added the missing `rustfmt` component to the test toolchain (surfaced by
+  require=all on beta). **js/ts/python project-mode is now CI-certified.** Remaining formatter gap → Q-formatter-clean-tree.
+- **[Q-formatter-clean-tree] Emitted PROGRAM + runtime tree not formatter-clean on all 5 (§20.6.2)** — bug ·
+  ready (pre-v1.0; larger codegen effort) · `compiler/crates/bock-codegen/src/{js,ts,py,go,rs}.rs` · — · links #194,
+  #196, §20.6.2 · note: FOUND in S7/#196. The formatter-clean `--check` gate currently covers the emitted **test
+  files** (+ rust/go entry), but the **full emitted tree** (`main.*`, `_bock_runtime.*`, entry files) is NOT yet
+  byte-for-byte prettier/black/gofmt-clean: e.g. **go** list-method inline-closure pretty-printing (was
+  Q-go-gofmt-listclosure, folded in); **python** runtime single-vs-double quotes + blank-line spacing; **js/ts**
+  redundant `(a + b)` parens + missing long-line wrapping. §20.6.2's codegen-formatter agreement requires the WHOLE
+  emitted tree to pass the formatter cleanly on first generation (else churn on the user's first commit). Per-backend
+  emit-hygiene pass + extend the `--check` gate to the full tree. Subsumes Q-go-gofmt-listclosure.
 
 ## Deferred
 
