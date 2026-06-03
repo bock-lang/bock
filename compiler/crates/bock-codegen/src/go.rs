@@ -840,6 +840,11 @@ struct GoEmitCtx {
     needs_strings_import: bool,
     /// Track whether we need `"unicode/utf8"` import (`String.len` scalar count).
     needs_utf8_import: bool,
+    /// Track whether we need `"math"` import (numeric `Float` math methods).
+    needs_math_import: bool,
+    /// Track whether we need `"unicode"` import (`Char`/`trim_start`/`trim_end`
+    /// predicates via `unicode.IsSpace`/`IsLetter`/`IsDigit`).
+    needs_unicode_import: bool,
     /// Package name (defaults to "main").
     package_name: String,
     /// Maps effect operation name → effect type name (e.g., "log" → "Logger").
@@ -1173,6 +1178,8 @@ struct GoImportNeeds {
     time: bool,
     strings: bool,
     utf8: bool,
+    math: bool,
+    unicode: bool,
 }
 
 impl GoImportNeeds {
@@ -1180,9 +1187,13 @@ impl GoImportNeeds {
     /// single package, an `import (...)` block for several), or the empty string
     /// when nothing is needed. The order matches `gofmt`'s lexical sort.
     fn render_block(self) -> String {
+        // Packages are pushed in `gofmt`'s lexical sort order.
         let mut imports = Vec::new();
         if self.fmt {
             imports.push("\"fmt\"");
+        }
+        if self.math {
+            imports.push("\"math\"");
         }
         if self.strings {
             imports.push("\"strings\"");
@@ -1192,6 +1203,9 @@ impl GoImportNeeds {
         }
         if self.time {
             imports.push("\"time\"");
+        }
+        if self.unicode {
+            imports.push("\"unicode\"");
         }
         if self.utf8 {
             imports.push("\"unicode/utf8\"");
@@ -1228,6 +1242,8 @@ impl GoEmitCtx {
             needs_time_import: false,
             needs_strings_import: false,
             needs_utf8_import: false,
+            needs_math_import: false,
+            needs_unicode_import: false,
             package_name: "main".into(),
             effect_ops: HashMap::new(),
             current_handler_vars: HashMap::new(),
@@ -1297,6 +1313,8 @@ impl GoEmitCtx {
         c.needs_time_import = false;
         c.needs_strings_import = false;
         c.needs_utf8_import = false;
+        c.needs_math_import = false;
+        c.needs_unicode_import = false;
         c.concurrency_runtime_emitted = false;
         c.optional_runtime_emitted = false;
         c.result_runtime_emitted = false;
@@ -3387,6 +3405,8 @@ impl GoEmitCtx {
                 time: self.needs_time_import,
                 strings: self.needs_strings_import,
                 utf8: self.needs_utf8_import,
+                math: self.needs_math_import,
+                unicode: self.needs_unicode_import,
             },
         )
     }
@@ -3399,6 +3419,8 @@ impl GoEmitCtx {
             time: self.needs_time_import,
             strings: self.needs_strings_import,
             utf8: self.needs_utf8_import,
+            math: self.needs_math_import,
+            unicode: self.needs_unicode_import,
         };
         header.push_str(&needs.render_block());
         header.push('\n');
@@ -4471,17 +4493,29 @@ impl GoEmitCtx {
     /// §18.3 — Go's `len(s)` is the BYTE length, so `byte_len` maps to it.
     /// `replace` replaces ALL occurrences (`strings.ReplaceAll`). `split` returns
     /// `[]string`, which the read-only `List` built-ins (`len`/…) accept.
+    ///
+    /// Gated on `recv_kind = "Primitive:String"` directly (not the cross-backend
+    /// [`crate::generator::desugared_string_method`] subset) so Go can lower the
+    /// wider resolved String surface — `slice`/`substring`/`char_at`/`index_of`/
+    /// `repeat`/`reverse`/`trim_start`/`trim_end` — to native ops, matching the
+    /// Rust backend. Indexing/`reverse` are **rune-aware** (`[]rune(s)`) so the
+    /// scalar-index semantics of §18.3 hold for multibyte input — a plain `s[i]`
+    /// would be a byte. `char_at`/`index_of` build the tagged `Optional` runtime
+    /// (`__bockSome(v)` / `__bockNone`); `index_of` converts `strings.Index`'s
+    /// byte offset to a rune index.
     fn try_emit_string_method(
         &mut self,
         node: &AIRNode,
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
-        let Some((recv, method, rest)) =
-            crate::generator::desugared_string_method(node, callee, args)
-        else {
+        if crate::generator::primitive_recv_kind(node) != Some("String") {
+            return Ok(false);
+        }
+        let Some((recv, field, rest)) = crate::generator::desugared_self_call(callee, args) else {
             return Ok(false);
         };
+        let method = field.name.as_str();
         let recv_str = self.expr_to_string(recv)?;
         let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
             rest.first()
@@ -4506,6 +4540,28 @@ impl GoEmitCtx {
             "trim" => {
                 self.needs_strings_import = true;
                 format!("strings.TrimSpace({recv_str})")
+            }
+            "trim_start" => {
+                self.needs_strings_import = true;
+                self.needs_unicode_import = true;
+                format!("strings.TrimLeftFunc({recv_str}, unicode.IsSpace)")
+            }
+            "trim_end" => {
+                self.needs_strings_import = true;
+                self.needs_unicode_import = true;
+                format!("strings.TrimRightFunc({recv_str}, unicode.IsSpace)")
+            }
+            // `reverse` reverses by Unicode scalar (rune), not byte.
+            "reverse" => format!(
+                "func(__r []rune) string {{ for __i, __j := 0, len(__r)-1; __i < __j; __i, __j = __i+1, __j-1 {{ __r[__i], __r[__j] = __r[__j], __r[__i] }}; return string(__r) }}([]rune({recv_str}))"
+            ),
+            "to_string" | "display" => format!("({recv_str})"),
+            "repeat" => {
+                let Some(n) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                format!("strings.Repeat({recv_str}, int({n}))")
             }
             "contains" => {
                 let Some(p) = arg0(self)? else {
@@ -4548,6 +4604,187 @@ impl GoEmitCtx {
                 };
                 self.needs_strings_import = true;
                 format!("strings.Split({recv_str}, {sep})")
+            }
+            // `slice`/`substring(start, end)`: scalar-index half-open substring
+            // (spec §18.3). Indexed over `[]rune` so the indices are scalar
+            // positions; `start`/`end` are clamped into range so out-of-bounds
+            // does not panic.
+            "slice" | "substring" => {
+                let Some(start) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(end) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                format!(
+                    "func(__r []rune, __a, __b int) string {{ if __a < 0 {{ __a = 0 }}; if __b > len(__r) {{ __b = len(__r) }}; if __a > __b {{ __a = __b }}; return string(__r[__a:__b]) }}([]rune({recv_str}), int({start}), int({end}))"
+                )
+            }
+            // `char_at(i)` returns `Optional[Char]` — `None` when out of range. A
+            // Bock `Char` is a Go `rune`.
+            "char_at" => {
+                let Some(i) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!(
+                    "func(__r []rune, __i int) __bockOption {{ if __i >= 0 && __i < len(__r) {{ return __bockSome(__r[__i]) }}; return __bockNone }}([]rune({recv_str}), int({i}))"
+                )
+            }
+            // `index_of(needle)` returns `Optional[Int]` — the scalar index of the
+            // first match, or `None`. `strings.Index` yields a *byte* offset, so
+            // convert it to a rune index via the prefix rune count.
+            "index_of" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                self.needs_strings_import = true;
+                self.needs_utf8_import = true;
+                format!(
+                    "func(__s, __p string) __bockOption {{ __b := strings.Index(__s, __p); if __b < 0 {{ return __bockNone }}; return __bockSome(int64(utf8.RuneCountInString(__s[:__b]))) }}({recv_str}, {p})"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
+    /// Lower a desugared numeric/`Char`/`Bool` primitive method (`recv_kind =
+    /// "Primitive:Int" | "Primitive:Float" | "Primitive:Char" | "Primitive:Bool"`)
+    /// to its native Go form. Covers the conversion and math methods the checker
+    /// resolves on the scalar primitives — `to_float`/`to_int`/`abs`/`min`/`max`/
+    /// `clamp`/`floor`/`ceil`/`round`/`sqrt`/… . Wired into the `Call` arm
+    /// alongside [`Self::try_emit_string_method`], before the generic
+    /// desugared-self-call fall-through (which would emit `n.toFloat(n)`).
+    /// `math.*` operates on `float64`, so the `Float` math methods round-trip the
+    /// `float64` receiver through `math`. `compare`/`eq`/`to_string`/`display`/
+    /// `hash_code` stay on the primitive *bridge* path. A Bock `Int` is a Go
+    /// `int64`, `Float` a `float64`, `Char` a `rune`.
+    fn try_emit_numeric_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let prim = match crate::generator::primitive_recv_kind(node) {
+            Some(p @ ("Int" | "Float" | "Char" | "Bool")) => p,
+            _ => return Ok(false),
+        };
+        let Some((recv, field, rest)) = crate::generator::desugared_self_call(callee, args) else {
+            return Ok(false);
+        };
+        let method = field.name.as_str();
+        let recv_str = self.expr_to_string(recv)?;
+        let arg = |this: &mut Self, i: usize| -> Result<Option<String>, CodegenError> {
+            rest.get(i)
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match (prim, method) {
+            // Conversions. `Float.to_int` truncates toward zero via `math.Trunc`,
+            // which also yields a *runtime* (non-constant) float64 — Go rejects a
+            // direct `int64(3.9)` on a literal receiver (an untyped/typed float
+            // *constant* not exactly representable as an int).
+            ("Int", "to_float") => format!("float64({recv_str})"),
+            ("Float", "to_int") => {
+                self.needs_math_import = true;
+                format!("int64(math.Trunc({recv_str}))")
+            }
+            ("Char", "to_int") => format!("int64({recv_str})"),
+            ("Bool", "to_int") => {
+                format!("func(__b bool) int64 {{ if __b {{ return 1 }}; return 0 }}({recv_str})")
+            }
+            // Int math. Go 1.21+ has builtin `min`/`max`; `abs` is via a cast to
+            // float64 and back to keep it inline.
+            ("Int", "abs") => {
+                self.needs_math_import = true;
+                format!("int64(math.Abs(float64({recv_str})))")
+            }
+            ("Int" | "Float", "min") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("min({recv_str}, {o})")
+            }
+            ("Int" | "Float", "max") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("max({recv_str}, {o})")
+            }
+            ("Int" | "Float", "clamp") => {
+                let (Some(lo), Some(hi)) = (arg(self, 0)?, arg(self, 1)?) else {
+                    return Ok(false);
+                };
+                format!("min(max({recv_str}, {lo}), {hi})")
+            }
+            ("Int", "shift_left") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("(({recv_str}) << ({o}))")
+            }
+            ("Int", "shift_right") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("(({recv_str}) >> ({o}))")
+            }
+            // Float math (`math.*` works on `float64`).
+            ("Float", "abs") => {
+                self.needs_math_import = true;
+                format!("math.Abs({recv_str})")
+            }
+            ("Float", "floor") => {
+                self.needs_math_import = true;
+                format!("math.Floor({recv_str})")
+            }
+            ("Float", "ceil") => {
+                self.needs_math_import = true;
+                format!("math.Ceil({recv_str})")
+            }
+            ("Float", "round") => {
+                self.needs_math_import = true;
+                format!("math.Round({recv_str})")
+            }
+            ("Float", "sqrt") => {
+                self.needs_math_import = true;
+                format!("math.Sqrt({recv_str})")
+            }
+            ("Float", "is_nan") => {
+                self.needs_math_import = true;
+                format!("math.IsNaN({recv_str})")
+            }
+            ("Float", "is_infinite") => {
+                self.needs_math_import = true;
+                format!("math.IsInf({recv_str}, 0)")
+            }
+            // Bool.
+            ("Bool", "negate") => format!("(!({recv_str}))"),
+            // Char (a Go `rune`).
+            ("Char", "to_upper") => {
+                self.needs_unicode_import = true;
+                format!("unicode.ToUpper({recv_str})")
+            }
+            ("Char", "to_lower") => {
+                self.needs_unicode_import = true;
+                format!("unicode.ToLower({recv_str})")
+            }
+            ("Char", "is_alpha") => {
+                self.needs_unicode_import = true;
+                format!("unicode.IsLetter({recv_str})")
+            }
+            ("Char", "is_digit") => {
+                self.needs_unicode_import = true;
+                format!("unicode.IsDigit({recv_str})")
+            }
+            ("Char", "is_whitespace") => {
+                self.needs_unicode_import = true;
+                format!("unicode.IsSpace({recv_str})")
             }
             _ => return Ok(false),
         };
@@ -4642,11 +4879,21 @@ impl GoEmitCtx {
     }
 
     /// Recognise desugared method calls on Duration/Instant values.
+    ///
+    /// `node` is the full `Call` AIR node, consulted only to *exclude* primitive
+    /// receivers: [`is_time_method_name`] alone is ambiguous (`abs` is both
+    /// `Duration.abs` and `Int.abs`/`Float.abs`), so when the checker has stamped
+    /// `recv_kind = "Primitive:<Ty>"` on the call this is a numeric method, not a
+    /// time method — bail so [`Self::try_emit_numeric_method`] handles it.
     fn try_emit_time_desugared_method(
         &mut self,
+        node: &AIRNode,
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
+        if crate::generator::primitive_recv_kind(node).is_some() {
+            return Ok(false);
+        }
         let NodeKind::FieldAccess { object, field } = &callee.kind else {
             return Ok(false);
         };
@@ -6383,7 +6630,7 @@ impl GoEmitCtx {
                 if self.try_emit_time_assoc_call(callee, args)? {
                     return Ok(());
                 }
-                if self.try_emit_time_desugared_method(callee, args)? {
+                if self.try_emit_time_desugared_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
@@ -6402,6 +6649,12 @@ impl GoEmitCtx {
                 // checker's `recv_kind = "Primitive:String"`, not by name alone —
                 // the fix for `String.contains` being misrouted to the List scan.
                 if self.try_emit_string_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // Numeric/Char/Bool primitive methods (`to_float`/`abs`/`sqrt`/…)
+                // likewise route by the checker's `recv_kind = "Primitive:Int|…"`
+                // before the generic fall-through, which would emit `n.toFloat(n)`.
+                if self.try_emit_numeric_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {

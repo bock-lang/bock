@@ -1,0 +1,116 @@
+// TEST: exec_string_num_methods
+// EXPECT: output "sl=éllo;sub=héllo;tl=[pad  ];tr=[  pad];rev=cba;rep=ababab;io=2;ioN=_;caHas=yes;caNHas=no;iabs=5;imin=3;imax=8;icl=10;ishl=16;ishr=8;ffl=3;fcl=4;frd=4;fsq=3;fabs=2;fmn=2;fmx=5;fcl2=7;i2fInt=7;f2i=3;cup=65;clo=97;c2i=65;b2i=1;isAlpha=yes;isDigit=yes;isWs=yes;bneg=no"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §18.3 String + numeric/Char/Bool primitive method lowering, exercised on ALL
+// FIVE targets (PR #210 lowered these on Rust only; the js/ts/python/go backends
+// emitted the Bock method name verbatim — `s.slice(...)` / `n.toFloat()` — which
+// is undefined/wrong on those targets). Each method now lowers to the target's
+// native idiom via the `recv_kind = "Primitive:String|Int|Float|Char|Bool"`
+// dispatch (`try_emit_string_method` / `try_emit_numeric_method`, run *before*
+// the List recogniser and the generic desugared-self-call fall-through).
+//
+// String coverage (output order):
+//   - `slice`/`substring(a, b)` — scalar-index half-open substring (§18.3). The
+//     receiver `"héllo world"` is multibyte, so this proves rune/code-point
+//     correctness (`sl` = scalars 1..5 of "héllo world" = "éllo").
+//   - `trim_start`/`trim_end` — one-sided whitespace strip.
+//   - `reverse` — scalar-reversed string.
+//   - `repeat(n)` — n-fold concatenation.
+//   - `index_of(needle)` — `Optional[Int]` (scalar index); `Some`/`None` matched.
+//   - `char_at(i)` — `Optional[Char]`; only the in-range/out-of-range *presence*
+//     is asserted (`caHas`/`caNHas`): the Char *value* is not interpolated
+//     because Char→String display and the boxed-Optional Char payload still
+//     diverge on Go (pre-existing gaps, tracked separately), independent of the
+//     `char_at` lowering itself.
+//
+// Numeric coverage:
+//   - Int: `abs`/`min`/`max`/`clamp`/`shift_left`/`shift_right`.
+//   - Float: `floor`/`ceil`/`round`/`sqrt`/`abs`/`min`/`max`/`clamp` — all chained
+//     through `.to_int()` so the output is target-identical without relying on
+//     cross-target float formatting (which is not what this fixture tests).
+//   - Conversions: `to_float`/`to_int` (round-tripped); a literal `Float.to_int`.
+//   - Char: `to_upper`/`to_lower` (compared by code point via `.to_int()`),
+//     `is_alpha`/`is_digit`/`is_whitespace`, `to_int`.
+//   - Bool: `negate`, `to_int`.
+//
+// Bools map to `yes`/`no` (raw `Bool` interpolation diverges: Python `True` vs the
+// rest's `true`). `main` is intentionally NOT `public`.
+module main
+
+fn yn(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn main() -> Void {
+  let s = "héllo world"
+  let sl = s.slice(1, 5)
+  let sub = s.substring(0, 5)
+  let tl = "  pad  ".trim_start()
+  let tr = "  pad  ".trim_end()
+  let rev = "abc".reverse()
+  let rep = "ab".repeat(3)
+
+  let io = "banana".index_of("nan")
+  let ioStr = match io {
+    Some(i) => "${i}"
+    None => "_"
+  }
+  let ioN = "banana".index_of("xyz")
+  let ioNStr = match ioN {
+    Some(i) => "${i}"
+    None => "_"
+  }
+
+  let ca = "hello".char_at(1)
+  let caHas = match ca {
+    Some(ch) => "yes"
+    None => "no"
+  }
+  let caNV = "hi".char_at(9)
+  let caNHas = match caNV {
+    Some(ch) => "yes"
+    None => "no"
+  }
+
+  let iabs = (0 - 5).abs()
+  let imin = 3.min(8)
+  let imax = 3.max(8)
+  let icl = 12.clamp(0, 10)
+  let ishl = 1.shift_left(4)
+  let ishr = 32.shift_right(2)
+
+  let ffl = 3.7.floor().to_int()
+  let fcl = 3.2.ceil().to_int()
+  let frd = 3.5.round().to_int()
+  let fsq = 9.0.sqrt().to_int()
+  let fabs = (0.0 - 2.5).abs().to_int()
+  let fmn = 2.0.min(5.0).to_int()
+  let fmx = 2.0.max(5.0).to_int()
+  let fcl2 = 9.0.clamp(0.0, 7.0).to_int()
+
+  let i2f = 7.to_float()
+  let i2fInt = i2f.to_int()
+  let f2i = 3.9.to_int()
+
+  let cup = 'a'.to_upper().to_int()
+  let clo = 'A'.to_lower().to_int()
+  let isAlpha = yn('x'.is_alpha())
+  let isDigit = yn('5'.is_digit())
+  let isWs = yn(' '.is_whitespace())
+  let c2i = 'A'.to_int()
+
+  let bneg = yn(true.negate())
+  let b2i = true.to_int()
+
+  let line1 = "sl=${sl};sub=${sub};tl=[${tl}];tr=[${tr}];rev=${rev};rep=${rep}"
+  let line2 = "io=${ioStr};ioN=${ioNStr};caHas=${caHas};caNHas=${caNHas}"
+  let line3 = "iabs=${iabs};imin=${imin};imax=${imax};icl=${icl};ishl=${ishl};ishr=${ishr}"
+  let line4 = "ffl=${ffl};fcl=${fcl};frd=${frd};fsq=${fsq};fabs=${fabs};fmn=${fmn};fmx=${fmx};fcl2=${fcl2}"
+  let line5 = "i2fInt=${i2fInt};f2i=${f2i};cup=${cup};clo=${clo};c2i=${c2i};b2i=${b2i}"
+  let line6 = "isAlpha=${isAlpha};isDigit=${isDigit};isWs=${isWs};bneg=${bneg}"
+  println("${line1};${line2};${line3};${line4};${line5};${line6}")
+}

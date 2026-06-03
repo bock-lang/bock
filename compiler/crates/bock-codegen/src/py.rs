@@ -879,6 +879,9 @@ struct PyEmitCtx {
     needs_asyncio_import: bool,
     /// Set when Duration/Instant codegen emits `time.monotonic_ns()`.
     needs_time_import: bool,
+    /// Set when a numeric primitive method emits `math.*` (`Float.floor`/`ceil`/
+    /// `sqrt`/`is_nan`/`is_infinite`), forcing `import math` in the preamble.
+    needs_math_import: bool,
     /// Names bound in the current block whose call value should be wrapped
     /// in `asyncio.create_task(...)` because the binding is later `await`ed
     /// within the same block. See [`Self::collect_task_bindings`].
@@ -1007,6 +1010,7 @@ impl PyEmitCtx {
             needs_abc_import: false,
             needs_asyncio_import: false,
             needs_time_import: false,
+            needs_math_import: false,
             task_bound_names: std::collections::HashSet::new(),
             effect_ops: HashMap::new(),
             current_handler_vars: HashMap::new(),
@@ -1092,6 +1096,9 @@ impl PyEmitCtx {
         }
         if self.needs_time_import {
             preamble.push_str("import time\n");
+        }
+        if self.needs_math_import {
+            preamble.push_str("import math\n");
         }
         // Merge every `typing` need into one `from typing import …` line so a
         // module that uses, e.g., both a `Callable` annotation and a generic
@@ -2010,17 +2017,29 @@ impl PyEmitCtx {
     /// `byte_len` encodes to UTF-8 first (`len(s.encode())`). `replace` replaces
     /// ALL occurrences (Python's default). `split` returns a Python list, the
     /// List runtime rep.
+    ///
+    /// Gated on `recv_kind = "Primitive:String"` directly (not the cross-backend
+    /// [`crate::generator::desugared_string_method`] subset) so Python can lower
+    /// the wider resolved String surface — `slice`/`substring`/`char_at`/
+    /// `index_of`/`repeat`/`reverse`/`trim_start`/`trim_end` — to native ops,
+    /// matching the Rust backend. Python `str` is already a code-point sequence,
+    /// so scalar slicing is plain `s[a:b]` and `reverse` is `s[::-1]`.
+    /// `char_at`/`index_of` build the tagged `Optional` runtime (`_BockSome(v)` /
+    /// `_bock_none`); the Optional prelude is pulled in by the structural scan
+    /// over the (Optional-typed) call.
     fn try_emit_string_method(
         &mut self,
         node: &AIRNode,
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
-        let Some((recv, method, rest)) =
-            crate::generator::desugared_string_method(node, callee, args)
-        else {
+        if crate::generator::primitive_recv_kind(node) != Some("String") {
+            return Ok(false);
+        }
+        let Some((recv, field, rest)) = crate::generator::desugared_self_call(callee, args) else {
             return Ok(false);
         };
+        let method = field.name.as_str();
         let recv_str = self.expr_to_string(recv)?;
         let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
             rest.first()
@@ -2034,6 +2053,16 @@ impl PyEmitCtx {
             "to_upper" => format!("({recv_str}).upper()"),
             "to_lower" => format!("({recv_str}).lower()"),
             "trim" => format!("({recv_str}).strip()"),
+            "trim_start" => format!("({recv_str}).lstrip()"),
+            "trim_end" => format!("({recv_str}).rstrip()"),
+            "reverse" => format!("({recv_str})[::-1]"),
+            "to_string" | "display" => format!("str({recv_str})"),
+            "repeat" => {
+                let Some(n) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("(({recv_str}) * ({n}))")
+            }
             "contains" => {
                 let Some(p) = arg0(self)? else {
                     return Ok(false);
@@ -2071,6 +2100,146 @@ impl PyEmitCtx {
                 };
                 format!("({recv_str}).split({sep})")
             }
+            // `slice`/`substring(start, end)`: scalar-index half-open substring
+            // (spec §18.3). Python `str` slicing is already code-point based, and
+            // out-of-range indices clamp rather than raise — matching the spec.
+            "slice" | "substring" => {
+                let Some(start) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(end) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                format!("({recv_str})[{start}:{end}]")
+            }
+            // `char_at(i)` returns `Optional[Char]` — `None` when out of range.
+            "char_at" => {
+                let Some(i) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!(
+                    "(lambda __s, __i: _BockSome(__s[__i]) if 0 <= __i < len(__s) else _bock_none)({recv_str}, {i})"
+                )
+            }
+            // `index_of(needle)` returns `Optional[Int]` — scalar index of the
+            // first match, or `None`. Python `str.find` is already code-point based.
+            "index_of" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!(
+                    "(lambda __s, __p: (lambda __b: _BockSome(__b) if __b >= 0 else _bock_none)(__s.find(__p)))({recv_str}, {p})"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
+    /// Lower a desugared numeric/`Char`/`Bool` primitive method (`recv_kind =
+    /// "Primitive:Int" | "Primitive:Float" | "Primitive:Char" | "Primitive:Bool"`)
+    /// to its native Python form. Covers the conversion and math methods the
+    /// checker resolves on the scalar primitives — `to_float`/`to_int`/`abs`/`min`/
+    /// `max`/`clamp`/`floor`/`ceil`/`round`/`sqrt`/… . Wired into the `Call` arm
+    /// alongside [`Self::try_emit_string_method`], before the generic
+    /// desugared-self-call fall-through (which would emit `n.to_float(n)`).
+    /// `floor`/`ceil`/`sqrt` need `math`, so they set `needs_math_import`.
+    /// `compare`/`eq`/`to_string`/`display`/`hash_code` stay on the primitive
+    /// *bridge* path. `Char` is a one-code-point Python `str`.
+    fn try_emit_numeric_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let prim = match crate::generator::primitive_recv_kind(node) {
+            Some(p @ ("Int" | "Float" | "Char" | "Bool")) => p,
+            _ => return Ok(false),
+        };
+        let Some((recv, field, rest)) = crate::generator::desugared_self_call(callee, args) else {
+            return Ok(false);
+        };
+        let method = field.name.as_str();
+        let recv_str = self.expr_to_string(recv)?;
+        let arg = |this: &mut Self, i: usize| -> Result<Option<String>, CodegenError> {
+            rest.get(i)
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match (prim, method) {
+            // Conversions.
+            ("Int", "to_float") => format!("float({recv_str})"),
+            ("Float", "to_int") => format!("int({recv_str})"),
+            ("Char", "to_int") => format!("ord({recv_str})"),
+            ("Bool", "to_int") => format!("(1 if ({recv_str}) else 0)"),
+            // Int math.
+            ("Int", "abs") => format!("abs({recv_str})"),
+            ("Int" | "Float", "min") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("min({recv_str}, {o})")
+            }
+            ("Int" | "Float", "max") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("max({recv_str}, {o})")
+            }
+            ("Int" | "Float", "clamp") => {
+                let (Some(lo), Some(hi)) = (arg(self, 0)?, arg(self, 1)?) else {
+                    return Ok(false);
+                };
+                format!("min(max({recv_str}, {lo}), {hi})")
+            }
+            ("Int", "shift_left") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("(({recv_str}) << ({o}))")
+            }
+            ("Int", "shift_right") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("(({recv_str}) >> ({o}))")
+            }
+            // Float math.
+            ("Float", "abs") => format!("abs({recv_str})"),
+            ("Float", "floor") => {
+                self.needs_math_import = true;
+                format!("float(math.floor({recv_str}))")
+            }
+            ("Float", "ceil") => {
+                self.needs_math_import = true;
+                format!("float(math.ceil({recv_str}))")
+            }
+            ("Float", "round") => format!("float(round({recv_str}))"),
+            ("Float", "sqrt") => {
+                self.needs_math_import = true;
+                format!("math.sqrt({recv_str})")
+            }
+            ("Float", "is_nan") => {
+                self.needs_math_import = true;
+                format!("math.isnan({recv_str})")
+            }
+            ("Float", "is_infinite") => {
+                self.needs_math_import = true;
+                format!("math.isinf({recv_str})")
+            }
+            // Bool.
+            ("Bool", "negate") => format!("(not ({recv_str}))"),
+            // Char (a one-code-point Python `str`).
+            ("Char", "to_upper") => format!("({recv_str}).upper()"),
+            ("Char", "to_lower") => format!("({recv_str}).lower()"),
+            ("Char", "is_alpha") => format!("({recv_str}).isalpha()"),
+            ("Char", "is_digit") => format!("({recv_str}).isdigit()"),
+            ("Char", "is_whitespace") => format!("({recv_str}).isspace()"),
             _ => return Ok(false),
         };
         self.buf.push_str(&code);
@@ -2233,11 +2402,21 @@ impl PyEmitCtx {
 
     /// Recognise desugared method calls `Call(FieldAccess(recv, m), [recv, ...args])`
     /// on Duration/Instant values and emit inline arithmetic.
+    ///
+    /// `node` is the full `Call` AIR node, consulted only to *exclude* primitive
+    /// receivers: [`is_time_method_name`] alone is ambiguous (`abs` is both
+    /// `Duration.abs` and `Int.abs`/`Float.abs`), so when the checker has stamped
+    /// `recv_kind = "Primitive:<Ty>"` this is a numeric method, not a time method —
+    /// bail so [`Self::try_emit_numeric_method`] handles it.
     fn try_emit_time_desugared_method(
         &mut self,
+        node: &AIRNode,
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
+        if crate::generator::primitive_recv_kind(node).is_some() {
+            return Ok(false);
+        }
         let NodeKind::FieldAccess { object, field } = &callee.kind else {
             return Ok(false);
         };
@@ -3554,7 +3733,7 @@ impl PyEmitCtx {
                 if self.try_emit_time_assoc_call(callee, args)? {
                     return Ok(());
                 }
-                if self.try_emit_time_desugared_method(callee, args)? {
+                if self.try_emit_time_desugared_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
@@ -3572,6 +3751,12 @@ impl PyEmitCtx {
                 // overlapping `len`/`contains`/`is_empty` names route by the
                 // checker's `recv_kind = "Primitive:String"`, not by name alone.
                 if self.try_emit_string_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // Numeric/Char/Bool primitive methods (`to_float`/`abs`/`sqrt`/…)
+                // likewise route by the checker's `recv_kind = "Primitive:Int|…"`
+                // before the generic fall-through, which would emit `n.to_float(n)`.
+                if self.try_emit_numeric_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {
