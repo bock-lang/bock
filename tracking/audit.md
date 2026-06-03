@@ -1894,3 +1894,33 @@ AWAITING OPERATOR (2 decisions, nothing in flight): (1) **examples-hardening dir
     engineer session (bock-codegen, the §20.4 method-vs-free-fn lowering); (3) build the informational examples-exec
     gate (Q-examples-exec-coverage) — separate engineer session (compiler/tests + .github/workflows), can run parallel
     to A (disjoint files). Audit artifacts: /tmp matrix + per-(example,target) logs (ephemeral; clusters captured here).
+
+[2026-06-03 15:24 UTC] MS-examples-hardening kickoff — gate (#204) + clusters A+B+C (#205) LANDED
+  Input: operator decided (this session) batch A+B+C into one fix session + launch the gate in parallel. Dispatched
+    TWO concurrent worktree-isolated engineer sub-agents (foreground, so they can write; model inherited = Opus 4.8,
+    meets the floor): (1) fix/list-codegen = A+B+C in bock-codegen; (2) chore/examples-exec-gate = the informational gate.
+  MERGES (I re-verified each via CI before merging — the dispatch-discipline lesson; CI runs the exact gate + conformance):
+    - **#202** gitignore cleanup — CLEAN (full matrix green), merged.
+    - **#204** informational examples-exec gate — CLEAN (incl. the new `examples build+run matrix` job), merged. 3 new
+      files, zero code changes: `tools/scripts/examples-exec-audit.sh` (out-of-tree build ×5 + run), `continue-on-error`
+      CI job, `tools/examples-exec-baseline.txt` ratchet (strict mode `BOCK_EXAMPLES_REQUIRE` exits 1 on regression).
+    - **#203** the 13:44 audit-record tracking PR — merged (tracking-views in sync).
+    - **#205** clusters A+B+C — waited for all 12 checks (ubuntu test lanes run conformance REQUIRE=all, 7m40s) → all
+      PASS, merged. main a5fbb28. A: `FUNCTIONAL_LIST_METHODS` + `desugared_list_functional_method` recogniser, native
+      idioms ×5. B: checker `LIST_CONCAT_META_KEY` stamp (+31 lines bock-types/checker.rs — out-of-scope but required;
+      reviewed, sound — codegen has no type table) + per-target concat. C: `collect_const_names`, consts emitted verbatim
+      def+use. 5 new conformance fixtures (×5, 25 pairs); conformance 455/0.
+  POST-FIX MATRIX (re-ran the #204 gate on main a5fbb28): runtime-working **js 2→7 · ts 2→4 (build 2→5) · py 7→9**;
+    rust 2, go 1 unchanged (blocked on E/F/G/D). +7 vs baseline, **0 regressions**. Measurable real-program gains from A/B/C.
+  NEW FINDING (orchestrator-verified at checker.rs:1375) → **Q-impl-body-typecheck (HIGH)**: `check_item` type-checks only
+    `FnDecl`/`ConstDecl`; `ImplBlock`/`ClassDecl` method BODIES are never checked (signatures are, via collect_sig). So
+    (1) type errors in methods are silently missed; (2) the checker meta-stamps (recv_kind, list_concat) aren't applied in
+    method bodies → A/B fully reach only FREE-fn call sites; method-body sites lean on codegen syntactic fallbacks. Likely
+    blocks a chunk of method-heavy examples. Filed; probably the high-leverage next fix.
+  TRIAGE: A/B → DONE(#205); C → const DONE, enum-variant/trait-name residue moved build→RUNTIME (folded into K + a
+    trait-symbol residue); M → DONE(#204, informational); #205's smaller OPENs (for_each block-closure go/py; chained
+    map.reduce record-projection go) → folded into Q-examples-codegen-misc (f)/(g). Both engineer sessions noted the
+    `/project:session` env wasn't pre-set (they set up worktrees manually off origin/main) — worktrees cleaned post-merge.
+  Follow-up: (1) land this tracking PR; (2) refresh the examples-exec baseline (ratchet step now that A/B/C landed);
+    (3) next dispatch in leverage order — Q-impl-body-typecheck (unblocks method-body sites) then Q-rust-cargo-workspace
+    (cheap, +3 rust) / E / F / G. Operator may want to checkpoint on sequencing before the next batch.

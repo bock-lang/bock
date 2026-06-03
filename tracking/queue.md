@@ -12,8 +12,16 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-03 13:44 — **EXAMPLES-EXEC AUDIT COMPLETE + operator decisions** (see audit.md
-2026-06-03 13:44). The full 20×5 audit (built in /tmp, project mode) gives the TRUE matrix: js 10/20 compile·2/10 run,
+_Last reconciled: 2026-06-03 15:24 — **MS-examples-hardening UNDERWAY: clusters A+B+C + the gate LANDED.** #204
+(informational examples-exec gate) + #205 (Q-list-method-codegen A · Q-list-concat-codegen B · Q-const-enum-naming C,
+all 5; conformance 455/0 w/ 5 new fixtures) merged; main a5fbb28. **Post-fix matrix (gate re-run): runtime-working
+js 2→7 · ts 2→4 · py 7→9 / 20; rust 2, go 1 unchanged (blocked on E/F/G/D); 0 regressions.** NEW HIGH finding
+**Q-impl-body-typecheck** (checker doesn't type-check impl/class method bodies → bounds A/B's reach to free-fn sites +
+misses method type errors). Cluster C: const part done, enum-variant/trait-name residue is now RUNTIME (→ K). Remaining
+MS-examples-hardening leverage order: Q-impl-body-typecheck, Q-rust-cargo-workspace, Q-go-enum-return-boxing (E),
+Q-rust-move-codegen (F), Q-rust-string-num-methods (G), Q-js-effect-export (J), Q-py-circular-import (K),
+Q-match-exprpos (D, deep), Q-examples-codegen-misc. Follow-up: refresh the examples-exec baseline (ratchet). — Earlier
+2026-06-03 13:44: **EXAMPLES-EXEC AUDIT COMPLETE + operator decisions** (see audit.md 2026-06-03 13:44). The full 20×5 audit (built in /tmp, project mode) gives the TRUE matrix: js 10/20 compile·2/10 run,
 ts 2/20·2/2, py 15/20·7/15, **rust 3/20·2/3 (in-repo 0/20 — workspace bug masks), go 1/20·1/1** — hello-world the only
 all-5. Worse than the digest's 6-example sample, and **rust/go fail on REAL codegen, not just the env bug** (proven:
 fizzbuzz-rust passes in /tmp, fails in-repo). **~9 evidence-confirmed root-cause clusters** filed below:
@@ -316,9 +324,14 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   *reflow* long lines (not hand-matchable in codegen) AND post-emit prettier would break the js/ts **source maps**;
   those formatters are user-OPTIONAL per §20.6.2 (not the baseline). Pursue later via either cheap codegen wins
   (redundant parens, py blank-lines) and/or post-emit formatting with source-map regeneration. v1.x-leaning.
-- **[Q-list-method-codegen] List `.map()`/`.filter()` method-with-closure mislowered (all 5)** — bug · ready ·
-  **★ NEXT DISPATCH — leverage #1, all-5** · `compiler/crates/bock-codegen/` · — · links §20.4, MS-examples-hardening ·
-  note: **FOUND 2026-06-03; CONFIRMED against generated code by the 20×5 audit (2026-06-03 13:44).** EXACT root cause:
+- **[Q-list-method-codegen] List `.map()`/`.filter()` method-with-closure mislowered (all 5)** — bug ·
+  **DONE → #205 (all 5)** · `compiler/crates/bock-codegen/` · — · links §20.4, MS-examples-hardening, #205,
+  Q-impl-body-typecheck · note: FIXED by #205 — new `FUNCTIONAL_LIST_METHODS` + `desugared_list_functional_method`
+  recogniser in generator.rs wired into each backend's Call arm; native idioms per target (JS/TS array methods; py
+  builtins + gated runtime prelude; rust iter-adapter chains; go for-range func literals). 5 new conformance fixtures
+  (×5, 25 exec pairs). **CAVEAT (reaches free-fn call sites; method-body sites bounded by Q-impl-body-typecheck —
+  the checker doesn't type-check impl/class method bodies so the recv_kind stamp isn't applied there).** Original detail:
+  EXACT root cause was
   a List functional METHOD with a closure is lowered with the **free-function calling convention** — the receiver is
   emitted as an explicit first argument: `data.map(data, (dp) => …)` (verified in TS output). Effect per target: **TS**
   array-not-assignable-to-callback + implicit-any params; **rust** `no method 'map'/'filter' on Vec` (needs
@@ -335,7 +348,12 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   /tmp, fails in-repo). Fix: emit an empty `[workspace]` table in the generated `Cargo.toml`. Purely additive — fixing
   recovers 3/20 rust examples in-repo; the other 17 fail on genuine rust codegen bugs (F/G/A/B/D). Cheap; do early.
 - **[Q-examples-exec-coverage] Exec-test all ~20 examples on all 5 targets in CI (the gate)** — chore/test-infra ·
-  ready · **HIGH — the guardrail; INFORMATIONAL-FIRST (operator-decided)** · `compiler/tests/`, `.github/workflows/` ·
+  **DONE (informational) → #204; ratchet-to-blocking pending** · `tools/scripts/examples-exec-audit.sh`,
+  `tools/examples-exec-baseline.txt`, `.github/workflows/examples-exec.yml` · — · links MS-examples-hardening, #204 ·
+  note: LANDED #204 — a script (out-of-tree build ×5 + run) + a `continue-on-error` CI job + a checked-in baseline that
+  warns on regression (strict mode `BOCK_EXAMPLES_REQUIRE` exits 1). **FOLLOW-UP (ratchet step): refresh the baseline now
+  that A/B/C landed** (post-fix matrix 15:24: js ran 7/20·ts 4/20·py 9/20·rust 2·go 1, +7 vs baseline, 0 regressions) so
+  the newly-passing pairs are protected; flip to required per-target as more clusters land. [historical detail below] ·
   — · links milestones (MS-examples-hardening, v1.0 acceptance) · note: FOUND 2026-06-03; the 20×5 audit (13:44) is the
   prototype. The 20 `examples/` aren't built+run on all 5, so real-world-pattern codegen bugs slipped past the narrow
   conformance fixtures (430/0 green while real programs fail). Build the gate: for each example × target, project-mode
@@ -343,18 +361,43 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   js `node`; py `python3`). **Land NON-BLOCKING (reports the matrix per PR), then ratchet per-target pass-thresholds
   upward to required as clusters land** (operator decision). Can run parallel to the cluster fixes (disjoint files).
   Note the in-repo cargo-workspace interaction (Q-rust-cargo-workspace) — fix it or build rust examples out-of-tree.
-- **[Q-list-concat-codegen] List `+` concatenation emitted as native `+` (ts/rust/go)** — bug · ready ·
-  `compiler/crates/bock-codegen/` · — · links MS-examples-hardening, §20.4 · note: FOUND 2026-06-03 (audit). Bock list
+- **[Q-list-concat-codegen] List `+` concatenation emitted as native `+` (ts/rust/go)** — bug ·
+  **DONE → #205** · `compiler/crates/bock-codegen/` (+ `bock-types/checker.rs` stamp) · — · links MS-examples-hardening,
+  §20.4, #205, Q-impl-body-typecheck · note: FIXED by #205 — checker stamps `LIST_CONCAT_META_KEY` on a List `+`
+  (`infer_binop`, checks result OR either operand for a concrete `List` to close the open-result-var case);
+  `generator::is_list_concat` reads it + a list-literal syntactic fallback; per-target concat idioms (`[...a,...b]` js/ts,
+  clone+extend rust, append-helper go, native `+` py). **CAVEAT: a bare `self.a + self.b` list concat INSIDE an impl
+  method won't get the checker stamp (Q-impl-body-typecheck); the syntactic fallback covers the common `xs + [..]` shape.**
+  Original: FOUND 2026-06-03 (audit). Bock list
   append/concat via `+` (`(self.items + [todo])`) lowers to a native `+` op: **ts** `Operator '+' cannot be applied to
   T[]`, **rust** E0369 `cannot add Vec<T> to Vec<T>`, **go** `operator + not defined on []T`. js silently does the wrong
   thing (string-concat), python coincidentally works (list `+`). Lower to each target's concat idiom (spread / `extend` /
   `append`). Examples: todo-list, expense-tracker, ownership-demo, systems-allocator.
-- **[Q-const-enum-naming] Const / enum-variant identifier def↔use mangling mismatch (all 5)** — bug · ready ·
-  `compiler/crates/bock-codegen/` · — · links MS-examples-hardening · note: FOUND 2026-06-03 (audit). A constant or
+- **[Q-const-enum-naming] Const / enum-variant identifier def↔use mangling mismatch (all 5)** — bug ·
+  **CONST part DONE → #205; enum-variant/trait-name residue now RUNTIME (not build)** · `compiler/crates/bock-codegen/` ·
+  — · links MS-examples-hardening, #205, Q-py-circular-import · note: #205 fixed the **const** def↔use mismatch
+  (`collect_const_names` registry; consts emitted verbatim at def + use across all backends) — fizzbuzz now compiles on
+  js/ts/py/rust. **POST-FIX MATRIX (15:24): the enum-variant (`Category_Electronics`) + trait/protocol-name
+  (`Allocatable`) cases now BUILD but RUN-FAIL** on js/py (inventory-system, systems-allocator moved from build-error to
+  runtime-error), folded into Q-py-circular-import (K) + a trait-symbol-not-emitted residue — **no remaining BUILD-level
+  work here**. Original: FOUND 2026-06-03 (audit). A constant or
   enum-variant name is emitted with one casing at the DEFINITION and another at the USE site: TS defines `FIZZ_NUM` but
   references `fizzNUM` (`Did you mean 'FIZZ_NUM'?`); `Category_Electronics`/`Allocatable` referenced-but-undefined; python
   references `FIZZ_NUM` but never emits the def at module scope. Normalize the identifier transform so def and use agree
   (and ensure module-scope consts are emitted). Examples: fizzbuzz, inventory-system, systems-allocator. Likely cheap.
+- **[Q-impl-body-typecheck] Checker does not type-check impl/class method BODIES** — bug · ready ·
+  **HIGH — correctness gap + bounds the meta-stamp codegen fixes** · `compiler/crates/bock-types/` (checker.rs) · — ·
+  links #205, Q-list-method-codegen, Q-list-concat-codegen, MS-examples-hardening · note: FOUND 2026-06-03 (during #205,
+  orchestrator-verified at checker.rs:1375). `check_item` dispatches only `FnDecl`/`ConstDecl`; `ImplBlock`/`ClassDecl`
+  fall into the `_ => record Void` arm. Method SIGNATURES are registered (`collect_sig`) but method BODIES are **never
+  type-checked**. Two consequences: (1) type errors inside impl/class methods are silently missed (correctness/UX);
+  (2) the checker's codegen meta-stamps (`recv_kind`, the new `list_concat`) aren't applied inside method bodies — so the
+  #205 A/B fixes fully reach only FREE-function call sites; `.map()`/`+`-concat **inside a method** relies on codegen
+  syntactic fallbacks (B's list-literal fallback covers `xs + [..]`; a bare `self.a + self.b` would still mislower).
+  Pre-existing (the stdlib/conformance pass because codegen has structural fallbacks). Likely accounts for a chunk of the
+  still-failing examples whose list ops live in methods (e.g. todo-list's class). Fix: recurse `check_item` into
+  impl/class method bodies (type-check each as a function with `self` bound to the target type). **Spec intends method
+  bodies to be checked — this is an impl bug, not a spec divergence (stays in-queue).** Probably high-leverage next.
 - **[Q-go-enum-return-boxing] Go: enum variant not boxed into sealed-trait interface on return** — bug · ready ·
   `compiler/crates/bock-codegen/` (go) · — · links MS-examples-hardening, #168 · note: FOUND 2026-06-03 (audit).
   Returning a variant where the sealed-trait interface type is expected isn't boxed: `cannot use MessageTypeText{}
@@ -387,8 +430,11 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   (js) / `return raise …` (py), invalid syntax — partly example **stub-quality** (guessing-game has unfinished bodies);
   (b) reserved-word / identifier collisions — `eval` (calculator js, `Invalid use of 'eval'`), redeclared `list`
   (todo-list js); (c) `Char` type unmapped on ts/rust/go (type-zoo); (d) go unused-var strictness `declared and not used`
-  (guessing-game); (e) local `step2` binding not emitted (calculator go/py `undefined: step2`). Triage each as its own
-  fix or example correction during the workstream.
+  (guessing-game); (e) local `step2` binding not emitted (calculator go/py `undefined: step2`); (f) **[from #205]**
+  `.for_each` with a BLOCK / mutating / `println` closure body fails on go/python (the pre-existing
+  statement-closure-body gap — `for_each` lowering itself is correct on rust/js/python; excluded from the all-5 fixture);
+  (g) **[from #205]** chained `.map(..).reduce(..)` over a record-field projection mislowers on go (nested-IIFE inference
+  gap; binding the projection to a typed `let` first works ×5). Triage each as its own fix or example correction.
 - **[Q-chat-protocol-allfail] `chat-protocol` fails build on all 5 — DIAGNOSED → folded into Q-match-exprpos** — bug ·
   **RESOLVED-AS-DUP (diagnosed 2026-06-03 13:44)** · — · links Q-match-exprpos · note: the all-5 failure (js `Unexpected
   token ')'`, py `'(' was never closed`, ts `Expression expected`, go enum-return) is the **expression-position
