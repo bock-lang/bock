@@ -1,0 +1,41 @@
+// TEST: exec_rust_effect_forwarding
+// EXPECT: output "outer;inner:hi"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Effect-handler forwarding across an effectful→effectful call. `outer` declares
+// `with Log` and calls `inner` (also `with Log`), forwarding its handler. In the
+// Rust backend the handler reaches `outer` as an `&impl Log` parameter; forwarding
+// it to `inner` previously re-borrowed it (`inner(&logger)` → `&&impl Log`),
+// failing the `Log` trait bound (`E0277: &impl Log: Log`). The backend now
+// forwards an already-borrowed handler param as-is (`inner(logger)`), while a
+// concrete handler (the module-level `handle` here) is still borrowed (`&CONST`).
+// All five targets must agree.
+module main
+
+effect Log {
+  fn emit(msg: String) -> String
+}
+
+record JoinLog {}
+
+impl Log for JoinLog {
+  fn emit(msg: String) -> String {
+    msg
+  }
+}
+
+fn inner(tag: String) -> String with Log {
+  emit("inner:${tag}")
+}
+
+fn outer() -> String with Log {
+  let a = emit("outer")
+  let b = inner("hi")
+  "${a};${b}"
+}
+
+handle Log with JoinLog {}
+
+fn main() -> Void {
+  println(outer())
+}

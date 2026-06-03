@@ -571,6 +571,16 @@ struct RsEmitCtx {
     effect_ops: HashMap<String, String>,
     /// Maps effect type name → current handler variable name in scope.
     current_handler_vars: HashMap<String, String>,
+    /// Effect type names whose in-scope handler variable is *already a reference*
+    /// (`&impl Effect`) — i.e. an effectful function's own `&impl Effect`
+    /// parameter forwarded to a nested effectful call. Forwarding such a handler
+    /// must pass it *as-is* (`handler`), not re-borrowed (`&handler`), which would
+    /// be `&&impl Effect` and fail the `Effect` trait bound (`E0277`). A handler
+    /// that is a concrete owned value instead (module-level `handle` const, a
+    /// `handling`-block local) is NOT in this set and is forwarded as `&handler`.
+    /// Saved/restored alongside [`Self::current_handler_vars`] at every scope that
+    /// rebinds handlers.
+    borrowed_handler_effects: std::collections::HashSet<String>,
     /// Maps function name → effect type names from its `with` clause.
     fn_effects: HashMap<String, Vec<String>>,
     /// Maps composite effect name → component effect names.
@@ -685,6 +695,7 @@ impl RsEmitCtx {
             task_bound_names: std::collections::HashSet::new(),
             effect_ops: HashMap::new(),
             current_handler_vars: HashMap::new(),
+            borrowed_handler_effects: std::collections::HashSet::new(),
             fn_effects: HashMap::new(),
             composite_effects: HashMap::new(),
             concurrency_runtime_emitted: false,
@@ -718,6 +729,7 @@ impl RsEmitCtx {
             task_bound_names: std::collections::HashSet::new(),
             effect_ops: self.effect_ops.clone(),
             current_handler_vars: HashMap::new(),
+            borrowed_handler_effects: std::collections::HashSet::new(),
             fn_effects: self.fn_effects.clone(),
             composite_effects: self.composite_effects.clone(),
             concurrency_runtime_emitted: false,
@@ -1892,11 +1904,20 @@ impl RsEmitCtx {
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
-        let Some((recv, method, rest)) =
-            crate::generator::desugared_string_method(node, callee, args)
-        else {
+        // Gate on the checker's `recv_kind = "Primitive:String"` stamp directly
+        // (rather than [`crate::generator::desugared_string_method`], which only
+        // admits the cross-backend `STRING_METHODS` subset). Rust can lower a
+        // wider set — `slice`/`substring`/`char_at`/`index_of`/`repeat`/`reverse`
+        // — to native `str` ops, so it recognises the full resolved String method
+        // surface here without widening the shared const (which would force the
+        // other backends to handle the extra names too).
+        if crate::generator::primitive_recv_kind(node) != Some("String") {
+            return Ok(false);
+        }
+        let Some((recv, field, rest)) = crate::generator::desugared_self_call(callee, args) else {
             return Ok(false);
         };
+        let method = field.name.as_str();
         let recv_str = self.expr_to_string(recv)?;
         let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
             rest.first()
@@ -1910,6 +1931,16 @@ impl RsEmitCtx {
             "to_upper" => format!("({recv_str}).to_uppercase()"),
             "to_lower" => format!("({recv_str}).to_lowercase()"),
             "trim" => format!("({recv_str}).trim().to_string()"),
+            "trim_start" => format!("({recv_str}).trim_start().to_string()"),
+            "trim_end" => format!("({recv_str}).trim_end().to_string()"),
+            "reverse" => format!("({recv_str}).chars().rev().collect::<String>()"),
+            "to_string" | "display" => format!("({recv_str}).to_string()"),
+            "repeat" => {
+                let Some(n) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).repeat(({n}) as usize)")
+            }
             "contains" => {
                 let Some(p) = arg0(self)? else {
                     return Ok(false);
@@ -1949,6 +1980,157 @@ impl RsEmitCtx {
                     "({recv_str}).split(&({sep}) as &str).map(|__p| __p.to_string()).collect::<Vec<String>>()"
                 )
             }
+            // `slice`/`substring(start, end)` are scalar-index half-open
+            // substrings (spec §18.3 — `len` is the Unicode scalar count, so
+            // indices are scalar positions, not bytes). Lowered via a char
+            // iterator so multibyte input is handled correctly and the result is
+            // an owned `String`. `start`/`end` are clamped by `take`'s saturating
+            // subtraction (`end.saturating_sub(start)`).
+            "slice" | "substring" => {
+                let Some(start) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(end) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                format!(
+                    "({recv_str}).chars().skip(({start}) as usize).take((({end}) as i64 - ({start}) as i64).max(0) as usize).collect::<String>()"
+                )
+            }
+            // `char_at(i)` returns `Optional[Char]` — `None` when out of range.
+            "char_at" => {
+                let Some(i) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).chars().nth(({i}) as usize)")
+            }
+            // `index_of(needle)` returns `Optional[Int]` — the scalar index of the
+            // first match, or `None`. Rust's `str::find` yields a *byte* offset,
+            // so convert it to a scalar index via the char-boundary count.
+            "index_of" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!(
+                    "({recv_str}).find(&({p}) as &str).map(|__b| ({recv_str})[..__b].chars().count() as i64)"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
+    /// Lower a desugared numeric/`Char`/`Bool` primitive method (`recv_kind =
+    /// "Primitive:Int" | "Primitive:Float" | "Primitive:Char" | "Primitive:Bool"`)
+    /// to its native Rust form. Covers the conversion and math methods the checker
+    /// resolves on the scalar primitives — `to_float`/`to_int`/`abs`/`min`/`max`/
+    /// `clamp`/`floor`/`ceil`/`round`/`sqrt`/… — none of which exist as inherent
+    /// methods on `i64`/`f64` in Rust. Wired into the `Call` arm alongside
+    /// [`Self::try_emit_string_method`], before the generic desugared-self-call
+    /// fall-through (which would emit `n.to_float(n)`, undefined on `i64`).
+    /// `compare`/`eq`/`to_string`/`display` stay on the primitive *bridge* path.
+    fn try_emit_numeric_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let prim = match crate::generator::primitive_recv_kind(node) {
+            Some(p @ ("Int" | "Float" | "Char" | "Bool")) => p,
+            _ => return Ok(false),
+        };
+        let Some((recv, field, rest)) = crate::generator::desugared_self_call(callee, args) else {
+            return Ok(false);
+        };
+        let method = field.name.as_str();
+        let recv_str = self.expr_to_string(recv)?;
+        let arg = |this: &mut Self, i: usize| -> Result<Option<String>, CodegenError> {
+            rest.get(i)
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match (prim, method) {
+            // Int → Float / Float → Int conversions.
+            ("Int", "to_float") => format!("(({recv_str}) as f64)"),
+            ("Float", "to_int") => format!("(({recv_str}) as i64)"),
+            // `Char.to_int` is the scalar value; `Bool.to_int` is 0/1.
+            ("Char", "to_int") => format!("(({recv_str}) as i64)"),
+            ("Bool", "to_int") => format!("(if ({recv_str}) {{ 1i64 }} else {{ 0i64 }})"),
+            // Int math.
+            ("Int", "abs") => format!("({recv_str}).abs()"),
+            ("Int", "min") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).min({o})")
+            }
+            ("Int", "max") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).max({o})")
+            }
+            ("Int", "clamp") => {
+                let (Some(lo), Some(hi)) = (arg(self, 0)?, arg(self, 1)?) else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).clamp({lo}, {hi})")
+            }
+            ("Int", "shift_left") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("(({recv_str}) << ({o}))")
+            }
+            ("Int", "shift_right") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("(({recv_str}) >> ({o}))")
+            }
+            // Float math.
+            ("Float", "abs") => format!("({recv_str}).abs()"),
+            ("Float", "floor") => format!("({recv_str}).floor()"),
+            ("Float", "ceil") => format!("({recv_str}).ceil()"),
+            ("Float", "round") => format!("({recv_str}).round()"),
+            ("Float", "sqrt") => format!("({recv_str}).sqrt()"),
+            ("Float", "is_nan") => format!("({recv_str}).is_nan()"),
+            ("Float", "is_infinite") => format!("({recv_str}).is_infinite()"),
+            ("Float", "min") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).min({o})")
+            }
+            ("Float", "max") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).max({o})")
+            }
+            ("Float", "clamp") => {
+                let (Some(lo), Some(hi)) = (arg(self, 0)?, arg(self, 1)?) else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).clamp({lo}, {hi})")
+            }
+            // Bool.
+            ("Bool", "negate") => format!("(!({recv_str}))"),
+            // Char.
+            ("Char", "to_upper") => {
+                format!("({recv_str}).to_uppercase().next().unwrap_or({recv_str})")
+            }
+            ("Char", "to_lower") => {
+                format!("({recv_str}).to_lowercase().next().unwrap_or({recv_str})")
+            }
+            ("Char", "is_alpha") => format!("({recv_str}).is_alphabetic()"),
+            ("Char", "is_digit") => format!("({recv_str}).is_ascii_digit()"),
+            ("Char", "is_whitespace") => format!("({recv_str}).is_whitespace()"),
             _ => return Ok(false),
         };
         self.buf.push_str(&code);
@@ -2813,6 +2995,10 @@ impl RsEmitCtx {
                     self.buf.push_str(";\n");
                     self.current_handler_vars
                         .insert(effect_name.to_string(), const_name);
+                    // A module-level `handle` const is a concrete owned handler;
+                    // forwarding it borrows (`&CONST`), so it is not a borrowed
+                    // param.
+                    self.borrowed_handler_effects.remove(effect_name);
                 } else {
                     // Fallback for non-literal handlers: emit a comment so the
                     // output is still valid Rust but the handler must be
@@ -2911,13 +3097,24 @@ impl RsEmitCtx {
         ));
         self.indent += 1;
         let old_handler_vars = self.current_handler_vars.clone();
+        let old_borrowed_handlers = self.borrowed_handler_effects.clone();
         let expanded = self.expand_effect_names(effect_clause);
         for ename in &expanded {
             self.current_handler_vars
                 .insert(ename.clone(), to_snake_case(ename));
+            // This fn's effect param is `&impl Effect` — already a reference, so
+            // a nested effectful call forwards it as-is (not re-borrowed).
+            self.borrowed_handler_effects.insert(ename.clone());
         }
+        // A by-value, non-`Copy` parameter reused after a move must clone on each
+        // by-value pass (`E0382`). See `seed_reused_params`.
+        let seeded = self.seed_reused_params(params, body);
         self.emit_block_body(body)?;
+        for name in seeded {
+            self.reused_let_bindings.remove(&name);
+        }
         self.current_handler_vars = old_handler_vars;
+        self.borrowed_handler_effects = old_borrowed_handlers;
         self.indent -= 1;
         self.writeln("}");
         Ok(())
@@ -2981,13 +3178,23 @@ impl RsEmitCtx {
             ));
             self.indent += 1;
             let old_handler_vars = self.current_handler_vars.clone();
+            let old_borrowed_handlers = self.borrowed_handler_effects.clone();
             let expanded = self.expand_effect_names(effect_clause);
             for ename in &expanded {
                 self.current_handler_vars
                     .insert(ename.clone(), to_snake_case(ename));
+                // `&impl Effect` method param — forward as-is, never re-borrowed.
+                self.borrowed_handler_effects.insert(ename.clone());
             }
+            // Seed move-reuse clones for by-value, non-`Copy` method params (the
+            // `self` receiver is borrowed and skipped). See `seed_reused_params`.
+            let seeded = self.seed_reused_params(rest, body);
             self.emit_block_body(body)?;
+            for name in seeded {
+                self.reused_let_bindings.remove(&name);
+            }
             self.current_handler_vars = old_handler_vars;
+            self.borrowed_handler_effects = old_borrowed_handlers;
             self.indent -= 1;
             self.writeln("}");
         }
@@ -3152,14 +3359,24 @@ impl RsEmitCtx {
             .collect()
     }
 
-    /// Build `&handler_var, ...` arguments for calling an effectful function.
+    /// Build the handler arguments for calling an effectful function. Each effect
+    /// of the callee is forwarded from the current scope's handler variable: a
+    /// concrete owned handler (module-level `handle` const, a `handling`-block
+    /// local) is borrowed (`&handler`); an *already-borrowed* `&impl Effect`
+    /// parameter is forwarded as-is (`handler`), since re-borrowing it would be
+    /// `&&impl Effect` and fail the trait bound (`E0277`). See
+    /// [`Self::borrowed_handler_effects`].
     fn build_effects_call_args_rs(&self, fn_name: &str) -> Option<String> {
         let effects = self.fn_effects.get(fn_name)?;
         let entries: Vec<String> = effects
             .iter()
             .filter_map(|e| {
                 let handler_var = self.current_handler_vars.get(e)?;
-                Some(format!("&{handler_var}"))
+                if self.borrowed_handler_effects.contains(e) {
+                    Some(handler_var.clone())
+                } else {
+                    Some(format!("&{handler_var}"))
+                }
             })
             .collect();
         if entries.is_empty() {
@@ -3270,7 +3487,17 @@ impl RsEmitCtx {
                 let binding = self.pattern_to_rs_binding(pattern);
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}for {binding} in ");
+                // `for x in coll` consumes `coll` via `.into_iter()`. If `coll` is
+                // a binding reused after the loop (`render_document(nodes)` after
+                // `for n in nodes`), clone it so the later use stays live
+                // (`E0382`). The loop body keeps owned element bindings (matching
+                // Bock's by-value `for`); iterating `&coll` would change them to
+                // references and break the body.
+                let clone_iter = self.arg_is_reused_binding(iterable);
                 self.emit_expr(iterable)?;
+                if clone_iter {
+                    self.buf.push_str(".clone()");
+                }
                 self.buf.push_str(" {\n");
                 self.indent += 1;
                 self.emit_block_body(body)?;
@@ -3355,6 +3582,7 @@ impl RsEmitCtx {
                 self.writeln("{");
                 self.indent += 1;
                 let old_handler_vars = self.current_handler_vars.clone();
+                let old_borrowed_handlers = self.borrowed_handler_effects.clone();
                 for h in handlers {
                     let effect_name = h
                         .effect
@@ -3368,6 +3596,10 @@ impl RsEmitCtx {
                     self.buf.push_str(";\n");
                     self.current_handler_vars
                         .insert(effect_name.to_string(), var_name);
+                    // A `handling`-block local is a concrete owned handler value,
+                    // so forwarding it borrows (`&__effect`) — clear any inherited
+                    // borrowed-param marker for this effect.
+                    self.borrowed_handler_effects.remove(effect_name);
                 }
                 if let NodeKind::Block { stmts, tail } = &body.kind {
                     for s in stmts {
@@ -3382,6 +3614,7 @@ impl RsEmitCtx {
                     self.emit_stmt(body)?;
                 }
                 self.current_handler_vars = old_handler_vars;
+                self.borrowed_handler_effects = old_borrowed_handlers;
                 self.indent -= 1;
                 self.writeln("}");
                 Ok(())
@@ -3523,11 +3756,21 @@ impl RsEmitCtx {
                 }
                 // `String + String` concat: Rust's `String + String` does not
                 // compile (`Add<String>` is not implemented; only `String +
-                // &str`). When either operand is a detectably-`String` expression
-                // emit `format!("{}{}", l, r)`, which concatenates regardless of
-                // whether each side is an owned `String` or a `&str`.
+                // &str`). Emit `format!("{}{}", l, r)`, which concatenates
+                // regardless of whether each side is an owned `String` or `&str`.
+                // The checker's `string_concat` stamp is authoritative (it sees
+                // operand *types*, so it catches `result + sep` where both are
+                // `String`-typed identifiers); the syntactic `expr_is_string_rs`
+                // heuristic is the fallback for unstamped nodes.
+                let string_concat_stamped = matches!(
+                    node.metadata
+                        .get(bock_types::checker::STRING_CONCAT_META_KEY),
+                    Some(bock_air::Value::Bool(true))
+                );
                 if *op == BinOp::Add
-                    && (Self::expr_is_string_rs(left) || Self::expr_is_string_rs(right))
+                    && (string_concat_stamped
+                        || Self::expr_is_string_rs(left)
+                        || Self::expr_is_string_rs(right))
                 {
                     let l = self.expr_to_string(left)?;
                     let r = self.expr_to_string(right)?;
@@ -3591,7 +3834,15 @@ impl RsEmitCtx {
                                 if i > 0 {
                                     self.buf.push_str(", ");
                                 }
+                                // A by-value pass of a reused binding into an
+                                // effect op (`storage.write(key, value)` before a
+                                // later `format!("…", key)`) moves it; clone so the
+                                // later use stays live (`E0382`).
+                                let clone_reused = self.arg_is_reused_binding(&arg.value);
                                 self.emit_expr(&arg.value)?;
+                                if clone_reused {
+                                    self.buf.push_str(".clone()");
+                                }
                             }
                             self.buf.push(')');
                             return Ok(());
@@ -3640,6 +3891,13 @@ impl RsEmitCtx {
                 if self.try_emit_string_method(node, callee, args)? {
                     return Ok(());
                 }
+                // Numeric/Char/Bool primitive methods (`to_float`/`abs`/`sqrt`/…)
+                // likewise route by the checker's `recv_kind = "Primitive:Int|…"`
+                // before the generic fall-through, which would emit `n.to_float(n)`
+                // (no such inherent method on `i64`/`f64`).
+                if self.try_emit_numeric_method(node, callee, args)? {
+                    return Ok(());
+                }
                 if self.try_emit_list_method(node, callee, args)? {
                     return Ok(());
                 }
@@ -3675,7 +3933,16 @@ impl RsEmitCtx {
                         if borrow_operands {
                             self.buf.push('&');
                         }
+                        // A by-value pass of a reused binding into a method arg
+                        // (`storage.write(key, value)` before a later
+                        // `format!("…", key)`) moves it; clone so the later use is
+                        // still live (`E0382`). Borrowed operands are never moved.
+                        let clone_reused =
+                            !borrow_operands && self.arg_is_reused_binding(&arg.value);
                         self.emit_expr(&arg.value)?;
+                        if clone_reused {
+                            self.buf.push_str(".clone()");
+                        }
                     }
                     self.buf.push(')');
                     return Ok(());
@@ -3745,7 +4012,13 @@ impl RsEmitCtx {
                     if borrow_operands {
                         self.buf.push('&');
                     }
+                    // Clone a reused binding passed by value into a method arg so
+                    // a later use stays live (`E0382`). See `arg_is_reused_binding`.
+                    let clone_reused = !borrow_operands && self.arg_is_reused_binding(&arg.value);
                     self.emit_expr(&arg.value)?;
+                    if clone_reused {
+                        self.buf.push_str(".clone()");
+                    }
                 }
                 self.buf.push(')');
                 Ok(())
@@ -3774,7 +4047,35 @@ impl RsEmitCtx {
             NodeKind::Lambda { params, body } => {
                 let param_strs = self.collect_param_strs(params);
                 let _ = write!(self.buf, "|{}| ", param_strs.join(", "));
+                // A closure used as `.map`/`.filter`/… is `FnMut`/`Fn` — it may
+                // run many times, so a by-value pass of a *captured* (non-param)
+                // binding moves it out of the closure on the first call (`E0507`).
+                // Seed every captured binding the body references for the
+                // move-reuse clone path so the call-arg emitter clones it
+                // (`category_name(cat)` → `category_name(cat.clone())`). The
+                // closure's own params bind fresh values each call and are
+                // excluded. Cloning is always sound (all generated types are
+                // `Clone`); a captured `Copy` scalar clones harmlessly.
+                let mut lambda_params = Vec::new();
+                for p in params {
+                    if let NodeKind::Param { pattern, .. } = &p.kind {
+                        Self::collect_pattern_binding_names(pattern, &mut lambda_params);
+                    }
+                }
+                let lambda_params: std::collections::HashSet<String> = lambda_params
+                    .into_iter()
+                    .map(|n| to_snake_case(&n))
+                    .collect();
+                let mut captured = Vec::new();
+                Self::collect_identifier_names(body, &mut captured);
+                let prev_reused_let = self.reused_let_bindings.clone();
+                for name in captured {
+                    if !lambda_params.contains(&name) {
+                        self.reused_let_bindings.insert(name);
+                    }
+                }
                 self.emit_expr(body)?;
+                self.reused_let_bindings = prev_reused_let;
                 Ok(())
             }
             NodeKind::Pipe { left, right } => self.emit_pipe(left, right),
@@ -3953,8 +4254,13 @@ impl RsEmitCtx {
                             // exprs on `self`, so they carry this state already.
                             sub.effect_ops = self.effect_ops.clone();
                             sub.current_handler_vars = self.current_handler_vars.clone();
+                            sub.borrowed_handler_effects = self.borrowed_handler_effects.clone();
                             sub.fn_effects = self.fn_effects.clone();
                             sub.composite_effects = self.composite_effects.clone();
+                            // Carry the move-reuse clone sets so an interpolated
+                            // by-value pass of a reused binding still clones.
+                            sub.reused_let_bindings = self.reused_let_bindings.clone();
+                            sub.reused_match_bindings = self.reused_match_bindings.clone();
                             sub.emit_expr(expr)?;
                             format_args.push(sub.buf);
                         }
@@ -4200,6 +4506,83 @@ impl RsEmitCtx {
         let mut c = UseCounter { name, count: 0 };
         bock_air::visitor::Visitor::visit_node(&mut c, node);
         c.count
+    }
+
+    /// Collect the snake-cased names of every `Identifier` read in `node` (used
+    /// to find a closure body's captured bindings — see the `Lambda` arm).
+    fn collect_identifier_names(node: &AIRNode, out: &mut Vec<String>) {
+        struct NameCollector<'a> {
+            out: &'a mut Vec<String>,
+        }
+        impl bock_air::visitor::Visitor for NameCollector<'_> {
+            fn visit_node(&mut self, node: &AIRNode) {
+                if let NodeKind::Identifier { name } = &node.kind {
+                    self.out.push(to_snake_case(&name.name));
+                }
+                bock_air::visitor::walk_node(self, node);
+            }
+        }
+        let mut c = NameCollector { out };
+        bock_air::visitor::Visitor::visit_node(&mut c, node);
+    }
+
+    /// Seed [`Self::reused_let_bindings`] with by-value, non-`Copy` parameters
+    /// that the body reads more than once. A Bock parameter is passed by value
+    /// (Rust takes ownership); a non-`Copy` value is *moved* by its first
+    /// by-value consumer, so a later by-value pass of the same parameter is a
+    /// use-after-move (`E0382`) — e.g. `show(op, …)` calling `eval(op, …)` then
+    /// `format_expr(op, …)` where `op: Op` is a (non-`Copy`) generated enum. By
+    /// registering such parameters here, the call-arg emitter inserts `.clone()`
+    /// on each by-value pass (every derived type is `Clone`). Returns the names
+    /// added so the caller can restore the set afterward.
+    ///
+    /// `Copy` scalar parameters (`Int`/`Float`/`Bool`/`Char` → `i64`/`f64`/`bool`
+    /// /`char`) and reference-bound `self`-operands are skipped: they are not
+    /// moved, and cloning them would be needless (`clippy::clone_on_copy`). The
+    /// leading `self` receiver is borrowed, never owned, so it is skipped too.
+    fn seed_reused_params(&mut self, params: &[AIRNode], body: &AIRNode) -> Vec<String> {
+        let mut added = Vec::new();
+        for p in params {
+            // Skip the `self` receiver — it lowers to `&self`/`&mut self`, never
+            // an owned move.
+            if crate::generator::param_binds_self(p).is_some() {
+                continue;
+            }
+            let NodeKind::Param { pattern, ty, .. } = &p.kind else {
+                continue;
+            };
+            // `Copy` scalars are never moved; cloning them is needless noise.
+            if ty.as_deref().is_some_and(Self::ast_type_is_copy) {
+                continue;
+            }
+            let NodeKind::BindPat { name, .. } = &pattern.kind else {
+                continue;
+            };
+            let rs_name = to_snake_case(&name.name);
+            if Self::count_identifier_uses(body, &rs_name) > 1
+                && self.reused_let_bindings.insert(rs_name.clone())
+            {
+                added.push(rs_name);
+            }
+        }
+        added
+    }
+
+    /// True when an AIR type node lowers to a `Copy` Rust scalar
+    /// (`Int`/`Float`/`Bool`/`Char` → `i64`/`f64`/`bool`/`char`). Such a value is
+    /// never moved by a by-value use, so it needs no move-reuse clone.
+    /// Conservative: anything else (String, records, enums, containers, optionals,
+    /// tuples, functions, generic type vars) is treated as non-`Copy`.
+    fn ast_type_is_copy(ty: &AIRNode) -> bool {
+        match &ty.kind {
+            NodeKind::TypeNamed { path, args } => {
+                args.is_empty()
+                    && path.segments.last().is_some_and(|s| {
+                        matches!(s.name.as_str(), "Int" | "Float" | "Bool" | "Char")
+                    })
+            }
+            _ => false,
+        }
     }
 
     /// True when `arg` is a bare identifier naming a match binding the current

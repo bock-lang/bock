@@ -64,7 +64,9 @@ See §20.6.1.
 >   project with `tsc -p .` (honoring the scaffolded `tsconfig.json`) then
 >   runs `node main.js`.
 > - **Rust** — a real Cargo crate: a `Cargo.toml` (`[package]` + a
->   `[[bin]]`) plus a `src/`-rooted module tree (`src/main.rs`,
+>   `[[bin]]`, plus an empty `[workspace]` table so the crate is its own
+>   workspace root and builds even when the output lands inside a parent
+>   Cargo workspace) plus a `src/`-rooted module tree (`src/main.rs`,
 >   `src/core/option.rs`, the `mod`/`pub mod` wiring files), with
 >   cross-module references resolved by `use crate::core::option::…;`. The
 >   concurrency runtime, when used, lives once in `src/bock_runtime.rs` and
