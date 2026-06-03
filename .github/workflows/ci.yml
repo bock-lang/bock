@@ -110,7 +110,46 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.toolchain }}
-      - run: cargo test --workspace --all-features
+      # ── Project-mode transpiled-test tooling (Linux lane only) ───────────────
+      # The ubuntu lane is the single *certifying* lane for §20.6.2: it provisions
+      # the js/ts/python test runners + formatters so `transpiled_tests.rs`
+      # RUN-verifies and formatter-gates all five targets (rust + go are already
+      # on the runner). `BOCK_PROJECTMODE_REQUIRE=all` (set on the test step below)
+      # turns any *absent* runner/formatter into a hard failure here — so the lane
+      # genuinely certifies rather than silently skipping. macOS/Windows lanes stay
+      # skip-if-absent (no install), keeping total CI time sane (one lane suffices).
+      - name: Set up Node (js/ts test runner + prettier)
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+      - name: Install project-mode test + format tooling
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # JS/TS formatter. The harness prefers the project-local Prettier (an
+          # `npm install` inside each scaffolded project resolves it from the
+          # generated devDependencies), so a global install is a belt-and-braces
+          # fallback. The Vitest runner likewise comes from `npm install`.
+          npm install -g 'prettier@3'
+          prettier --version
+          # Python formatter(s): pipx isolates them from the PEP-668 system env.
+          pipx install black
+          pipx install ruff
+          black --version
+          # Python test runner. The runner is ephemeral, so installing pytest into
+          # the system interpreter with --break-system-packages is acceptable and
+          # keeps `python3 -m pytest` (and `python -m unittest`, stdlib) on PATH.
+          python3 -m pip install --break-system-packages pytest
+          python3 -m pytest --version
+      - name: cargo test (workspace)
+        shell: bash
+        env:
+          # Certify all five targets on Linux; elsewhere leave run-verify/format
+          # checks skip-if-absent (empty require flag).
+          BOCK_PROJECTMODE_REQUIRE: ${{ runner.os == 'Linux' && 'all' || '' }}
+        run: cargo test --workspace --all-features
 
   doc:
     name: cargo doc

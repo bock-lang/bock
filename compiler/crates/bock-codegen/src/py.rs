@@ -720,7 +720,11 @@ impl CodeGenerator for PyGenerator {
             out.push_str(line);
             out.push('\n');
         }
-        out.push('\n');
+        // Black/PEP 8 puts two blank lines between the import block and the first
+        // top-level definition (`class`/`def`). Emitting them here keeps the
+        // transpiled test file `black --check`-clean (§20.6.2 codegen-formatter
+        // agreement), which CI enforces on the certifying lane.
+        out.push_str("\n\n");
 
         if is_unittest {
             out.push_str("class TestBock(unittest.TestCase):\n");
@@ -736,13 +740,17 @@ impl CodeGenerator for PyGenerator {
             }
             out.push_str("\n\nif __name__ == \"__main__\":\n    unittest.main()\n");
         } else {
-            for (test_fn, _module_path) in &tests {
+            // Two blank lines between top-level `def`s (Black/PEP 8) and exactly
+            // one trailing newline at end of file.
+            for (i, (test_fn, _module_path)) in tests.iter().enumerate() {
                 let NodeKind::FnDecl { name, body, .. } = &test_fn.kind else {
                     continue;
                 };
+                if i > 0 {
+                    out.push_str("\n\n");
+                }
                 out.push_str(&format!("def {}():\n", to_snake_case(&name.name)));
                 ctx.emit_py_test_body(body, false, 1, &mut out)?;
-                out.push('\n');
             }
         }
 
