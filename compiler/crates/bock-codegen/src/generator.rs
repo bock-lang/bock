@@ -1399,6 +1399,26 @@ where
     })
 }
 
+/// Whether a JS/TS `actual` expression must be parenthesized before a `._tag`
+/// member access, i.e. whether its emitted form binds looser than member access.
+///
+/// Atoms and postfix forms — identifiers, literals, calls, method calls, field
+/// accesses, and index reads — bind at least as tightly as member access, so a
+/// following `._tag` needs no wrapping (and Prettier would strip any redundant
+/// parens). Everything else (binary/conditional/await/etc.) is wrapped so the
+/// generated test file is both correct and `prettier --check`-clean.
+fn js_actual_needs_member_parens(actual: &AIRNode) -> bool {
+    !matches!(
+        &actual.kind,
+        NodeKind::Identifier { .. }
+            | NodeKind::Literal { .. }
+            | NodeKind::Call { .. }
+            | NodeKind::MethodCall { .. }
+            | NodeKind::FieldAccess { .. }
+            | NodeKind::Index { .. }
+    )
+}
+
 /// Emit the statements of a js/ts `@test` body into `out`, lowering `expect(...)`
 /// assertion chains to the Vitest/Jest matcher API and dropping any non-assertion
 /// statement that the matcher set does not cover into a `let` (handled by the
@@ -1415,6 +1435,18 @@ fn emit_js_test_body(
     for stmt in stmts {
         if let Some((assertion, actual, expected)) = classify_assertion(stmt) {
             let a = emitter.expr_to_string(actual)?;
+            // For tag-discriminating predicates we read `<actual>._tag`. Wrap the
+            // actual in parens only when its expression form would otherwise bind
+            // looser than the member access (so the emitted `.test` file stays
+            // `prettier --check`-clean: prettier strips redundant parens around a
+            // call/identifier/member/index, §20.6.2 codegen-formatter agreement).
+            let tagged = |a: &str| -> String {
+                if js_actual_needs_member_parens(actual) {
+                    format!("({a})._tag")
+                } else {
+                    format!("{a}._tag")
+                }
+            };
             let line = match assertion {
                 TestAssertion::Equal => {
                     let e = match expected {
@@ -1425,10 +1457,10 @@ fn emit_js_test_body(
                 }
                 TestAssertion::BeTrue => format!("expect({a}).toBe(true);"),
                 TestAssertion::BeFalse => format!("expect({a}).toBe(false);"),
-                TestAssertion::BeSome => format!("expect(({a})._tag).toBe(\"Some\");"),
-                TestAssertion::BeNone => format!("expect(({a})._tag).toBe(\"None\");"),
-                TestAssertion::BeOk => format!("expect(({a})._tag).toBe(\"Ok\");"),
-                TestAssertion::BeErr => format!("expect(({a})._tag).toBe(\"Err\");"),
+                TestAssertion::BeSome => format!("expect({}).toBe(\"Some\");", tagged(&a)),
+                TestAssertion::BeNone => format!("expect({}).toBe(\"None\");", tagged(&a)),
+                TestAssertion::BeOk => format!("expect({}).toBe(\"Ok\");", tagged(&a)),
+                TestAssertion::BeErr => format!("expect({}).toBe(\"Err\");", tagged(&a)),
             };
             out.push_str(&format!("    {line}\n"));
         } else if let NodeKind::LetBinding { pattern, value, .. } = &stmt.kind {

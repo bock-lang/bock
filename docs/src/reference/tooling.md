@@ -211,10 +211,25 @@ def test_add_works():
     assert (add(1, 2)) == (3)
 ```
 
-**Formatter-clean output.** The emitted Rust and Go test files pass
-`rustfmt --check` and `gofmt -l` cleanly on first generation — the §20.6.2
-codegen-formatter agreement, enforced as a release-readiness check. (rustfmt
-and gofmt are universal/always-on for those targets.)
+**Formatter-clean output.** The emitted test files pass their target's
+formatter `--check` cleanly on first generation — the §20.6.2 codegen-formatter
+agreement, enforced as a release-readiness check:
+
+| Target | Formatter gate |
+| ------ | -------------- |
+| Rust   | `rustfmt --check` (universal/always-on) |
+| Go     | `gofmt -l` (universal/always-on) |
+| JS/TS  | `prettier --check` (against the scaffolded `.prettierrc.json`) |
+| Python | `black --check` (against the scaffolded `[tool.black]`) |
+
+**Run-verified, all five targets.** The compiler's own CI (the Linux test lane)
+provisions the JS/TS/Python test runners and formatters and *runs* every
+target's transpiled tests — `cargo test`, `go test`, `npm test` (Vitest),
+`pytest`, and `python -m unittest` — asserting they pass, and gates each
+target's emitted test file with the formatter above. The harness is
+skip-if-absent for dev hosts that lack a given toolchain; the CI lane sets
+`BOCK_PROJECTMODE_REQUIRE=all` so an absent runner/formatter fails the build
+instead of silently skipping.
 
 ### Source Maps
 
