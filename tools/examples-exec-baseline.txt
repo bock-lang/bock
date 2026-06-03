@@ -8,8 +8,10 @@
 # cluster lands so the ratchet can only tighten, never loosen silently.
 #
 fundamentals/calculator	python	build
-fundamentals/fizzbuzz	js	build
-fundamentals/fizzbuzz	python	build
+fundamentals/calculator	rust	pass
+fundamentals/fizzbuzz	js	pass
+fundamentals/fizzbuzz	ts	build
+fundamentals/fizzbuzz	python	pass
 fundamentals/fizzbuzz	rust	pass
 fundamentals/guessing-game	rust	build
 fundamentals/hello-world	js	pass
@@ -17,21 +19,28 @@ fundamentals/hello-world	ts	pass
 fundamentals/hello-world	python	pass
 fundamentals/hello-world	rust	pass
 fundamentals/hello-world	go	pass
-fundamentals/todo-list	python	build
-real-world/data-pipeline	js	build
+fundamentals/todo-list	python	pass
+real-world/data-pipeline	js	pass
 real-world/data-pipeline	python	build
-real-world/expense-tracker	js	build
+real-world/expense-tracker	js	pass
+real-world/expense-tracker	ts	pass
 real-world/expense-tracker	python	pass
 real-world/inventory-system	js	build
 real-world/inventory-system	python	build
-real-world/markdown-parser	js	build
+real-world/inventory-system	rust	pass
+real-world/markdown-parser	js	pass
+real-world/markdown-parser	ts	pass
 real-world/markdown-parser	python	pass
+real-world/markdown-parser	rust	pass
 real-world/task-api	python	pass
+real-world/task-api	rust	pass
 spec-exercisers/effect-showcase	ts	pass
 spec-exercisers/effect-showcase	python	pass
-spec-exercisers/type-zoo	js	build
+spec-exercisers/effect-showcase	rust	pass
+spec-exercisers/type-zoo	js	pass
 spec-exercisers/type-zoo	python	build
 target-optimized/microservice	python	pass
+target-optimized/microservice	rust	pass
 target-optimized/ml-data-prep	js	pass
 target-optimized/ml-data-prep	python	pass
 target-optimized/react-components	js	build
