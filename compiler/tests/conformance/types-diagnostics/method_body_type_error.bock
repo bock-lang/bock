@@ -1,0 +1,21 @@
+// TEST: method_body_type_error
+// EXPECT: error E4001 at 19:5
+//
+// Q-impl-body-typecheck: the type checker must walk impl/class method *bodies*,
+// not just signatures. Before the fix, `check_item` dispatched only `FnDecl`
+// and `ConstDecl`; `ImplBlock`/`ClassDecl` fell through to a `record Void`
+// arm, so a type error inside a method body was silently missed. This negative
+// fixture pins that a method body whose final expression's type disagrees with
+// the declared return type now fails to check with `E4001`.
+module userapp
+
+record Box {
+  value: Int
+}
+
+impl Box {
+  // `self.value` is `Int`, but the method is declared `-> String`.
+  public fn label(self) -> String {
+    self.value
+  }
+}
