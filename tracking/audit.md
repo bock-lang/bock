@@ -1839,3 +1839,58 @@ AWAITING OPERATOR (2 decisions, nothing in flight): (1) **examples-hardening dir
   fix Q-list-method-codegen first / reassess v1.0 scope; (2) **`.gitignore` policy** — gitignore `examples/**/build/` +
   drop the stale `hello-world/build` snapshot? [recommend yes]. NEXT SESSION: pick up from the operator's answer; if
   none, the recommended start is the examples-exec audit (read-only, becomes the Q-examples-exec-coverage CI gate).
+
+[2026-06-03 13:44 UTC] ★ Examples-exec audit COMPLETE (all 20 × 5) + operator v1.0-scope decisions
+  Input: operator resumed; chose (decision 1) examples-hardening = **audit-first**; (decision 2) **yes** to the
+    `.gitignore` cleanup. Ran the full read-only audit: all 20 examples × 5 targets, project-mode `bock build`, built
+    in `/tmp` copies (repo untouched). Built debug `bock` with a forced stdlib re-embed first (stale-binary hazard).
+  METHOD NOTE: built in `/tmp` (NOT in-repo) on purpose → no parent cargo workspace, so Q-rust-cargo-workspace does
+    NOT fire — this ISOLATES real rust codegen status from the environmental workspace bug (the digest's in-repo build
+    conflated them). Confirmed the workspace bug separately: fizzbuzz-rust PASSES in /tmp, FAILS in-repo with exactly
+    "current package believes it's in a workspace when it's not" → Q-rust-cargo-workspace is MASKING-ONLY (fixing it
+    recovers 3/20 rust in-repo; the other 17 fail on genuine rust codegen bugs).
+  TRUE MATRIX (compile / run-of-compiled; js+py "compile"=syntax-only so RUN is their real signal; ts run via
+    `node --experimental-strip-types`):
+      js  10/20 compile, 2/10 run     ts  2/20 compile, 2/2 run     python 15/20 compile, 7/15 run
+      rust 3/20 compile, 2/3 run (in-repo 0/20 pre-workspace-fix)    go 1/20 compile, 1/1 run
+    hello-world is the ONLY example green on all 5. The digest's "ts/rust/go 0/6 on real-world" was real but
+    undercounted causes; the full 20-example sweep is worse and rust/go fail on REAL codegen, not just the env bug.
+  ROOT-CAUSE CLUSTERS (evidence-confirmed against generated code):
+    A Q-list-method-codegen [HIGH, all 5] — `.map/.filter`-with-closure emits `recv.map(recv, fn)` (receiver dup'd as
+      first arg; free-fn calling convention applied to a method). Confirmed: `data.map(data,(dp)=>…)` in TS out.
+      Broadest single bug (~10 examples). § filed.
+    B Q-list-concat-codegen [NEW, ts/rust/go] — list `+` append → native `+` (`(self.items + [todo])`); rust E0369,
+      go "operator + not defined on []T", ts type-error; js silently-wrong, python coincidentally-works.
+    C Q-const-enum-naming [NEW, all 5] — const/enum-variant identifier def↔use mangling mismatch: TS defines
+      `FIZZ_NUM` but references `fizzNUM`; `Category_Electronics`/`Allocatable` undefined; py refs `FIZZ_NUM` but never
+      emits the def at module scope.
+    D Q-match-exprpos [KNOWN → BROADEN/UN-DEFER, all 5] — expr-position control-flow lowering: unbalanced parens on
+      js/py (SUBSUMES Q-chat-protocol-allfail: `'(' was never closed`), duplicate `default` clause on js, "Expression
+      expected" ts, "expected expression" rust/go. Higher-impact than the deferral assumed (~6 examples).
+    E Q-go-enum-return-boxing [NEW, go] — variant not boxed into the sealed-trait interface on return: "cannot use
+      X{} as __bockResult value", "too many return values", "interface{} does not implement Route".
+    F Q-rust-move-codegen [NEW, rust] — borrow/move violations: E0382 use-of-moved (`op`,`key`), E0425 cannot-find
+      moved-renamed binding (`val`/`val2`).
+    G Q-rust-string-num-methods [NEW, rust] — String/numeric method gaps: no method `slice`/`to_float`; `&str` vs
+      `String` mismatches.
+    J Q-js-effect-export [NEW, js] — effect-group/stack export referenced but not emitted: "Export 'AppEffects'/
+      'ApiEffects'/'ServiceStack' is not defined in module".
+    K Q-py-circular-import [NEW, py] — multi-module python emits a circular import (inventory-system `Category`).
+    minor Q-examples-codegen-misc [NEW] — `todo`-expr in return pos → `return throw`/`return raise` (invalid; also
+      example-stub-quality), reserved-word/ident collisions (`eval`, redeclared `list`), `Char` type unmapped on
+      ts/rust/go, go unused-var strictness (`declared and not used`), local `step2` binding not emitted (go/py).
+    L Q-rust-cargo-workspace [confirmed, environmental/masking] — fix = emit empty `[workspace]` in generated
+      Cargo.toml; recovers 3/20 rust in-repo. M Q-examples-exec-coverage [HIGH, infra] — this audit, productized.
+  OPERATOR DECISIONS (this session): (1) v1.0 strategy = **leverage-order, ALL 5 targets held at the 'examples green'
+    bar** (not tiered) — fix clusters in leverage order: A first (most ×5), then B, C, quick wins, then the deep ones
+    (D, E, F, G). go(1/20)+rust are long poles, accepted. (2) Examples-exec gate = **informational-first, then
+    blocking** (land non-blocking, ratchet per-target thresholds up as clusters land). (3) tsx now installed by
+    operator (nvm bin not on this shell's PATH, but `node --experimental-strip-types` runs ts dependency-free).
+  ACTIONS: gitignore cleanup → PR #202 (examples/**/build/ ignored + stale pre-ItemB hello-world snapshot dropped;
+    no gate surface; CI green except pending ubuntu/windows test lanes — merging when green). This tracking PR records
+    the matrix + clusters: new queue items B/C/E/F/G/J/K/misc filed; A/D/L/M reconciled; D un-deferred; Q-chat-protocol
+    -allfail folded into D (diagnosed). New MS-examples-hardening milestone; v1.0 acceptance updated (all-5 bar).
+  Follow-up: (1) merge #202; (2) dispatch the leverage-ordered fix workstream — Q-list-method-codegen (A) FIRST as an
+    engineer session (bock-codegen, the §20.4 method-vs-free-fn lowering); (3) build the informational examples-exec
+    gate (Q-examples-exec-coverage) — separate engineer session (compiler/tests + .github/workflows), can run parallel
+    to A (disjoint files). Audit artifacts: /tmp matrix + per-(example,target) logs (ephemeral; clusters captured here).

@@ -35,6 +35,13 @@ the Bock identity.
   (List `.map()`-method-with-closure mislowered = Q-list-method-codegen; rust Cargo.toml workspace = Q-rust-cargo-workspace;
   examples not exec-tested = Q-examples-exec-coverage). An **examples-hardening workstream** (exec-gate the examples ×5 +
   fix the codegen clusters) is a v1.0 prerequisite. v1.0 is further out than the ItemB-complete picture implied.
+  **UPDATE (2026-06-03 13:44) — full audit done + scope decided:** the complete 20×5 audit (built out-of-tree) gives the
+  true matrix — **js 10/20·ts 2/20·py 15/20·rust 3/20·go 1/20 compile** (hello-world the only all-5; rust/go fail on real
+  codegen, not just the env bug). **~9 root-cause clusters** identified (see MS-examples-hardening / queue). **Operator
+  decided:** v1.0 **holds all 5 targets at the 'examples green' acceptance bar** (NOT tiered to ≥JS+Py+Rust — the gate
+  wording is superseded), fixed in leverage order (Q-list-method-codegen first); the examples-exec gate
+  (Q-examples-exec-coverage) lands **informational-first → blocking**. v1.0 acceptance = MS-examples-hardening complete
+  (all 20 examples compile+run on all 5) + per-target EXECUTION of the stdlib + release actions (escalate).
 
 ## v1.1 — Editor & Tooling Polish
 **Theme:** delight in the editor; close interpreter gaps.
@@ -106,3 +113,20 @@ files per framework + formatter-clean release gate); operator pre-S7 checkpoint 
 collision on js/ts/python; go fixed). S7–S8 remain. **Still v1.x:** `--deliverable`,
 `--no-tests` (§20.1). External `/get-started` copy = **ItemD** (escalates). Links: ItemB, DV13, DQ19, §20.6.1/2,
 §20.7, changelogs `20260602-1608-per-module-output-dq19.md` + `20260602-1608-projectmode-config-tables-v1.md`.
+
+## MS-examples-hardening — v1.0 PREREQUISITE (opened 2026-06-03) — real-world examples compile+run ×5
+**Theme:** close the gap between green conformance and green real-world programs. The 20×5 examples-exec audit
+(2026-06-03 13:44) established the true matrix — **js 10/20·ts 2/20·py 15/20·rust 3/20·go 1/20 compile; hello-world the
+only all-5 end-to-end** — and ~9 evidence-confirmed codegen clusters. Conformance (430/0) was a narrow slice: it
+exercises the stdlib's FREE functions but not the real-world-shaped method/closure/concat/match-position patterns.
+**Operator decision (2026-06-03):** v1.0 holds **all 5 targets** at the "examples green" bar (not tiered); fix in
+**leverage order**; the examples-exec CI gate lands **informational-first**, ratcheting to blocking as clusters land.
+- **Acceptance:** all 20 `examples/` **compile AND run** on all 5 targets in CI (the Q-examples-exec-coverage gate,
+  flipped to blocking); no regressions vs the ratchet.
+- **Mapped items (queue.md), leverage order:** `Q-list-method-codegen` (A, HIGH, all 5 — receiver dup'd as 1st arg) →
+  `Q-rust-cargo-workspace` (L, cheap, recovers 3 rust in-repo) → `Q-list-concat-codegen` (B) → `Q-const-enum-naming` (C)
+  → `Q-go-enum-return-boxing` (E) → `Q-rust-move-codegen` (F) → `Q-rust-string-num-methods` (G) → `Q-js-effect-export`
+  (J) → `Q-py-circular-import` (K) → `Q-match-exprpos` (D, deep, cross-4-backend; subsumes ex-Q-chat-protocol-allfail) →
+  `Q-examples-codegen-misc` (minor/triage). Plus `Q-examples-exec-coverage` (M, the gate — built in parallel, disjoint
+  files). LESSON (carried in memory `conformance-green-is-not-sufficient`): conformance fixtures must include
+  real-world-shaped programs / the examples must be exec-tested — green conformance gave false confidence.
