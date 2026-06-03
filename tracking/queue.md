@@ -12,15 +12,15 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-03 15:24 — **MS-examples-hardening UNDERWAY: clusters A+B+C + the gate LANDED.** #204
-(informational examples-exec gate) + #205 (Q-list-method-codegen A · Q-list-concat-codegen B · Q-const-enum-naming C,
-all 5; conformance 455/0 w/ 5 new fixtures) merged; main a5fbb28. **Post-fix matrix (gate re-run): runtime-working
-js 2→7 · ts 2→4 · py 7→9 / 20; rust 2, go 1 unchanged (blocked on E/F/G/D); 0 regressions.** NEW HIGH finding
-**Q-impl-body-typecheck** (checker doesn't type-check impl/class method bodies → bounds A/B's reach to free-fn sites +
-misses method type errors). Cluster C: const part done, enum-variant/trait-name residue is now RUNTIME (→ K). Remaining
-MS-examples-hardening leverage order: Q-impl-body-typecheck, Q-rust-cargo-workspace, Q-go-enum-return-boxing (E),
-Q-rust-move-codegen (F), Q-rust-string-num-methods (G), Q-js-effect-export (J), Q-py-circular-import (K),
-Q-match-exprpos (D, deep), Q-examples-codegen-misc. Follow-up: refresh the examples-exec baseline (ratchet). — Earlier
+_Last reconciled: 2026-06-03 16:56 — **MS-examples-hardening UNDERWAY: gate + A+B+C + Q-impl-body-typecheck LANDED.**
+#204 (gate) · #205 (A/B/C, all 5) · #207 (Q-impl-body-typecheck — checker now type-checks impl/class method bodies;
+caught a REAL latent core.error field/method value-position bug + fixed a Self false-positive; conformance 455→460).
+main a3b5491. **Examples matrix: runtime-working js 7 · ts 4 · py 9 / 20; rust 2, go 1 (blocked on E/F/G/D); #207 was a
+correctness win, NOT codegen-reach — example output byte-identical, codegen fallbacks already covered method-body list
+ops; 0 regressions.** Remaining MS-examples-hardening leverage order: **Q-rust-cargo-workspace** (cheap, +3 rust) →
+**Q-go-enum-return-boxing (E)** → **Q-rust-move-codegen (F)** → **Q-rust-string-num-methods (G)** → Q-js-effect-export
+(J) → Q-py-circular-import (K) → Q-match-exprpos (D, deep) → Q-examples-codegen-misc (now 9 sub-items incl. #207's
+go-list-map-interface + js-let-rebind-const). Follow-up: refresh the examples-exec baseline (ratchet). — Earlier
 2026-06-03 13:44: **EXAMPLES-EXEC AUDIT COMPLETE + operator decisions** (see audit.md 2026-06-03 13:44). The full 20×5 audit (built in /tmp, project mode) gives the TRUE matrix: js 10/20 compile·2/10 run,
 ts 2/20·2/2, py 15/20·7/15, **rust 3/20·2/3 (in-repo 0/20 — workspace bug masks), go 1/20·1/1** — hello-world the only
 all-5. Worse than the digest's 6-example sample, and **rust/go fail on REAL codegen, not just the env bug** (proven:
@@ -385,19 +385,23 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   references `fizzNUM` (`Did you mean 'FIZZ_NUM'?`); `Category_Electronics`/`Allocatable` referenced-but-undefined; python
   references `FIZZ_NUM` but never emits the def at module scope. Normalize the identifier transform so def and use agree
   (and ensure module-scope consts are emitted). Examples: fizzbuzz, inventory-system, systems-allocator. Likely cheap.
-- **[Q-impl-body-typecheck] Checker does not type-check impl/class method BODIES** — bug · ready ·
-  **HIGH — correctness gap + bounds the meta-stamp codegen fixes** · `compiler/crates/bock-types/` (checker.rs) · — ·
-  links #205, Q-list-method-codegen, Q-list-concat-codegen, MS-examples-hardening · note: FOUND 2026-06-03 (during #205,
-  orchestrator-verified at checker.rs:1375). `check_item` dispatches only `FnDecl`/`ConstDecl`; `ImplBlock`/`ClassDecl`
-  fall into the `_ => record Void` arm. Method SIGNATURES are registered (`collect_sig`) but method BODIES are **never
-  type-checked**. Two consequences: (1) type errors inside impl/class methods are silently missed (correctness/UX);
-  (2) the checker's codegen meta-stamps (`recv_kind`, the new `list_concat`) aren't applied inside method bodies — so the
-  #205 A/B fixes fully reach only FREE-function call sites; `.map()`/`+`-concat **inside a method** relies on codegen
-  syntactic fallbacks (B's list-literal fallback covers `xs + [..]`; a bare `self.a + self.b` would still mislower).
-  Pre-existing (the stdlib/conformance pass because codegen has structural fallbacks). Likely accounts for a chunk of the
-  still-failing examples whose list ops live in methods (e.g. todo-list's class). Fix: recurse `check_item` into
-  impl/class method bodies (type-check each as a function with `self` bound to the target type). **Spec intends method
-  bodies to be checked — this is an impl bug, not a spec divergence (stays in-queue).** Probably high-leverage next.
+- **[Q-impl-body-typecheck] Checker does not type-check impl/class method BODIES** — bug ·
+  **DONE → #207** · `compiler/crates/bock-types/` (checker.rs) · — · links #205, #207, Q-list-method-codegen,
+  Q-list-concat-codegen, MS-examples-hardening, Q-go-error-message/Q-error-message-jstspy · note: FIXED by #207 —
+  `check_item` now recurses into `ImplBlock`/`ClassDecl`, type-checking each method body as a function with `self` bound
+  to the target + impl generics/`Self` substituted (`build_impl_context`). **Measure-then-fix blast radius was small +
+  fully resolved:** turning on body-checking surfaced exactly two latent issues — (1) a **REAL pre-existing bug** in
+  `core.error` (`impl Error for SimpleError { fn message(self)->String { self.message } }`: a `FieldAccess` to a field
+  whose name collides with a method resolved the METHOD in value position → E4001; affected ALL core modules transitively
+  + user-facing; fixed by preferring the same-named field in value position, method *calls* re-resolve via new
+  `resolve_user_method_fn_type`), and (2) a `Self`-in-plain-impl return-type **false positive** (the `TypeSelf` arm now
+  consults `gp_map["Self"]`). Conformance **455→460** (REQUIRE=all; +5 new `exec_method_body_list_ops` ×5). Negative
+  diagnostics fixtures added (impl + class method-body type errors now caught). **HONEST PAYOFF:** the value is the
+  **correctness** dimension (catching method-body type errors + the latent core.error bug) — NOT new codegen reach:
+  example output (todo-list ×5) is **byte-identical** before/after because codegen already had robust syntactic fallbacks
+  for method-body list ops. NEW residue OPENs surfaced (pre-existing, codegen-crate) → folded into Q-examples-codegen-misc
+  (h)/(i). [The core.error checker-resolution fix is distinct from the codegen field/method collision work in
+  Q-go-error-message/#191 + Q-error-message-jstspy/#193 — same pain point, different layer.]
 - **[Q-go-enum-return-boxing] Go: enum variant not boxed into sealed-trait interface on return** — bug · ready ·
   `compiler/crates/bock-codegen/` (go) · — · links MS-examples-hardening, #168 · note: FOUND 2026-06-03 (audit).
   Returning a variant where the sealed-trait interface type is expected isn't boxed: `cannot use MessageTypeText{}
@@ -434,7 +438,12 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `.for_each` with a BLOCK / mutating / `println` closure body fails on go/python (the pre-existing
   statement-closure-body gap — `for_each` lowering itself is correct on rust/js/python; excluded from the all-5 fixture);
   (g) **[from #205]** chained `.map(..).reduce(..)` over a record-field projection mislowers on go (nested-IIFE inference
-  gap; binding the projection to a typed `let` first works ×5). Triage each as its own fix or example correction.
+  gap; binding the projection to a typed `let` first works ×5); (h) **[from #207]** go: a `list.map(...)` result returned
+  DIRECTLY lowers its element type to `[]interface{}` (fails `go build`) — go generic-element-typing residue of cluster A
+  at the free-fn level; the typed-`let` pattern avoids it; (i) **[from #207]** js/ts: a `let` binding that is REASSIGNED
+  (`let list = …; list = list.add(…)`) is emitted as `const` → Node `Identifier 'list' has already been declared` (this
+  precisely diagnoses the audit's "redeclared `list`", item (b) — a `let`-reassignment-vs-`const` lowering bug; affects
+  todo-list js). Triage each as its own fix or example correction.
 - **[Q-chat-protocol-allfail] `chat-protocol` fails build on all 5 — DIAGNOSED → folded into Q-match-exprpos** — bug ·
   **RESOLVED-AS-DUP (diagnosed 2026-06-03 13:44)** · — · links Q-match-exprpos · note: the all-5 failure (js `Unexpected
   token ')'`, py `'(' was never closed`, ts `Expression expected`, go enum-return) is the **expression-position
