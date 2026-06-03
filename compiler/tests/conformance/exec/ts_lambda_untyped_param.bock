@@ -1,0 +1,24 @@
+// TEST: exec_ts_lambda_untyped_param
+// EXPECT: output "12"
+// EXPECT: targets js, ts, python
+//
+// A lambda whose parameter carries no type annotation, stored in a binding with
+// no contextual type and then invoked (the type-zoo / task-api / inventory /
+// todo-list cluster). Bock lambdas usually omit param types; the AIR carries no
+// inferred type, so emitting `(x) => …` is an *implicit any* that `tsc --strict`
+// (`noImplicitAny`) rejects (TS7006). The fix annotates an un-typed lambda param
+// as `any` (always type-checks; a contextual call site would have inferred it
+// anyway), validated here against the (untyped) js/python emits.
+//
+// Restricted to js/ts/python: rust and go reject an un-annotated, un-contextual
+// closure param (`x * 3` with `x: interface{}` / untyped) — a separate backend
+// inference gap reported as an OPEN. Widen once those infer the param type.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let triple = (x) => x * 3
+  println("${triple(4)}")
+}

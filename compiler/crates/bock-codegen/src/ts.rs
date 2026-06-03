@@ -469,6 +469,19 @@ fn export_runtime_decls(runtime: &str) -> String {
 
 // ─── Emission context ────────────────────────────────────────────────────────
 
+/// Where the value produced by a statement-position control-flow expression
+/// (lowered by [`TsEmitCtx::emit_value_in_stmt_pos`]) should go. Either `return`
+/// it (the expression was a function-body tail) or assign it to a named binding
+/// (the expression initialised a `let`/`const`). A diverging tail
+/// (`return`/`break`/`continue`/`todo()`) ignores the sink.
+#[derive(Clone)]
+enum ValueSink {
+    /// `return <value>;`
+    Return,
+    /// `<name> = <value>;`
+    Assign(String),
+}
+
 /// Internal state for TypeScript emission.
 struct TsEmitCtx {
     buf: String,
@@ -630,6 +643,22 @@ struct TsEmitCtx {
     /// by `generate_project` (and extended per-module by the `Module` arm for the
     /// single-module `generate_module` path). Shared policy with go/js/py.
     field_method_collisions: HashSet<String>,
+    /// Active value-sink while a statement-position control-flow expression is
+    /// being emitted (see [`ValueSink`] and [`Self::emit_value_in_stmt_pos`]).
+    /// A `match` arm body emitted under this sink delivers its value through it
+    /// (`return v` / `binding = v`) instead of the default `return v`, so an
+    /// expression-position `match` containing a `return`/`break` arm lowers to a
+    /// statement `switch` whose value-arms feed the binding. `None` everywhere
+    /// else; saved/restored around each statement-position lowering so it never
+    /// leaks into an unrelated (IIFE-lowered) match.
+    value_sink: Option<ValueSink>,
+    /// Per-loop result sink, pushed/popped alongside [`Self::loop_labels`]. When
+    /// a `loop` is lowered in value position (`let r = loop { … break v … }`),
+    /// the innermost entry holds the sink that `break v` writes into (`r = v;
+    /// break;`). `None` for an ordinary statement-position loop, where `break v`
+    /// has no value destination. Indexed by loop nesting, so an inner ordinary
+    /// loop inside a value loop does not capture the outer sink.
+    loop_value_sinks: Vec<Option<ValueSink>>,
 }
 
 impl TsEmitCtx {
@@ -673,6 +702,8 @@ impl TsEmitCtx {
             self_module_path: String::new(),
             enum_variant_exports: Vec::new(),
             field_method_collisions: HashSet::new(),
+            value_sink: None,
+            loop_value_sinks: Vec::new(),
         }
     }
 
@@ -2209,6 +2240,11 @@ impl TsEmitCtx {
             "Float" => "number".into(),
             "Bool" => "boolean".into(),
             "String" => "string".into(),
+            // Bock `Char` has no distinct TS runtime type; a Char literal
+            // (`'A'`) emits as a single-character string and every Char method
+            // (`to_upper`, `is_alpha`, …) is implemented as a string op, so the
+            // type maps to `string` for consistency.
+            "Char" => "string".into(),
             "Void" | "Unit" => "void".into(),
             "List" => "Array".into(),
             "Map" => "Map".into(),
@@ -3105,6 +3141,33 @@ impl TsEmitCtx {
         Ok(())
     }
 
+    /// Collect a lambda's parameters, typing any *un-annotated* param as `any`.
+    ///
+    /// Bock lambdas usually omit param types (`(x) => …`); the AIR carries no
+    /// inferred type, so an un-annotated emit (`(x) =>`) is an implicit `any`
+    /// that `tsc --strict` (`noImplicitAny`) rejects (TS7006). An explicit `any`
+    /// is always accepted and never loses correctness — at a contextually-typed
+    /// call site (`.filter((m) => …)`) TS would have inferred `m` anyway, and the
+    /// explicit annotation is compatible; at an un-contextual site (`const f =
+    /// (x) => …`) it is the only thing that type-checks. Params that *do* carry a
+    /// declared type keep it.
+    fn collect_lambda_params(&self, params: &[AIRNode]) -> Vec<String> {
+        params
+            .iter()
+            .filter_map(|p| {
+                let NodeKind::Param { pattern, ty, .. } = &p.kind else {
+                    return None;
+                };
+                let name = self.pattern_to_binding_name(pattern);
+                let ty_str = match ty {
+                    Some(t) => format!(": {}", self.type_to_ts(t)),
+                    None => ": any".to_string(),
+                };
+                Some(format!("{name}{ty_str}"))
+            })
+            .collect()
+    }
+
     /// Collect typed parameter names: `name: Type`.
     fn collect_typed_params(&self, params: &[AIRNode]) -> Vec<String> {
         params
@@ -3394,6 +3457,19 @@ impl TsEmitCtx {
                 let binding = self.pattern_to_ts_destructure(pattern);
                 let ty_ts = ty.as_ref().map(|t| self.type_to_ts(t));
                 let ty_str = ty_ts.as_ref().map(|t| format!(": {t}")).unwrap_or_default();
+                // A control-flow initialiser with no TS expression form (a `loop`,
+                // or a value `if`/`match` with a `return`/`break` arm) is lowered
+                // in statement position: declare the binding `let`, then emit the
+                // control flow assigning into it. The original binding must be
+                // `let` (not `const`) so the arms can assign it (cluster-1 fix).
+                if self.value_needs_stmt_form(value) {
+                    let ind = self.indent_str();
+                    // A plain identifier binding can be reassigned; a destructuring
+                    // pattern cannot be split, so this path only applies to simple
+                    // bindings (the only shape these examples produce).
+                    let _ = writeln!(self.buf, "{ind}let {binding}{ty_str};");
+                    return self.emit_value_in_stmt_pos(value, &ValueSink::Assign(binding));
+                }
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}{kw} {binding}{ty_str} = ");
                 // Record the binding's declared type as the expected type for the
@@ -3463,7 +3539,7 @@ impl TsEmitCtx {
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
-                self.loop_labels.pop();
+                self.pop_loop_frame();
                 Ok(())
             }
             NodeKind::While { condition, body } => {
@@ -3476,7 +3552,7 @@ impl TsEmitCtx {
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
-                self.loop_labels.pop();
+                self.pop_loop_frame();
                 Ok(())
             }
             NodeKind::Loop { body } => {
@@ -3486,7 +3562,7 @@ impl TsEmitCtx {
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
-                self.loop_labels.pop();
+                self.pop_loop_frame();
                 Ok(())
             }
             NodeKind::Return { value } => {
@@ -3502,10 +3578,19 @@ impl TsEmitCtx {
             }
             NodeKind::Break { value } => {
                 if let Some(val) = value {
-                    let ind = self.indent_str();
-                    let _ = write!(self.buf, "{ind}/* break value: ");
-                    self.emit_expr(val)?;
-                    self.buf.push_str(" */\n");
+                    // In a value-position loop (`let r = loop { … break v … }`),
+                    // `break v` delivers the loop's value through the loop sink
+                    // (`r = v;`) before breaking. Without a sink (an ordinary
+                    // statement loop) the value is dropped — emit it as a comment
+                    // so it remains visible but inert.
+                    if let Some(sink) = self.innermost_loop_value_sink() {
+                        self.emit_sink_value(val, &sink)?;
+                    } else {
+                        let ind = self.indent_str();
+                        let _ = write!(self.buf, "{ind}/* break value: ");
+                        self.emit_expr(val)?;
+                        self.buf.push_str(" */\n");
+                    }
                 }
                 if self.switch_label_depth > 0 {
                     if let Some(label) = self.innermost_loop_label() {
@@ -3884,7 +3969,7 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::Lambda { params, body } => {
-                let param_list = self.collect_typed_params(params);
+                let param_list = self.collect_lambda_params(params);
                 let _ = write!(self.buf, "({}) => ", param_list.join(", "));
                 if matches!(body.kind, NodeKind::Block { .. }) {
                     self.buf.push_str("{\n");
@@ -4324,7 +4409,9 @@ impl TsEmitCtx {
     }
 
     /// Emit a TS label before a loop iff a contained statement-arm `match`
-    /// needs to `break`/`continue` the loop. Pair with `loop_labels.pop()`.
+    /// needs to `break`/`continue` the loop. Pair with [`Self::pop_loop_frame`].
+    /// Also pushes a `None` loop result-sink frame; a value-position loop (see
+    /// [`Self::emit_value_in_stmt_pos`]) overwrites it with [`Self::set_loop_value_sink`].
     fn emit_loop_label_prefix(&mut self, body: &AIRNode) {
         if crate::generator::loop_needs_break_label(body) {
             self.loop_label_counter += 1;
@@ -4334,6 +4421,28 @@ impl TsEmitCtx {
         } else {
             self.loop_labels.push(None);
         }
+        self.loop_value_sinks.push(None);
+    }
+
+    /// Pop the loop frame pushed by [`Self::emit_loop_label_prefix`] (both the
+    /// label and the result-sink entry).
+    fn pop_loop_frame(&mut self) {
+        self.loop_labels.pop();
+        self.loop_value_sinks.pop();
+    }
+
+    /// Set the innermost loop's result sink — where `break v` writes the loop's
+    /// value (`<binding> = v;` / `return v;`). Called right after
+    /// [`Self::emit_loop_label_prefix`] for a value-position loop.
+    fn set_loop_value_sink(&mut self, sink: ValueSink) {
+        if let Some(top) = self.loop_value_sinks.last_mut() {
+            *top = Some(sink);
+        }
+    }
+
+    /// The innermost loop's result sink, if it is a value-position loop.
+    fn innermost_loop_value_sink(&self) -> Option<ValueSink> {
+        self.loop_value_sinks.last().and_then(Clone::clone)
     }
 
     /// Label of the innermost loop, if one was allocated.
@@ -4358,11 +4467,15 @@ impl TsEmitCtx {
                 NodeKind::WildcardPat => {
                     self.writeln("default: {");
                 }
-                NodeKind::BindPat { name, .. } if !is_adt => {
+                NodeKind::BindPat { name, is_mut } if !is_adt => {
                     self.writeln("default: {");
                     self.indent += 1;
+                    // A `mut x =>` arm reassigns the binding in its body, so it
+                    // must be `let` — emitting `const` trips TS2588 ("cannot
+                    // assign to a constant").
+                    let kw = if *is_mut { "let" } else { "const" };
                     let ind = self.indent_str();
-                    let _ = write!(self.buf, "{ind}const {} = ", name.name);
+                    let _ = write!(self.buf, "{ind}{kw} {} = ", name.name);
                     self.emit_scrutinee_ref(scrutinee, temp)?;
                     self.buf.push_str(";\n");
                     self.indent -= 1;
@@ -4745,33 +4858,294 @@ impl TsEmitCtx {
                     self.emit_node(t)?;
                     return Ok(());
                 }
+                // A diverging-intrinsic tail (`todo()`/`unreachable()`) lowers to
+                // a bare `throw` statement — emitting `return throw …` is invalid
+                // TS (TS1109). Emit it as a statement instead.
+                if self.call_is_diverging(t) {
+                    self.write_indent();
+                    self.emit_expr(t)?;
+                    self.buf.push_str(";\n");
+                    return Ok(());
+                }
+                // Expression-position control flow whose branches carry
+                // statements (a value `if`/`match` with a `return` arm, or a
+                // `loop` producing its value via `break v`) has no TS expression
+                // form. Lower it in statement position, delivering each value
+                // tail through the active sink (default `return`; cluster-1 fix;
+                // see `emit_value_in_stmt_pos`).
+                if self.value_needs_stmt_form(t) {
+                    let sink = self.value_sink.clone().unwrap_or(ValueSink::Return);
+                    return self.emit_value_in_stmt_pos(t, &sink);
+                }
                 if let NodeKind::Match { scrutinee, arms } = &t.kind {
                     if crate::generator::match_has_statement_arm(arms) {
                         self.emit_match(scrutinee, arms, false)?;
                         return Ok(());
                     }
                 }
-                let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}return ");
-                self.emit_expr(t)?;
-                self.buf.push_str(";\n");
+                self.emit_block_tail_value(t)?;
             }
         } else if crate::generator::node_is_statement(node) {
             self.emit_node(node)?;
+        } else if self.call_is_diverging(node) {
+            self.write_indent();
+            self.emit_expr(node)?;
+            self.buf.push_str(";\n");
+        } else if self.value_needs_stmt_form(node) {
+            let sink = self.value_sink.clone().unwrap_or(ValueSink::Return);
+            self.emit_value_in_stmt_pos(node, &sink)?;
         } else if let NodeKind::Match { scrutinee, arms } = &node.kind {
             if crate::generator::match_has_statement_arm(arms) {
                 self.emit_match(scrutinee, arms, false)?;
             } else {
+                self.emit_block_tail_value(node)?;
+            }
+        } else {
+            self.emit_block_tail_value(node)?;
+        }
+        Ok(())
+    }
+
+    /// Deliver a block's value tail. When a [`ValueSink`] is active (the block is
+    /// a `match`-arm body inside a statement-position control-flow lowering), the
+    /// value flows through it (`return v` / `binding = v`); otherwise the default
+    /// function-body behavior — `return v` — applies.
+    fn emit_block_tail_value(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        if let Some(sink) = self.value_sink.clone() {
+            return self.emit_sink_value(node, &sink);
+        }
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}return ");
+        self.emit_expr(node)?;
+        self.buf.push_str(";\n");
+        Ok(())
+    }
+
+    /// True when a `Call` is to a diverging intrinsic (`todo()` / `unreachable()`),
+    /// which lowers to a bare `throw new Error(...)` *statement* — never produces
+    /// a value. Emitting it after `return ` (`return throw …`) is invalid TS, so
+    /// callers in value-tail position must emit it as a statement instead.
+    fn call_is_diverging(&self, node: &AIRNode) -> bool {
+        if let NodeKind::Call { callee, .. } = &node.kind {
+            if let NodeKind::Identifier { name } = &callee.kind {
+                return matches!(name.name.as_str(), "todo" | "unreachable");
+            }
+        }
+        false
+    }
+
+    /// True when `node` (in *value* position) contains control flow that has no
+    /// TypeScript expression form — a `Loop` (its value arrives via `break v`), or
+    /// an `if`/`match`/`block` any of whose value-tails is a `return`/`break`/
+    /// `continue`, a diverging intrinsic call, or (recursively) a nested
+    /// control-flow value that itself needs statement form. Such a value must be
+    /// emitted in **statement** position (assigning the result to a binding, or
+    /// `return`ing it) via [`Self::emit_value_in_stmt_pos`] — the ternary /
+    /// value-IIFE lowering would emit `/* unsupported */` for the control-flow
+    /// tail. The recursion is what makes a *nested* `if … else if … else { return
+    /// … }` chain (chat-protocol) trigger the statement lowering, not just a
+    /// single-level `if`.
+    fn value_needs_stmt_form(&self, node: &AIRNode) -> bool {
+        match &node.kind {
+            // A loop never has an expression form; its value comes from `break v`.
+            NodeKind::Loop { .. } => true,
+            NodeKind::If {
+                then_block,
+                else_block,
+                let_pattern: None,
+                ..
+            } => {
+                self.branch_needs_stmt_form(then_block)
+                    || else_block
+                        .as_deref()
+                        .is_some_and(|e| self.branch_needs_stmt_form(e))
+            }
+            NodeKind::Match { arms, .. } => arms.iter().any(|arm| {
+                matches!(&arm.kind, NodeKind::MatchArm { body, .. } if self.branch_needs_stmt_form(body))
+            }),
+            NodeKind::Block { tail, .. } => {
+                tail.as_deref().is_some_and(|t| self.value_needs_stmt_form(t))
+            }
+            _ => false,
+        }
+    }
+
+    /// True when a branch / arm body (an `if`/`match`/`loop`/`block` arm, or a
+    /// bare expression) used in value position requires statement-form lowering:
+    /// its value tail is a diverging statement, or it is itself control flow that
+    /// needs statement form. Drives the recursion in [`Self::value_needs_stmt_form`].
+    fn branch_needs_stmt_form(&self, node: &AIRNode) -> bool {
+        self.value_tail_diverges(node) || self.value_needs_stmt_form(node)
+    }
+
+    /// True when the *value tail* of `node` is a diverging statement — a
+    /// `return`/`break`/`continue` node, a diverging intrinsic call, or (for a
+    /// block) a tail that itself diverges. Drives [`Self::branch_needs_stmt_form`]:
+    /// a value-position branch whose tail is one of these cannot be a ternary/IIFE
+    /// arm.
+    fn value_tail_diverges(&self, node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::Return { .. } | NodeKind::Break { .. } | NodeKind::Continue => true,
+            NodeKind::Call { .. } => self.call_is_diverging(node),
+            NodeKind::Block { stmts, tail } => match tail {
+                Some(t) => self.value_tail_diverges(t),
+                // A block with no tail (ends in a statement) yields no value.
+                None => stmts.last().is_some_and(|s| self.value_tail_diverges(s)),
+            },
+            _ => false,
+        }
+    }
+
+    /// Emit a value-position expression that [`Self::value_needs_stmt_form`] has
+    /// flagged, in **statement** position, delivering its result via `sink`
+    /// (`return <v>;` or `<name> = <v>;`). Diverging tails (`return`/`break`/
+    /// `continue`/`todo()`) emit their own statement and ignore the sink. This is
+    /// the TS-side desugar of expression-position control flow whose branches
+    /// carry statements; it keeps `return`/`break` in the enclosing function/loop
+    /// scope (an IIFE would capture them) — see the cluster-1 OPEN in the PR body
+    /// proposing a shared AIR desugar.
+    fn emit_value_in_stmt_pos(
+        &mut self,
+        node: &AIRNode,
+        sink: &ValueSink,
+    ) -> Result<(), CodegenError> {
+        match &node.kind {
+            // A diverging statement: emit it directly, ignore the sink.
+            NodeKind::Return { .. } | NodeKind::Break { .. } | NodeKind::Continue => {
+                self.emit_node(node)
+            }
+            NodeKind::Call { .. } if self.call_is_diverging(node) => {
+                self.write_indent();
+                self.emit_expr(node)?;
+                self.buf.push_str(";\n");
+                Ok(())
+            }
+            NodeKind::Loop { body } => {
+                self.emit_loop_label_prefix(body);
+                // The loop's value arrives through `break v`; record the sink so
+                // each `break v` writes it (`<binding> = v; break;`).
+                self.set_loop_value_sink(sink.clone());
+                self.writeln("while (true) {");
+                self.indent += 1;
+                self.emit_block_body(body)?;
+                self.indent -= 1;
+                self.writeln("}");
+                self.pop_loop_frame();
+                Ok(())
+            }
+            NodeKind::If {
+                let_pattern: None,
+                condition,
+                then_block,
+                else_block,
+            } => {
                 let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}if (");
+                self.emit_expr(condition)?;
+                self.buf.push_str(") {\n");
+                self.indent += 1;
+                self.emit_value_in_stmt_pos(then_block, sink)?;
+                self.indent -= 1;
+                if let Some(else_b) = else_block {
+                    if matches!(
+                        else_b.kind,
+                        NodeKind::If {
+                            let_pattern: None,
+                            ..
+                        }
+                    ) {
+                        let ind = self.indent_str();
+                        let _ = write!(self.buf, "{ind}}} else ");
+                        // Re-dispatch the nested `if` without re-opening a brace.
+                        self.emit_value_in_stmt_pos_else_if(else_b, sink)?;
+                        return Ok(());
+                    }
+                    self.writeln("} else {");
+                    self.indent += 1;
+                    self.emit_value_in_stmt_pos(else_b, sink)?;
+                    self.indent -= 1;
+                }
+                self.writeln("}");
+                Ok(())
+            }
+            NodeKind::Match { scrutinee, arms } => {
+                let prev = self.value_sink.replace(sink.clone());
+                let res = self.emit_match(scrutinee, arms, false);
+                self.value_sink = prev;
+                res
+            }
+            NodeKind::Block { stmts, tail } => {
+                for s in stmts {
+                    self.emit_node(s)?;
+                }
+                if let Some(t) = tail {
+                    self.emit_value_in_stmt_pos(t, sink)?;
+                }
+                Ok(())
+            }
+            // A plain value: deliver it through the sink.
+            _ => self.emit_sink_value(node, sink),
+        }
+    }
+
+    /// Helper for the `else if` chain in [`Self::emit_value_in_stmt_pos`]: emits an
+    /// `if (...) { … } else …` after the caller has already written `} else `.
+    fn emit_value_in_stmt_pos_else_if(
+        &mut self,
+        node: &AIRNode,
+        sink: &ValueSink,
+    ) -> Result<(), CodegenError> {
+        let NodeKind::If {
+            condition,
+            then_block,
+            else_block,
+            ..
+        } = &node.kind
+        else {
+            return self.emit_value_in_stmt_pos(node, sink);
+        };
+        self.buf.push_str("if (");
+        self.emit_expr(condition)?;
+        self.buf.push_str(") {\n");
+        self.indent += 1;
+        self.emit_value_in_stmt_pos(then_block, sink)?;
+        self.indent -= 1;
+        if let Some(else_b) = else_block {
+            if matches!(
+                else_b.kind,
+                NodeKind::If {
+                    let_pattern: None,
+                    ..
+                }
+            ) {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}}} else ");
+                self.emit_value_in_stmt_pos_else_if(else_b, sink)?;
+                return Ok(());
+            }
+            self.writeln("} else {");
+            self.indent += 1;
+            self.emit_value_in_stmt_pos(else_b, sink)?;
+            self.indent -= 1;
+        }
+        self.writeln("}");
+        Ok(())
+    }
+
+    /// Deliver a finished value expression `node` through `sink`.
+    fn emit_sink_value(&mut self, node: &AIRNode, sink: &ValueSink) -> Result<(), CodegenError> {
+        let ind = self.indent_str();
+        match sink {
+            ValueSink::Return => {
                 let _ = write!(self.buf, "{ind}return ");
                 self.emit_expr(node)?;
                 self.buf.push_str(";\n");
             }
-        } else {
-            let ind = self.indent_str();
-            let _ = write!(self.buf, "{ind}return ");
-            self.emit_expr(node)?;
-            self.buf.push_str(";\n");
+            ValueSink::Assign(name) => {
+                let _ = write!(self.buf, "{ind}{name} = ");
+                self.emit_expr(node)?;
+                self.buf.push_str(";\n");
+            }
         }
         Ok(())
     }

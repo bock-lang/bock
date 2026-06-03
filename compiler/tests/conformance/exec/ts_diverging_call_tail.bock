@@ -1,0 +1,34 @@
+// TEST: exec_ts_diverging_call_tail
+// EXPECT: output "got:42"
+// EXPECT: targets ts
+//
+// Restricted to `ts`: a diverging-intrinsic tail (`unreachable()`/`todo()`) is
+// emitted as `return <throw/raise/panic>` by every other backend too (js:
+// `return throw …`, python: `return raise …`, go: `panic(...) used as value`) —
+// the same shared limitation this TS fix addresses, surfaced as an OPEN. Widen
+// to all five once the shared fix lands.
+//
+// A function whose body *tail* is a diverging intrinsic call (`unreachable()`),
+// reached only on a branch the test never takes (the guessing-game cluster).
+// `unreachable()`/`todo()` lower to a bare `throw` *statement*, so emitting them
+// after `return ` (`return throw new Error(...)`) is invalid TS (`tsc` TS1109).
+// The fix emits the diverging tail as a statement, not a `return` operand. The
+// program runs the non-diverging path, so the fixture pins valid *syntax*
+// (compile-time) without ever executing the `throw`. js/python share the same
+// `return raise`/`return throw` hazard; rust/go their analogues.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn checked(n: Int) -> Int {
+  if (n >= 0) {
+    return n
+  }
+  // Tail position: a diverging call, never reached for n >= 0.
+  unreachable()
+}
+
+fn main() -> Void {
+  println("got:${checked(42)}")
+}

@@ -1,0 +1,33 @@
+// TEST: exec_ts_match_mut_bind_arm
+// EXPECT: output "11"
+// EXPECT: targets ts
+//
+// Restricted to `ts`: a `mut x =>` match binding that is reassigned is currently
+// mishandled by every other backend too (js emits `const x` → assignment-to-
+// constant; python rebinds wrongly; go drops the binding) — a shared backend gap
+// surfaced as an OPEN. This fix corrects the TS side (`let x`, not `const x`).
+// Widen to all five once the others handle mutable match bindings.
+//
+// A `match` arm that binds its scrutinee with a *mutable* binding (`mut x =>`)
+// and then reassigns it (the pattern-lab const-reassign cluster). The TS lowering
+// emits the arm binding; a `mut x` arm must emit `let x = …`, not `const x = …`,
+// or the reassignment in the body trips `tsc` TS2588 ("Cannot assign to 'x'
+// because it is a constant"). js/python are untyped; rust/go thread their own
+// mutability — this pins TS alongside them.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn bump(n: Int) -> Int {
+  match n {
+    mut x => {
+      x = x + 1
+      x
+    }
+  }
+}
+
+fn main() -> Void {
+  println("${bump(10)}")
+}
