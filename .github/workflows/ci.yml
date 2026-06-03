@@ -105,7 +105,11 @@ jobs:
       - name: Install Rust toolchain
         shell: bash
         run: |
-          rustup toolchain install ${{ matrix.toolchain }} --profile minimal
+          # `rustfmt` is needed by the transpiled-test formatter-clean gate
+          # (`rust_test_file_is_rustfmt_clean`); the certifying Linux lane sets
+          # BOCK_PROJECTMODE_REQUIRE=all, which fails that gate if rustfmt is
+          # absent — so install the component here (minimal profile omits it).
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component rustfmt
           rustup default ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
