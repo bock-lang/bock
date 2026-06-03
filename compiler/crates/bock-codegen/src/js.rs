@@ -1060,11 +1060,21 @@ impl EmitCtx {
     /// Recognise desugared method calls `Call(FieldAccess(recv, m), [recv, ...args])`
     /// on Duration/Instant values and emit inline arithmetic. Returns true if
     /// the call was emitted.
+    ///
+    /// `node` is the full `Call` AIR node, consulted only to *exclude* primitive
+    /// receivers: [`is_time_method_name`] alone is ambiguous (`abs` is both
+    /// `Duration.abs` and `Int.abs`/`Float.abs`), so when the checker has stamped
+    /// `recv_kind = "Primitive:<Ty>"` this is a numeric method, not a time method —
+    /// bail so [`Self::try_emit_numeric_method`] handles it.
     fn try_emit_time_desugared_method(
         &mut self,
+        node: &AIRNode,
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
+        if crate::generator::primitive_recv_kind(node).is_some() {
+            return Ok(false);
+        }
         let NodeKind::FieldAccess { object, field } = &callee.kind else {
             return Ok(false);
         };
@@ -1763,17 +1773,29 @@ impl EmitCtx {
     /// point) per spec §18.3 — not `s.length` (UTF-16 code units). `byte_len` is
     /// the UTF-8 byte count via `TextEncoder`. `replace` replaces ALL occurrences
     /// (`replaceAll`). `split` returns a JS array, which is the List runtime rep.
+    ///
+    /// Gated on `recv_kind = "Primitive:String"` directly (not the cross-backend
+    /// [`crate::generator::desugared_string_method`] subset) so JS can lower the
+    /// wider resolved String surface — `slice`/`substring`/`char_at`/`index_of`/
+    /// `repeat`/`reverse`/`trim_start`/`trim_end` — to native ops, matching the
+    /// Rust backend without widening the shared `STRING_METHODS` const (which
+    /// would force every backend to handle the extra names). `slice`/`reverse`
+    /// iterate by code point (`[...s]`) to honour the scalar-index semantics.
+    /// `char_at`/`index_of` return the inline tagged `Optional`
+    /// (`{ _tag: "Some", _0: v }` / `{ _tag: "None" }`).
     fn try_emit_string_method(
         &mut self,
         node: &AIRNode,
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
-        let Some((recv, method, rest)) =
-            crate::generator::desugared_string_method(node, callee, args)
-        else {
+        if crate::generator::primitive_recv_kind(node) != Some("String") {
+            return Ok(false);
+        }
+        let Some((recv, field, rest)) = crate::generator::desugared_self_call(callee, args) else {
             return Ok(false);
         };
+        let method = field.name.as_str();
         let recv_str = self.expr_to_string(recv)?;
         let arg0 = |this: &mut Self| -> Result<Option<String>, CodegenError> {
             rest.first()
@@ -1787,6 +1809,16 @@ impl EmitCtx {
             "to_upper" => format!("({recv_str}).toUpperCase()"),
             "to_lower" => format!("({recv_str}).toLowerCase()"),
             "trim" => format!("({recv_str}).trim()"),
+            "trim_start" => format!("({recv_str}).trimStart()"),
+            "trim_end" => format!("({recv_str}).trimEnd()"),
+            "reverse" => format!("[...({recv_str})].reverse().join('')"),
+            "to_string" | "display" => format!("String({recv_str})"),
+            "repeat" => {
+                let Some(n) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!("({recv_str}).repeat({n})")
+            }
             "contains" => {
                 let Some(p) = arg0(self)? else {
                     return Ok(false);
@@ -1824,6 +1856,134 @@ impl EmitCtx {
                 };
                 format!("({recv_str}).split({sep})")
             }
+            // `slice`/`substring(start, end)` are scalar-index half-open
+            // substrings (spec §18.3 — indices count Unicode scalars, not UTF-16
+            // code units). Iterate by code point via the spread so multibyte input
+            // is handled correctly, then `slice`/`join` the resulting array.
+            "slice" | "substring" => {
+                let Some(start) = arg0(self)? else {
+                    return Ok(false);
+                };
+                let Some(end) = rest
+                    .get(1)
+                    .map(|a| self.expr_to_string(&a.value))
+                    .transpose()?
+                else {
+                    return Ok(false);
+                };
+                format!("[...({recv_str})].slice({start}, {end}).join('')")
+            }
+            // `char_at(i)` returns `Optional[Char]` — `None` when out of range.
+            "char_at" => {
+                let Some(i) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!(
+                    "((__s, __i) => __i >= 0 && __i < __s.length ? {{ _tag: \"Some\", _0: __s[__i] }} : {{ _tag: \"None\" }})([...({recv_str})], {i})"
+                )
+            }
+            // `index_of(needle)` returns `Optional[Int]` — the scalar index of the
+            // first match, or `None`. JS `indexOf` is a UTF-16 code-unit offset, so
+            // convert it to a scalar index via the code-point prefix length.
+            "index_of" => {
+                let Some(p) = arg0(self)? else {
+                    return Ok(false);
+                };
+                format!(
+                    "((__s, __p) => {{ const __b = __s.indexOf(__p); return __b >= 0 ? {{ _tag: \"Some\", _0: [...__s.slice(0, __b)].length }} : {{ _tag: \"None\" }}; }})({recv_str}, {p})"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
+    /// Lower a desugared numeric/`Char`/`Bool` primitive method (`recv_kind =
+    /// "Primitive:Int" | "Primitive:Float" | "Primitive:Char" | "Primitive:Bool"`)
+    /// to its native JavaScript form. Covers the conversion and math methods the
+    /// checker resolves on the scalar primitives — `to_float`/`to_int`/`abs`/`min`/
+    /// `max`/`clamp`/`floor`/`ceil`/`round`/`sqrt`/… — none of which exist as
+    /// methods on a JS `number`/`boolean`/string-char. Wired into the `Call` arm
+    /// alongside [`Self::try_emit_string_method`], before the generic
+    /// desugared-self-call fall-through (which would emit `n.to_float(n)`).
+    /// `compare`/`eq`/`to_string`/`display`/`hash_code` stay on the primitive
+    /// *bridge* path. `Char` is a single-code-point JS string.
+    fn try_emit_numeric_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let prim = match crate::generator::primitive_recv_kind(node) {
+            Some(p @ ("Int" | "Float" | "Char" | "Bool")) => p,
+            _ => return Ok(false),
+        };
+        let Some((recv, field, rest)) = crate::generator::desugared_self_call(callee, args) else {
+            return Ok(false);
+        };
+        let method = field.name.as_str();
+        let recv_str = self.expr_to_string(recv)?;
+        let arg = |this: &mut Self, i: usize| -> Result<Option<String>, CodegenError> {
+            rest.get(i)
+                .map(|a| this.expr_to_string(&a.value))
+                .transpose()
+        };
+        let code = match (prim, method) {
+            // Conversions. `to_float`/`to_int` are runtime no-ops on a JS `number`,
+            // but `to_int` truncates toward zero (Bock `Float.to_int`).
+            ("Int", "to_float") => format!("({recv_str})"),
+            ("Float", "to_int") => format!("Math.trunc({recv_str})"),
+            ("Char", "to_int") => format!("(({recv_str}).codePointAt(0))"),
+            ("Bool", "to_int") => format!("(({recv_str}) ? 1 : 0)"),
+            // Int math.
+            ("Int", "abs") => format!("Math.abs({recv_str})"),
+            ("Int" | "Float", "min") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("Math.min({recv_str}, {o})")
+            }
+            ("Int" | "Float", "max") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("Math.max({recv_str}, {o})")
+            }
+            ("Int" | "Float", "clamp") => {
+                let (Some(lo), Some(hi)) = (arg(self, 0)?, arg(self, 1)?) else {
+                    return Ok(false);
+                };
+                format!("Math.min(Math.max({recv_str}, {lo}), {hi})")
+            }
+            ("Int", "shift_left") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("(({recv_str}) << ({o}))")
+            }
+            ("Int", "shift_right") => {
+                let Some(o) = arg(self, 0)? else {
+                    return Ok(false);
+                };
+                format!("(({recv_str}) >> ({o}))")
+            }
+            // Float math.
+            ("Float", "abs") => format!("Math.abs({recv_str})"),
+            ("Float", "floor") => format!("Math.floor({recv_str})"),
+            ("Float", "ceil") => format!("Math.ceil({recv_str})"),
+            ("Float", "round") => format!("Math.round({recv_str})"),
+            ("Float", "sqrt") => format!("Math.sqrt({recv_str})"),
+            ("Float", "is_nan") => format!("Number.isNaN({recv_str})"),
+            ("Float", "is_infinite") => format!("(!Number.isFinite({recv_str}))"),
+            // Bool.
+            ("Bool", "negate") => format!("(!({recv_str}))"),
+            // Char (a one-code-point JS string).
+            ("Char", "to_upper") => format!("({recv_str}).toUpperCase()"),
+            ("Char", "to_lower") => format!("({recv_str}).toLowerCase()"),
+            ("Char", "is_alpha") => format!("(/\\p{{L}}/u.test({recv_str}))"),
+            ("Char", "is_digit") => format!("(/[0-9]/.test({recv_str}))"),
+            ("Char", "is_whitespace") => format!("(/\\s/.test({recv_str}))"),
             _ => return Ok(false),
         };
         self.buf.push_str(&code);
@@ -2821,7 +2981,7 @@ impl EmitCtx {
                 if self.try_emit_time_assoc_call(callee, args)? {
                     return Ok(());
                 }
-                if self.try_emit_time_desugared_method(callee, args)? {
+                if self.try_emit_time_desugared_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_concurrency_call(callee, args)? {
@@ -2841,6 +3001,12 @@ impl EmitCtx {
                 // overlapping `len`/`contains`/`is_empty` names route by the
                 // checker's `recv_kind = "Primitive:String"`, not by name alone.
                 if self.try_emit_string_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // Numeric/Char/Bool primitive methods (`to_float`/`abs`/`sqrt`/…)
+                // likewise route by the checker's `recv_kind = "Primitive:Int|…"`
+                // before the generic fall-through, which would emit `n.to_float(n)`.
+                if self.try_emit_numeric_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {
