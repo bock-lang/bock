@@ -1,0 +1,33 @@
+// TEST: exec_py_todo_expr_stmt
+// EXPECT: output "ok=7"
+// EXPECT: targets python
+//
+// A `todo()` placeholder inside an expression-position `if` branch
+// (`if c { todo() } else { value }`) in RETURN/tail position. `todo()` lowers to
+// a Python `raise NotImplementedError()` — a statement, not an expression — so
+// emitting the surrounding `if` as a ternary produced
+// `return (raise NotImplementedError() if c else value)`, a `SyntaxError`. The
+// py fix recognises a diverging `raise` branch and hoists the `if` to
+// statement form (the diverging branch `raise`s, the value branch `return`s).
+// The `todo` branch is never reached at run time (the guard takes the value
+// path); the fixture locks in that the *unreached* `todo()` still lowers to
+// valid source.
+//
+// PYTHON-ONLY: js/ts reject the `todo()`-in-`if` lowering, so this is asserted
+// on Python (the bare-tail `todo()` form is exercised cross-target elsewhere).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn pick(use_default: Bool, value: Int) -> Int {
+  if (use_default) {
+    todo()
+  } else {
+    value
+  }
+}
+
+fn main() -> Void {
+  println("ok=${pick(false, 7)}")
+}

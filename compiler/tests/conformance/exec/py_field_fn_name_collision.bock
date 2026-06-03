@@ -1,0 +1,58 @@
+// TEST: exec_py_field_fn_name_collision
+// EXPECT: output "total=60"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression for the Python circular-import bug (Q-py-circular-import). A record
+// field name (`total` on `Summary`, declared in module `models`) collides with a
+// PUBLIC FUNCTION of the same name (`total`, declared in module `service`, which
+// `use`s `models`). Python emits one file per module and computes each module's
+// cross-module imports by scanning for referenced identifier tokens. The field
+// name `"total"` matched the sibling function, so `models.py` spuriously emitted
+// `from service import total` — and because `service.py` imports `models`, that
+// closed an import CYCLE (`ImportError: cannot import name 'Summary' …
+// (circular import)`) the instant `main.py` imported `models`.
+//
+// The py fix subtracts record/enum/class field-label occurrences from the
+// implicit-import scan, so a name reached only through a field label is not
+// imported. The other four backends never had this cycle, so the fixture runs
+// identically on all five and also guards against a regression where the field
+// vs. function name collision is mis-resolved.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale). The `models` / `service` functions ARE `public`:
+// cross-module `use` only resolves exported items.
+module main
+
+use models.{Summary}
+use service.{summarize, render}
+
+fn main() -> Void {
+  let s: Summary = summarize([10, 20, 30])
+  println(render(s))
+}
+
+// FILE: models.bock
+module models
+
+// `total` here is a FIELD name; it collides with `service.total` (a public fn).
+public record Summary {
+  count: Int
+  total: Int
+}
+
+// FILE: service.bock
+module service
+
+use models.{Summary}
+
+public fn total(items: List[Int]) -> Int {
+  items.fold(0, (acc, x) => acc + x)
+}
+
+public fn summarize(items: List[Int]) -> Summary {
+  Summary { count: items.len(), total: total(items) }
+}
+
+public fn render(s: Summary) -> String {
+  "total=${s.total}"
+}
