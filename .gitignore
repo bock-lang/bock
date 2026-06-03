@@ -6,9 +6,10 @@ Cargo.lock.bak
 # Bock build cache
 .bock/
 
-# Example native binaries (transpiled per-target sources under examples/**/build/ are intentional)
-examples/**/output
-examples/**/output.exe
+# Example build output — project-mode `bock build` emits a regenerable
+# per-target tree (sources, manifests, compiled artifacts) under
+# examples/**/build/. Never commit it; it is reproduced by building.
+examples/**/build/
 
 # Node / VS Code extension
 node_modules/
