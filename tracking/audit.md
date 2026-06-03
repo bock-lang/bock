@@ -1788,3 +1788,30 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
     the remaining pre-v1.0 quality item is Q-formatter-clean-tree (larger; grown beyond the original go-only scope).
     NEXT: checkpoint with operator — Q-formatter-clean-tree (do now / defer v1.x / scope-first) + v1.0 release actions
     (all escalate). We are at "v1.0 engineering essentially done; release is operator-driven."
+
+[2026-06-03 06:15 UTC] ★ Examples-compile audit — major coverage gap found; v1.0 readiness reframed
+  Operator chose "(a) do Q-formatter-clean-tree now, audit-first." I installed prettier/black, built the real-world
+    examples to all 5, ran the formatters. Formatter result: rust clean ×6; go dirty 4/6 (struct alignment + single-line
+    switch/closure expansion) → fixed via post-emit `gofmt -w`/`rustfmt` (#198, MERGED, main 028820c; rust/go §20.6.2
+    baseline now met + full-tree gates). js/ts/python full-clean DEFERRED (prettier/black reflow not hand-matchable +
+    post-emit prettier breaks js/ts source maps; user-optional formatters per §20.6.2).
+  ★ BUT THE AUDIT INCIDENTALLY UNCOVERED A BIGGER ISSUE: building the 6 real-world examples in PROJECT MODE → **ts 0/6,
+    rust 0/6, go 0/6 compile** (js 4/6, python 5/6 — and those pass only because js/py build-validate is syntax-only
+    [node --check / py_compile]; they'd break at runtime). Root causes:
+    (1) **Q-list-method-codegen** [HIGH]: List functional METHOD with a closure (`data.map((dp)=>…)`) mislowered →
+        emits `recv.map(recv, closure)` (dup receiver) + untyped closure params → TS type-error, Go syntax-error (`map`
+        keyword), js/py runtime-break. DISTINCT from core.iter free-fns (conformance-tested + pass) → that's why
+        conformance is 430/0 GREEN while real programs fail. §20.4 transpiler bug (checks clean, codegen-invalid).
+    (2) **Q-rust-cargo-workspace**: generated Cargo.toml not workspace-isolated → cargo errors inside a parent workspace.
+    (3) **Q-chat-protocol-allfail**: chat-protocol fails even js/py syntax — separate, undiagnosed.
+    META: **Q-examples-exec-coverage** — the 20 examples are NOT exec-tested ×5, so these slipped past the narrow
+    conformance fixtures. milestones "examples build on ≥JS+Py+Rust" acceptance gate is UNMET.
+  HONEST REFRAMING (recorded in snapshot/milestones/queue): "ItemB complete / 430 conformance / project mode real on
+    all 5" was TRUE for the conformance fixtures but those are too narrow; real-world programs largely don't compile on
+    ts/rust/go. **v1.0 is further out than the green-conformance picture implied.** The architecture is sound + done;
+    real-world codegen coverage has holes. An examples-hardening workstream (exec-gate examples ×5 + fix the clusters)
+    is a v1.0 prerequisite. Filed Q-list-method-codegen / Q-rust-cargo-workspace / Q-examples-exec-coverage /
+    Q-chat-protocol-allfail. Q-formatter-clean-tree: rust/go DONE (#198), js/ts/python deferred.
+  NEXT: surfaced to operator (recommend examples-exec audit first → fix clusters); **awaiting direction** before driving
+    the examples-hardening workstream. LESSON for the project: conformance fixtures must include real-world-shaped
+    programs / the examples must be exec-tested — green conformance gave false confidence.

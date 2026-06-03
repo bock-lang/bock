@@ -15,11 +15,14 @@ links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 _Last reconciled: 2026-06-03 vs main bf34070 + this S8 close PR (**★ ItemB COMPLETE — MS-projectmode DONE (S0–S8) ★** — per-module native
 output on all 5 [DV13]; project mode real [scaffolder-owned manifests/configs/README + transpiled @test files per
 framework], source mode bare [DV18]; config tables parsed; core.error fixed ×5 [#193]. 430 exec pairs / 0 failed
-REQUIRE=all. ItemB was v1.0's last mapped ENGINEERING item → v1.0 engineering runway clear; remaining = release
-actions [escalate]. **Q-ci-projectmode-tooling DONE [#196] — js/ts/python project-mode CI-certified (transpiled
-tests run-verify ×5; they pass as-emitted).** Remaining pre-v1.0 (non-blocking): **Q-formatter-clean-tree** (full
-emitted tree formatter-clean on all 5 per §20.6.2; subsumes the go-gofmt gap; larger codegen effort — operator
-checkpoint pending). ItemD [external get-started] UNBLOCKED but escalates. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
+REQUIRE=all. ItemB (the ProjectMode milestone) complete + js/ts/python CI-certified [#196] + rust/go formatter-clean
+[#198]. **⚠ BUT (FOUND 2026-06-03): an examples-compile audit shows the conformance fixtures are TOO NARROW — the
+real-world examples largely DON'T compile in project mode (ts 0/6, rust 0/6, go 0/6; js/py "OK" = syntax-only).**
+Root causes: **Q-list-method-codegen** (List `.map()`-with-closure mislowered, all 5, §20.4) · **Q-rust-cargo-workspace**
+· chat-protocol. Meta gap: **Q-examples-exec-coverage** (examples not exec-tested ×5). **v1.0 is further out than
+the green-conformance picture implied** — an "examples-hardening" workstream is needed before release. **OPERATOR
+DIRECTION PENDING** (recommended: examples-exec audit first → fix clusters). Release actions [escalate]; ItemD unblocked
+but escalates. Q-formatter-clean-tree: rust/go DONE [#198], js/ts/python deferred. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
 [#175]**; **Q-r2-codegen-residue (c) builtin-vs-user-method shadowing [#176, ×5]** + pinned Q-go-list-literal /
 Q-r2-(b) / Q-ts-generic-impl (verified already-fixed). New FOUND triaged: Q-allcaps-record-parse (parser),
 Q-arch-doc-drift (ARCHITECTURE.md/compiler-CLAUDE.md/CONTRIBUTING.md crate-name drift). Q-match-exprpos still
@@ -291,15 +294,38 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   execution-codegen bugs; the only fixes were formatter-cleanliness of the emitted *test files* (js/ts tag-predicate
   parens; py blank-line spacing). Also added the missing `rustfmt` component to the test toolchain (surfaced by
   require=all on beta). **js/ts/python project-mode is now CI-certified.** Remaining formatter gap → Q-formatter-clean-tree.
-- **[Q-formatter-clean-tree] Emitted PROGRAM + runtime tree not formatter-clean on all 5 (§20.6.2)** — bug ·
-  ready (pre-v1.0; larger codegen effort) · `compiler/crates/bock-codegen/src/{js,ts,py,go,rs}.rs` · — · links #194,
-  #196, §20.6.2 · note: FOUND in S7/#196. The formatter-clean `--check` gate currently covers the emitted **test
-  files** (+ rust/go entry), but the **full emitted tree** (`main.*`, `_bock_runtime.*`, entry files) is NOT yet
-  byte-for-byte prettier/black/gofmt-clean: e.g. **go** list-method inline-closure pretty-printing (was
-  Q-go-gofmt-listclosure, folded in); **python** runtime single-vs-double quotes + blank-line spacing; **js/ts**
-  redundant `(a + b)` parens + missing long-line wrapping. §20.6.2's codegen-formatter agreement requires the WHOLE
-  emitted tree to pass the formatter cleanly on first generation (else churn on the user's first commit). Per-backend
-  emit-hygiene pass + extend the `--check` gate to the full tree. Subsumes Q-go-gofmt-listclosure.
+- **[Q-formatter-clean-tree] Full emitted tree formatter-clean (§20.6.2)** — bug · **rust/go DONE (#198); js/ts/python
+  DEFERRED** · `compiler/crates/bock-codegen/` · — · links #194, #196, #198, §20.6.2 · note: §20.6.2 mandates **rust+go**
+  formatter-cleanliness as the universal baseline → **DONE (#198)**: project-mode build runs a post-emit `gofmt -w`
+  (go) / `rustfmt` (rust) pass over the full tree (their formatters ship with the toolchain; go has no source-map
+  conflict); full-tree `gofmt -l`/`rustfmt --check` gates added. **js/ts/python full-clean DEFERRED**: prettier/black
+  *reflow* long lines (not hand-matchable in codegen) AND post-emit prettier would break the js/ts **source maps**;
+  those formatters are user-OPTIONAL per §20.6.2 (not the baseline). Pursue later via either cheap codegen wins
+  (redundant parens, py blank-lines) and/or post-emit formatting with source-map regeneration. v1.x-leaning.
+- **[Q-list-method-codegen] List `.map()`/`.filter()` method-with-closure mislowered (all 5)** — bug · ready
+  (**HIGH — real-program correctness; likely highest-leverage**) · `compiler/crates/bock-codegen/` · — · links §20.4 ·
+  note: **FOUND 2026-06-03 by an examples-compile audit.** A List functional METHOD with a closure (`data.map((dp) => …)`)
+  is mislowered: codegen emits `recv.map(recv, closure)` (receiver duplicated as an arg) with untyped closure params →
+  **TS** type-error, **Go** syntax-error (`map` is a keyword), **js/python** runtime-break (their build-validate is
+  syntax-only so they falsely show "compiles"). Distinct from `core.iter`'s FREE functions (conformance-tested + pass) —
+  which is why conformance is green while real programs fail. Checks clean but fails codegen ⇒ §20.4 transpiler bug.
+  Affects most real-world examples on ts/go (and at runtime on js/py).
+- **[Q-rust-cargo-workspace] Generated `Cargo.toml` doesn't opt out of a parent workspace** — bug · ready ·
+  `compiler/crates/bock-codegen/` (rust scaffolder) · — · note: FOUND 2026-06-03. Project-mode rust build fails
+  `current package believes it's in a workspace when it's not` when `build/rust/Cargo.toml` sits inside a parent cargo
+  workspace. Fix: emit an empty `[workspace]` table in the generated `Cargo.toml`. Scaffolding robustness; also masks
+  rust's real codegen status in the examples audit until fixed.
+- **[Q-examples-exec-coverage] Exec-test all ~20 examples on all 5 targets in CI** — chore/test-infra · ready
+  (**HIGH — coverage gap that hid the above**) · `compiler/tests/`, `.github/workflows/` · — · links milestones (v1.0
+  acceptance) · note: FOUND 2026-06-03. The 20 `examples/` aren't built+run on all 5 targets, so real-world-pattern
+  codegen bugs (Q-list-method-codegen) slipped past the narrower conformance fixtures (430/0 green while real programs
+  fail). Audit (6 real-world ×5): **ts 0/6, rust 0/6, go 0/6 compile** (js/py "OK" = syntax-only validate). Add an
+  examples-exec gate (build + where possible run each example ×5). milestones.md lists "examples build/test clean on
+  ≥JS+Py+Rust" as a v1.0 acceptance gate — currently UNMET.
+- **[Q-chat-protocol-allfail] `chat-protocol` example fails build on all 5** — bug · ready (needs diagnosis) ·
+  `examples/real-world/chat-protocol`, codegen · — · note: FOUND 2026-06-03. Fails even js/python syntax-validate (a
+  different root cause than Q-list-method-codegen, which only breaks the type-checked targets). Diagnose during the
+  examples-exec audit.
 
 ## Deferred
 
