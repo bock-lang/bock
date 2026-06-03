@@ -1,0 +1,37 @@
+// TEST: exec_rust_guard_let_binding
+// EXPECT: output "ok:hello;ok:world;bailed"
+// EXPECT: targets rust
+//
+// guard-let binds a name that stays in scope for the rest of the block
+// (ownership-demo regression, Rust backend). `guard (let Ok(v) = expr) else { … }`
+// must lower so `v` is usable after the guard. The Rust backend previously
+// lowered guard-let to a boolean `if !(cond)` guard, dropping the binding
+// (`E0425 cannot find value 'v'`) and negating a non-bool (`E0600`). It now
+// lowers to Rust's `let PAT = EXPR else { … };` (let-else), keeping the binding
+// in scope and requiring the else arm to diverge — which guard already
+// guarantees.
+//
+// Rust-targeted: the same guard-let `v`-binding is currently dropped on the
+// js / ts / python / go backends too (they emit `ReferenceError`/`NameError`
+// and a ts/go compile error), but those are distinct cross-backend defects out
+// of this fix's scope (Rust-only). Tracked separately — see the PR's OPEN note.
+module main
+
+fn validate(input: String) -> Result[String, String] {
+  if (input == "") { Err("empty") } else { Ok(input) }
+}
+
+fn check(input: String) -> String {
+  guard (let Ok(v) = validate(input)) else {
+    return "bailed"
+  }
+  // `v` is bound by the guard and live here.
+  "ok:${v}"
+}
+
+fn main() -> Void {
+  let a = check("hello")
+  let b = check("world")
+  let c = check("")
+  println("${a};${b};${c}")
+}
