@@ -130,6 +130,15 @@ exercises the stdlib's FREE functions but not the real-world-shaped method/closu
 **leverage order**; the examples-exec CI gate lands **informational-first**, ratcheting to blocking as clusters land.
 - **Acceptance:** all 20 `examples/` **compile AND run** on all 5 targets in CI (the Q-examples-exec-coverage gate,
   flipped to blocking); no regressions vs the ratchet.
+- **Progress (2026-06-03 23:05):** landed **17 PRs (#204–#221)**. A **5-WAY PARALLEL FAN-OUT** (#216 rust · #217 js ·
+  #218 py · #219 ts · #220 go — one cluster-batch per backend, file-disjoint, `generator.rs` untouched in every one;
+  combined conformance 0-failed/124-fixtures verified on merged main) **leapt the examples matrix: runtime-working
+  js 7→14 · ts 5→7 · py 9→12 · rust 8→9 · go 1→7 / 20** (30→49 example-target passes; baseline ratcheted #221). go's
+  all-5 bet is paying off (1→7). Per-backend clusters done; the fan-out **converged on the remaining SHARED-lowering
+  work** — `Q-exprpos-shared-desugar` (the match-exprpos core; value-position diverging control-flow needs a shared AIR
+  temp-hoist; go-blocking), `Q-propagate-operator-noop` (`?` no-op on js/ts/py; maybe Design), `Q-list-range-pattern-shared`,
+  `Q-guard-let-shared`, `Q-let-shadow-const`. **Next = the shared-lowering session (generator.rs/AIR — NOT parallelizable).**
+  [prior 20:25 progress below.]
 - **Progress (2026-06-03 20:25):** landed **11 PRs (#204–#214)** — adds Q-string-num-jstspygo (#213, §18.3 String/num/
   Char/Bool methods on js/ts/py/go; conformance 476→480; **microservice ts FAIL→PASS**). An INCIDENT (merged #213 with a
   failing windows-python lane — multibyte fixture output vs Windows-Python's codepage stdout) was caught + hotfixed (#214,

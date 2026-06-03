@@ -12,17 +12,18 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-03 20:25 — **MS-examples-hardening: 11 PRs landed (#204–#214).** main 6806edc. Latest:
-**Q-string-num-jstspygo DONE (#213** — §18.3 String/num/Char/Bool methods on js/ts/py/go; conformance 476→480;
-**microservice ts FAIL→PASS**). **INCIDENT+RECOVERY:** #213 was merged with a failing windows-python lane (the all-5
-fixture printed multibyte slice output; Windows-Python stdout=codepage not UTF-8) — caused by an ungated merge script;
-**hotfix #214** (ASCII-output fixture) restored main green, merge properly gated on `mergeStateStatus=CLEAN`. Root
-product issue filed → **Q-py-windows-utf8**. **Examples matrix: runtime-working js 7 · ts 4→5 · py 9 · rust 8 · go 1 /
-20** (ts +1 microservice; go still 1 — advanced past String.slice, now hits match-binding + Result-payload). **OPERATOR
-DECISION (2026-06-03): go HOLDS the all-5 v1.0 bar** (not tiered) — commit to the full go chain. **Remaining leverage
-order:** Q-js-effect-export (J) · Q-py-circular-import (K) · **Q-match-exprpos (D, deep, all-backend — biggest remaining,
-go-blocking)** · go Result-payload + Q-py-windows-utf8 + Q-examples-codegen-misc (14 sub-items). 0 regressions across the
-workstream. — Earlier
+_Last reconciled: 2026-06-03 23:05 — **MS-examples-hardening: 17 PRs landed (#204–#221).** main e2117ee. Latest: a
+**5-WAY PARALLEL FAN-OUT — one cluster-batch per backend (#216 rust · #217 js · #218 py · #219 ts · #220 go), all
+file-disjoint, generator.rs untouched in every one.** Combined-state conformance **0 failed across 124 fixtures**
+(REQUIRE=all, verified on merged main). **Examples matrix LEAPT: runtime-working js 7→14 · ts 5→7 · py 9→12 · rust 8→9 ·
+go 1→7 / 20** (30→49 example-target passes; baseline ratcheted #221). go's all-5 bet is paying off (1→7). **Done this
+batch:** Q-js-effect-export, Q-py-circular-import, Q-py-windows-utf8, the rust ownership clusters (#216), the go
+Result-payload/Char/int-width/unused-var (#220), per-backend match-exprpos emitter work. **THE FAN-OUT SCOPED THE
+REMAINING SHARED WORK** (all backends converged on it): **Q-exprpos-shared-desugar** (HIGH — the real match-exprpos core;
+value-position diverging control-flow needs a SHARED AIR temp-hoist; go-blocking; NON-parallel) · **Q-propagate-operator-noop**
+(HIGH — `?` is a no-op on js/ts/py, drops the unwrap; maybe Design) · Q-list-range-pattern-shared · Q-guard-let-shared
+(js/ts/py/go; rust done) · Q-let-shadow-const (ts/py/go; js done). **NEXT focused phase = the shared-lowering session**
+(generator.rs/AIR — NOT parallelizable). 0 regressions across the workstream. — Earlier
 2026-06-03 13:44: **EXAMPLES-EXEC AUDIT COMPLETE + operator decisions** (see audit.md 2026-06-03 13:44). The full 20×5 audit (built in /tmp, project mode) gives the TRUE matrix: js 10/20 compile·2/10 run,
 ts 2/20·2/2, py 15/20·7/15, **rust 3/20·2/3 (in-repo 0/20 — workspace bug masks), go 1/20·1/1** — hello-world the only
 all-5. Worse than the digest's 6-example sample, and **rust/go fail on REAL codegen, not just the env bug** (proven:
@@ -85,16 +86,49 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `compiler/crates/bock-types/` · — · links #110 · note: the resolver doesn't
   treat a primitive type name as an expression value, so `Float.from(3)` doesn't
   resolve (`.into()` is the working primitive path). Minor usability gap.
-- **[Q-match-exprpos] Expression-position statement-arm match/if lowering (all 5)** — impl ·
-  ready · **UN-DEFERRED 2026-06-03 (audit) — now v1.0-scope (MS-examples-hardening), deep** · `compiler/crates/bock-codegen/` ·
-  — · links #121, #127, #176, MS-examples-hardening · note: #121 fixed statement-POSITION matches with statement arms
-  (all 5). The expression-position case (`let x = match … { _ => return }` yielding a value) needs a temp-hoist desugar.
-  **#176 re-confirmed** broken on go/py/js/ts (Rust correct); the **20×5 audit (13:44) shows it's BROADER + higher-impact
-  than the deferral assumed (~6 examples)** and is the root cause of the former Q-chat-protocol-allfail: on js/py the
-  IIFE/lambda wrapping produces **unbalanced parens** (`Unexpected token ')'` / `'(' was never closed`) and a **duplicate
-  `default` clause** on js, not just a captured transfer. The correct fix threads an "assign-to-target" mode through each
-  backend's match/if-arm emitter — **cross-cutting across 4 backends** (still deep), but operator held all 5 at the v1.0
-  bar, so it's in scope. Examples: chat-protocol, context-audit, guessing-game, pattern-lab, ownership-demo, type-zoo.
+- **[Q-match-exprpos] Expression-position control-flow lowering — PER-BACKEND done; SHARED value-position desugar remains** —
+  impl · **PARTIALLY DONE (#218/#219/#220 per-backend); shared piece → Q-exprpos-shared-desugar** · `compiler/crates/bock-codegen/` ·
+  — · links #121, #176, #218, #219, #220, MS-examples-hardening, Q-exprpos-shared-desugar · note: the 5-backend fan-out
+  (#217–#220) lowered the **tractable** expr-position cases per-backend (ts ValueSink `let r; if{ r=… } else { return }`;
+  py statement-form hoist; go value-IIFE + loop_expr_depth) — context-audit now runs on ts/py/go, guessing-game/pattern-lab
+  advanced. **BUT all four sessions independently confirmed the genuinely-shared case** (`let x = loop {…}` / a value-position
+  match/if whose arms DIVERGE) **needs a SHARED AIR temp-hoist desugar** (it currently emits `/* unsupported */` on the
+  backends lacking the per-emitter workaround). That shared desugar is split out → **Q-exprpos-shared-desugar** (the real
+  remaining core). This item now tracks only the per-backend emitter work (done); the shared desugar is the next focused
+  (NON-parallel, generator.rs/AIR) session. Remaining example barriers routing through it: chat-protocol (early-return
+  trapped in value-IIFE on go/ts), inventory map/fold.
+- **[Q-exprpos-shared-desugar] Shared AIR temp-hoist desugar for value-position diverging control-flow** — impl · ready ·
+  **HIGH — the real remaining match-exprpos core; go-blocking; NON-parallel (touches generator.rs/AIR)** ·
+  `compiler/crates/bock-codegen/src/generator.rs` (+ bock-air/bock-types if the desugar is AIR-level) · — · links
+  Q-match-exprpos, #217–#220 · note: FOUND 2026-06-03 (the 5-backend fan-out converged on this). A value-position
+  control-flow expression whose arms DIVERGE (`let x = loop { … break v … }`, `let x = match s { A => v  B => return }`)
+  has no clean per-backend IIFE lowering — needs a shared temp-hoist desugar (introduce a temp, lower the control-flow as
+  statements assigning the temp, replace the expression with the temp) in the AIR/lowering layer so ALL backends emit valid
+  code uniformly. The per-backend sessions each did the easy cases + reported this as the shared blocker. Do as ONE focused
+  session (conflicts with all backend emitters → not parallelizable). Unblocks the last go/ts/chat-protocol barriers.
+- **[Q-propagate-operator-noop] The `?`/Propagate operator is a no-op on js/ts/python (drops the unwrap)** — bug · ready ·
+  **HIGH — semantic gap** · `compiler/crates/bock-codegen/` (js/ts/py; check rust/go) · — · links #219,
+  MS-examples-hardening, DV/§ · note: FOUND 2026-06-03 (#219, ts session). `expr?` (Result/Optional propagation) lowers to
+  a no-op on js/ts/python — it does NOT unwrap the payload nor early-return the error, so a `BockResult<T,E>` flows where a
+  `T` is expected (type-zoo, task-api remaining errors all trace here). Real semantics bug, not just codegen-shape. Lower
+  `?` to each target's unwrap-or-early-return. Verify rust/go too. (DQ20 had deferred `expr?`; this re-opens it as v1.0
+  example-blocking — may need a Design check on the exact semantics.)
+- **[Q-list-range-pattern-shared] `match` over list/range patterns mis-lowered (shared)** — bug · ready ·
+  `compiler/crates/bock-codegen/src/generator.rs` (+ per-backend) · — · links #216, #217, #218, MS-examples-hardening ·
+  note: FOUND 2026-06-03 (fan-out). `generator::match_needs_ifchain` doesn't recognize `ListPat`/`RangePat`, so list-
+  pattern (`[]`/`[x]`/`[first, *rest]`) and range-pattern (`1..10`) matches mis-lower. #217 (js) compensated LOCALLY via
+  `match_has_unswitchable_pattern`; #216 (rust) did `as_slice()` matching; #218 (py) did `case` list-patterns — but a
+  SHARED `match_needs_ifchain` extension would let all backends route uniformly (ts/go still fail to build these). Extend
+  the shared recogniser. Examples: pattern-lab.
+- **[Q-guard-let-shared] `guard (let Pat = expr)` binding dropped on js/ts/python/go** — bug · ready ·
+  `compiler/crates/bock-codegen/` (js/ts/py/go) · — · links #216, MS-examples-hardening · note: FOUND 2026-06-03 (fan-out).
+  #216 fixed guard-let on RUST (lowered to `let-else`); js/ts/python/go still drop the bound names (js `ReferenceError`,
+  python `NameError`, ts/go compile error). guessing-game `guard (let Ok(guess) = …)`. Lower guard-let to bind in scope on
+  the other 4 backends.
+- **[Q-let-shadow-const] `let` shadowing emitted as repeated `const`/`let` collision (ts/py/go; js done)** — bug · ready ·
+  `compiler/crates/bock-codegen/` (ts/py/go) · — · links #217, MS-examples-hardening · note: FOUND 2026-06-03 (fan-out).
+  A shadowing `let` (same name re-bound in a nested/same scope) emits a second `const`/binding → ts `TS2451`, etc.
+  (todo-list). #217 fixed JS (per-block let-scope tracking); ts/python/go still affected. Mirror the js fix.
 - **[Q-stdlib-fmtcheck] Enable `fmt --check` on stdlib `.bock`** — chore · ready ·
   `.github/workflows/`, `stdlib/` · — · links #119 · note: now that `bock fmt`
   emits valid Bock (#119), the stdlib `.bock` files (hand-authored to avoid the old
@@ -436,23 +470,25 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   past `String.slice` (now hits the deeper chain — match-binding + Result-payload). **INCIDENT: #213 merged with a
   failing windows-python lane** (the all-5 fixture printed multibyte slice output; Windows-Python stdout = locale codepage,
   not UTF-8 → mismatch). Hotfix **#214** made the fixture ASCII-output; main green. Root product issue → Q-py-windows-utf8.
-- **[Q-py-windows-utf8] Bock-generated Python should force UTF-8 stdout (cross-platform unicode)** — bug · ready ·
-  `compiler/crates/bock-codegen/` (py) · — · links #213, #214, MS-examples-hardening · note: FOUND 2026-06-03 (#214
+- **[Q-py-windows-utf8] Bock-generated Python should force UTF-8 stdout (cross-platform unicode)** — bug ·
+  **DONE → #218** · `compiler/crates/bock-codegen/` (py) · — · links #213, #214, #218, MS-examples-hardening · note:
+  FIXED by #218 — entry-only `sys.stdout/stderr.reconfigure(encoding="utf-8")` in `main.py` (py3.7+; verified not emitted
+  in non-entry modules). Re-enables a multibyte-rune fixture later. Original: FOUND 2026-06-03 (#214
   incident). Windows-Python defaults stdout to the locale codepage, so a Bock program that `print`s multibyte/unicode
   emits mismatched/garbled bytes on Windows (passes on Linux/macOS). Emit a stdout UTF-8 reconfigure at the Python entry
   point (`sys.stdout.reconfigure(encoding="utf-8")`, py3.7+, entry module only) so unicode output is cross-platform. Real
   product correctness gap; surfaced when the string_num_methods fixture printed a multibyte slice. Re-enables a
   multibyte-rune-correctness fixture (currently ASCII-only per #214).
-- **[Q-js-effect-export] JS: effect-group/stack export referenced but not emitted** — bug · ready ·
-  `compiler/crates/bock-codegen/` (js) · — · links MS-examples-hardening, #155, #157 · note: FOUND 2026-06-03 (audit).
-  `SyntaxError: Export 'AppEffects'/'ApiEffects'/'ServiceStack' is not defined in module` — an effect-group/stack symbol
-  is in the ESM export list but never emitted as a binding. Emit the binding (or drop it from the export list). Examples:
-  effect-showcase, task-api, microservice (js).
-- **[Q-py-circular-import] Python: multi-module emit produces a circular import** — bug · ready ·
-  `compiler/crates/bock-codegen/` (python) · — · links MS-examples-hardening, #182 (per-module python) · note: FOUND
-  2026-06-03 (audit). `ImportError: cannot import name 'Category' from partially initialized module 'models' (circular
-  import)` — the per-module python emit creates an import cycle across the project's modules. Break the cycle (lazy/local
-  import, or module-ordering). Example: inventory-system (python).
+- **[Q-js-effect-export] JS: effect-group/stack export referenced but not emitted** — bug ·
+  **DONE → #217** · `compiler/crates/bock-codegen/` (js) · — · links MS-examples-hardening, #155, #157, #217 · note:
+  FIXED by #217 — a public composite effect now emits a `const X = Object.freeze({__composite:[…]})` binding so the ESM
+  export resolves (effect-showcase, task-api, microservice js — all build+run). [Part of the js-backend batch #217.]
+- **[Q-py-circular-import] Python: multi-module emit produces a circular import** — bug ·
+  **DONE → #218** · `compiler/crates/bock-codegen/` (python) · — · links MS-examples-hardening, #182, #218 · note: FIXED
+  by #218 — ROOT CAUSE was the implicit-import scan matching record/enum/class **field-label** tokens in the AIR debug
+  dump as cross-module references (`InventorySummary.total_value` field ↔ `service.total_value` fn). Fixed by counting
+  field-label occurrences across all label positions and subtracting them from the scan; `models.py` no longer imports
+  `service`. inventory-system python now runs (the lone py example that flipped fail→pass in the matrix). [batch #218.]
 - **[Q-examples-codegen-misc] Examples audit: minor / per-example codegen + stub-quality gaps** — bug · ready (low-pri,
   triage individually) · `compiler/crates/bock-codegen/`, `examples/` · — · links MS-examples-hardening · note: FOUND
   2026-06-03 (audit). Smaller items surfaced: (a) `todo`/unimplemented expression in return position → `return throw …`
@@ -475,6 +511,12 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `display` emits `fmt.Sprintf("%v", rune)` → prints the code-point integer (`65`) not the char (`A`); pre-existing
   primitive-*bridge* path (not the method lowering), compounded by the boxed-Optional Char payload. Triage each as its
   own fix or example correction.
+  **RESOLVED in the 5-backend fan-out (#216–#220):** (a) py todo-expr → #218; (i) js let-rebind-const → #217 (ts/py/go
+  residue → Q-let-shadow-const); (j) rust guard-let → #216 (other backends → Q-guard-let-shared); (k) rust mut-param →
+  #216; (l) rust list-pattern → #216 (shared → Q-list-range-pattern-shared); (m) go Result-payload → #220; (n) go
+  Char-display → #220 (`string(rune)`); (d) go unused-var → #220; go int/int64 width → #220; (b) js `eval` reserved-word
+  → #217. REMAINING: (c) `Char` type unmapped on rust/go (ts done #219 → string); (e) `step2` local-binding (re-check;
+  likely fixed by go batch). Still grab-bag for residual one-offs.
 - **[Q-chat-protocol-allfail] `chat-protocol` fails build on all 5 — DIAGNOSED → folded into Q-match-exprpos** — bug ·
   **RESOLVED-AS-DUP (diagnosed 2026-06-03 13:44)** · — · links Q-match-exprpos · note: the all-5 failure (js `Unexpected
   token ')'`, py `'(' was never closed`, ts `Expression expected`, go enum-return) is the **expression-position

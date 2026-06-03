@@ -2011,3 +2011,37 @@ AWAITING OPERATOR (2 decisions, nothing in flight): (1) **examples-hardening dir
   STATE: main 6806edc, 0 open PRs (after this tracking PR), clean. 11 PRs this session (#204–#214), 0 net regressions.
     NEXT: SESSION HAS RUN VERY LONG — checkpoint + session-end digest; do NOT auto-start the next cluster. Remaining
     leverage order: D (match-exprpos, deep, go-blocking, biggest remaining) · J · K · go-Result-payload · Q-py-windows-utf8.
+
+[2026-06-03 23:05 UTC] ★ 5-WAY PARALLEL FAN-OUT (#216–#220) — one cluster-batch per backend; examples leapt; shared core scoped
+  Input: operator "On we go. As much parallel fan out as makes sense is good." Decomposed the remaining clusters along the
+    BACKEND axis — each backend lives in its own bock-codegen file (rs/js/py/ts/go.rs), so 5 sessions run fully PARALLEL
+    with disjoint files. Dispatched 5 concurrent worktree-isolated engineer sessions (foreground, Opus 4.8), each owning
+    ONE backend file + that backend's clusters (incl. its match-exprpos emitter share), with a HARD rule: no generator.rs/
+    bock-types/other-backend edits — report shared needs as OPEN.
+  RESULT: all 5 landed (#216 rust · #217 js · #218 py · #219 ts · #220 go). **generator.rs untouched in EVERY one**;
+    file-disjoint (verified via `comm` — no shared source/fixture files). Per-PR (each gated on `mergeStateStatus=CLEAN`,
+    0 fails, before merge — the #213 lesson applied):
+      #216 rust: guard-let→let-else, mut-param, list-pattern (as_slice). ownership-demo runs (rust 8→9). conf +3.
+      #217 js: effect-export binding, dup-default if-chain, let-rebind scope-tracking, reserved-word escape. ALL 7 js
+        examples FAIL→build+run. conf +5.
+      #218 py: circular-import (ROOT = implicit-import scan matched field-label tokens), utf8-stdout (entry-only), match-
+        exprpos statement-hoist, todo-expr. 5 py examples compile-clean, inventory/context-audit/ownership-demo run. conf +5.
+      #219 ts: match-exprpos ValueSink, Char→string, typed lambda params, const-reassign. context-audit runs; tsc 47→42. conf +7.
+      #220 go: Result-payload type-assert, match-exprpos value-IIFE, int/int64 width, unused-var, Char-display (string(rune)).
+        go 0/8→5/8 build+run. conf +8.
+  COMBINED-STATE VERIFY (the discipline — 5 concurrent PRs never CI'd together): after merging all 5, ran conformance
+    REQUIRE=all on merged main e2117ee → **0 failed, 0 skipped, 124 fixtures** (also settled #217's flagged "build-cache
+    race": a clean serial run is green → it was a parallel-run artifact). Re-ran the examples gate → **matrix LEAPT:
+    runtime-working js 7→14 · ts 5→7 · py 9→12 · rust 8→9 · go 1→7 / 20** (30→49 passes; go's all-5 bet paying off).
+    Ratcheted baseline (#221, 32→49 passing pairs).
+  ★ KEY OUTCOME beyond the fixes: the fan-out CONVERGED — all backend sessions independently reported the SAME shared
+    blockers, precisely scoping the remaining NON-parallel work: **Q-exprpos-shared-desugar** (HIGH — value-position
+    diverging control-flow [`let x = loop{…}` / diverging match arms] needs a shared AIR temp-hoist; the real match-exprpos
+    core; go-blocking; conflicts with all backend emitters → must be ONE focused session), **Q-propagate-operator-noop**
+    (HIGH — `?`/Propagate is a no-op on js/ts/py, drops the unwrap; maybe Design re: §semantics), Q-list-range-pattern-shared
+    (generator.rs match_needs_ifchain), Q-guard-let-shared (js/ts/py/go; rust done), Q-let-shadow-const (ts/py/go; js done).
+    Q-match-exprpos re-scoped (per-backend emitter DONE; shared piece → Q-exprpos-shared-desugar). Misc sub-items a/b/d/i/
+    j/k/l/m/n + int-width resolved across the batch.
+  STATE: main e2117ee, 0 open PRs after this tracking PR + #221, clean. **17 PRs this session (#204–#221), 0 net regressions.**
+    NEXT: the SHARED-lowering phase is fundamentally sequential (generator.rs/AIR) → can't fan out; Q-exprpos-shared-desugar
+    is the highest-leverage (go-blocking) single next session. SESSION EXTREMELY LONG — strong checkpoint here.
