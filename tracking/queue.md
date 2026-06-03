@@ -12,12 +12,12 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-02 vs main 6434237 (**MS-projectmode S1–S6 DONE [#182/#184/#185/#186/#188/#190/#191]** —
-DV13 CLOSED [all 5 emit per-module native trees, sole path]; DV18 CLOSED [source mode bare, scaffolder owns
-manifests, harness builds project-mode]; per-target scaffolders enriched [manifests/configs/README ×5]; go
-core.error fixed. 427 exec pairs / 0 failed REQUIRE=all. **Next = S7 (transpiled tests + formatter-clean gate);
-operator pre-S7 checkpoint pending.** NEW FOUND → **Q-error-message-jstspy** [core.error.message() collision on
-js/ts/python, pre-existing; go fixed #191]. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
+_Last reconciled: 2026-06-03 vs main bf34070 + this S8 close PR (**★ ItemB COMPLETE — MS-projectmode DONE (S0–S8) ★** — per-module native
+output on all 5 [DV13]; project mode real [scaffolder-owned manifests/configs/README + transpiled @test files per
+framework], source mode bare [DV18]; config tables parsed; core.error fixed ×5 [#193]. 430 exec pairs / 0 failed
+REQUIRE=all. ItemB was v1.0's last mapped ENGINEERING item → v1.0 engineering runway clear; remaining = release
+actions [escalate]. Pre-v1.0 follow-ups (non-blocking): Q-ci-projectmode-tooling, Q-go-gofmt-listclosure. ItemD
+[external get-started] now UNBLOCKED but escalates. Plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md`. Quality-sweep Wave 1 also landed: **Q-conformance-clean-rebuild + Q-time-int64
 [#175]**; **Q-r2-codegen-residue (c) builtin-vs-user-method shadowing [#176, ×5]** + pinned Q-go-list-literal /
 Q-r2-(b) / Q-ts-generic-impl (verified already-fixed). New FOUND triaged: Q-allcaps-record-parse (parser),
 Q-arch-doc-drift (ARCHITECTURE.md/compiler-CLAUDE.md/CONTRIBUTING.md crate-name drift). Q-match-exprpos still
@@ -224,8 +224,8 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 - **[D2-polish] D2 language-reference final polish** — docs · blocked ·
   `docs/src/language/` · blocked-by: (D2-FOUND mostly resolved — verify)
   · note: most D2-FOUND rows resolved per spec revision; confirm residue.
-- **[ItemB] Per-module output + project-mode codegen + config tables** — impl · **IN FLIGHT (milestone
-  MS-projectmode, v1-BLOCKING; S1–S6 DONE [#182/#184/#185/#186/#188/#190/#191] → DV13+DV18 CLOSED; next = S7 transpiled tests)** ·
+- **[ItemB] Per-module output + project-mode codegen + config tables** — impl · **★ DONE — MS-projectmode COMPLETE
+  (S0–S8: #181/#182/#184/#185/#186/#188/#190/#191/#193/#194 + S8 close) → DV13+DV18 CLOSED; project mode real on all 5 ★** ·
   `compiler/crates/bock-codegen/`,
   `bock-cli/src/build.rs`, `bock-build/src/toolchain.rs`, `compiler/tests/execution.rs` · — · links #28, #132,
   DV13, DQ19, MS-projectmode · plan: `plans/2026-06-02-itemB-per-module-projectmode-plan.md` · note: **v1.0's last
@@ -264,17 +264,35 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
       Q-go-error-message** (go field/method collision via `go_method_name`; locked by `exec_core_error.bock`).
       Required side-fix: TS run plan `tsc main.ts` → `tsc -p .` (scaffolded tsconfig). 427 exec pairs / 0 failed.
       Deep-config that changes CODE (test-file codegen per framework) → S7.
-  - **S7** — transpiled tests + formatter-clean gate · **READY (dispatch next — pre-S7 operator checkpoint per
-    pacing decision)** · was blocked-by S6. SCOPE: transpile Bock `@test` fns → idiomatic target test files
-    (Vitest|Jest / pytest|unittest / cargo test / go test) so `npm test`/`cargo test`/`pytest`/`go test` run them;
-    formatter-clean release gate (rustfmt/gofmt/prettier/black `--check` on emitted output). Also address
-    **Q-error-message-jstspy** (below) if not done standalone.
-  - **S8** — internal docs + close · blocked-by S7.
-  INVARIANT every PR: `run-conformance.sh REQUIRE=all` stays green (now **427/427**). `--deliverable`/`--no-tests`
-  stay v1.x. External `/get-started` = ItemD. **S1–S6 DONE; DV13 + DV18 CLOSED; next = S7 (transpiled tests).**
-- **[ItemD] /get-started project-mode evolution** — docs · blocked ·
-  `docs/`, `website/` · blocked-by: ItemB Phase 6 · note: external-facing
-  copy — escalate for approval.
+  - **S7** — transpiled tests + formatter-clean gate. **DONE → #194** — Bock `@test` fns transpile to per-target
+    test files (Vitest|Jest / pytest|unittest / cargo test / go test), framework-branched, wired into the scaffolded
+    project; assertion lowering. **rust+go RUN-verified** (`cargo test`/`go test` pass on the emitted project);
+    js/ts/python **compile-verified** (`tsc`/`node --check`/`py_compile`) — their runners (vitest/jest/pytest) +
+    formatters (prettier/black) are absent on host/CI. Formatter-clean gate enforced for **rust (`rustfmt --check`)
+    + go (`gofmt -l`)** + 2 codegen-hygiene fixes. 430/0. FOUND → Q-ci-projectmode-tooling, Q-go-gofmt-listclosure
+    (below). Q-error-message-jstspy was done standalone (#193).
+  - **S8** — internal docs + close. **DONE → this PR** — fixed `docs/src/getting-started.md` stale build-output
+    path (`.bock/build/` → `build/<target>/`) + documented project-mode default (scaffolded project w/ manifest +
+    transpiled tests); tooling.md/project-schema.md already updated by S5–S7. mdbook clean. Tracking closed (this PR).
+  INVARIANT (held every PR): `run-conformance.sh REQUIRE=all` green (**430/430**). `--deliverable`/`--no-tests`
+  stay v1.x. **★ ItemB COMPLETE (S0–S8) — DV13 + DV18 CLOSED; project mode real on all 5. ★** Remaining for v1.0
+  release-readiness (NOT blocking ItemB): Q-ci-projectmode-tooling (certify js/ts/python project-mode via real
+  test-runs) + Q-go-gofmt-listclosure (go output gofmt-clean per §20.6.2). **ItemD now UNBLOCKED** (external — escalates).
+- **[ItemD] /get-started project-mode evolution** — docs · **READY-but-ESCALATES (UNBLOCKED 2026-06-03 — ItemB done)** ·
+  `docs/`, `website/` · — · note: external-facing copy (website get-started) — **escalate for approval before any
+  website change**; do not action autonomously. Now that project mode is real, the website get-started can evolve to
+  show the scaffolded-project flow (`bock build` → `npm test`/`cargo run`).
+- **[Q-ci-projectmode-tooling] CI must provision js/ts/python test+format tooling** — chore/test-infra · ready ·
+  `.github/workflows/` · — · links #194, §20.6.2 · note: FOUND in S7. The host/CI lacks `vitest`/`jest`/`npx`,
+  `pytest`, `prettier`, `black`/`ruff`, so transpiled-test RUN-verification + the formatter-clean `--check` gate are
+  only certified for **rust+go**; js/ts/python are compile-verified only. Per §20.6.2 a target is project-mode-ready
+  when its Tier-2 (transpiled) tests PASS — so to certify js/ts/python project mode for v1.0, CI must install those
+  runners/formatters and run them. Pre-v1.0 release-readiness; not a Bock codegen gap.
+- **[Q-go-gofmt-listclosure] Go: emitted list-method inline closures aren't gofmt-clean** — bug · ready ·
+  `compiler/crates/bock-codegen/src/go.rs` · — · links #194, §20.6.2 · note: FOUND in S7 (pre-existing). The Go
+  list-method inline-closure pretty-printing in emitted program code (`main.go`) isn't `gofmt`-clean (S7's emitted
+  *test* files + `bock_runtime.go` ARE clean). §20.6.2 codegen-formatter agreement requires go output to pass
+  `gofmt -l` — general codegen hygiene; pre-v1.0.
 
 ## Deferred
 

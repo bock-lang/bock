@@ -58,9 +58,14 @@ bock build -t rust            # Rust
 bock build -t go              # Go
 ```
 
-The transpiled source is placed under `.bock/build/<target>/`.
+By default this produces a runnable **project** under `build/<target>/`: the
+transpiled per-module source plus the target's scaffolding — package manifest,
+formatter config, a first-contact `README`, and your `@test` functions
+transpiled to the target's test framework (so `npm test` / `cargo test` /
+`pytest` / `go test` run them). See [Build & Tooling](./reference/tooling.md)
+for the output modes and `bock.project` per-target configuration.
 
-For source-only output (no toolchain invocation):
+For bare transpiled source with no scaffolding or toolchain invocation:
 
 ```bash
 bock build -t ts --source-only
