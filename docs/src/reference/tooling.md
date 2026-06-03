@@ -211,9 +211,9 @@ def test_add_works():
     assert (add(1, 2)) == (3)
 ```
 
-**Formatter-clean output.** The emitted test files pass their target's
-formatter `--check` cleanly on first generation — the §20.6.2 codegen-formatter
-agreement, enforced as a release-readiness check:
+**Formatter-clean output.** The emitted code passes its target's formatter
+cleanly — the §20.6.2 codegen-formatter agreement, enforced as a
+release-readiness check:
 
 | Target | Formatter gate |
 | ------ | -------------- |
@@ -222,11 +222,32 @@ agreement, enforced as a release-readiness check:
 | JS/TS  | `prettier --check` (against the scaffolded `.prettierrc.json`) |
 | Python | `black --check` (against the scaffolded `[tool.black]`) |
 
+For **Rust and Go the formatter is universal and always-on**, so the
+*entire* emitted tree (runtime source, entry wiring, scaffolding, and
+transpiled tests) is guaranteed `rustfmt --check` / `gofmt -l`-clean.
+Project-mode builds achieve this with a **post-emit formatter pass**: after
+codegen writes the files, `bock build --target go` runs `gofmt -w` over the
+output directory and `bock build --target rust` runs `rustfmt` over the
+emitted `.rs` files. Both formatters ship with the target toolchain the build
+already invokes to validate, so they are always present; if a formatter is
+somehow absent the pass is skipped with a warning rather than failing the
+build. The pass runs in **project mode** only — `--source-only` emits bare,
+unformatted transpilation for integration into a project the user already
+manages. Go output has no source-map dependency (the `//# sourceMappingURL`
+affordance is JS/TS-only), so reformatting it is always safe.
+
+JS/TS/Python formatting is **user-optional** (the user's configured
+Prettier/Black, run on demand); Bock emits code that passes those formatters'
+`--check` on first generation but does not reflow it post-emit (post-emit
+Prettier would break JS/TS source maps).
+
 **Run-verified, all five targets.** The compiler's own CI (the Linux test lane)
 provisions the JS/TS/Python test runners and formatters and *runs* every
 target's transpiled tests — `cargo test`, `go test`, `npm test` (Vitest),
 `pytest`, and `python -m unittest` — asserting they pass, and gates each
-target's emitted test file with the formatter above. The harness is
+target's emitted output with the formatter above (for Rust and Go the gate
+covers the *full emitted tree* via `rustfmt --check` / `gofmt -l`, not just the
+test file). The harness is
 skip-if-absent for dev hosts that lack a given toolchain; the CI lane sets
 `BOCK_PROJECTMODE_REQUIRE=all` so an absent runner/formatter fails the build
 instead of silently skipping.
