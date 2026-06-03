@@ -1,0 +1,50 @@
+// TEST: js_effect_export_binding
+// EXPECT: output "tick@42;done@42"
+// EXPECT: targets js
+//
+// JS regression guard: a *public* composite effect (`public effect AppEffects =
+// Logger + Clock`) is a compile-time grouping with no runtime representation —
+// the js emitter wrote only a `// composite effect …` comment for it. But a
+// public effect is listed in the per-module `export { … }`, so the ESM export
+// referenced an undefined name → "Export 'AppEffects' is not defined in module"
+// (the effect-showcase / task-api / microservice examples). The emitter now also
+// emits a concrete frozen marker binding (`const AppEffects = Object.freeze(…)`)
+// so the export resolves. Targeted at js because the ESM export list is the
+// JS/TS per-module surface; the construct itself runs on all backends.
+//
+// `run` is exercised through the composite effect (Logger + Clock) and returns a
+// single string so the program prints exactly one line.
+module main
+
+public effect Logger {
+  fn label() -> String
+}
+
+public effect Clock {
+  fn now() -> Int
+}
+
+public effect AppEffects = Logger + Clock
+
+public record TickLogger {}
+impl Logger for TickLogger {
+  public fn label() -> String { "tick" }
+}
+
+public record FixedClock {}
+impl Clock for FixedClock {
+  public fn now() -> Int { 42 }
+}
+
+public fn run() -> String with AppEffects {
+  let t = now()
+  let l = label()
+  "${l}@${t};done@${t}"
+}
+
+fn main() -> Void {
+  handling (Logger with TickLogger {}, Clock with FixedClock {}) {
+    let r = run()
+    println("${r}")
+  }
+}

@@ -1,0 +1,31 @@
+// TEST: js_match_list_pattern
+// EXPECT: output "0;7;3"
+// EXPECT: targets js
+//
+// JS regression guard: a `match` whose arms are list patterns (`[]`,
+// `[first, ..rest]`) has no single `switch` discriminant — every arm previously
+// lowered to a `default:`, so two list arms emitted two `default` clauses ("more
+// than one default clause in switch statement", the ownership-demo example). The
+// js emitter now routes list-pattern matches to the if/else-if chain and tests
+// `Array.isArray(x) && x.length …`, binding head elements positionally and a
+// `..rest` to the trailing slice. Targeted at js because the other backends do
+// not yet lower list patterns (shared gap reported as an OPEN).
+module main
+
+fn head_or_zero(xs: List[Int]) -> Int {
+  match xs {
+    [] => 0
+    [first, ..rest] => first
+  }
+}
+
+fn rest_len(xs: List[Int]) -> Int {
+  match xs {
+    [] => 0
+    [first, ..rest] => rest.len()
+  }
+}
+
+fn main() -> Void {
+  println("${head_or_zero([])};${head_or_zero([7, 8, 9])};${rest_len([1, 2, 3, 4])}")
+}
