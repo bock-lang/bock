@@ -1,31 +1,34 @@
 // TEST: exec_core_error
 // EXPECT: output "boom;again: boom"
-// EXPECT: targets rust, go
 //
 // THE PAYOFF FIXTURE for `core.error`: a user program that `use`s the embedded
 // `core.error` stdlib module, constructs a `SimpleError` via the `error(...)`
 // constructor, and reads its message back through the `message()` method —
-// compiled + run on the targets where a struct field and a method may share a
-// name today (rust + go).
+// compiled + run on ALL FIVE targets (no `// EXPECT: targets` restriction).
 //
-// Q-GO-ERROR-MESSAGE LOCK. `core.error` declares `record SimpleError { message:
-// String }` *and* `fn message(self) -> String` (the `Error` trait method). On
-// Go those previously both emitted `Message` on the `SimpleError` struct — a
-// field and a method with the same name, which `go build` rejects ("type
-// SimpleError has both field and method named Message"), so `.message()` never
-// compiled on Go. The Go backend now disambiguates the *method* to
-// `MessageMethod()` (at the trait interface, the receiver, and every call site)
-// while the field stays `Message`, so `go run .` compiles and runs. Rust allows
-// a field and a method to share a name, so it is a no-op regression guard there.
+// FIELD/METHOD NAME-COLLISION LOCK (all 5). `core.error` declares `record
+// SimpleError { message: String }` *and* `fn message(self) -> String` (the
+// `Error` trait method). Bock keeps a field (`self.message`) and a method
+// (`self.message()`) distinct, but most target object models collapse a field
+// and a same-named method onto one member slot. The codegen remedy renames the
+// *method* (the field keeps its name) at its declaration and every call site:
 //
-// TARGETS — rust + go only. The SAME field/method name collision is a
-// PRE-EXISTING bug on js, ts, and python (FOUND, surfaced for triage): on those
-// targets the emitted instance field shadows the same-named method (TS: a
-// `tsc` "Duplicate identifier" error; JS: `e.message` resolves to the string,
-// so `e.message()` is "not a function"; Python: the dataclass field overwrites
-// the method). The collision-disambiguation fix landed for Go here; the js/ts/
-// python equivalents are a separate follow-up, so this fixture restricts to the
-// two targets where `core.error.message()` works end to end.
+//   - Go:     `Message` field + method ⇒ `go build` error ("has both field and
+//             method named Message"); method emitted as `MessageMethod()`.
+//   - TS:     class field + merged-interface method ⇒ "Duplicate identifier";
+//             method (trait sig + merged sig + prototype + calls) ⇒ `messageMethod`.
+//   - JS:     instance field shadows the prototype method (`e.message()` is "not
+//             a function"); method ⇒ `messageMethod`.
+//   - Python: `@dataclass` field overwrites the method attribute (`'str' object
+//             is not callable`); method ⇒ `message_method`.
+//   - Rust:   a field and an inherent method may share a name — a no-op
+//             regression guard.
+//
+// The disambiguation is a shared mechanism: every backend computes the
+// collision-renamed method name through `generator::disambiguate_method_name`
+// against `generator::collect_record_field_names`, so future field/method pairs
+// are handled uniformly. This fixture exercises `core.error.message()` end to
+// end (build + run + stdout diff) on every installed toolchain.
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale).

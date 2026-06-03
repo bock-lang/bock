@@ -244,6 +244,16 @@ impl CodeGenerator for TsGenerator {
         let exported_types = crate::generator::collect_exported_type_names(modules);
         let record_names = crate::generator::collect_record_names(modules);
         let public_symbols = crate::generator::collect_public_symbols_for_esm(modules);
+        // Program-wide field/method name-collision set (camelCased). Built across
+        // *all* reachable modules so a call site in `main.ts` to a renamed method
+        // declared in `core/error.ts` agrees with that declaration.
+        let mut field_method_collisions = HashSet::new();
+        for (module, _) in modules {
+            field_method_collisions.extend(crate::generator::collect_record_field_names(
+                module,
+                to_camel_case,
+            ));
+        }
 
         let main_is_async = modules
             .iter()
@@ -267,6 +277,7 @@ impl CodeGenerator for TsGenerator {
             // Record names need the whole reachable set so a cross-module record
             // construction lowers to `new Name(...)` (see the JS backend note).
             ctx.record_names = record_names.clone();
+            ctx.field_method_collisions = field_method_collisions.clone();
             ctx.seed_effect_registries(modules);
             ctx.self_module_path = if i == entry_idx {
                 String::new()
@@ -544,6 +555,17 @@ struct TsEmitCtx {
     /// without `export`, so cross-module references need the trailing re-export.
     /// Computed in `generate_project`.
     enum_variant_exports: Vec<String>,
+    /// Camel-cased record/class field names across the reachable program, used to
+    /// disambiguate a method whose camelCased name collides with a field name
+    /// (`core.error`'s `message` field + `message()` method). TS rejects a class
+    /// field and a (declaration-merged) interface method sharing a name with a
+    /// "Duplicate identifier" error, so the *method* is renamed (`messageMethod`)
+    /// at the trait-interface signature, the merged-interface signature, the
+    /// prototype attachment, the class-body method, and every call site via
+    /// [`Self::ts_method_name`]; the field keeps its name. Pre-seeded program-wide
+    /// by `generate_project` (and extended per-module by the `Module` arm for the
+    /// single-module `generate_module` path). Shared policy with go/js/py.
+    field_method_collisions: HashSet<String>,
 }
 
 impl TsEmitCtx {
@@ -585,7 +607,30 @@ impl TsEmitCtx {
             public_symbols: HashMap::new(),
             self_module_path: String::new(),
             enum_variant_exports: Vec::new(),
+            field_method_collisions: HashSet::new(),
         }
+    }
+
+    /// Disambiguate an *already-rendered* method member name against the
+    /// program's field names: when the rendered name collides with a field name,
+    /// append a `Method` suffix (`message` → `messageMethod`). Returns the name
+    /// unchanged otherwise.
+    ///
+    /// TS renders method names two ways — declarations use the raw Bock name
+    /// (`name.name`) while call sites use `to_camel_case` — so this helper takes
+    /// whatever each site already produced and only adds the suffix, preserving
+    /// each site's existing casing. For the field/method collisions this targets
+    /// (single-word field names like `message`, where raw == camelCase) the two
+    /// renderings agree, so the renamed method resolves at the trait-interface
+    /// signature, the merged-interface signature, the prototype attachment, the
+    /// class-body method, and every call site alike. Shared policy with go/js/py
+    /// (see [`crate::generator::disambiguate_method_name`]).
+    fn ts_method_name(&self, rendered: &str) -> String {
+        crate::generator::disambiguate_method_name(
+            rendered.to_string(),
+            &self.field_method_collisions,
+            "Method",
+        )
     }
 
     fn finish(self) -> (String, Vec<SourceMapping>) {
@@ -2011,6 +2056,16 @@ impl TsEmitCtx {
         self.mark_span(node.span);
         match &node.kind {
             NodeKind::Module { items, imports, .. } => {
+                // Field/method name-collision set (camelCased). Pre-seeded
+                // program-wide by `generate_project` so a call site in one file
+                // agrees with the renamed method declared in another; extended
+                // here so the single-module `generate_module` path (no pre-seed)
+                // is also covered.
+                self.field_method_collisions
+                    .extend(crate::generator::collect_record_field_names(
+                        node,
+                        to_camel_case,
+                    ));
                 if self.per_module {
                     // Per-module native-import path (the real build): each module
                     // is emitted to its own `.ts` file and the runtime
@@ -2272,7 +2327,7 @@ impl TsEmitCtx {
                             .unwrap_or_else(|| "void".into());
                         self.writeln(&format!(
                             "{}{m_generics}({}): {};",
-                            name.name,
+                            self.ts_method_name(&name.name),
                             param_list.join(", "),
                             ret,
                         ));
@@ -2370,7 +2425,7 @@ impl TsEmitCtx {
                         self.trait_self_subst = prev_subst;
                         iface_sigs.push(format!(
                             "{}{generics}({}){ret_str};",
-                            name.name,
+                            self.ts_method_name(&name.name),
                             all_params.join(", "),
                         ));
                     }
@@ -2470,7 +2525,7 @@ impl TsEmitCtx {
                         );
                         self.writeln(&format!(
                             "{target_base}.prototype.{} = {async_kw}function{generics}({}){ret_str} {{",
-                            name.name,
+                            self.ts_method_name(&name.name),
                             all_params.join(", "),
                         ));
                         self.indent += 1;
@@ -2714,7 +2769,7 @@ impl TsEmitCtx {
                 *is_async,
                 return_type.as_deref().map(|r| self.type_to_ts(r)),
             );
-            let method_name = to_camel_case(&name.name);
+            let method_name = self.ts_method_name(&to_camel_case(&name.name));
             self.writeln(&format!(
                 "{async_kw}{method_name}{generics}({}){ret_str} {{",
                 all_params.join(", "),
@@ -3394,6 +3449,38 @@ impl TsEmitCtx {
                         }
                     }
                 }
+                // A trait/record method call lowers to `Call(FieldAccess(recv,
+                // method), [recv, ...])` (the receiver is re-passed as `self`,
+                // sharing the receiver's NodeId — see `desugared_self_call`).
+                // When the method name collides with a field name, the *method*
+                // was renamed at its declaration (`<name>Method`); rename the
+                // call's member access to match so it resolves. A genuine field
+                // *read* (bare `FieldAccess`, not in call position) and a
+                // field-closure call `(p.f)(x)` (distinct receiver nodes) keep
+                // the field name. Shared policy with go/js/py. The prototype
+                // function takes an explicit `self`, so all `args` are kept.
+                if let NodeKind::FieldAccess { object, field } = &callee.kind {
+                    if crate::generator::desugared_self_call(callee, args).is_some() {
+                        // The prototype/merged-interface declarations spell the
+                        // method with the raw Bock name, so disambiguate the call
+                        // against the raw name to match (and the generic
+                        // fall-through emits the field raw too).
+                        let renamed = self.ts_method_name(&field.name);
+                        if renamed != field.name {
+                            self.emit_expr(object)?;
+                            let _ = write!(self.buf, ".{renamed}");
+                            self.buf.push('(');
+                            for (i, arg) in args.iter().enumerate() {
+                                if i > 0 {
+                                    self.buf.push_str(", ");
+                                }
+                                self.emit_expr(&arg.value)?;
+                            }
+                            self.buf.push(')');
+                            return Ok(());
+                        }
+                    }
+                }
                 // Pass handler args to effectful function calls.
                 let effects_arg = if let NodeKind::Identifier { name } = &callee.kind {
                     self.build_effects_call_arg_ts(&name.name)
@@ -3427,7 +3514,11 @@ impl TsEmitCtx {
                     return Ok(());
                 }
                 self.emit_expr(receiver)?;
-                let _ = write!(self.buf, ".{}", to_camel_case(&method.name));
+                let _ = write!(
+                    self.buf,
+                    ".{}",
+                    self.ts_method_name(&to_camel_case(&method.name))
+                );
                 self.buf.push('(');
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -6872,6 +6963,187 @@ mod tests {
         assert!(
             out.contains("Box.prototype.get = function<T>(self: Box<T>): T {"),
             "prototype function should re-declare `<T>` and reference `Box.prototype`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn method_colliding_with_field_is_disambiguated() {
+        // trait Error { fn message(self) -> String }
+        let trait_decl = node(
+            1,
+            NodeKind::TraitDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_platform: false,
+                name: ident("Error"),
+                generic_params: vec![],
+                associated_types: vec![],
+                methods: vec![node(
+                    2,
+                    NodeKind::FnDecl {
+                        annotations: vec![],
+                        visibility: Visibility::Public,
+                        is_async: false,
+                        name: ident("message"),
+                        generic_params: vec![],
+                        params: vec![typed_param_node(3, "self", "Error")],
+                        return_type: Some(Box::new(node(
+                            4,
+                            NodeKind::TypeNamed {
+                                path: type_path(&["String"]),
+                                args: vec![],
+                            },
+                        ))),
+                        effect_clause: vec![],
+                        where_clause: vec![],
+                        body: Box::new(block(5, vec![], None)),
+                    },
+                )],
+            },
+        );
+        // record SimpleError { message: String }
+        let record_decl = node(
+            10,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("SimpleError"),
+                generic_params: vec![],
+                fields: vec![make_record_field("message", "String")],
+            },
+        );
+        // impl Error for SimpleError { fn message(self) -> String { self.message } }
+        let method = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("message"),
+                generic_params: vec![],
+                params: vec![typed_param_node(21, "self", "SimpleError")],
+                return_type: Some(Box::new(node(
+                    22,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    23,
+                    vec![],
+                    Some(node(
+                        24,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(25, "self")),
+                            field: ident("message"),
+                        },
+                    )),
+                )),
+            },
+        );
+        let impl_block = node(
+            30,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                target: Box::new(node(
+                    31,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["SimpleError"]),
+                        args: vec![],
+                    },
+                )),
+                trait_path: Some(type_path(&["Error"])),
+                trait_args: vec![],
+                generic_params: vec![],
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        );
+        // fn read(e: SimpleError) -> String { e.message() }
+        let read_fn = node(
+            40,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("read"),
+                generic_params: vec![],
+                params: vec![typed_param_node(41, "e", "SimpleError")],
+                return_type: Some(Box::new(node(
+                    42,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    43,
+                    vec![],
+                    Some(node(
+                        44,
+                        NodeKind::Call {
+                            callee: Box::new(node(
+                                45,
+                                NodeKind::FieldAccess {
+                                    // The lowerer reuses the *same* receiver node
+                                    // in both the field-access object and the self
+                                    // arg; `desugared_self_call` keys on the shared
+                                    // NodeId, so the test must too.
+                                    object: Box::new(id_node(46, "e")),
+                                    field: ident("message"),
+                                },
+                            )),
+                            type_args: vec![],
+                            args: vec![AirArg {
+                                label: None,
+                                value: id_node(46, "e"),
+                            }],
+                        },
+                    )),
+                )),
+            },
+        );
+        let out = gen(&module(
+            vec![],
+            vec![trait_decl, record_decl, impl_block, read_fn],
+        ));
+        // The class field stays `message`.
+        assert!(
+            out.contains("message: string;"),
+            "class field should remain `message: string`, got: {out}"
+        );
+        // The trait interface, merged interface, and prototype rename to
+        // `messageMethod` so the field and method no longer share an identifier.
+        assert!(
+            out.contains("messageMethod(self: Error): string;"),
+            "trait interface should declare `messageMethod`, got: {out}"
+        );
+        assert!(
+            out.contains("messageMethod(self: SimpleError): string;"),
+            "merged interface should declare `messageMethod`, got: {out}"
+        );
+        assert!(
+            out.contains("SimpleError.prototype.messageMethod = "),
+            "prototype method should be `messageMethod`, got: {out}"
+        );
+        // Call site renamed; field read in the body untouched.
+        assert!(
+            out.contains(".messageMethod(e)"),
+            "call site should be `.messageMethod(e)`, got: {out}"
+        );
+        assert!(
+            out.contains("return self.message;"),
+            "method body should read the field `self.message`, got: {out}"
+        );
+        // No bare duplicate-identifier `message(...)` method declaration remains.
+        assert!(
+            !out.contains("message(self: SimpleError)"),
+            "must NOT emit a `message(...)` method colliding with the field, got: {out}"
         );
     }
 }

@@ -1585,20 +1585,21 @@ impl GoEmitCtx {
     /// the call site, and the call would not resolve. Inherent (`impl Type`)
     /// and class methods keep the public-only rule.
     fn collect_methods(&mut self, module: &AIRNode) {
+        // Collect every record/class field's PascalCased Go name so
+        // `go_method_name` can detect a field/method name collision Go
+        // forbids on a struct (`SimpleError { message }` + a `message`
+        // method). The shared collector (used identically by js/ts/py) walks
+        // every record/class regardless of where the colliding method is
+        // declared (a separate `impl` block). `collect_methods` is called once
+        // per reachable module to build a *program-wide* set on the template
+        // ctx (see `generate_project`), so we extend rather than replace.
+        self.record_field_names
+            .extend(crate::generator::collect_record_field_names(
+                module,
+                to_pascal_case,
+            ));
         if let NodeKind::Module { items, .. } = &module.kind {
             for item in items {
-                // Collect every record/class field's PascalCased Go name so
-                // `go_method_name` can detect a field/method name collision Go
-                // forbids on a struct (`SimpleError { message }` + a `message`
-                // method). Done for every record/class regardless of where the
-                // method that collides is declared (a separate `impl` block).
-                if let NodeKind::RecordDecl { fields, .. } | NodeKind::ClassDecl { fields, .. } =
-                    &item.kind
-                {
-                    for f in fields {
-                        self.record_field_names.insert(to_pascal_case(&f.name.name));
-                    }
-                }
                 let (methods, always_export) = match &item.kind {
                     NodeKind::ImplBlock {
                         methods,
@@ -1634,12 +1635,14 @@ impl GoEmitCtx {
     /// camelCased and never collide with a (PascalCased) field name.
     fn go_method_name(&self, name: &str, is_public: bool) -> String {
         if is_public {
-            let pascal = to_pascal_case(name);
-            if self.record_field_names.contains(&pascal) {
-                format!("{pascal}Method")
-            } else {
-                pascal
-            }
+            // Shared collision policy (js/ts/py route through the same helper):
+            // a public method whose PascalCased name equals a field name gets a
+            // `Method` suffix (`Message` → `MessageMethod`).
+            crate::generator::disambiguate_method_name(
+                to_pascal_case(name),
+                &self.record_field_names,
+                "Method",
+            )
         } else {
             to_camel_case(name)
         }
