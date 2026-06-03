@@ -1,0 +1,42 @@
+// TEST: exec_const_expr_use
+// EXPECT: output "15;8;1"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Cluster C regression — a module-scope `const` (the `fizzbuzz` shape) read in
+// an expression. The const's identifier was spelled DIFFERENTLY at its
+// declaration and its use site, per backend: def `FIZZ_NUM` vs use `fizzNUM` on
+// JS/TS (the `to_camel_case` transform mangled the SCREAMING_SNAKE use site),
+// def `fizz_num` (snake) vs use `FIZZ_NUM` on Python, def `FIZZNUM` (underscore
+// stripped) vs use `fizzNUM` on Go — a `not defined` / `NameError` at run time.
+// The fix routes a known const through its verbatim declared name at both the
+// declaration and every use, so the two agree (`SCREAMING_SNAKE` is a valid
+// identifier in every target). Two consts are referenced both in an arithmetic
+// expression and as a function argument, covering both use positions.
+//
+// `if`/`else` are kept as nested (non-`else if`) blocks to avoid an unrelated
+// `else if`-chain lowering defect on Python (tracked separately).
+//
+// Printed (`;`-joined): `FIZZ_NUM * BUZZ_NUM` (= 3 * 5 = 15), `FIZZ_NUM + BUZZ_NUM`
+// (= 8), and whether 15 is divisible by `FIZZ_NUM` (1 = true, as a 0/1 int so
+// Python's `True` does not diverge from the other targets' `true`).
+//
+// `main` is intentionally NOT `public`.
+module main
+
+const FIZZ_NUM: Int = 3
+const BUZZ_NUM: Int = 5
+
+fn divisibleBy(n: Int, d: Int) -> Int {
+  if (n % d == 0) {
+    return 1
+  } else {
+    return 0
+  }
+}
+
+fn main() -> Void {
+  let product: Int = FIZZ_NUM * BUZZ_NUM
+  let total: Int = FIZZ_NUM + BUZZ_NUM
+  let divByFizz: Int = divisibleBy(product, FIZZ_NUM)
+  println("${product};${total};${divByFizz}")
+}

@@ -182,6 +182,8 @@ impl CodeGenerator for TsGenerator {
             crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
         ctx.exported_types =
             crate::generator::collect_exported_type_names(&[(module, std::path::Path::new(""))]);
+        ctx.const_names =
+            crate::generator::collect_const_names(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let (content, mappings) = ctx.finish();
         let source_map = SourceMap {
@@ -243,6 +245,7 @@ impl CodeGenerator for TsGenerator {
         let trait_decls = crate::generator::collect_trait_decls(modules);
         let exported_types = crate::generator::collect_exported_type_names(modules);
         let record_names = crate::generator::collect_record_names(modules);
+        let const_names = crate::generator::collect_const_names(modules);
         let public_symbols = crate::generator::collect_public_symbols_for_esm(modules);
         // Program-wide field/method name-collision set (camelCased). Built across
         // *all* reachable modules so a call site in `main.ts` to a renamed method
@@ -277,6 +280,7 @@ impl CodeGenerator for TsGenerator {
             // Record names need the whole reachable set so a cross-module record
             // construction lowers to `new Name(...)` (see the JS backend note).
             ctx.record_names = record_names.clone();
+            ctx.const_names = const_names.clone();
             ctx.field_method_collisions = field_method_collisions.clone();
             ctx.seed_effect_registries(modules);
             ctx.self_module_path = if i == entry_idx {
@@ -390,6 +394,7 @@ impl CodeGenerator for TsGenerator {
                 ctx.trait_decls = crate::generator::collect_trait_decls(ctx_modules);
                 ctx.exported_types = crate::generator::collect_exported_type_names(ctx_modules);
                 ctx.record_names = crate::generator::collect_record_names(ctx_modules);
+                ctx.const_names = crate::generator::collect_const_names(ctx_modules);
                 let mut field_method_collisions = HashSet::new();
                 for (module, _) in ctx_modules {
                     field_method_collisions.extend(crate::generator::collect_record_field_names(
@@ -478,6 +483,11 @@ struct TsEmitCtx {
     composite_effects: HashMap<String, Vec<String>>,
     /// Names of records declared in this module (emitted as classes).
     record_names: HashSet<String>,
+    /// Declared names of module-scope `const`s, pre-scanned across the reachable
+    /// program; emitted verbatim at both declaration and use so the two agree
+    /// (the `to_camel_case` transform would mangle a SCREAMING_SNAKE use site).
+    /// See [`crate::generator::collect_const_names`].
+    const_names: HashSet<String>,
     /// Names of effects declared in this module (for typing handler vars).
     effect_names: HashSet<String>,
     /// 1-indexed current line in `buf`, maintained incrementally.
@@ -632,6 +642,7 @@ impl TsEmitCtx {
             fn_effects: HashMap::new(),
             composite_effects: HashMap::new(),
             record_names: HashSet::new(),
+            const_names: HashSet::new(),
             effect_names: HashSet::new(),
             cur_line: 1,
             cur_col: 1,
@@ -1424,6 +1435,89 @@ impl TsEmitCtx {
                 self.emit_expr(recv)?;
                 self.buf.push_str(").join(");
                 self.emit_expr(&sep.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Emit a functional (closure-taking) `List` built-in method call to its TS
+    /// form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_functional_method`].
+    /// Mirrors the JS lowering — native `map`/`filter`/`reduce`/`forEach`/`some`/
+    /// `every`/`flatMap` with the closure passed *once* on the receiver array, so
+    /// `tsc --strict --noImplicitAny` contextually types each callback parameter
+    /// from the array's element type (the broken `recv.map(recv, cb)` form both
+    /// double-passed the receiver *and* left the params implicitly `any`).
+    /// `fold(init, cb)` maps to `reduce(cb, init)`; `find` wraps the native
+    /// result into the tagged `BockOption`.
+    fn try_emit_list_functional_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_functional_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "map" | "filter" | "for_each" | "any" | "all" | "flat_map" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let native = match method {
+                    "map" => "map",
+                    "filter" => "filter",
+                    "for_each" => "forEach",
+                    "any" => "some",
+                    "all" => "every",
+                    "flat_map" => "flatMap",
+                    _ => unreachable!(),
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, ").{native}(");
+                self.emit_expr(&cb.value)?;
+                self.buf.push(')');
+            }
+            "reduce" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").reduce(");
+                self.emit_expr(&cb.value)?;
+                self.buf.push(')');
+            }
+            "fold" => {
+                let (Some(init), Some(cb)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").reduce(");
+                self.emit_expr(&cb.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&init.value)?;
+                self.buf.push(')');
+            }
+            "find" => {
+                self.buf.push_str(
+                    "(<T,>(__r: ReadonlyArray<T>, __p: (x: T) => boolean): BockOption<T> => \
+                     { const __m = __r.find(__p); return __m === undefined ? \
+                     { _tag: \"None\" as const } : { _tag: \"Some\" as const, _0: __m }; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                self.emit_expr(&cb.value)?;
                 self.buf.push(')');
             }
             _ => return Ok(false),
@@ -3406,12 +3500,29 @@ impl TsEmitCtx {
                     // A bare unit-variant reference (`Red`) → the frozen
                     // `{enum}_{variant}` const.
                     let _ = write!(self.buf, "{enum_name}_{}", name.name);
+                } else if self.const_names.contains(&name.name) {
+                    // A module-scope `const` is emitted verbatim at its
+                    // declaration; spell its use site identically (the
+                    // `to_camel_case` transform would mangle `FIZZ_NUM` → `fizzNUM`).
+                    self.buf.push_str(&name.name);
                 } else {
                     self.buf.push_str(&ts_value_ident(&name.name));
                 }
                 Ok(())
             }
             NodeKind::BinaryOp { op, left, right } => {
+                // `+` on two `List[T]` operands is concatenation: spread both into
+                // a fresh array (`[...a, ...b]`). TS rejects `+` on `T[]`
+                // (`Operator '+' cannot be applied to T[]`); the spread preserves
+                // the element type.
+                if matches!(op, BinOp::Add) && crate::generator::is_list_concat(node, left, right) {
+                    self.buf.push_str("[...");
+                    self.emit_expr(left)?;
+                    self.buf.push_str(", ...");
+                    self.emit_expr(right)?;
+                    self.buf.push(']');
+                    return Ok(());
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {
@@ -3482,6 +3593,9 @@ impl TsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_functional_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {

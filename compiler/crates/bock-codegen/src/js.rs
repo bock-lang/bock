@@ -112,6 +112,8 @@ impl CodeGenerator for JsGenerator {
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
         ctx.trait_decls =
             crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
+        ctx.const_names =
+            crate::generator::collect_const_names(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let (content, mappings) = ctx.finish();
         let source_map = SourceMap {
@@ -184,6 +186,7 @@ impl CodeGenerator for JsGenerator {
         let enum_variants = crate::generator::collect_enum_variants(modules);
         let trait_decls = crate::generator::collect_trait_decls(modules);
         let record_names = crate::generator::collect_record_names(modules);
+        let const_names = crate::generator::collect_const_names(modules);
         let public_symbols = crate::generator::collect_public_symbols_for_esm(modules);
         // Program-wide field/method name-collision set (camelCased). Built across
         // *all* reachable modules so a call site in `main.js` to a renamed method
@@ -216,6 +219,7 @@ impl CodeGenerator for JsGenerator {
             // construction (`use`d from another module) lowers to `new Name(...)`
             // rather than a bare object literal that drops its prototype methods.
             ctx.record_names = record_names.clone();
+            ctx.const_names = const_names.clone();
             // Program-wide collision set so renamed methods and their
             // cross-module call sites agree (see above).
             ctx.field_method_collisions = field_method_collisions.clone();
@@ -320,6 +324,7 @@ impl CodeGenerator for JsGenerator {
                 let enum_variants = crate::generator::collect_enum_variants(ctx_modules);
                 let trait_decls = crate::generator::collect_trait_decls(ctx_modules);
                 let record_names = crate::generator::collect_record_names(ctx_modules);
+                let const_names = crate::generator::collect_const_names(ctx_modules);
                 let mut field_method_collisions = HashSet::new();
                 for (module, _) in ctx_modules {
                     field_method_collisions.extend(crate::generator::collect_record_field_names(
@@ -332,6 +337,7 @@ impl CodeGenerator for JsGenerator {
                 ctx.enum_variants = enum_variants;
                 ctx.trait_decls = trait_decls;
                 ctx.record_names = record_names;
+                ctx.const_names = const_names;
                 ctx.field_method_collisions = field_method_collisions;
                 ctx.seed_effect_registries(ctx_modules);
                 Box::new(JsTestEmitter { ctx })
@@ -417,6 +423,12 @@ struct EmitCtx {
     composite_effects: HashMap<String, Vec<String>>,
     /// Names of records declared in this module (emitted as classes).
     record_names: HashSet<String>,
+    /// Declared names of module-scope `const`s, pre-scanned across the reachable
+    /// program. A const identifier is emitted verbatim at both its declaration
+    /// and every use so the two agree (the `to_camel_case` transform would
+    /// otherwise mangle a `SCREAMING_SNAKE` use site, e.g. `FIZZ_NUM` → `fizzNUM`,
+    /// against the verbatim-emitted definition). See [`crate::generator::collect_const_names`].
+    const_names: HashSet<String>,
     /// 1-indexed current line in `buf`, maintained incrementally.
     cur_line: u32,
     /// 1-indexed current column (char count) in `buf`, maintained incrementally.
@@ -531,6 +543,7 @@ impl EmitCtx {
             fn_effects: HashMap::new(),
             composite_effects: HashMap::new(),
             record_names: HashSet::new(),
+            const_names: HashSet::new(),
             cur_line: 1,
             cur_col: 1,
             scan_pos: 0,
@@ -1345,6 +1358,92 @@ impl EmitCtx {
                 self.emit_expr(recv)?;
                 self.buf.push_str(").join(");
                 self.emit_expr(&sep.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Emit a functional (closure-taking) `List` built-in method call to its JS
+    /// form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_functional_method`] in
+    /// the `Call` arm. JS arrays carry native `map`/`filter`/`reduce`/`forEach`/
+    /// `some`/`every`/`flatMap`, so the closure is passed *once* (no duplicated
+    /// receiver — the desugared `recv.map(recv, cb)` shape that the generic
+    /// fall-through would otherwise emit is what broke). `fold(init, cb)` maps to
+    /// `reduce(cb, init)`; `find` wraps the native `.find` result (element or
+    /// `undefined`) into the tagged `Optional` representation user enum variants
+    /// use.
+    fn try_emit_list_functional_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_functional_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "map" | "filter" | "for_each" | "any" | "all" | "flat_map" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let native = match method {
+                    "map" => "map",
+                    "filter" => "filter",
+                    "for_each" => "forEach",
+                    "any" => "some",
+                    "all" => "every",
+                    "flat_map" => "flatMap",
+                    _ => unreachable!(),
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                let _ = write!(self.buf, ").{native}(");
+                self.emit_expr(&cb.value)?;
+                self.buf.push(')');
+            }
+            "reduce" => {
+                // Bock `reduce((a, b) => ...)` has no seed: the first element is
+                // the initial accumulator, matching JS `.reduce(cb)`.
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").reduce(");
+                self.emit_expr(&cb.value)?;
+                self.buf.push(')');
+            }
+            "fold" => {
+                // Bock `fold(init, (acc, x) => ...)` → JS `reduce(cb, init)`.
+                let (Some(init), Some(cb)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").reduce(");
+                self.emit_expr(&cb.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&init.value)?;
+                self.buf.push(')');
+            }
+            "find" => {
+                // Native `.find` yields the element or `undefined`; wrap into the
+                // tagged `Optional` representation.
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str("((__r) => { const __m = __r.find(");
+                self.emit_expr(&cb.value)?;
+                self.buf.push_str(
+                    "); return __m === undefined ? { _tag: \"None\" } : { _tag: \"Some\", _0: __m }; })(",
+                );
+                self.emit_expr(recv)?;
                 self.buf.push(')');
             }
             _ => return Ok(false),
@@ -2650,12 +2749,29 @@ impl EmitCtx {
                     // A bare unit-variant reference (`Red`) → the frozen
                     // `{enum}_{variant}` const emitted by `emit_enum_variant`.
                     let _ = write!(self.buf, "{enum_name}_{}", name.name);
+                } else if self.const_names.contains(&name.name) {
+                    // A module-scope `const` is emitted verbatim at its
+                    // declaration; spell its use site identically so the two agree
+                    // (the `to_camel_case` transform would mangle a SCREAMING_SNAKE
+                    // name, e.g. `FIZZ_NUM` → `fizzNUM`).
+                    self.buf.push_str(&name.name);
                 } else {
                     self.buf.push_str(&js_value_ident(&name.name));
                 }
                 Ok(())
             }
             NodeKind::BinaryOp { op, left, right } => {
+                // `+` on two `List[T]` operands is concatenation: spread both into
+                // a fresh array (`[...a, ...b]`). JS's native `+` would coerce the
+                // arrays to strings and concatenate *those*, a silent bug.
+                if matches!(op, BinOp::Add) && crate::generator::is_list_concat(node, left, right) {
+                    self.buf.push_str("[...");
+                    self.emit_expr(left)?;
+                    self.buf.push_str(", ...");
+                    self.emit_expr(right)?;
+                    self.buf.push(']');
+                    return Ok(());
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {
@@ -2728,6 +2844,9 @@ impl EmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_functional_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {

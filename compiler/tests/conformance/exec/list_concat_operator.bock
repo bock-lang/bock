@@ -1,0 +1,34 @@
+// TEST: exec_list_concat_operator
+// EXPECT: output "5;96;apple,pear"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Cluster B regression — list concatenation via the `+` OPERATOR (distinct from
+// the `concat` method). `a + b` on two `List[T]` operands was lowered to a
+// native `+`: `Operator '+' cannot be applied to T[]` on TS, E0369 `cannot add
+// Vec<T>` on Rust, `operator + not defined on []T` on Go, and a silent *string*
+// concatenation on JS. The checker now stamps the `+` node as list concat and
+// each backend emits its idiom (`[...a, ...b]` on JS/TS, a clone-and-extend on
+// Rust, `append(append([]T{}, a...), b...)` on Go, native `+` on Python).
+//
+// Exercises concat over both Int and String lists. The concatenated Int list is
+// read back via `len` and a `reduce(+)` sum (rather than `join`, which on an Int
+// list hits a separate read-only-method limitation); the String list via
+// `join`. Printed (`;`-joined):
+//   len of (ints + more)            = [1,2,3]+[40,50]  -> 5
+//   sum of the concatenated ints    = 1+2+3+40+50      -> 96
+//   the joined concatenated strings = "apple,pear"
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn main() -> Void {
+  let ints: List[Int] = [1, 2, 3]
+  let more: List[Int] = [40, 50]
+  let combined: List[Int] = ints + more
+  let sum: Int = combined.reduce((a, b) => a + b)
+
+  let words: List[String] = ["apple"]
+  let words2: List[String] = words + ["pear"]
+
+  println("${combined.len()};${sum};${words2.join(",")}")
+}

@@ -60,6 +60,21 @@ fn py_module_uses_result(items: &[AIRNode]) -> bool {
     })
 }
 
+/// True if the module uses a `List` functional combinator that lowers to one of
+/// the [`LIST_FUNCTIONAL_RUNTIME_PY`] helpers (`reduce`/`fold`/`find`/`for_each`).
+/// Gates emission of that prelude, mirroring [`py_module_uses_optional`]. `map`/
+/// `filter`/`any`/`all`/`flat_map` lower to Python builtins (`list(map(..))` /
+/// `any(..)` / a comprehension) and need no helper, so they don't gate here.
+fn py_module_uses_list_functional(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"reduce\"")
+            || s.contains("\"fold\"")
+            || s.contains("\"find\"")
+            || s.contains("\"for_each\"")
+    })
+}
+
 /// True if the module references the prelude `Ordering` enum, any of its
 /// variants, or a `compare` method call (which the primitive bridge lowers to an
 /// `Ordering` runtime value). Gates emission of [`ORDERING_RUNTIME_PY`], mirroring
@@ -155,6 +170,41 @@ class _BockOrderingGreater:
 _bock_less = _BockOrderingLess()
 _bock_equal = _BockOrderingEqual()
 _bock_greater = _BockOrderingGreater()
+";
+
+/// Runtime helpers for the closure-taking `List` combinators whose Python form
+/// is not a single builtin expression: `reduce`/`fold` (left folds, no
+/// statement-level loop is expressible in a lambda), `find` (returns the tagged
+/// `Optional`), and `for_each` (a side-effecting drive returning `None`). `map`/
+/// `filter`/`any`/`all`/`flat_map` lower inline to Python builtins and need no
+/// helper. `_bock_find` builds the same tagged `Optional` runtime values
+/// (`_BockSome`/`_bock_none`) that `OPTIONAL_RUNTIME_PY` defines, so that prelude
+/// is co-emitted whenever this one is. Gated by [`py_module_uses_list_functional`].
+const LIST_FUNCTIONAL_RUNTIME_PY: &str = "\
+# ── Bock List functional-combinator runtime ──
+def _bock_reduce(xs, f):
+    it = iter(xs)
+    acc = next(it)
+    for x in it:
+        acc = f(acc, x)
+    return acc
+
+def _bock_fold(xs, init, f):
+    acc = init
+    for x in xs:
+        acc = f(acc, x)
+    return acc
+
+def _bock_find(xs, pred):
+    for x in xs:
+        if pred(x):
+            return _BockSome(x)
+    return _bock_none
+
+def _bock_for_each(xs, f):
+    for x in xs:
+        f(x)
+    return None
 ";
 
 /// Runtime-prelude names that resolve through the shared `_bock_runtime`
@@ -434,6 +484,8 @@ impl CodeGenerator for PyGenerator {
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
         ctx.trait_decls =
             crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
+        ctx.const_names =
+            crate::generator::collect_const_names(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
         let content = ctx.finish();
         let source_map = SourceMap {
@@ -503,6 +555,7 @@ impl CodeGenerator for PyGenerator {
         // lowers identically to the bundling path.
         let enum_variants = crate::generator::collect_enum_variants(modules);
         let trait_decls = crate::generator::collect_trait_decls(modules);
+        let const_names = crate::generator::collect_const_names(modules);
         // Map of public symbol → declaring module, for the implicit-import pass.
         let public_symbols = collect_public_symbol_modules(modules);
         // Program-wide field/method name-collision set (snake_cased). Built across
@@ -527,12 +580,14 @@ impl CodeGenerator for PyGenerator {
         let mut runtime_result = false;
         let mut runtime_ordering = false;
         let mut runtime_concurrency = false;
+        let mut runtime_list_functional = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let mut ctx = PyEmitCtx::new();
             ctx.per_module = true;
             ctx.enum_variants = enum_variants.clone();
             ctx.trait_decls = trait_decls.clone();
+            ctx.const_names = const_names.clone();
             ctx.field_method_collisions = field_method_collisions.clone();
             // Effect-op resolution needs the whole reachable set: a bare op in
             // one module may belong to an effect declared in another.
@@ -544,6 +599,7 @@ impl CodeGenerator for PyGenerator {
             runtime_result |= ctx.needs_runtime_result;
             runtime_ordering |= ctx.needs_runtime_ordering;
             runtime_concurrency |= ctx.needs_runtime_concurrency;
+            runtime_list_functional |= ctx.needs_runtime_list_functional;
             let mut content = ctx.finish();
 
             // The entry file gets the `if __name__ == "__main__": main()`
@@ -575,7 +631,12 @@ impl CodeGenerator for PyGenerator {
         }
 
         // Emit the shared runtime module with exactly the preludes referenced.
-        if runtime_optional || runtime_result || runtime_ordering || runtime_concurrency {
+        if runtime_optional
+            || runtime_result
+            || runtime_ordering
+            || runtime_concurrency
+            || runtime_list_functional
+        {
             let mut content = String::new();
             // Every runtime name is underscore-prefixed, which `from … import *`
             // skips *unless* the module declares `__all__`. Build `__all__`
@@ -609,6 +670,15 @@ impl CodeGenerator for PyGenerator {
                 content.push_str(CONCURRENCY_RUNTIME_PY);
                 content.push('\n');
                 all_names.extend(["__BockChannel", "__bock_channel_new", "__bock_spawn"]);
+            }
+            if runtime_list_functional {
+                // `_bock_find` references `_BockSome`/`_bock_none`; the ctx that
+                // set `needs_runtime_list_functional` also set
+                // `needs_runtime_optional`, so the Optional prelude is already in
+                // `content` above this point.
+                content.push_str(LIST_FUNCTIONAL_RUNTIME_PY);
+                content.push('\n');
+                all_names.extend(["_bock_reduce", "_bock_fold", "_bock_find", "_bock_for_each"]);
             }
             let all_list = all_names
                 .iter()
@@ -657,6 +727,7 @@ impl CodeGenerator for PyGenerator {
         // bodies lower references identically to the runtime tree.
         let enum_variants = crate::generator::collect_enum_variants(modules);
         let trait_decls = crate::generator::collect_trait_decls(modules);
+        let const_names = crate::generator::collect_const_names(modules);
         let mut field_method_collisions = std::collections::HashSet::new();
         for (module, _) in modules {
             field_method_collisions.extend(crate::generator::collect_record_field_names(
@@ -668,6 +739,7 @@ impl CodeGenerator for PyGenerator {
         ctx.per_module = true;
         ctx.enum_variants = enum_variants;
         ctx.trait_decls = trait_decls;
+        ctx.const_names = const_names;
         ctx.field_method_collisions = field_method_collisions;
         ctx.seed_effect_registries(modules);
 
@@ -846,6 +918,9 @@ struct PyEmitCtx {
     /// Set once the concurrency runtime prelude has been emitted; deduped exactly
     /// as [`Self::optional_runtime_emitted`].
     concurrency_runtime_emitted: bool,
+    /// Set once the [`LIST_FUNCTIONAL_RUNTIME_PY`] prelude has been emitted;
+    /// deduped exactly as [`Self::optional_runtime_emitted`].
+    list_functional_runtime_emitted: bool,
     /// Set when an enum decl emits a `Name = Union[...]` alias, so the preamble
     /// imports `Union` from `typing`.
     needs_union_import: bool,
@@ -896,6 +971,7 @@ struct PyEmitCtx {
     needs_runtime_result: bool,
     needs_runtime_ordering: bool,
     needs_runtime_concurrency: bool,
+    needs_runtime_list_functional: bool,
     /// Implicit cross-module imports for the per-module path, as
     /// `(module_path, symbol_name)` pairs — names this module references but
     /// neither declares locally nor imports via an explicit `use` (e.g. a
@@ -913,6 +989,13 @@ struct PyEmitCtx {
     /// `Module` arm for the single-module `generate_module` path). Shared policy
     /// with go/js/ts.
     field_method_collisions: std::collections::HashSet<String>,
+    /// Declared names of module-scope `const`s, pre-scanned across the reachable
+    /// program. A const is emitted verbatim at both its declaration and every use
+    /// so the two agree — the def's `to_snake_case` (`FIZZ_NUM` → `fizz_num`) and
+    /// the use site's uppercase-preserving `identifier_to_py` (`FIZZ_NUM`) would
+    /// otherwise disagree, raising `NameError`. See
+    /// [`crate::generator::collect_const_names`].
+    const_names: std::collections::HashSet<String>,
 }
 
 impl PyEmitCtx {
@@ -935,6 +1018,7 @@ impl PyEmitCtx {
             result_runtime_emitted: false,
             ordering_runtime_emitted: false,
             concurrency_runtime_emitted: false,
+            list_functional_runtime_emitted: false,
             needs_union_import: false,
             needs_typing_callable: Cell::new(false),
             needs_typing_any: Cell::new(false),
@@ -949,8 +1033,10 @@ impl PyEmitCtx {
             needs_runtime_result: false,
             needs_runtime_ordering: false,
             needs_runtime_concurrency: false,
+            needs_runtime_list_functional: false,
             implicit_imports: Vec::new(),
             field_method_collisions: std::collections::HashSet::new(),
+            const_names: std::collections::HashSet::new(),
         }
     }
 
@@ -996,7 +1082,8 @@ impl PyEmitCtx {
             && (self.needs_runtime_optional
                 || self.needs_runtime_result
                 || self.needs_runtime_ordering
-                || self.needs_runtime_concurrency)
+                || self.needs_runtime_concurrency
+                || self.needs_runtime_list_functional)
         {
             let _ = writeln!(preamble, "from {RUNTIME_MODULE_PY} import *");
         }
@@ -1515,6 +1602,107 @@ impl PyEmitCtx {
                 self.emit_expr(&sep.value)?;
                 self.buf.push_str(").join(");
                 self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Emit a functional (closure-taking) `List` built-in method call to its
+    /// Python form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_functional_method`].
+    /// `map`/`filter` lower to `list(map(cb, r))` / `list(filter(cb, r))`;
+    /// `any`/`all` to the `any(...)`/`all(...)` builtins over `map`; `flat_map`
+    /// to a nested comprehension. `reduce`/`fold`/`find`/`for_each` lower to the
+    /// `_bock_*` helpers of [`LIST_FUNCTIONAL_RUNTIME_PY`] (a left fold and the
+    /// tagged-`Optional` `find` cannot be expressed as a single Python builtin
+    /// call). In all cases the closure is passed *once* — the desugared
+    /// `recv.map(recv, cb)` shape the generic fall-through would emit fails on a
+    /// `list` (`'list' object has no attribute 'map'`).
+    fn try_emit_list_functional_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_functional_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "map" | "filter" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let _ = write!(self.buf, "list({method}(");
+                self.emit_expr(&cb.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(recv)?;
+                self.buf.push_str("))");
+            }
+            "any" | "all" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let _ = write!(self.buf, "{method}(map(");
+                self.emit_expr(&cb.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(recv)?;
+                self.buf.push_str("))");
+            }
+            "flat_map" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str("[__y for __x in ");
+                self.emit_expr(recv)?;
+                self.buf.push_str(" for __y in (");
+                self.emit_expr(&cb.value)?;
+                self.buf.push_str(")(__x)]");
+            }
+            "reduce" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str("_bock_reduce(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&cb.value)?;
+                self.buf.push(')');
+            }
+            "fold" => {
+                let (Some(init), Some(cb)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push_str("_bock_fold(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&init.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&cb.value)?;
+                self.buf.push(')');
+            }
+            "find" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str("_bock_find(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&cb.value)?;
+                self.buf.push(')');
+            }
+            "for_each" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str("_bock_for_each(");
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&cb.value)?;
                 self.buf.push(')');
             }
             _ => return Ok(false),
@@ -2132,6 +2320,12 @@ impl PyEmitCtx {
                     if py_module_uses_concurrency(items) {
                         self.needs_runtime_concurrency = true;
                     }
+                    if py_module_uses_list_functional(items) {
+                        self.needs_runtime_list_functional = true;
+                        // `_bock_find` builds tagged `Optional` runtime values, so
+                        // the Optional prelude must be present alongside it.
+                        self.needs_runtime_optional = true;
+                    }
                 } else {
                     // Single-module self-contained emit (`generate_module`, used
                     // by unit tests): the module's runtime preludes are inlined
@@ -2156,6 +2350,21 @@ impl PyEmitCtx {
                         self.buf.push_str(CONCURRENCY_RUNTIME_PY);
                         self.buf.push('\n');
                         self.concurrency_runtime_emitted = true;
+                    }
+                    // `_bock_find` references `_BockSome`/`_bock_none`, so the
+                    // Optional prelude (emitted just above when used) must precede
+                    // this one; both are inlined in source order here.
+                    if !self.list_functional_runtime_emitted
+                        && py_module_uses_list_functional(items)
+                    {
+                        if !self.optional_runtime_emitted {
+                            self.buf.push_str(OPTIONAL_RUNTIME_PY);
+                            self.buf.push('\n');
+                            self.optional_runtime_emitted = true;
+                        }
+                        self.buf.push_str(LIST_FUNCTIONAL_RUNTIME_PY);
+                        self.buf.push('\n');
+                        self.list_functional_runtime_emitted = true;
                     }
                 }
                 // Per-module path: emit the module's cross-module imports as
@@ -2643,11 +2852,11 @@ impl PyEmitCtx {
             } => {
                 let type_hint = format!(": {}", self.type_to_py(ty));
                 let ind = self.indent_str();
-                let _ = write!(
-                    self.buf,
-                    "{ind}{}{type_hint} = ",
-                    py_value_ident(&name.name)
-                );
+                // Emit the const's declared name verbatim (not snake_cased) so it
+                // matches the verbatim spelling the `Identifier` use-site arm emits
+                // for a known const — `to_snake_case` would lower `FIZZ_NUM` to
+                // `fizz_num` here while the use site keeps `FIZZ_NUM`, a `NameError`.
+                let _ = write!(self.buf, "{ind}{}{type_hint} = ", name.name);
                 self.emit_expr(value)?;
                 self.buf.push('\n');
                 Ok(())
@@ -3268,6 +3477,11 @@ impl PyEmitCtx {
                     // A unit-variant reference (`Empty`) → an instance of its
                     // `@dataclass(frozen=True)` class: `Shape_Empty()`.
                     let _ = write!(self.buf, "{enum_name}_{}()", name.name);
+                } else if self.const_names.contains(&name.name) {
+                    // A module-scope `const` is emitted verbatim at its
+                    // declaration (see the `ConstDecl` arm); spell its use site
+                    // identically rather than through `identifier_to_py`.
+                    self.buf.push_str(&name.name);
                 } else {
                     self.buf.push_str(&identifier_to_py(&name.name));
                 }
@@ -3361,6 +3575,9 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_functional_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {
