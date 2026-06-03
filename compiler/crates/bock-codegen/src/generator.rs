@@ -1202,6 +1202,39 @@ pub fn collect_record_names(modules: &[(&AIRModule, &Path)]) -> std::collections
     names
 }
 
+/// Pre-scan every reached module and collect the **declared names of all
+/// module-scope `const`s**.
+///
+/// A const's identifier must be spelled identically at its declaration and at
+/// every use site, across all backends. Each backend's value-identifier
+/// transform (`to_camel_case` on JS/TS, `to_snake_case` on Python, `to_pascal_case`
+/// on Go) mangles a `SCREAMING_SNAKE` const name *differently* at the use site
+/// than the declaration emits it (def `FIZZ_NUM` vs use `fizzNUM` on JS/TS; def
+/// `fizz_num` vs use `FIZZ_NUM` on Python; def `FIZZNUM` vs use `fizzNUM` on Go),
+/// producing a "not defined"/`NameError` at the target. The backends consult this
+/// registry at both the `ConstDecl` and `Identifier` arms to emit the const's
+/// **verbatim declared name** in both places — `SCREAMING_SNAKE` is a valid
+/// identifier in every target. A *pre-scan* (rather than recording consts as
+/// their decls are emitted) is required because a use site may precede its
+/// const's declaration in source order, and because a `use`d const can live in a
+/// different module than its use. Mirrors [`collect_record_names`] /
+/// [`collect_enum_variants`].
+#[must_use]
+pub fn collect_const_names(modules: &[(&AIRModule, &Path)]) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for (module, _) in modules {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            if let NodeKind::ConstDecl { name, .. } = &item.kind {
+                names.insert(name.name.clone());
+            }
+        }
+    }
+    names
+}
+
 /// Compute the relative ES-module import specifier from the file that hosts
 /// module `from_path` to the file that hosts module `to_path`, both keyed on
 /// their **declared** dotted module-paths and laid out at the mirrored path
@@ -1907,6 +1940,34 @@ pub fn raw_recv_kind(node: &AIRNode) -> Option<&str> {
     Some(tag.as_str())
 }
 
+/// True when a `BinaryOp { op: Add, left, right }` is **list concatenation** and
+/// must be lowered to the target's concat idiom rather than a native `+`.
+///
+/// Two independent signals, either of which suffices:
+///
+/// 1. The checker's [`bock_types::checker::LIST_CONCAT_META_KEY`] stamp — set on
+///    a `+` whose operands resolved to `List[T]`. This is the precise signal for
+///    every `+` the checker's body pass reaches.
+/// 2. A *syntactic* fallback: one operand is a list literal (`xs + [todo]` /
+///    `[head] + tail`). A list literal can only be `+`-combined with another
+///    list (numeric/string `+` never has a `[...]` operand), so this is
+///    unambiguous — and it covers `+` sites the checker's body pass does not
+///    currently visit (e.g. inside `impl` method bodies, which are not yet
+///    type-checked), where the stamp is absent.
+///
+/// Each backend calls this from its `NodeKind::BinaryOp { op: Add, .. }` arm. See
+/// the metadata key's docs for the per-target lowering rationale.
+#[must_use]
+pub fn is_list_concat(node: &AIRNode, left: &AIRNode, right: &AIRNode) -> bool {
+    let stamped = matches!(
+        node.metadata.get(bock_types::checker::LIST_CONCAT_META_KEY),
+        Some(bock_air::Value::Bool(true))
+    );
+    let has_list_literal = matches!(left.kind, NodeKind::ListLiteral { .. })
+        || matches!(right.kind, NodeKind::ListLiteral { .. });
+    stamped || has_list_literal
+}
+
 /// Recognise a *desugared `List` built-in method call*.
 ///
 /// Building on the same desugared shape [`desugared_self_call`] detects
@@ -1954,6 +2015,66 @@ pub fn desugared_list_method<'a>(
     let (recv, field, rest) = desugared_self_call(callee, args)?;
     let method = field.name.as_str();
     if READ_ONLY_LIST_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
+/// The *functional* `List` built-in methods that take a closure argument and
+/// must be lowered to each target's native iteration idiom (see
+/// [`desugared_list_functional_method`]).
+///
+/// These resolve in the checker to a concrete return type with a fully typed
+/// closure parameter (see `resolve_builtin_method_fn_type` for `List`), but the
+/// receiver type `List[T]` has no `.map`/`.filter`/`.reduce`/… method in *any*
+/// target — JS/TS arrays have `.map`/`.filter`/`.reduce` but not the desugared
+/// `recv.map(recv, cb)` shape; Python lists, Rust `Vec`, and Go slices have no
+/// such methods at all. Without a dedicated lowering these fall through to the
+/// generic desugared-self-call path, which emits `recv.map(recv, cb)` —
+/// array-not-a-callback on TS, "x.map is not a function" on JS, `'list' object
+/// has no attribute 'map'` on Python, `no method 'map' for Vec` on Rust, and a
+/// keyword/selector parse error on Go (`map` is reserved). This is the surface
+/// counterpart to the `core.iter` *free functions* (`map`/`filter`/`fold`/…
+/// over `ListIterator[T]`), which already lower correctly.
+///
+/// The set mirrors the closure-taking `List` methods the checker resolves:
+/// `map`/`filter`/`reduce`/`fold`/`for_each`/`find`/`any`/`all`/`flat_map`. The
+/// no-closure functional combinators (`take`/`skip`/`reverse`/`sort`/`dedup`/
+/// `enumerate`/`zip`/`flatten`/`to_set`/`push`/`pop`/…) are intentionally NOT in
+/// this set: they are either non-closure transforms or mutating methods left to
+/// their existing paths (DQ18).
+pub const FUNCTIONAL_LIST_METHODS: &[&str] = &[
+    "map", "filter", "reduce", "fold", "for_each", "find", "any", "all", "flat_map",
+];
+
+/// Recognise a *desugared `List` functional (closure-taking) method call*.
+///
+/// The functional sibling of [`desugared_list_method`]: same desugared shape
+/// (`Call { callee: FieldAccess(recv, method), args: [recv, closure, …] }`),
+/// same `recv_kind`-gating (accepts a `recv_kind = "List"` stamp *or* an absent
+/// stamp, rejects any other stamp so a same-named user-record method or a
+/// `Map`/`Set` method is not shadowed — those run *before* this recogniser via
+/// their own `recv_kind`), but requires the method to be one of
+/// [`FUNCTIONAL_LIST_METHODS`]. Returns the receiver, the validated method name,
+/// and the remaining (non-self) arguments (the closure plus, for `fold`, the
+/// initial accumulator).
+///
+/// Each backend wires this into its `Call` arm alongside
+/// [`desugared_list_method`] and lowers it to the target's native iteration
+/// idiom with the closure passed *once* and correctly (no duplicated receiver).
+#[must_use]
+pub fn desugared_list_functional_method<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    if !matches!(raw_recv_kind(call_node), None | Some("List")) {
+        return None;
+    }
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if FUNCTIONAL_LIST_METHODS.contains(&method) {
         Some((recv, method, rest))
     } else {
         None
@@ -4392,6 +4513,93 @@ mod tests {
                 "{m} on a user record (recv_kind=User:Counter) must not route to the List built-in"
             );
         }
+    }
+
+    #[test]
+    fn desugared_list_functional_method_matches_closure_combinators() {
+        // Every functional (closure-taking) built-in is recognised, returning the
+        // receiver, the method name, and the non-self args (the closure, plus the
+        // seed for `fold`). The closure arg is modelled as a bare identifier here;
+        // the recogniser is closure-shape-agnostic.
+        for &m in FUNCTIONAL_LIST_METHODS {
+            let extra = if m == "fold" {
+                vec![
+                    n(
+                        7,
+                        NodeKind::Identifier {
+                            name: ident("init"),
+                        },
+                    ),
+                    n(9, NodeKind::Identifier { name: ident("cb") }),
+                ]
+            } else {
+                vec![n(7, NodeKind::Identifier { name: ident("cb") })]
+            };
+            let n_extra = extra.len();
+            let (callee, args, call_node) = desugared_call(m, extra);
+            let (recv, got_method, rest) =
+                desugared_list_functional_method(&call_node, &callee, &args).expect("should match");
+            assert_eq!(got_method, m);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+            assert_eq!(rest.len(), n_extra);
+        }
+    }
+
+    #[test]
+    fn desugared_list_functional_method_rejects_read_only_and_other_stamps() {
+        // The read-only built-ins are NOT functional combinators (they route
+        // through `desugared_list_method` instead).
+        for &m in &["len", "get", "concat", "join", "frobnicate"] {
+            let (callee, args, call_node) = desugared_call(m, vec![]);
+            assert!(
+                desugared_list_functional_method(&call_node, &callee, &args).is_none(),
+                "{m} must not be recognised as a functional List method"
+            );
+        }
+        // A non-`List` `recv_kind` (a user record / Map / Set sharing the method
+        // name) is rejected so the built-in does not shadow it.
+        let extra = vec![n(7, NodeKind::Identifier { name: ident("cb") })];
+        let (callee, args, mut call_node) = desugared_call("map", extra);
+        call_node.metadata.insert(
+            bock_types::checker::RECV_KIND_META_KEY.to_string(),
+            bock_air::Value::String("Set".to_string()),
+        );
+        assert!(
+            desugared_list_functional_method(&call_node, &callee, &args).is_none(),
+            "map on a Set receiver must not route to the List functional built-in"
+        );
+    }
+
+    #[test]
+    fn is_list_concat_reads_the_checker_stamp() {
+        let lhs = n(20, NodeKind::Identifier { name: ident("a") });
+        let rhs = n(21, NodeKind::Identifier { name: ident("b") });
+
+        // Two plain (non-list-literal) operands with no stamp → not list concat.
+        let plain = n(1, NodeKind::Identifier { name: ident("x") });
+        assert!(
+            !is_list_concat(&plain, &lhs, &rhs),
+            "an unstamped node with non-literal operands is not list concat"
+        );
+
+        // The `Bool(true)` checker stamp marks list concat.
+        let mut stamped = n(2, NodeKind::Identifier { name: ident("x") });
+        stamped.metadata.insert(
+            bock_types::checker::LIST_CONCAT_META_KEY.to_string(),
+            bock_air::Value::Bool(true),
+        );
+        assert!(
+            is_list_concat(&stamped, &lhs, &rhs),
+            "the `Bool(true)` stamp marks list concat"
+        );
+
+        // The syntactic fallback fires when an operand is a list literal, even
+        // without the stamp (covers `+` sites the checker body pass misses).
+        let list_lit = n(22, NodeKind::ListLiteral { elems: vec![] });
+        assert!(
+            is_list_concat(&plain, &lhs, &list_lit),
+            "a list-literal operand marks list concat syntactically"
+        );
     }
 
     // ── Primitive-bridge / Ordering ──────────────────────────────────────────

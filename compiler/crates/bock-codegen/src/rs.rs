@@ -966,6 +966,15 @@ impl RsEmitCtx {
                             return;
                         }
                     }
+                    // The functional combinators all lower through `.iter()
+                    // .cloned()` / `.clone().into_iter()`, so they clone the
+                    // element type just like `get`/`concat` above.
+                    if crate::generator::desugared_list_functional_method(node, callee, args)
+                        .is_some()
+                    {
+                        self.found = true;
+                        return;
+                    }
                     if let Some((_, method, _)) =
                         crate::generator::desugared_map_method(node, callee, args)
                     {
@@ -1473,6 +1482,125 @@ impl RsEmitCtx {
                 };
                 let sep = self.expr_to_string(&sep.value)?;
                 format!("({recv_str}).join(({sep}).as_str())")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
+    /// Emit a functional (closure-taking) `List` built-in method call to its
+    /// Rust form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_functional_method`].
+    /// The receiver is `.clone()`d (Bock lists have value semantics — the
+    /// receiver var stays usable) and iterated by value: `map`/`flat_map`/`fold`/
+    /// `for_each`/`reduce` drive `.clone().into_iter()`; the predicate combinators
+    /// `filter`/`find`/`any`/`all` drive `.iter().cloned()` and adapt their `&T`
+    /// item to the Bock closure's by-value `T` parameter via `__x.clone()`. The
+    /// closure is captured *once* into `__f` so it is evaluated a single time
+    /// (the desugared `recv.map(recv, cb)` shape the generic fall-through emits
+    /// otherwise fails with `no method 'map' found for Vec`). `T: Clone` holds for
+    /// every v1 element type (Int/Float/String/Bool and `#[derive(Clone)]`
+    /// records); a generic-`List[T]` use is gated to synthesize the bound via
+    /// [`Self::body_clones_collection_element`].
+    fn try_emit_list_functional_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_functional_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        // The closure is emitted *inline* into the adapter rather than bound to a
+        // `let __f` first: a closure stored in a `let` whose params are the
+        // inferred-placeholder `|x: _|` cannot always back-infer its parameter
+        // types from a later `into_iter().map(__f)` (`E0282`), whereas a closure
+        // passed directly into the iterator adapter takes its parameter type from
+        // the adapter's item type.
+        let code = match method {
+            "map" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&cb.value)?;
+                format!("({recv_str}).clone().into_iter().map({f}).collect::<Vec<_>>()")
+            }
+            "flat_map" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&cb.value)?;
+                format!("({recv_str}).clone().into_iter().flat_map({f}).collect::<Vec<_>>()")
+            }
+            "filter" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&cb.value)?;
+                // The Bock predicate takes `T` by value, but `Iterator::filter`
+                // passes `&T` — and a closure literal cannot infer its parameter
+                // type from an immediate application. So the predicate is flowed
+                // *directly* into `.map(..)` (which pins its `T` param) to compute
+                // a parallel `Vec<bool>`, then zipped with the elements and
+                // filtered on the bool, then projected back to the elements.
+                format!(
+                    "{{ let __p: Vec<bool> = ({recv_str}).clone().into_iter().map({f}).collect(); \
+                     ({recv_str}).iter().cloned().zip(__p).filter(|__t| __t.1).map(|__t| __t.0).collect::<Vec<_>>() }}"
+                )
+            }
+            "find" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&cb.value)?;
+                // Same map-pinning approach as `filter`; `find` then returns the
+                // first element whose paired predicate is true (`Option<T>`, the
+                // Rust Optional rep).
+                format!(
+                    "{{ let __p: Vec<bool> = ({recv_str}).clone().into_iter().map({f}).collect(); \
+                     ({recv_str}).iter().cloned().zip(__p).find(|__t| __t.1).map(|__t| __t.0) }}"
+                )
+            }
+            "any" | "all" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&cb.value)?;
+                // Compute the predicate over each element via `.map(..)` (which
+                // pins the closure's `T` param), then short-circuit with the
+                // bool-iterator `any`/`all`.
+                format!("({recv_str}).clone().into_iter().map({f}).{method}(|__b| __b)")
+            }
+            "reduce" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&cb.value)?;
+                // Bock `reduce` has no seed (first element is the accumulator) and
+                // returns `T`; `Iterator::reduce` returns `Option<T>`.
+                format!(
+                    "({recv_str}).clone().into_iter().reduce({f}).expect(\"reduce on an empty list\")"
+                )
+            }
+            "fold" => {
+                let (Some(init), Some(cb)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                let init = self.expr_to_string(&init.value)?;
+                let f = self.expr_to_string(&cb.value)?;
+                format!("({recv_str}).clone().into_iter().fold({init}, {f})")
+            }
+            "for_each" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let f = self.expr_to_string(&cb.value)?;
+                format!("({recv_str}).clone().into_iter().for_each({f})")
             }
             _ => return Ok(false),
         };
@@ -3380,6 +3508,19 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::BinaryOp { op, left, right } => {
+                // `+` on two `List[T]` operands is concatenation. Rust does not
+                // implement `Add` for `Vec<T>` (E0369), so clone the left operand
+                // and extend it with the right — value-semantic concat that leaves
+                // both operands usable. `T: Clone` holds for every v1 element type.
+                if *op == BinOp::Add && crate::generator::is_list_concat(node, left, right) {
+                    let l = self.expr_to_string(left)?;
+                    let r = self.expr_to_string(right)?;
+                    let _ = write!(
+                        self.buf,
+                        "{{ let mut __v = ({l}).clone(); __v.extend(({r}).iter().cloned()); __v }}"
+                    );
+                    return Ok(());
+                }
                 // `String + String` concat: Rust's `String + String` does not
                 // compile (`Add<String>` is not implemented; only `String +
                 // &str`). When either operand is a detectably-`String` expression
@@ -3500,6 +3641,9 @@ impl RsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_functional_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {

@@ -87,6 +87,19 @@ const E_NO_CONVERSION: DiagnosticCode = DiagnosticCode {
 /// receiver — so a backend reads `call_node.metadata[RECV_KIND_META_KEY]`.
 pub const RECV_KIND_META_KEY: &str = "recv_kind";
 
+/// Metadata key stamped on a `BinaryOp { op: Add, .. }` node whose two operands
+/// resolved to `List[T]`, marking the `+` as **list concatenation** rather than
+/// numeric/string addition.
+///
+/// Codegen reads this (a `Value::Bool(true)`) to lower the `+` to each target's
+/// list-concat idiom (`[...a, ...b]` on JS/TS, a clone-and-extend on Rust, an
+/// `append(append(...), ...)` helper on Go, native `+` on Python where list `+`
+/// is already concatenation). Without it the operator falls through to the native
+/// `+`, which fails to compile on TS/Rust/Go and silently *string*-concatenates
+/// on JS. The element type is intentionally not recorded — every target's concat
+/// is element-type-agnostic.
+pub const LIST_CONCAT_META_KEY: &str = "list_concat";
+
 /// Base node id for AIR nodes the checker synthesizes (the `for`-over-`Iterable`
 /// desugar). Chosen high enough to sit far above the dense, zero-based ids the
 /// lowerer assigns to real nodes, so synthesized nodes never collide with real
@@ -1691,7 +1704,23 @@ impl TypeChecker {
                 } else {
                     unreachable!()
                 };
-                self.infer_binop(op, &lt, &rt, span)
+                let result = self.infer_binop(op, &lt, &rt, span);
+                // `+` on `List[T]` operands is concatenation, not numeric addition.
+                // Stamp the node so codegen lowers it to each target's concat idiom
+                // rather than a native `+` (which fails on TS/Rust/Go arrays/slices
+                // and silently string-concats on JS). The result *or* either operand
+                // resolving to a concrete `List` is sufficient — a record-field
+                // receiver (`self.items + [x]`) may leave the unified result type a
+                // still-open var while the left operand is already a concrete
+                // `List`, so checking the operands too closes that gap.
+                if matches!(op, BinOp::Add) {
+                    let is_list = |t: &Type| matches!(self.subst.apply(t), Type::Generic(g) if g.constructor == "List");
+                    if is_list(&result) || is_list(&lt) || is_list(&rt) {
+                        node.metadata
+                            .insert(LIST_CONCAT_META_KEY.to_string(), Value::Bool(true));
+                    }
+                }
+                result
             }
 
             // ── Unary operations ──────────────────────────────────────────────

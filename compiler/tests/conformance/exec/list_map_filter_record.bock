@@ -1,0 +1,49 @@
+// TEST: exec_list_map_filter_record
+// EXPECT: output "apple,pear,fig;20;2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Cluster A regression — `List` functional methods whose closure ranges over a
+// USER RECORD element (the real-world shape from `data-pipeline` /
+// `ml-data-prep`: `data.map((dp) => ...)`). `items.map((it) => it.name)`
+// projects a `List[Item]` to a `List[String]`; `items.filter((it) =>
+// it.price >= 20)` keeps a subset. The receiver must NOT be re-passed as the
+// first argument (the bug emitted `items.map(items, cb)`), the closure param
+// `it` must be typed to the record (no implicit-any on TS, a concrete `[]Item`
+// element on Go, `it.name` resolving the field on Rust/Python), and the result
+// list type is taken from the typed binding.
+//
+// Each projected list is bound to a typed `let` (rather than chaining
+// `.map(..).reduce(..)` inline) so every backend has the result element type at
+// the projection site — the chained form additionally stresses Go's nested-IIFE
+// return-type inference, which is tracked separately.
+//
+// Printed (`;`-joined): the joined projected names, the summed prices of the
+// filtered (price >= 20) items, and the filtered (< 20) count.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+record Item {
+  name: String
+  price: Int
+}
+
+fn main() -> Void {
+  let items: List[Item] = [
+    Item { name: "apple", price: 10 },
+    Item { name: "pear", price: 20 },
+    Item { name: "fig", price: 10 }
+  ]
+
+  let names: List[String] = items.map((it) => it.name)
+  let joined: String = names.join(",")
+
+  let pricey: List[Item] = items.filter((it) => it.price >= 20)
+  let priceyPrices: List[Int] = pricey.map((it) => it.price)
+  let priceySum: Int = priceyPrices.reduce((a, b) => a + b)
+
+  let cheap: List[Item] = items.filter((it) => it.price < 20)
+  let cheapCount: Int = cheap.len()
+
+  println("${joined};${priceySum};${cheapCount}")
+}

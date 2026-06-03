@@ -1,0 +1,47 @@
+// TEST: exec_enum_variant_use_site
+// EXPECT: output "Electronics;Books;Electronics"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Cluster C regression (enum half) — a unit enum VARIANT referenced at a use
+// site that is NOT an inline match-arm or call argument: bound to a `let`,
+// returned from a function, and stored in a record field, then read back and
+// matched. The `inventory-system` defect was `Category_Electronics`
+// referenced-but-undefined: a use-site variant reference must lower to the same
+// `{enum}_{variant}` / variant-struct spelling the declaration emits, and the
+// definition must actually be emitted at module scope. This fixture threads a
+// variant through a `let`, a return value, and a record field to exercise every
+// non-inline use position.
+//
+// Printed (`;`-joined): the name of a `let`-bound variant, of a function-returned
+// variant, and of a variant read back out of a record field.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+enum Category {
+  Electronics
+  Books
+}
+
+record Product {
+  category: Category
+}
+
+fn categoryName(c: Category) -> String {
+  match c {
+    Electronics => return "Electronics"
+    Books => return "Books"
+  }
+}
+
+fn defaultCategory() -> Category {
+  return Electronics
+}
+
+fn main() -> Void {
+  let direct: Category = Electronics
+  let returned: Category = defaultCategory()
+  let p: Product = Product { category: Books }
+
+  println("${categoryName(direct)};${categoryName(p.category)};${categoryName(returned)}")
+}

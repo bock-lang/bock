@@ -455,6 +455,8 @@ impl CodeGenerator for GoGenerator {
         // built-in constraint (GAP-C — `fn_sealed_bound`).
         ctx.trait_decls =
             crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
+        ctx.const_names =
+            crate::generator::collect_const_names(&[(module, std::path::Path::new(""))]);
         ctx.collect_fn_and_type_names(module);
         ctx.derive_self_param_traits();
         ctx.emit_node(module)?;
@@ -543,6 +545,7 @@ impl CodeGenerator for GoGenerator {
         template.enum_variants = crate::generator::collect_enum_variants(modules);
         template.generic_decls = crate::generator::collect_generic_decls(modules);
         template.trait_decls = crate::generator::collect_trait_decls(modules);
+        template.const_names = crate::generator::collect_const_names(modules);
         template.derive_self_param_traits();
         for (module, _) in modules {
             template.collect_methods(module);
@@ -649,6 +652,7 @@ impl CodeGenerator for GoGenerator {
         template.enum_variants = crate::generator::collect_enum_variants(modules);
         template.generic_decls = crate::generator::collect_generic_decls(modules);
         template.trait_decls = crate::generator::collect_trait_decls(modules);
+        template.const_names = crate::generator::collect_const_names(modules);
         template.derive_self_param_traits();
         for (module, _) in modules {
             template.collect_methods(module);
@@ -993,6 +997,12 @@ struct GoEmitCtx {
     /// Optional/Result pre-seeds are filtered out (Optional has its own
     /// `__bockOption` runtime). Pre-scanned across the reached modules.
     enum_variants: crate::generator::EnumVariantRegistry,
+    /// Declared names of module-scope `const`s, pre-scanned across the reachable
+    /// program. Emitted verbatim at both declaration and use so the two agree —
+    /// `to_pascal_case` (`FIZZ_NUM` → `FIZZNUM`) at the def and `go_fn_name`
+    /// (`fizzNUM`) at the use otherwise disagree. `SCREAMING_SNAKE` is a valid,
+    /// exported Go identifier. See [`crate::generator::collect_const_names`].
+    const_names: std::collections::HashSet<String>,
     /// Generic-type declaration registry: a record/enum/class name → its
     /// declared generic params. Lets an `impl Box { ... }` block recover the
     /// `[T any]` declared on `record Box[T]` so a Go method receiver emits
@@ -1248,6 +1258,7 @@ impl GoEmitCtx {
             ordering_runtime_emitted: false,
             range_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
+            const_names: std::collections::HashSet::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             var_go_type: HashMap::new(),
             record_param_fields: HashMap::new(),
@@ -3771,6 +3782,234 @@ impl GoEmitCtx {
         Ok(true)
     }
 
+    /// Render a closure (lambda) argument as a typed Go func literal, with its
+    /// parameter types pinned to `param_types`, and report the func literal's
+    /// inferred return type.
+    ///
+    /// Used by [`Self::try_emit_list_functional_method`]: a bare `(x) => x * 2`
+    /// argument would otherwise emit `func(x interface{}) interface{}`, whose
+    /// return does not assign into a concrete `[]int64`. Pinning the params to the
+    /// receiver's element type (`[]int64` → `int64`) lets the Go backend infer a
+    /// concrete return type, which the caller uses both to size the result slice
+    /// and to decide whether a type assertion is needed.
+    fn render_typed_closure_go(
+        &mut self,
+        closure: &AIRNode,
+        param_types: &[String],
+    ) -> Result<(String, Option<String>), CodegenError> {
+        let ret = if let NodeKind::Lambda { params, body } = &closure.kind {
+            let saved = self.enter_param_go_types_with_expected(params, Some(param_types));
+            let r = self.infer_go_expr_type(body);
+            self.var_go_type = saved;
+            r
+        } else {
+            None
+        };
+        let prev = self.expected_lambda_param_types.take();
+        self.expected_lambda_param_types = Some(param_types.to_vec());
+        let code = self.expr_to_string(closure)?;
+        self.expected_lambda_param_types = prev;
+        Ok((code, ret))
+    }
+
+    /// The Go element type to use for a `List` combinator's *result* slice, drawn
+    /// from the binding's expected type (`current_expected_type`, e.g. `[]string`
+    /// → `string`) when it is a slice, else from the closure's inferred return
+    /// `cb_ret`, else `interface{}`.
+    fn list_result_elem_go(&self, cb_ret: Option<&str>) -> String {
+        if let Some(t) = self.current_expected_type.as_deref() {
+            if let Some(elem) = t.strip_prefix("[]") {
+                return elem.to_string();
+            }
+        }
+        cb_ret.unwrap_or("interface{}").to_string()
+    }
+
+    /// Emit a functional (closure-taking) `List` built-in method call to its Go
+    /// form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_functional_method`]. Go
+    /// has neither methods on slices nor a usable `map` selector (`map` is a
+    /// keyword), so each combinator lowers to an immediately-invoked func literal
+    /// that drives a `for _, __x := range __r` loop, applying the closure
+    /// (rendered with its parameter types pinned to the receiver's element type,
+    /// via [`Self::render_typed_closure_go`]). The closure is evaluated *once* —
+    /// the desugared `recv.map(recv, cb)` shape the generic fall-through emits
+    /// otherwise produces `expected selector …, found 'map'` (a parse error,
+    /// `map` being reserved) or `.filter undefined`. `map`/`flat_map` size their
+    /// result from the binding's expected element type; `fold`/`reduce` thread an
+    /// accumulator; `find` returns the tagged Optional runtime; `any`/`all`
+    /// short-circuit to `bool`; `for_each` returns nothing.
+    fn try_emit_list_functional_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_functional_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let elem = self
+            .list_receiver_elem_go_type(recv)
+            .unwrap_or_else(|| "interface{}".to_string());
+        let slice = format!("[]{elem}");
+        let code = match method {
+            "map" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let (f, cb_ret) =
+                    self.render_typed_closure_go(&cb.value, std::slice::from_ref(&elem))?;
+                let out = self.list_result_elem_go(cb_ret.as_deref());
+                // Assert the closure result into the declared element type unless
+                // the closure's inferred return type *already* matches it exactly
+                // (asserting a concrete value onto its own type is a Go compile
+                // error; appending an `interface{}` to a concrete `[]T` without
+                // an assertion is also an error). When `out` is `interface{}` no
+                // assertion is needed (anything assigns to `interface{}`).
+                let push = if out != "interface{}" && cb_ret.as_deref() != Some(out.as_str()) {
+                    format!("__out = append(__out, __f(__x).({out}))")
+                } else {
+                    "__out = append(__out, __f(__x))".to_string()
+                };
+                format!(
+                    "func(__r {slice}) []{out} {{ \
+                     __f := {f}; \
+                     __out := make([]{out}, 0, len(__r)); \
+                     for _, __x := range __r {{ {push} }}; \
+                     return __out }}({recv_str})"
+                )
+            }
+            "flat_map" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let (f, cb_ret) =
+                    self.render_typed_closure_go(&cb.value, std::slice::from_ref(&elem))?;
+                // The closure returns a slice; its element is the result element.
+                let out = self.current_expected_type.as_deref().map_or_else(
+                    || {
+                        cb_ret
+                            .as_deref()
+                            .and_then(|r| r.strip_prefix("[]"))
+                            .unwrap_or("interface{}")
+                            .to_string()
+                    },
+                    |t| t.strip_prefix("[]").unwrap_or("interface{}").to_string(),
+                );
+                format!(
+                    "func(__r {slice}) []{out} {{ \
+                     __f := {f}; \
+                     __out := make([]{out}, 0, len(__r)); \
+                     for _, __x := range __r {{ __out = append(__out, __f(__x)...) }}; \
+                     return __out }}({recv_str})"
+                )
+            }
+            "filter" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let (f, _) =
+                    self.render_typed_closure_go(&cb.value, std::slice::from_ref(&elem))?;
+                format!(
+                    "func(__r {slice}) {slice} {{ \
+                     __f := {f}; \
+                     __out := make({slice}, 0, len(__r)); \
+                     for _, __x := range __r {{ if __f(__x) {{ __out = append(__out, __x) }} }}; \
+                     return __out }}({recv_str})"
+                )
+            }
+            "find" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let (f, _) =
+                    self.render_typed_closure_go(&cb.value, std::slice::from_ref(&elem))?;
+                format!(
+                    "func(__r {slice}) __bockOption {{ \
+                     __f := {f}; \
+                     for _, __x := range __r {{ if __f(__x) {{ return __bockSome(__x) }} }}; \
+                     return __bockNone }}({recv_str})"
+                )
+            }
+            "any" | "all" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let (f, _) =
+                    self.render_typed_closure_go(&cb.value, std::slice::from_ref(&elem))?;
+                // `any`: true if some element matches; `all`: true unless one fails.
+                if method == "any" {
+                    format!(
+                        "func(__r {slice}) bool {{ \
+                         __f := {f}; \
+                         for _, __x := range __r {{ if __f(__x) {{ return true }} }}; \
+                         return false }}({recv_str})"
+                    )
+                } else {
+                    format!(
+                        "func(__r {slice}) bool {{ \
+                         __f := {f}; \
+                         for _, __x := range __r {{ if !__f(__x) {{ return false }} }}; \
+                         return true }}({recv_str})"
+                    )
+                }
+            }
+            "reduce" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                // No seed: first element is the accumulator. Accumulator type is
+                // the element type.
+                let (f, _) =
+                    self.render_typed_closure_go(&cb.value, &[elem.clone(), elem.clone()])?;
+                format!(
+                    "func(__r {slice}) {elem} {{ \
+                     __f := {f}; \
+                     __acc := __r[0]; \
+                     for __i := 1; __i < len(__r); __i++ {{ __acc = __f(__acc, __r[__i]) }}; \
+                     return __acc }}({recv_str})"
+                )
+            }
+            "fold" => {
+                let (Some(init), Some(cb)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                let acc_ty = self
+                    .infer_go_expr_type(&init.value)
+                    .or_else(|| self.current_expected_type.clone())
+                    .unwrap_or_else(|| "interface{}".to_string());
+                let init_str = self.expr_to_string(&init.value)?;
+                let (f, _) =
+                    self.render_typed_closure_go(&cb.value, &[acc_ty.clone(), elem.clone()])?;
+                format!(
+                    "func(__r {slice}, __acc {acc_ty}) {acc_ty} {{ \
+                     __f := {f}; \
+                     for _, __x := range __r {{ __acc = __f(__acc, __x) }}; \
+                     return __acc }}({recv_str}, {init_str})"
+                )
+            }
+            "for_each" => {
+                let Some(cb) = rest.first() else {
+                    return Ok(false);
+                };
+                let (f, _) =
+                    self.render_typed_closure_go(&cb.value, std::slice::from_ref(&elem))?;
+                format!(
+                    "func(__r {slice}) {{ \
+                     __f := {f}; \
+                     for _, __x := range __r {{ __f(__x) }} }}({recv_str})"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Emit a built-in `Map[K, V]` method call to its Go form (native
     /// `map[K]V`, building on P3-α's typed map literals/decls).
     ///
@@ -4833,11 +5072,13 @@ impl GoEmitCtx {
             } => {
                 let type_str = format!(" {}", self.type_to_go(ty));
                 let ind = self.indent_str();
-                let _ = write!(
-                    self.buf,
-                    "{ind}var {}{type_str} = ",
-                    to_pascal_case(&name.name)
-                );
+                // Emit the const's declared name verbatim (not pascal-cased) so it
+                // matches the verbatim spelling the `Identifier` use-site arm emits
+                // for a known const — `to_pascal_case` strips underscores
+                // (`FIZZ_NUM` → `FIZZNUM`) while the use site keeps `FIZZ_NUM`, an
+                // undefined-identifier error. `SCREAMING_SNAKE` is a valid exported
+                // Go identifier.
+                let _ = write!(self.buf, "{ind}var {}{type_str} = ", name.name);
                 self.emit_expr(value)?;
                 self.buf.push('\n');
                 Ok(())
@@ -5879,6 +6120,13 @@ impl GoEmitCtx {
                     let _ = write!(self.buf, "{enum_name}{}{{}}", name.name);
                     return Ok(());
                 }
+                // A module-scope `const` is emitted verbatim at its declaration;
+                // spell its use site identically (the `go_fn_name` transform would
+                // camelCase a SCREAMING_SNAKE name, e.g. `FIZZ_NUM` → `fizzNUM`).
+                if self.const_names.contains(&name.name) {
+                    self.buf.push_str(&name.name);
+                    return Ok(());
+                }
                 let emitted = if is_prelude_ctor(&name.name) {
                     name.name.clone()
                 } else {
@@ -5891,6 +6139,40 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::BinaryOp { op, left, right } => {
+                // `+` on two `List[T]` operands is concatenation. Go has no `+`
+                // for slices (`operator + not defined on []T`), so build a fresh
+                // slice with `append(append([]T{}, a...), b...)`. The element type
+                // comes from a list-typed operand or the binding's expected type.
+                if matches!(op, BinOp::Add) && crate::generator::is_list_concat(node, left, right) {
+                    let elem = self
+                        .list_receiver_elem_go_type(left)
+                        .or_else(|| self.list_receiver_elem_go_type(right))
+                        .or_else(|| {
+                            self.current_expected_type
+                                .as_deref()
+                                .and_then(|t| t.strip_prefix("[]"))
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| "interface{}".to_string());
+                    // A list-literal operand must adopt `elem` as its element type
+                    // — a `[]interface{}{x}` literal is not assignable to the
+                    // `[]elem` slice `append` builds. Thread the expected element
+                    // into each literal operand (mirrors the `concat` method).
+                    let emit_operand =
+                        |this: &mut Self, n: &AIRNode| -> Result<String, CodegenError> {
+                            let prev = this.expected_collection_elem.take();
+                            if matches!(n.kind, NodeKind::ListLiteral { .. }) {
+                                this.expected_collection_elem = Some((elem.clone(), None));
+                            }
+                            let s = this.expr_to_string(n);
+                            this.expected_collection_elem = prev;
+                            s
+                        };
+                    let l = emit_operand(self, left)?;
+                    let r = emit_operand(self, right)?;
+                    let _ = write!(self.buf, "append(append([]{elem}{{}}, {l}...), {r}...)");
+                    return Ok(());
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {
@@ -6003,6 +6285,9 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_functional_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_primitive_bridge(node, callee, args)? {
