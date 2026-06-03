@@ -12,15 +12,16 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-03 16:56 — **MS-examples-hardening UNDERWAY: gate + A+B+C + Q-impl-body-typecheck LANDED.**
-#204 (gate) · #205 (A/B/C, all 5) · #207 (Q-impl-body-typecheck — checker now type-checks impl/class method bodies;
-caught a REAL latent core.error field/method value-position bug + fixed a Self false-positive; conformance 455→460).
-main a3b5491. **Examples matrix: runtime-working js 7 · ts 4 · py 9 / 20; rust 2, go 1 (blocked on E/F/G/D); #207 was a
-correctness win, NOT codegen-reach — example output byte-identical, codegen fallbacks already covered method-body list
-ops; 0 regressions.** Remaining MS-examples-hardening leverage order: **Q-rust-cargo-workspace** (cheap, +3 rust) →
-**Q-go-enum-return-boxing (E)** → **Q-rust-move-codegen (F)** → **Q-rust-string-num-methods (G)** → Q-js-effect-export
-(J) → Q-py-circular-import (K) → Q-match-exprpos (D, deep) → Q-examples-codegen-misc (now 9 sub-items incl. #207's
-go-list-map-interface + js-let-rebind-const). Follow-up: refresh the examples-exec baseline (ratchet). — Earlier
+_Last reconciled: 2026-06-03 18:01 — **MS-examples-hardening: gate + A/B/C + Q-impl-body-typecheck + rust L/F/G + go E
+LANDED (8 PRs #204–#211).** main a7a0083. Latest: #209 (E go-enum-boxing) + #210 (L cargo-workspace, F move/borrow,
+G rust String/num) merged; combined-state conformance **476/0** REQUIRE=all; baseline ratcheted (#211). **Examples
+matrix now: runtime-working js 7 · ts 4 · py 9 · RUST 2→8 · go 1 / 20** (rust jumped hard from L/F/G; **go STILL 1 — E
+was necessary but go examples hit a deeper barrier chain**: string-methods §18.3 + match-exprpos + Result-payload). 0
+regressions. **Remaining leverage order:** Q-string-num-jstspygo (string/num on js/ts/py/**go** — unblocks go +
+js/ts/py runtime) · Q-js-effect-export (J) · Q-py-circular-import (K) · Q-match-exprpos (D, deep, all-backend — biggest
+remaining + go-blocking) · Q-examples-codegen-misc (now 13 sub-items: incl. rust guard-let/mut-param/list-pattern from
+#210, go Result-payload from #209). **STRATEGIC: go is the lone stuck target (1/20) — needs Q-string-num-jstspygo + D +
+go Result-payload chained before ANY go example completes; worth an operator check on the go v1.0 bar.** — Earlier
 2026-06-03 13:44: **EXAMPLES-EXEC AUDIT COMPLETE + operator decisions** (see audit.md 2026-06-03 13:44). The full 20×5 audit (built in /tmp, project mode) gives the TRUE matrix: js 10/20 compile·2/10 run,
 ts 2/20·2/2, py 15/20·7/15, **rust 3/20·2/3 (in-repo 0/20 — workspace bug masks), go 1/20·1/1** — hello-world the only
 all-5. Worse than the digest's 6-example sample, and **rust/go fail on REAL codegen, not just the env bug** (proven:
@@ -341,12 +342,11 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   ml-data-prep, react-components, systems-allocator, type-zoo, todo-list). Distinct from `core.iter`'s FREE functions
   (conformance-tested + pass) — which is why conformance is 430/0 green while real programs fail. Checks clean ⇒ §20.4
   transpiler bug. Fix the method-call lowering to use each target's native chain (no dup receiver, typed closure params).
-- **[Q-rust-cargo-workspace] Generated `Cargo.toml` doesn't opt out of a parent workspace** — bug · ready ·
-  `compiler/crates/bock-codegen/` (rust scaffolder) · — · links MS-examples-hardening · note: FOUND 2026-06-03;
-  **CONFIRMED MASKING-ONLY (audit 13:44).** Project-mode rust build fails `current package believes it's in a workspace
-  when it's not` when `build/rust/Cargo.toml` sits inside a parent cargo workspace (reproduced: fizzbuzz-rust passes in
-  /tmp, fails in-repo). Fix: emit an empty `[workspace]` table in the generated `Cargo.toml`. Purely additive — fixing
-  recovers 3/20 rust examples in-repo; the other 17 fail on genuine rust codegen bugs (F/G/A/B/D). Cheap; do early.
+- **[Q-rust-cargo-workspace] Generated `Cargo.toml` doesn't opt out of a parent workspace** — bug ·
+  **DONE → #210** · `compiler/crates/bock-codegen/src/scaffold.rs` · — · links MS-examples-hardening, #210 · note:
+  FIXED by #210 — the rust scaffolder now emits an empty `[workspace]` table in the generated `Cargo.toml`. Verified
+  in-repo (fizzbuzz built inside the gitignored `temp/` — which is inside the repo's cargo workspace — now succeeds).
+  Was masking-only; recovers the rust examples that failed solely on this.
 - **[Q-examples-exec-coverage] Exec-test all ~20 examples on all 5 targets in CI (the gate)** — chore/test-infra ·
   **DONE (informational) → #204; ratchet-to-blocking pending** · `tools/scripts/examples-exec-audit.sh`,
   `tools/examples-exec-baseline.txt`, `.github/workflows/examples-exec.yml` · — · links MS-examples-hardening, #204 ·
@@ -402,22 +402,36 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   for method-body list ops. NEW residue OPENs surfaced (pre-existing, codegen-crate) → folded into Q-examples-codegen-misc
   (h)/(i). [The core.error checker-resolution fix is distinct from the codegen field/method collision work in
   Q-go-error-message/#191 + Q-error-message-jstspy/#193 — same pain point, different layer.]
-- **[Q-go-enum-return-boxing] Go: enum variant not boxed into sealed-trait interface on return** — bug · ready ·
-  `compiler/crates/bock-codegen/` (go) · — · links MS-examples-hardening, #168 · note: FOUND 2026-06-03 (audit).
-  Returning a variant where the sealed-trait interface type is expected isn't boxed: `cannot use MessageTypeText{}
-  (struct) as __bockResult value in return`, `too many return values have (int, error) want (interface{})`, `interface{}
-  does not implement Route (missing method isRoute)`. Box the variant to its interface at return sites. Examples:
-  chat-protocol, microservice, effect-showcase, calculator (go).
-- **[Q-rust-move-codegen] Rust: codegen produces borrow/move violations** — bug · ready ·
-  `compiler/crates/bock-codegen/` (rust) · — · links MS-examples-hardening · note: FOUND 2026-06-03 (audit). Generated
-  rust moves a value then reuses it: E0382 `use of moved value: op`/`borrow of moved value: key`; E0425 `cannot find
-  value val/val2` (move-renamed binding). Needs clone/borrow insertion or by-ref lowering for reused bindings (pairs with
-  the #149 Rust by-value-reuse follow-up). Examples: calculator, effect-showcase, ownership-demo (rust).
-- **[Q-rust-string-num-methods] Rust: String / numeric method-lowering gaps** — bug · ready ·
-  `compiler/crates/bock-codegen/` (rust) · — · links MS-examples-hardening, Q-r2-codegen-residue(d) · note: FOUND
-  2026-06-03 (audit). `no method 'slice' found for String`, `no method 'to_float' found for i64`, `&str` vs `String`
-  mismatches. Map Bock String/numeric methods to rust equivalents (slicing, numeric conversion) with correct owned/borrowed
-  types. Examples: microservice, markdown-parser, inventory-system (rust).
+- **[Q-go-enum-return-boxing] Go: enum variant not boxed into sealed-trait interface on return** — bug ·
+  **DONE → #209** · `compiler/crates/bock-codegen/src/go.rs` · — · links MS-examples-hardening, #168, #209,
+  Q-string-num-jstspygo, Q-match-exprpos · note: FIXED by #209 (4 root causes: block-in-expr-position closure dropped
+  its statements + hardcoded `func() interface{}`; if/match IIFEs didn't propagate the concrete type into branch/arm
+  bodies; untyped `let m = if{…}` over variants typed its closure from the fn return; void-call arm tails emitted
+  `return println(..)` → the `(int,error)` arity error). Conformance +5 (`exec_enum_return_boxing` ×5). **HONEST: cleared
+  the boxing/arity barrier on all 4 go examples but go examples STILL fail (matrix go 1/20 unchanged) — each now hits a
+  NEXT barrier** (chat-protocol→early-return-trapped-in-IIFE = Q-match-exprpos; microservice→String.slice = Q-string-num-
+  jstspygo + expr-position type-switch payload; calculator/effect-showcase→a single Result-payload type-assert on go).
+  E was a necessary prerequisite, not sufficient — go needs the full chain (string-methods + match-exprpos + Result-payload).
+- **[Q-rust-move-codegen] Rust: codegen produces borrow/move violations** — bug ·
+  **DONE → #210** · `compiler/crates/bock-codegen/src/rs.rs` · — · links MS-examples-hardening, #149, #210 · note:
+  FIXED by #210 — clone-on-reuse extended to fn/method params (`seed_reused_params`, skips Copy scalars), the
+  desugared-self-call / MethodCall / bare-effect-op arg paths, `for x in coll` iterables, and closure-captured bindings
+  (E0507); plus an adjacent effect-handler double-borrow fix (E0277 `&impl T: T`) via a `borrowed_handler_effects` set.
+  New fixtures `exec_rust_move_reuse` (×5) + `exec_rust_effect_forwarding` (×5). Recovered rust examples (see Q-list-method
+  matrix). [the #149 by-value-reuse follow-up is subsumed.]
+- **[Q-rust-string-num-methods] Rust: String / numeric method-lowering gaps** — bug ·
+  **DONE (rust) → #210; cross-backend split → Q-string-num-jstspygo** · `compiler/crates/bock-codegen/src/rs.rs`
+  (+ `bock-types/checker.rs` string_concat stamp) · — · links MS-examples-hardening, #210, Q-string-num-jstspygo · note:
+  FIXED on RUST by #210 — lowered String `slice`/`substring`/`char_at`/`index_of`/`repeat`/`reverse`/`trim_*` + numeric
+  `to_float`/`to_int`/`abs`/`min`/`max`/`clamp`/`floor`/`ceil`/`round`/`sqrt`/… to native rust; new checker `string_concat`
+  stamp lowers `String + String` to `format!`. Fixture `exec_rust_string_num_methods` (rust-only). **The same lowerings
+  are MISSING on js/ts/python/go → split out to Q-string-num-jstspygo (below).**
+- **[Q-string-num-jstspygo] String/numeric method lowering missing on js/ts/python/go (§18.3)** — bug · ready ·
+  `compiler/crates/bock-codegen/` (js/ts/py/go) · — · links MS-examples-hardening, #210, §18.3 · note: FOUND 2026-06-03
+  (#210). #210 lowered the §18.3 String/numeric methods (`slice`/`substring`/`char_at`/`index_of`/`to_float`/`to_int`/…)
+  to native code on RUST only; js/ts/python/go still emit `s.slice(...)`/`n.toFloat()` (undefined on those targets — e.g.
+  go `microservice` now hits `String.slice` unimplemented after the boxing fix). Grow the same per-backend lowerings,
+  routed by `recv_kind`. Contributes to go (and js/ts/py runtime) example failures. Worth a single cross-backend session.
 - **[Q-js-effect-export] JS: effect-group/stack export referenced but not emitted** — bug · ready ·
   `compiler/crates/bock-codegen/` (js) · — · links MS-examples-hardening, #155, #157 · note: FOUND 2026-06-03 (audit).
   `SyntaxError: Export 'AppEffects'/'ApiEffects'/'ServiceStack' is not defined in module` — an effect-group/stack symbol
@@ -443,7 +457,10 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   at the free-fn level; the typed-`let` pattern avoids it; (i) **[from #207]** js/ts: a `let` binding that is REASSIGNED
   (`let list = …; list = list.add(…)`) is emitted as `const` → Node `Identifier 'list' has already been declared` (this
   precisely diagnoses the audit's "redeclared `list`", item (b) — a `let`-reassignment-vs-`const` lowering bug; affects
-  todo-list js). Triage each as its own fix or example correction.
+  todo-list js); (j) **[from #210]** rust: guard-`let` pattern lowered to a boolean guard → E0600/E0425 unbound `val`/`val2`
+  (ownership-demo); (k) **[from #210]** rust: `mut <param>` not emitted as `mut` → E0384 (ownership-demo); (l) **[from #210]**
+  rust: list-pattern emitted as a slice pattern → E0529 (ownership-demo); (m) **[from #209]** go: Result-payload
+  type-assert error after the boxing fix (calculator, effect-showcase go). Triage each as its own fix or example correction.
 - **[Q-chat-protocol-allfail] `chat-protocol` fails build on all 5 — DIAGNOSED → folded into Q-match-exprpos** — bug ·
   **RESOLVED-AS-DUP (diagnosed 2026-06-03 13:44)** · — · links Q-match-exprpos · note: the all-5 failure (js `Unexpected
   token ')'`, py `'(' was never closed`, ts `Expression expected`, go enum-return) is the **expression-position
