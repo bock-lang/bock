@@ -12,9 +12,19 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_Last reconciled: 2026-06-03 — **NIGHT PAUSE** at main b7d8720 (0 open PRs, worktrees==main, clean). See the
-2026-06-03 DAILY DIGEST in audit.md. **Awaiting operator: (1) examples-hardening direction [audit-first recommended];
-(2) .gitignore policy for examples/**/build/.** Earlier today: (**★ ItemB COMPLETE — MS-projectmode DONE (S0–S8) ★** — per-module native
+_Last reconciled: 2026-06-03 13:44 — **EXAMPLES-EXEC AUDIT COMPLETE + operator decisions** (see audit.md
+2026-06-03 13:44). The full 20×5 audit (built in /tmp, project mode) gives the TRUE matrix: js 10/20 compile·2/10 run,
+ts 2/20·2/2, py 15/20·7/15, **rust 3/20·2/3 (in-repo 0/20 — workspace bug masks), go 1/20·1/1** — hello-world the only
+all-5. Worse than the digest's 6-example sample, and **rust/go fail on REAL codegen, not just the env bug** (proven:
+fizzbuzz-rust passes in /tmp, fails in-repo). **~9 evidence-confirmed root-cause clusters** filed below:
+Q-list-method-codegen (A, HIGH, all 5 — receiver dup'd as first arg), Q-list-concat-codegen (B), Q-const-enum-naming
+(C), Q-match-exprpos (D — UN-DEFERRED, broadened; subsumes the now-diagnosed Q-chat-protocol-allfail),
+Q-go-enum-return-boxing (E), Q-rust-move-codegen (F), Q-rust-string-num-methods (G), Q-js-effect-export (J),
+Q-py-circular-import (K), Q-examples-codegen-misc (minor); plus Q-rust-cargo-workspace (L, masking-only) +
+Q-examples-exec-coverage (M, the gate). **OPERATOR DECIDED:** v1.0 = **leverage-order, ALL 5 targets at the
+'examples green' bar** (not tiered; go/rust long poles accepted); gate = **informational-first → blocking**. → see
+MS-examples-hardening. gitignore cleanup → **PR #202** (merging). NEXT: fix A first (engineer session) + build the
+informational gate (parallel, disjoint files). — Earlier 2026-06-03: (**★ ItemB COMPLETE — MS-projectmode DONE (S0–S8) ★** — per-module native
 output on all 5 [DV13]; project mode real [scaffolder-owned manifests/configs/README + transpiled @test files per
 framework], source mode bare [DV18]; config tables parsed; core.error fixed ×5 [#193]. 430 exec pairs / 0 failed
 REQUIRE=all. ItemB (the ProjectMode milestone) complete + js/ts/python CI-certified [#196] + rust/go formatter-clean
@@ -65,14 +75,16 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `compiler/crates/bock-types/` · — · links #110 · note: the resolver doesn't
   treat a primitive type name as an expression value, so `Float.from(3)` doesn't
   resolve (`.into()` is the working primitive path). Minor usability gap.
-- **[Q-match-exprpos] Expression-position statement-arm match lowering** — impl ·
-  ready (deferred — deep) · `compiler/crates/bock-codegen/` · — · links #121, #127, #176 · note: #121 fixed
-  statement-POSITION matches with statement arms (all 5). The expression-position case
-  (`let x = match … { _ => return }` yielding a value) needs a temp-hoist desugar on
-  Go/Py/JS/TS. **#176 re-confirmed** it is genuinely broken on go/py/js/ts (Rust correct): an expr-position match/if
-  bound to a `let` with a control-flow arm captures the transfer inside the IIFE/lambda. The correct fix threads an
-  "assign-to-target" mode through each backend's match-arm emitter — **cross-cutting across 4 backends**, so deferred
-  (too deep for the residue sweep). Off the for-desugar path.
+- **[Q-match-exprpos] Expression-position statement-arm match/if lowering (all 5)** — impl ·
+  ready · **UN-DEFERRED 2026-06-03 (audit) — now v1.0-scope (MS-examples-hardening), deep** · `compiler/crates/bock-codegen/` ·
+  — · links #121, #127, #176, MS-examples-hardening · note: #121 fixed statement-POSITION matches with statement arms
+  (all 5). The expression-position case (`let x = match … { _ => return }` yielding a value) needs a temp-hoist desugar.
+  **#176 re-confirmed** broken on go/py/js/ts (Rust correct); the **20×5 audit (13:44) shows it's BROADER + higher-impact
+  than the deferral assumed (~6 examples)** and is the root cause of the former Q-chat-protocol-allfail: on js/py the
+  IIFE/lambda wrapping produces **unbalanced parens** (`Unexpected token ')'` / `'(' was never closed`) and a **duplicate
+  `default` clause** on js, not just a captured transfer. The correct fix threads an "assign-to-target" mode through each
+  backend's match/if-arm emitter — **cross-cutting across 4 backends** (still deep), but operator held all 5 at the v1.0
+  bar, so it's in scope. Examples: chat-protocol, context-audit, guessing-game, pattern-lab, ownership-demo, type-zoo.
 - **[Q-stdlib-fmtcheck] Enable `fmt --check` on stdlib `.bock`** — chore · ready ·
   `.github/workflows/`, `stdlib/` · — · links #119 · note: now that `bock fmt`
   emits valid Bock (#119), the stdlib `.bock` files (hand-authored to avoid the old
@@ -304,30 +316,84 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   *reflow* long lines (not hand-matchable in codegen) AND post-emit prettier would break the js/ts **source maps**;
   those formatters are user-OPTIONAL per §20.6.2 (not the baseline). Pursue later via either cheap codegen wins
   (redundant parens, py blank-lines) and/or post-emit formatting with source-map regeneration. v1.x-leaning.
-- **[Q-list-method-codegen] List `.map()`/`.filter()` method-with-closure mislowered (all 5)** — bug · ready
-  (**HIGH — real-program correctness; likely highest-leverage**) · `compiler/crates/bock-codegen/` · — · links §20.4 ·
-  note: **FOUND 2026-06-03 by an examples-compile audit.** A List functional METHOD with a closure (`data.map((dp) => …)`)
-  is mislowered: codegen emits `recv.map(recv, closure)` (receiver duplicated as an arg) with untyped closure params →
-  **TS** type-error, **Go** syntax-error (`map` is a keyword), **js/python** runtime-break (their build-validate is
-  syntax-only so they falsely show "compiles"). Distinct from `core.iter`'s FREE functions (conformance-tested + pass) —
-  which is why conformance is green while real programs fail. Checks clean but fails codegen ⇒ §20.4 transpiler bug.
-  Affects most real-world examples on ts/go (and at runtime on js/py).
+- **[Q-list-method-codegen] List `.map()`/`.filter()` method-with-closure mislowered (all 5)** — bug · ready ·
+  **★ NEXT DISPATCH — leverage #1, all-5** · `compiler/crates/bock-codegen/` · — · links §20.4, MS-examples-hardening ·
+  note: **FOUND 2026-06-03; CONFIRMED against generated code by the 20×5 audit (2026-06-03 13:44).** EXACT root cause:
+  a List functional METHOD with a closure is lowered with the **free-function calling convention** — the receiver is
+  emitted as an explicit first argument: `data.map(data, (dp) => …)` (verified in TS output). Effect per target: **TS**
+  array-not-assignable-to-callback + implicit-any params; **rust** `no method 'map'/'filter' on Vec` (needs
+  `.iter().map().collect()`); **go** `found 'map'` syntax-error (`map` keyword) + `.filter` undefined; **js** runtime
+  "object is not a function" / "nodes.map is not a function"; **python** `'list' object has no attribute 'map'/'filter'`.
+  BROADEST single bug — ~10 examples (data-pipeline, markdown-parser, task-api, inventory-system, ownership-demo,
+  ml-data-prep, react-components, systems-allocator, type-zoo, todo-list). Distinct from `core.iter`'s FREE functions
+  (conformance-tested + pass) — which is why conformance is 430/0 green while real programs fail. Checks clean ⇒ §20.4
+  transpiler bug. Fix the method-call lowering to use each target's native chain (no dup receiver, typed closure params).
 - **[Q-rust-cargo-workspace] Generated `Cargo.toml` doesn't opt out of a parent workspace** — bug · ready ·
-  `compiler/crates/bock-codegen/` (rust scaffolder) · — · note: FOUND 2026-06-03. Project-mode rust build fails
-  `current package believes it's in a workspace when it's not` when `build/rust/Cargo.toml` sits inside a parent cargo
-  workspace. Fix: emit an empty `[workspace]` table in the generated `Cargo.toml`. Scaffolding robustness; also masks
-  rust's real codegen status in the examples audit until fixed.
-- **[Q-examples-exec-coverage] Exec-test all ~20 examples on all 5 targets in CI** — chore/test-infra · ready
-  (**HIGH — coverage gap that hid the above**) · `compiler/tests/`, `.github/workflows/` · — · links milestones (v1.0
-  acceptance) · note: FOUND 2026-06-03. The 20 `examples/` aren't built+run on all 5 targets, so real-world-pattern
-  codegen bugs (Q-list-method-codegen) slipped past the narrower conformance fixtures (430/0 green while real programs
-  fail). Audit (6 real-world ×5): **ts 0/6, rust 0/6, go 0/6 compile** (js/py "OK" = syntax-only validate). Add an
-  examples-exec gate (build + where possible run each example ×5). milestones.md lists "examples build/test clean on
-  ≥JS+Py+Rust" as a v1.0 acceptance gate — currently UNMET.
-- **[Q-chat-protocol-allfail] `chat-protocol` example fails build on all 5** — bug · ready (needs diagnosis) ·
-  `examples/real-world/chat-protocol`, codegen · — · note: FOUND 2026-06-03. Fails even js/python syntax-validate (a
-  different root cause than Q-list-method-codegen, which only breaks the type-checked targets). Diagnose during the
-  examples-exec audit.
+  `compiler/crates/bock-codegen/` (rust scaffolder) · — · links MS-examples-hardening · note: FOUND 2026-06-03;
+  **CONFIRMED MASKING-ONLY (audit 13:44).** Project-mode rust build fails `current package believes it's in a workspace
+  when it's not` when `build/rust/Cargo.toml` sits inside a parent cargo workspace (reproduced: fizzbuzz-rust passes in
+  /tmp, fails in-repo). Fix: emit an empty `[workspace]` table in the generated `Cargo.toml`. Purely additive — fixing
+  recovers 3/20 rust examples in-repo; the other 17 fail on genuine rust codegen bugs (F/G/A/B/D). Cheap; do early.
+- **[Q-examples-exec-coverage] Exec-test all ~20 examples on all 5 targets in CI (the gate)** — chore/test-infra ·
+  ready · **HIGH — the guardrail; INFORMATIONAL-FIRST (operator-decided)** · `compiler/tests/`, `.github/workflows/` ·
+  — · links milestones (MS-examples-hardening, v1.0 acceptance) · note: FOUND 2026-06-03; the 20×5 audit (13:44) is the
+  prototype. The 20 `examples/` aren't built+run on all 5, so real-world-pattern codegen bugs slipped past the narrow
+  conformance fixtures (430/0 green while real programs fail). Build the gate: for each example × target, project-mode
+  `bock build` (compile) + run where possible (ts via `node --experimental-strip-types`; rust `cargo run`; go `go run .`;
+  js `node`; py `python3`). **Land NON-BLOCKING (reports the matrix per PR), then ratchet per-target pass-thresholds
+  upward to required as clusters land** (operator decision). Can run parallel to the cluster fixes (disjoint files).
+  Note the in-repo cargo-workspace interaction (Q-rust-cargo-workspace) — fix it or build rust examples out-of-tree.
+- **[Q-list-concat-codegen] List `+` concatenation emitted as native `+` (ts/rust/go)** — bug · ready ·
+  `compiler/crates/bock-codegen/` · — · links MS-examples-hardening, §20.4 · note: FOUND 2026-06-03 (audit). Bock list
+  append/concat via `+` (`(self.items + [todo])`) lowers to a native `+` op: **ts** `Operator '+' cannot be applied to
+  T[]`, **rust** E0369 `cannot add Vec<T> to Vec<T>`, **go** `operator + not defined on []T`. js silently does the wrong
+  thing (string-concat), python coincidentally works (list `+`). Lower to each target's concat idiom (spread / `extend` /
+  `append`). Examples: todo-list, expense-tracker, ownership-demo, systems-allocator.
+- **[Q-const-enum-naming] Const / enum-variant identifier def↔use mangling mismatch (all 5)** — bug · ready ·
+  `compiler/crates/bock-codegen/` · — · links MS-examples-hardening · note: FOUND 2026-06-03 (audit). A constant or
+  enum-variant name is emitted with one casing at the DEFINITION and another at the USE site: TS defines `FIZZ_NUM` but
+  references `fizzNUM` (`Did you mean 'FIZZ_NUM'?`); `Category_Electronics`/`Allocatable` referenced-but-undefined; python
+  references `FIZZ_NUM` but never emits the def at module scope. Normalize the identifier transform so def and use agree
+  (and ensure module-scope consts are emitted). Examples: fizzbuzz, inventory-system, systems-allocator. Likely cheap.
+- **[Q-go-enum-return-boxing] Go: enum variant not boxed into sealed-trait interface on return** — bug · ready ·
+  `compiler/crates/bock-codegen/` (go) · — · links MS-examples-hardening, #168 · note: FOUND 2026-06-03 (audit).
+  Returning a variant where the sealed-trait interface type is expected isn't boxed: `cannot use MessageTypeText{}
+  (struct) as __bockResult value in return`, `too many return values have (int, error) want (interface{})`, `interface{}
+  does not implement Route (missing method isRoute)`. Box the variant to its interface at return sites. Examples:
+  chat-protocol, microservice, effect-showcase, calculator (go).
+- **[Q-rust-move-codegen] Rust: codegen produces borrow/move violations** — bug · ready ·
+  `compiler/crates/bock-codegen/` (rust) · — · links MS-examples-hardening · note: FOUND 2026-06-03 (audit). Generated
+  rust moves a value then reuses it: E0382 `use of moved value: op`/`borrow of moved value: key`; E0425 `cannot find
+  value val/val2` (move-renamed binding). Needs clone/borrow insertion or by-ref lowering for reused bindings (pairs with
+  the #149 Rust by-value-reuse follow-up). Examples: calculator, effect-showcase, ownership-demo (rust).
+- **[Q-rust-string-num-methods] Rust: String / numeric method-lowering gaps** — bug · ready ·
+  `compiler/crates/bock-codegen/` (rust) · — · links MS-examples-hardening, Q-r2-codegen-residue(d) · note: FOUND
+  2026-06-03 (audit). `no method 'slice' found for String`, `no method 'to_float' found for i64`, `&str` vs `String`
+  mismatches. Map Bock String/numeric methods to rust equivalents (slicing, numeric conversion) with correct owned/borrowed
+  types. Examples: microservice, markdown-parser, inventory-system (rust).
+- **[Q-js-effect-export] JS: effect-group/stack export referenced but not emitted** — bug · ready ·
+  `compiler/crates/bock-codegen/` (js) · — · links MS-examples-hardening, #155, #157 · note: FOUND 2026-06-03 (audit).
+  `SyntaxError: Export 'AppEffects'/'ApiEffects'/'ServiceStack' is not defined in module` — an effect-group/stack symbol
+  is in the ESM export list but never emitted as a binding. Emit the binding (or drop it from the export list). Examples:
+  effect-showcase, task-api, microservice (js).
+- **[Q-py-circular-import] Python: multi-module emit produces a circular import** — bug · ready ·
+  `compiler/crates/bock-codegen/` (python) · — · links MS-examples-hardening, #182 (per-module python) · note: FOUND
+  2026-06-03 (audit). `ImportError: cannot import name 'Category' from partially initialized module 'models' (circular
+  import)` — the per-module python emit creates an import cycle across the project's modules. Break the cycle (lazy/local
+  import, or module-ordering). Example: inventory-system (python).
+- **[Q-examples-codegen-misc] Examples audit: minor / per-example codegen + stub-quality gaps** — bug · ready (low-pri,
+  triage individually) · `compiler/crates/bock-codegen/`, `examples/` · — · links MS-examples-hardening · note: FOUND
+  2026-06-03 (audit). Smaller items surfaced: (a) `todo`/unimplemented expression in return position → `return throw …`
+  (js) / `return raise …` (py), invalid syntax — partly example **stub-quality** (guessing-game has unfinished bodies);
+  (b) reserved-word / identifier collisions — `eval` (calculator js, `Invalid use of 'eval'`), redeclared `list`
+  (todo-list js); (c) `Char` type unmapped on ts/rust/go (type-zoo); (d) go unused-var strictness `declared and not used`
+  (guessing-game); (e) local `step2` binding not emitted (calculator go/py `undefined: step2`). Triage each as its own
+  fix or example correction during the workstream.
+- **[Q-chat-protocol-allfail] `chat-protocol` fails build on all 5 — DIAGNOSED → folded into Q-match-exprpos** — bug ·
+  **RESOLVED-AS-DUP (diagnosed 2026-06-03 13:44)** · — · links Q-match-exprpos · note: the all-5 failure (js `Unexpected
+  token ')'`, py `'(' was never closed`, ts `Expression expected`, go enum-return) is the **expression-position
+  control-flow lowering** producing unbalanced parens on js/py + the go-enum-return cluster — NOT a distinct root cause.
+  Folded into **Q-match-exprpos** (D, un-deferred) and **Q-go-enum-return-boxing** (E). No separate work item.
 
 ## Deferred
 
