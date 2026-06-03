@@ -130,11 +130,13 @@ exercises the stdlib's FREE functions but not the real-world-shaped method/closu
 **leverage order**; the examples-exec CI gate lands **informational-first**, ratcheting to blocking as clusters land.
 - **Acceptance:** all 20 `examples/` **compile AND run** on all 5 targets in CI (the Q-examples-exec-coverage gate,
   flipped to blocking); no regressions vs the ratchet.
-- **Progress (2026-06-03 15:24):** the gate (M, #204, informational) + clusters **A+B+C (#205)** landed. Runtime-working
-  rose **js 2→7 · ts 2→4 · py 7→9 / 20** (rust 2, go 1 unchanged — blocked on E/F/G/D), 0 regressions, conformance 455/0
-  with 5 new real-world-shaped fixtures. NEW finding **Q-impl-body-typecheck** (HIGH — checker skips impl/class method
-  bodies; bounds A/B's meta-stamp fixes to free-fn call sites). Cluster C: const done; enum-variant/trait-name residue is
-  now runtime (→ K). Remaining: Q-impl-body-typecheck, Q-rust-cargo-workspace, E, F, G, J, K, D, misc.
+- **Progress (2026-06-03 16:56):** the gate (M, #204, informational) + clusters **A+B+C (#205)** + **Q-impl-body-typecheck
+  (#207)** landed. Runtime-working rose **js 2→7 · ts 2→4 · py 7→9 / 20** (rust 2, go 1 unchanged — blocked on E/F/G/D),
+  0 regressions, conformance **455→460**. #207 made the checker type-check impl/class method bodies — caught a REAL latent
+  `core.error` field/method value-position bug + fixed a `Self` false-positive; a correctness win (example output
+  byte-identical — codegen fallbacks already covered method-body list ops). Cluster C: const done; enum-variant/trait-name
+  residue now runtime (→ K). **Remaining (leverage order):** Q-rust-cargo-workspace (cheap, +3 rust), E (go-enum-boxing),
+  F (rust-move), G (rust-string), J (js-effect-export), K (py-circular), D (match-exprpos, deep), Q-examples-codegen-misc.
 - **Mapped items (queue.md), leverage order:** `Q-list-method-codegen` (A, HIGH, all 5 — receiver dup'd as 1st arg) →
   `Q-rust-cargo-workspace` (L, cheap, recovers 3 rust in-repo) → `Q-list-concat-codegen` (B) → `Q-const-enum-naming` (C)
   → `Q-go-enum-return-boxing` (E) → `Q-rust-move-codegen` (F) → `Q-rust-string-num-methods` (G) → `Q-js-effect-export`

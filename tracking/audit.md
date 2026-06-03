@@ -1924,3 +1924,32 @@ AWAITING OPERATOR (2 decisions, nothing in flight): (1) **examples-hardening dir
   Follow-up: (1) land this tracking PR; (2) refresh the examples-exec baseline (ratchet step now that A/B/C landed);
     (3) next dispatch in leverage order — Q-impl-body-typecheck (unblocks method-body sites) then Q-rust-cargo-workspace
     (cheap, +3 rust) / E / F / G. Operator may want to checkpoint on sequencing before the next batch.
+
+[2026-06-03 16:56 UTC] Q-impl-body-typecheck DONE (#207) — measure-then-fix, clean blast radius
+  Input: operator said "go ahead with Q-impl-body-typecheck." Dispatched ONE worktree-isolated engineer session
+    (foreground; model inherited Opus 4.8) with an explicit MEASURE-THEN-FIX framing — flagged the blast-radius risk
+    (newly type-checking impl/class bodies could surface pre-existing errors in stdlib/examples that currently compile,
+    turning conformance red). Instructed: baseline conformance → implement → measure what newly-fails → diagnose
+    real-bug-vs-checker-false-positive → fix so the gate stays green → if intractable, scope + report OPENs, don't land red.
+  RESULT (#207, re-verified via CI — all 13 checks pass incl. ubuntu test lanes REQUIRE=all): `check_item` now recurses
+    into ImplBlock/ClassDecl, checking each method body as a fn (self bound to target, impl generics/Self substituted via
+    `build_impl_context`). Blast radius was SMALL + fully resolved — exactly two latent issues:
+      (1) REAL pre-existing bug — `core.error` `impl Error for SimpleError { fn message(self)->String { self.message } }`:
+          a FieldAccess to a field whose name collides with a method resolved the METHOD in value position → E4001.
+          Affected ALL core modules transitively + user-facing. Fixed IN THE CHECKER (prefer same-named field in value
+          position; method *calls* re-resolve via new `resolve_user_method_fn_type`) — no stdlib source changed.
+      (2) FALSE POSITIVE — `Self` in a plain-impl return type resolved to `Named("Self")`; the `TypeSelf` arm now consults
+          `gp_map["Self"]`.
+    Conformance 455→460 (+5 new exec_method_body_list_ops ×5); negative diagnostics fixtures added (method/class body type
+    errors now caught). Scope clean: only bock-types/checker.rs + execution.rs + 3 fixtures. Merged; main a3b5491.
+  HONEST FINDING (engineer reported, I confirmed it's the right read): example output (todo-list ×5) is BYTE-IDENTICAL
+    before/after — codegen already had robust syntactic fallbacks for method-body list ops, so #207's value is the
+    CORRECTNESS dimension (catching method-body type errors + the latent core.error bug), NOT new codegen reach. So
+    Q-impl-body-typecheck did NOT move the examples matrix (still js7/ts4/py9). Tracking updated to say so plainly.
+  NEW residue OPENs (pre-existing, codegen-crate, out of #207 scope) → folded into Q-examples-codegen-misc (h)/(i):
+    (h) go: `list.map(...)` returned DIRECTLY → `[]interface{}` (generic-element-typing residue of cluster A); (i) js/ts:
+    a REASSIGNED `let` emitted as `const` → Node redeclare error (precisely diagnoses the audit's "redeclared list").
+  STATE: main a3b5491, this tracking PR pending. MS-examples-hardening: gate + A/B/C + Q-impl-body-typecheck landed;
+    remaining leverage order = Q-rust-cargo-workspace (cheap, +3 rust) → E (go-enum-boxing) → F (rust-move) → G
+    (rust-string) → J → K → D (deep) → misc. NEXT: checkpoint with operator on the next batch (rust/go are the long poles;
+    Q-rust-cargo-workspace + E/F/G would lift rust/go, which are currently 2/1 of 20). Plus the baseline-refresh ratchet.
