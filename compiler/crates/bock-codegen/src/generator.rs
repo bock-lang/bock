@@ -338,6 +338,50 @@ pub trait CodeGenerator {
         &self,
         modules: &[(&AIRModule, &Path)],
     ) -> Result<GeneratedCode, CodegenError>;
+
+    /// Transpile the project's `@test` functions into the target's idiomatic test
+    /// framework (project mode, §20.6.2).
+    ///
+    /// `framework` selects the deep-config test-framework variant (`"vitest"` /
+    /// `"jest"` for js/ts; `"pytest"` / `"unittest"` for python; ignored for
+    /// rust/go, whose frameworks are universal — `cargo test` / `go test`).
+    /// Returns the test files to write into the scaffolded project plus an
+    /// optional snippet to append to the entry file (Rust wires its inline
+    /// `#[cfg(test)] mod` from `src/main.rs`). When the project has no `@test`
+    /// functions the returned [`TestArtifacts`] is empty.
+    ///
+    /// The default implementation returns no test artifacts; every v1 backend
+    /// overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CodegenError` if a test body contains a construct that cannot be
+    /// represented in the target language.
+    fn generate_tests(
+        &self,
+        modules: &[(&AIRModule, &Path)],
+        framework: &str,
+    ) -> Result<TestArtifacts, CodegenError> {
+        let _ = (modules, framework);
+        Ok(TestArtifacts::default())
+    }
+}
+
+/// The output of [`CodeGenerator::generate_tests`]: the transpiled test files
+/// plus an optional snippet appended to the entry file.
+///
+/// Most targets place their tests in standalone files (`*.test.js`,
+/// `test_*.py`, `*_test.go`). Rust uses an inline `#[cfg(test)] mod`, so its
+/// `bock_tests.rs` must be wired into `src/main.rs` via a `mod bock_tests;`
+/// declaration — carried in [`Self::entry_append`].
+#[derive(Debug, Clone, Default)]
+pub struct TestArtifacts {
+    /// Standalone test files, paths relative to the target build root.
+    pub files: Vec<OutputFile>,
+    /// A snippet to append verbatim to the entry file's content (Rust's
+    /// `mod bock_tests;`), or `None` when no entry wiring is required. The path
+    /// of the entry file is target-specific; the build driver knows it.
+    pub entry_append: Option<String>,
 }
 
 /// Restrict `modules` to those **reachable** from the entry module via real
@@ -536,6 +580,139 @@ pub fn module_main_fn_is_async(module: &AIRModule) -> bool {
             NodeKind::FnDecl { name, is_async: true, .. } if name.name == "main"
         )
     })
+}
+
+// ─── Transpiled-test extraction + assertion classification (§20.6.2) ─────────
+//
+// Project mode (§20.6.2) transpiles each Bock `@test` function into the target's
+// idiomatic test framework. These shared helpers identify the `@test` functions
+// and classify the `expect(actual).<assertion>(expected)` chains in their bodies
+// so each per-target test emitter can lower them to its framework's idiom
+// without re-implementing the AIR pattern-matching five times.
+
+/// Returns `true` if `node` is a function declaration carrying the `@test`
+/// annotation. Matches the discovery rule used by `bock test`
+/// (`bock-cli::test::discover_test_functions`): an `@test`-annotated `FnDecl`.
+#[must_use]
+pub fn fn_is_test(node: &AIRNode) -> bool {
+    matches!(
+        &node.kind,
+        NodeKind::FnDecl { annotations, .. }
+            if annotations.iter().any(|a| a.name.name == "test")
+    )
+}
+
+/// Collect every `@test`-annotated top-level function across the given modules,
+/// paired with the module's declared path (dotted, or `""` if anonymous).
+///
+/// The result preserves module order and within-module declaration order, so the
+/// emitted test files are deterministic. Each entry borrows the `FnDecl` node.
+#[must_use]
+pub fn collect_test_fns<'a>(
+    modules: &'a [(&'a AIRModule, &'a Path)],
+) -> Vec<(&'a AIRNode, String)> {
+    let mut tests = Vec::new();
+    for (module, _) in modules {
+        let module_path = module_path_string(module).unwrap_or_default();
+        if let NodeKind::Module { items, .. } = &module.kind {
+            for item in items {
+                if fn_is_test(item) {
+                    tests.push((item, module_path.clone()));
+                }
+            }
+        }
+    }
+    tests
+}
+
+/// A recognized Bock test assertion (`expect(actual).<method>(...)`).
+///
+/// Each variant carries the framework-agnostic *intent*; the per-target emitter
+/// maps it to the idiom (Vitest/Jest `expect().toBe(...)`, pytest `assert`, Rust
+/// `assert_eq!`, Go `t.Errorf`, etc.). The assertion methods mirror the
+/// interpreter's `register_test_builtins` set (`bock-interp::builtins`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestAssertion {
+    /// `expect(actual).to_equal(expected)`
+    Equal,
+    /// `expect(actual).to_be_true()`
+    BeTrue,
+    /// `expect(actual).to_be_false()`
+    BeFalse,
+    /// `expect(actual).to_be_some()`
+    BeSome,
+    /// `expect(actual).to_be_none()`
+    BeNone,
+    /// `expect(actual).to_be_ok()`
+    BeOk,
+    /// `expect(actual).to_be_err()`
+    BeErr,
+}
+
+impl TestAssertion {
+    fn from_method(name: &str) -> Option<Self> {
+        match name {
+            "to_equal" => Some(Self::Equal),
+            "to_be_true" => Some(Self::BeTrue),
+            "to_be_false" => Some(Self::BeFalse),
+            "to_be_some" => Some(Self::BeSome),
+            "to_be_none" => Some(Self::BeNone),
+            "to_be_ok" => Some(Self::BeOk),
+            "to_be_err" => Some(Self::BeErr),
+            _ => None,
+        }
+    }
+}
+
+/// If `stmt` is an `expect(actual).<assertion>(expected?)` chain, classify it.
+///
+/// Returns `(assertion, actual_expr, expected_expr_opt)` where `actual_expr` is
+/// the argument to `expect(...)` and `expected_expr_opt` is the explicit
+/// argument to the assertion method (present for [`TestAssertion::Equal`],
+/// absent for the nullary predicates). Returns `None` for any statement that is
+/// not an `expect(...)`-rooted assertion chain — the emitter falls back to its
+/// normal statement lowering for those.
+///
+/// A Bock method call `recv.m(args)` is lowered (by `bock-air::lower`) to
+/// `Call { callee: FieldAccess(recv, m), args: [self=recv, ...args] }` — the
+/// receiver is *prepended* as the implicit `self` argument. So an assertion
+/// `expect(actual).to_equal(expected)` is:
+/// ```text
+/// Call {
+///   callee: FieldAccess(object: Call{expect, [actual]}, field: to_equal),
+///   args: [ self = Call{expect, [actual]}, expected ],
+/// }
+/// ```
+/// The explicit `expected` is therefore `args[1]` (`args[0]` is the self copy).
+#[must_use]
+pub fn classify_assertion(stmt: &AIRNode) -> Option<(TestAssertion, &AIRNode, Option<&AIRNode>)> {
+    let NodeKind::Call { callee, args, .. } = &stmt.kind else {
+        return None;
+    };
+    let NodeKind::FieldAccess { object, field } = &callee.kind else {
+        return None;
+    };
+    let assertion = TestAssertion::from_method(&field.name)?;
+    // The receiver object must be `expect(actual)`.
+    let NodeKind::Call {
+        callee: expect_callee,
+        args: expect_args,
+        ..
+    } = &object.kind
+    else {
+        return None;
+    };
+    let NodeKind::Identifier { name } = &expect_callee.kind else {
+        return None;
+    };
+    if name.name != "expect" {
+        return None;
+    }
+    let actual = expect_args.first().map(|a| &a.value)?;
+    // `args[0]` is the desugared `self` (a copy of the `expect(...)` receiver);
+    // the explicit assertion argument, if any, is `args[1]`.
+    let expected = args.get(1).map(|a| &a.value);
+    Some((assertion, actual, expected))
 }
 
 // ─── ESM per-module emission helpers (js/ts) ────────────────────────────────
@@ -1071,6 +1248,205 @@ pub fn esm_relative_specifier(from_path: &str, to_path: &str, ext: &str) -> Stri
     spec.push('.');
     spec.push_str(ext);
     spec
+}
+
+// ─── Shared js/ts transpiled-test builder (§20.6.2) ──────────────────────────
+
+/// Lowers a single AIR expression to its target string, for the shared js/ts
+/// test-file builder. Implemented by a thin adapter over each backend's private
+/// emit context so [`js_ts_generate_tests`] can reuse the exact expression
+/// lowering the runtime tree uses (function casing, enum/Optional reps, …).
+pub trait JsTsExprEmitter {
+    /// Render `node` as a target expression string.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the backend's [`CodegenError`].
+    fn expr_to_string(&mut self, node: &AIRNode) -> Result<String, CodegenError>;
+}
+
+/// camelCase a Bock identifier the way the js/ts backends do for value names
+/// (so an imported function name matches its `export function` form). Mirrors
+/// `bock-codegen::js::to_camel_case` for the common `snake_case`/`PascalCase`
+/// inputs `@test` bodies reference.
+fn js_camel_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut upper_next = false;
+    for (i, c) in s.chars().enumerate() {
+        if c == '_' {
+            upper_next = true;
+        } else if i == 0 {
+            out.push(c.to_ascii_lowercase());
+        } else if upper_next {
+            out.push(c.to_ascii_uppercase());
+            upper_next = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Build the Vitest/Jest test file for the project's `@test` functions (S7),
+/// shared by the JS and TS backends (identical apart from the file extension and
+/// the concrete emit context, both injected by the caller).
+///
+/// - `framework`: `"jest"` → Jest globals; anything else → Vitest import.
+/// - `file_ext`: the test file's own extension (`"js"` / `"ts"`).
+/// - `import_ext`: the extension to use in *import specifiers*. For JS this is
+///   `"js"`; for TS it is **also** `"js"` — TS/ESM specifiers reference the
+///   emitted `.js`, which `tsc`'s `.js`→`.ts` resolution follows (and a strict
+///   `tsc --noEmit` rejects a `.ts` specifier without `allowImportingTsExtensions`).
+/// - `output_path`: maps a module to its emitted file path (entry → `main.<ext>`).
+/// - `make_emitter`: builds the per-program expression emitter (with the same
+///   cross-module registries the runtime tree uses).
+///
+/// Imports each module's public functions by name and lowers
+/// `expect(actual).<assertion>(expected)` chains to the framework's matcher API.
+/// Returns a single `bock.test.<file_ext>` file (no entry wiring).
+///
+/// # Errors
+///
+/// Propagates [`CodegenError`] from expression lowering.
+pub fn js_ts_generate_tests<'a, F, M>(
+    modules: &'a [(&'a AIRModule, &'a Path)],
+    framework: &str,
+    file_ext: &str,
+    import_ext: &str,
+    output_path: F,
+    make_emitter: M,
+) -> Result<TestArtifacts, CodegenError>
+where
+    F: Fn(&'a AIRModule, &'a Path, bool) -> PathBuf,
+    M: for<'b> FnOnce(&'b [(&'b AIRModule, &'b Path)]) -> Box<dyn JsTsExprEmitter>,
+{
+    let reachable = reachable_modules(modules);
+    let tests = collect_test_fns(&reachable);
+    if tests.is_empty() {
+        return Ok(TestArtifacts::default());
+    }
+    let entry_idx = reachable
+        .iter()
+        .position(|(m, _)| module_declares_main_fn(m))
+        .unwrap_or(reachable.len().saturating_sub(1));
+
+    // Build the per-module import lines: each reachable module's public function
+    // names, imported by their camelCased (emitted) name from the module's file.
+    let mut import_lines: Vec<String> = Vec::new();
+    for (i, (module, source_path)) in reachable.iter().enumerate() {
+        let fn_names: Vec<String> = exportable_value_names(module)
+            .into_iter()
+            .filter(|e| e.is_fn)
+            .map(|e| js_camel_case(&e.name))
+            .collect();
+        if fn_names.is_empty() {
+            continue;
+        }
+        let spec = if i == entry_idx {
+            // The entry file is `main.<file_ext>`; the specifier references the
+            // emitted/served module by its import extension (`main.js`).
+            let stem = output_path(module, source_path, true)
+                .with_extension(import_ext)
+                .display()
+                .to_string();
+            format!("./{stem}")
+        } else {
+            let to_path = module_path_string(module).unwrap_or_default();
+            esm_relative_specifier("", &to_path, import_ext)
+        };
+        // Normalize Windows-style separators a Display might emit.
+        let spec = spec.replace('\\', "/");
+        import_lines.push(format!(
+            "import {{ {} }} from \"{spec}\";",
+            fn_names.join(", ")
+        ));
+    }
+    import_lines.sort_unstable();
+    import_lines.dedup();
+
+    let is_jest = framework == "jest";
+    let mut out = String::new();
+    if is_jest {
+        out.push_str("// Jest provides describe/it/expect as globals.\n");
+    } else {
+        out.push_str("import { describe, it, expect } from \"vitest\";\n");
+    }
+    for line in &import_lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str("describe(\"bock tests\", () => {\n");
+
+    let mut emitter = make_emitter(&reachable);
+    for (test_fn, _module_path) in &tests {
+        let NodeKind::FnDecl { name, body, .. } = &test_fn.kind else {
+            continue;
+        };
+        out.push_str(&format!("  it(\"{}\", () => {{\n", name.name));
+        emit_js_test_body(body, emitter.as_mut(), &mut out)?;
+        out.push_str("  });\n");
+    }
+    out.push_str("});\n");
+
+    Ok(TestArtifacts {
+        files: vec![OutputFile {
+            path: PathBuf::from(format!("bock.test.{file_ext}")),
+            content: out,
+            source_map: None,
+        }],
+        entry_append: None,
+    })
+}
+
+/// Emit the statements of a js/ts `@test` body into `out`, lowering `expect(...)`
+/// assertion chains to the Vitest/Jest matcher API and dropping any non-assertion
+/// statement that the matcher set does not cover into a `let` (handled by the
+/// expression emitter). Each line is indented four spaces (inside `it(... => {`).
+fn emit_js_test_body(
+    body: &AIRNode,
+    emitter: &mut dyn JsTsExprEmitter,
+    out: &mut String,
+) -> Result<(), CodegenError> {
+    let stmts: Vec<&AIRNode> = match &body.kind {
+        NodeKind::Block { stmts, tail } => stmts.iter().chain(tail.as_deref()).collect(),
+        _ => vec![body],
+    };
+    for stmt in stmts {
+        if let Some((assertion, actual, expected)) = classify_assertion(stmt) {
+            let a = emitter.expr_to_string(actual)?;
+            let line = match assertion {
+                TestAssertion::Equal => {
+                    let e = match expected {
+                        Some(e) => emitter.expr_to_string(e)?,
+                        None => "undefined".to_string(),
+                    };
+                    format!("expect({a}).toEqual({e});")
+                }
+                TestAssertion::BeTrue => format!("expect({a}).toBe(true);"),
+                TestAssertion::BeFalse => format!("expect({a}).toBe(false);"),
+                TestAssertion::BeSome => format!("expect(({a})._tag).toBe(\"Some\");"),
+                TestAssertion::BeNone => format!("expect(({a})._tag).toBe(\"None\");"),
+                TestAssertion::BeOk => format!("expect(({a})._tag).toBe(\"Ok\");"),
+                TestAssertion::BeErr => format!("expect(({a})._tag).toBe(\"Err\");"),
+            };
+            out.push_str(&format!("    {line}\n"));
+        } else if let NodeKind::LetBinding { pattern, value, .. } = &stmt.kind {
+            // A `let` in a test body (e.g. building the value under assertion):
+            // lower it to a `const` so the following assertions can reference it.
+            let name = match &pattern.kind {
+                NodeKind::BindPat { name, .. } => js_camel_case(&name.name),
+                _ => continue,
+            };
+            let v = emitter.expr_to_string(value)?;
+            out.push_str(&format!("    const {name} = {v};\n"));
+        } else {
+            // Any other statement is emitted as an expression statement.
+            let s = emitter.expr_to_string(stmt)?;
+            out.push_str(&format!("    {s};\n"));
+        }
+    }
+    Ok(())
 }
 
 // ─── Native-module emission helpers (rust/go) ───────────────────────────────
@@ -3193,6 +3569,176 @@ mod tests {
                 items,
             },
         )
+    }
+
+    // ── Transpiled-test extraction + assertion classification (S7) ───────────
+
+    /// A `@test`-annotated `fn` named `name` with the given body block.
+    fn test_fn_decl(name: &str, body: AIRNode) -> AIRNode {
+        use bock_ast::{Annotation, Visibility};
+        let annotation = Annotation {
+            id: 0,
+            name: ident("test"),
+            args: vec![],
+            span: dummy_span(),
+        };
+        AIRNode::new(
+            0,
+            dummy_span(),
+            NodeKind::FnDecl {
+                annotations: vec![annotation],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
+    }
+
+    fn identifier(id: u32, name: &str) -> AIRNode {
+        AIRNode::new(id, dummy_span(), NodeKind::Identifier { name: ident(name) })
+    }
+
+    fn call(id: u32, callee: AIRNode, args: Vec<AIRNode>) -> AIRNode {
+        AIRNode::new(
+            id,
+            dummy_span(),
+            NodeKind::Call {
+                callee: Box::new(callee),
+                args: args
+                    .into_iter()
+                    .map(|value| AirArg { label: None, value })
+                    .collect(),
+                type_args: vec![],
+            },
+        )
+    }
+
+    /// Build the lowered AIR for `expect(actual).<method>(expected?)`: a `Call`
+    /// whose callee is `FieldAccess(expect(actual), method)` and whose first arg
+    /// is the desugared `self` (a copy of the `expect(...)` receiver). This is the
+    /// exact shape `bock-air::lower` produces for a method call.
+    fn assertion(method: &str, actual: AIRNode, expected: Option<AIRNode>) -> AIRNode {
+        let expect_call = call(10, identifier(11, "expect"), vec![actual]);
+        let field = AIRNode::new(
+            12,
+            dummy_span(),
+            NodeKind::FieldAccess {
+                object: Box::new(expect_call.clone()),
+                field: ident(method),
+            },
+        );
+        let mut args = vec![expect_call];
+        if let Some(e) = expected {
+            args.push(e);
+        }
+        call(13, field, args)
+    }
+
+    #[test]
+    fn fn_is_test_detects_test_annotation() {
+        let body = AIRNode::new(
+            1,
+            dummy_span(),
+            NodeKind::Block {
+                stmts: vec![],
+                tail: None,
+            },
+        );
+        assert!(fn_is_test(&test_fn_decl("t", body)));
+        assert!(!fn_is_test(&fn_decl("not_a_test")));
+    }
+
+    #[test]
+    fn collect_test_fns_finds_annotated_functions() {
+        let body = AIRNode::new(
+            1,
+            dummy_span(),
+            NodeKind::Block {
+                stmts: vec![],
+                tail: None,
+            },
+        );
+        let m = module_named(
+            "main",
+            &[],
+            vec![
+                fn_decl("main"),
+                test_fn_decl("test_a", body.clone()),
+                fn_decl("helper"),
+                test_fn_decl("test_b", body),
+            ],
+        );
+        let p = std::path::Path::new("x.bock");
+        let modules = [(&m, p)];
+        let tests = collect_test_fns(&modules);
+        assert_eq!(tests.len(), 2);
+        let names: Vec<&str> = tests
+            .iter()
+            .map(|(n, _)| match &n.kind {
+                NodeKind::FnDecl { name, .. } => name.name.as_str(),
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(names, vec!["test_a", "test_b"]);
+        assert_eq!(tests[0].1, "main");
+    }
+
+    #[test]
+    fn classify_assertion_recognizes_equal() {
+        let stmt = assertion("to_equal", identifier(1, "x"), Some(identifier(2, "y")));
+        let (kind, actual, expected) = classify_assertion(&stmt).expect("should classify");
+        assert_eq!(kind, TestAssertion::Equal);
+        assert!(matches!(&actual.kind, NodeKind::Identifier { name } if name.name == "x"));
+        let expected = expected.expect("equal has an expected operand");
+        assert!(matches!(&expected.kind, NodeKind::Identifier { name } if name.name == "y"));
+    }
+
+    #[test]
+    fn classify_assertion_recognizes_nullary_predicates() {
+        for (method, expected_kind) in [
+            ("to_be_true", TestAssertion::BeTrue),
+            ("to_be_false", TestAssertion::BeFalse),
+            ("to_be_some", TestAssertion::BeSome),
+            ("to_be_none", TestAssertion::BeNone),
+            ("to_be_ok", TestAssertion::BeOk),
+            ("to_be_err", TestAssertion::BeErr),
+        ] {
+            let stmt = assertion(method, identifier(1, "v"), None);
+            let (kind, _actual, expected) =
+                classify_assertion(&stmt).unwrap_or_else(|| panic!("classify {method}"));
+            assert_eq!(kind, expected_kind, "method {method}");
+            assert!(expected.is_none(), "{method} takes no expected operand");
+        }
+    }
+
+    #[test]
+    fn classify_assertion_rejects_non_assertions() {
+        // A plain function call is not an assertion.
+        let plain = call(1, identifier(2, "do_thing"), vec![]);
+        assert!(classify_assertion(&plain).is_none());
+        // A method call whose receiver is not `expect(...)`.
+        let other = {
+            let recv = call(3, identifier(4, "build"), vec![]);
+            let field = AIRNode::new(
+                5,
+                dummy_span(),
+                NodeKind::FieldAccess {
+                    object: Box::new(recv.clone()),
+                    field: ident("to_equal"),
+                },
+            );
+            call(6, field, vec![recv, identifier(7, "z")])
+        };
+        assert!(classify_assertion(&other).is_none());
+        // An unknown assertion method on `expect(...)`.
+        let unknown = assertion("to_be_weird", identifier(8, "v"), None);
+        assert!(classify_assertion(&unknown).is_none());
     }
 
     #[test]

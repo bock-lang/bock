@@ -79,8 +79,9 @@ See §20.6.1.
 > In project mode (the default) these manifests are the *rich* project-mode
 > scaffolding (test-framework references, formatter/linter configs, a README
 > first-contact) described under [Project-Mode Scaffolding](#project-mode-scaffolding)
-> below; `--source-only` emits none of them. The actual transpiled `@test`
-> *files* and the formatter-clean release gate are a later milestone.
+> below; `--source-only` emits none of them. Project mode also writes the
+> transpiled `@test` *files* (see [Transpiled Tests](#transpiled-tests)) so the
+> scaffolded project's own test runner exercises them.
 
 ### Output Modes
 
@@ -149,6 +150,71 @@ Notes:
 
 Unknown values in either table produce a build error pointing at the
 documented options for that target. See §20.6.2 for the normative matrix.
+
+### Transpiled Tests
+
+Project mode transpiles every Bock `@test` function into the target's
+idiomatic test framework, placed where that framework looks for tests and
+wired into the scaffolded project so the project's own runner executes them.
+The `expect(actual).to_equal(expected)` assertion DSL (and the
+`to_be_true`/`to_be_false`/`to_be_some`/`to_be_none`/`to_be_ok`/`to_be_err`
+predicates) lower to each framework's native assertion idiom. `@test`
+functions are emitted **only** into these test files — never into the runtime
+module tree.
+
+| Target | Test file | Shape | Run with |
+| ------ | --------- | ----- | -------- |
+| JS     | `bock.test.js` | `describe`/`it` + `expect(...).toEqual/toBe(...)` | `npm test` (Vitest, or Jest when `test_framework = "jest"`) |
+| TS     | `bock.test.ts` | same as JS (imports the emitted `.js`) | `npm test` |
+| Python | `test_bock.py` | `def test_*()` with `assert` (pytest), or a `unittest.TestCase` when `test_framework = "unittest"` | `pytest` / `python -m unittest` |
+| Rust   | `src/bock_tests.rs` (inline `#[cfg(test)] mod`, wired from `src/main.rs`) | `#[test]` fns with `assert_eq!`/`assert!` | `cargo test` |
+| Go     | `bock_test.go` (`package main`) | `func TestXxx(t *testing.T)` with `if … { t.Errorf(...) }` | `go test ./...` |
+
+The test-framework variant follows the deep-config `test_framework` field
+(defaulting per §20.6.2). The emitted JS/TS/Python imports reference the
+functions under test by name from their generated modules; the Rust inline
+module and the Go same-package file see the program's items directly.
+
+Example — this Bock source:
+
+```bock
+public fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+@test
+fn test_add_works() {
+  expect(add(1, 2)).to_equal(3)
+}
+```
+
+transpiles (rust) to `src/bock_tests.rs`:
+
+```rust
+#[cfg(test)]
+mod bock_tests {
+    use super::*;
+
+    #[test]
+    fn test_add_works() {
+        assert_eq!(add(1, 2), 3);
+    }
+}
+```
+
+and (Python, pytest) to `test_bock.py`:
+
+```python
+from main import add
+
+def test_add_works():
+    assert (add(1, 2)) == (3)
+```
+
+**Formatter-clean output.** The emitted Rust and Go test files pass
+`rustfmt --check` and `gofmt -l` cleanly on first generation — the §20.6.2
+codegen-formatter agreement, enforced as a release-readiness check. (rustfmt
+and gofmt are universal/always-on for those targets.)
 
 ### Source Maps
 

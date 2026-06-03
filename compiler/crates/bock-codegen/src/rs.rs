@@ -376,6 +376,105 @@ impl CodeGenerator for RsGenerator {
 
         Ok(GeneratedCode { files })
     }
+
+    /// Transpile `@test` functions into an inline `#[cfg(test)] mod` (S7).
+    ///
+    /// `cargo test` runs the bin crate's inline test module. Each Bock `@test`
+    /// becomes a `#[test] fn`, with `expect(actual).<assertion>(expected)` chains
+    /// lowered to `assert!` / `assert_eq!`. The module is emitted to
+    /// `src/bock_tests.rs` and wired into `src/main.rs` via the returned
+    /// `entry_append` (`#[cfg(test)] mod bock_tests;`). `framework` is ignored:
+    /// `cargo test` is the universal Rust framework (§20.6.2).
+    fn generate_tests(
+        &self,
+        modules: &[(&AIRModule, &std::path::Path)],
+        _framework: &str,
+    ) -> Result<crate::generator::TestArtifacts, CodegenError> {
+        let reachable = crate::generator::reachable_modules(modules);
+        let modules = reachable.as_slice();
+        let tests = crate::generator::collect_test_fns(modules);
+        if tests.is_empty() {
+            return Ok(crate::generator::TestArtifacts::default());
+        }
+
+        // Build the same cross-module registries `generate_project` uses so the
+        // test bodies lower references (enum variants, generics, trait methods)
+        // identically to the runtime tree.
+        let enum_variants = crate::generator::collect_enum_variants(modules);
+        let generic_decls = crate::generator::collect_generic_decls(modules);
+        let trait_decls = crate::generator::collect_trait_decls(modules);
+        let mut template = RsEmitCtx::new();
+        template.enum_variants = enum_variants;
+        template.generic_decls = generic_decls;
+        template.collect_self_operand_methods(&trait_decls);
+        template.trait_decls = trait_decls;
+        for (module, _) in modules {
+            template.collect_clone_targets(module);
+        }
+        template.seed_effect_registries(modules);
+
+        // The test module lives at the crate root; `use super::*` brings in
+        // everything the bin's `main.rs` (the entry module) declares. Each
+        // *non-entry* reachable module is a real `crate::<ns>` submodule, so
+        // bring each top-level namespace in too, letting a test call functions
+        // declared in a `use`d module. (The entry module is the crate root, not
+        // a `crate::<entry>` submodule, so it must NOT be added here.)
+        let entry_idx = modules
+            .iter()
+            .position(|(m, _)| crate::generator::module_declares_main_fn(m))
+            .unwrap_or(modules.len() - 1);
+        let mut ctx = template.fork();
+        ctx.per_module = true;
+        ctx.indent = 0;
+        ctx.writeln("use super::*;");
+        let mut namespaces: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (i, (module, _)) in modules.iter().enumerate() {
+            if i == entry_idx {
+                continue;
+            }
+            if let Some(p) = crate::generator::module_path_string(module) {
+                if let Some(top) = p.split('.').next() {
+                    if !top.is_empty() {
+                        namespaces.insert(top.to_string());
+                    }
+                }
+            }
+        }
+        for ns in &namespaces {
+            ctx.writeln(&format!("use crate::{ns}::*;"));
+        }
+
+        for (test_fn, _module_path) in &tests {
+            let NodeKind::FnDecl { name, body, .. } = &test_fn.kind else {
+                continue;
+            };
+            ctx.buf.push('\n');
+            ctx.writeln("#[test]");
+            ctx.writeln(&format!("fn {}() {{", to_snake_case(&name.name)));
+            ctx.indent += 1;
+            ctx.emit_test_body(body)?;
+            ctx.indent -= 1;
+            ctx.writeln("}");
+        }
+
+        // `src/bock_tests.rs` IS the `bock_tests` module body (it is reached via
+        // `#[cfg(test)] mod bock_tests;` in `main.rs`), so the `use`/`#[test] fn`
+        // items go at file top with NO extra `mod` wrapper — otherwise `super`
+        // would resolve to a spurious inner module instead of the crate root and
+        // `use super::*` would not bring in the bin's items. The whole file is
+        // already `#[cfg(test)]`-gated by the `mod bock_tests;` declaration.
+        let body = ctx.buf;
+        let content = format!("#![allow(unused_imports, unused_parens, dead_code)]\n\n{body}");
+
+        Ok(crate::generator::TestArtifacts {
+            files: vec![OutputFile {
+                path: PathBuf::from("src").join("bock_tests.rs"),
+                content,
+                source_map: None,
+            }],
+            entry_append: Some("\n#[cfg(test)]\nmod bock_tests;\n".to_string()),
+        })
+    }
 }
 
 /// Builder for the Rust `mod` declaration tree of a per-module crate.
@@ -1032,8 +1131,12 @@ impl RsEmitCtx {
         if self.buf.is_empty() {
             return self.buf;
         }
+        // rustfmt wraps an inner-attribute list of this many items across lines
+        // (regardless of the line fitting in `max_width`), so emit the wrapped
+        // form directly — the §20.6.2 codegen-formatter agreement requires the
+        // output to pass `rustfmt --check` cleanly on first generation (S7).
         let mut prefix = String::from(
-            "#![allow(unused_variables, unused_imports, unused_parens, dead_code, non_upper_case_globals)]\n\n",
+            "#![allow(\n    unused_variables,\n    unused_imports,\n    unused_parens,\n    dead_code,\n    non_upper_case_globals\n)]\n\n",
         );
         if self.needs_rc_import {
             prefix.push_str("use std::rc::Rc;\n");
@@ -1060,8 +1163,12 @@ impl RsEmitCtx {
         if self.buf.is_empty() {
             return self.buf;
         }
+        // rustfmt wraps an inner-attribute list of this many items across lines
+        // (regardless of the line fitting in `max_width`), so emit the wrapped
+        // form directly — the §20.6.2 codegen-formatter agreement requires the
+        // output to pass `rustfmt --check` cleanly on first generation (S7).
         let mut prefix = String::from(
-            "#![allow(unused_variables, unused_imports, unused_parens, dead_code, non_upper_case_globals)]\n\n",
+            "#![allow(\n    unused_variables,\n    unused_imports,\n    unused_parens,\n    dead_code,\n    non_upper_case_globals\n)]\n\n",
         );
         if self.needs_rc_import {
             prefix.push_str("use std::rc::Rc;\n");
@@ -2196,10 +2303,21 @@ impl RsEmitCtx {
                         self.concurrency_runtime_emitted = true;
                     }
                 }
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
+                // `@test` functions are NOT emitted into the runtime module
+                // tree: they are transpiled separately into the target's test
+                // framework (project mode, §20.6.2 — see `generate_tests`). Their
+                // bodies use the `expect(...)` assertion DSL, which has no runtime
+                // definition in the emitted source, so emitting them here would
+                // produce code that does not compile.
+                let mut first = true;
+                for item in items.iter() {
+                    if crate::generator::fn_is_test(item) {
+                        continue;
+                    }
+                    if !first {
                         self.buf.push('\n');
                     }
+                    first = false;
                     self.emit_node(item)?;
                 }
                 Ok(())
@@ -4291,6 +4409,48 @@ impl RsEmitCtx {
             self.write_indent();
             self.emit_expr(node)?;
             self.buf.push('\n');
+        }
+        Ok(())
+    }
+
+    /// Emit a `@test` function body (S7), lowering `expect(...)` assertion
+    /// chains to Rust `assert!` / `assert_eq!` and falling back to the normal
+    /// statement emitter for any other statement (`let`, helper calls, …).
+    fn emit_test_body(&mut self, body: &AIRNode) -> Result<(), CodegenError> {
+        let emit_one = |this: &mut Self, stmt: &AIRNode| -> Result<(), CodegenError> {
+            if let Some((assertion, actual, expected)) = crate::generator::classify_assertion(stmt)
+            {
+                let a = this.expr_to_string(actual)?;
+                let line = match assertion {
+                    crate::generator::TestAssertion::Equal => {
+                        let e = match expected {
+                            Some(e) => this.expr_to_string(e)?,
+                            None => "()".to_string(),
+                        };
+                        format!("assert_eq!({a}, {e});")
+                    }
+                    crate::generator::TestAssertion::BeTrue => format!("assert!({a});"),
+                    crate::generator::TestAssertion::BeFalse => format!("assert!(!({a}));"),
+                    crate::generator::TestAssertion::BeSome => format!("assert!(({a}).is_some());"),
+                    crate::generator::TestAssertion::BeNone => format!("assert!(({a}).is_none());"),
+                    crate::generator::TestAssertion::BeOk => format!("assert!(({a}).is_ok());"),
+                    crate::generator::TestAssertion::BeErr => format!("assert!(({a}).is_err());"),
+                };
+                this.writeln(&line);
+                Ok(())
+            } else {
+                this.emit_node(stmt)
+            }
+        };
+        if let NodeKind::Block { stmts, tail } = &body.kind {
+            for s in stmts {
+                emit_one(self, s)?;
+            }
+            if let Some(t) = tail {
+                emit_one(self, t)?;
+            }
+        } else {
+            emit_one(self, body)?;
         }
         Ok(())
     }

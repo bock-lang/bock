@@ -26,9 +26,10 @@ pub use bock_ai::{Rule, RuleCache};
 pub use error::CodegenError;
 pub use gaps::{detect_gaps, CapabilityGap};
 pub use generator::{
-    arm_body_is_statement, desugared_self_call, loop_needs_break_label, match_has_statement_arm,
-    node_is_statement, param_binds_self, CodeGenerator, GeneratedCode, OutputFile, SourceInfo,
-    SourceMap, SourceMapEntry, SourceMapping,
+    arm_body_is_statement, classify_assertion, collect_test_fns, desugared_self_call, fn_is_test,
+    js_ts_generate_tests, loop_needs_break_label, match_has_statement_arm, node_is_statement,
+    param_binds_self, CodeGenerator, GeneratedCode, JsTsExprEmitter, OutputFile, SourceInfo,
+    SourceMap, SourceMapEntry, SourceMapping, TestArtifacts, TestAssertion,
 };
 pub use go::GoGenerator;
 pub use js::JsGenerator;
@@ -39,7 +40,7 @@ pub use profile::{
 pub use py::PyGenerator;
 pub use rs::RsGenerator;
 pub use scaffold::{
-    run_scaffolder, scaffolder_for, ScaffoldConfig, ScaffoldContext, ScaffoldError, Scaffolder,
-    TargetScaffoldConfig, SCAFFOLD_TARGETS,
+    effective_test_framework, run_scaffolder, scaffolder_for, ScaffoldConfig, ScaffoldContext,
+    ScaffoldError, Scaffolder, TargetScaffoldConfig, SCAFFOLD_TARGETS,
 };
 pub use ts::TsGenerator;
