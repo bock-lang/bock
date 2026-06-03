@@ -75,7 +75,14 @@ phased P0-P4) that must land before the stdlib resumes. Q-stdlib R1 PAUSED behin
 is proven (T1 ×5) and resumes after P0/P1. DQ16 resolved (keep List-backed floor; build the prerequisite).
 Links: DV1, DV10-DV15, Q-stdlib, Q-codegen-completeness, DQ5, DQ16, DQ18, #100, #129.
 
-## MS-projectmode — v1-BLOCKING (in flight, from 2026-06-02) — per-module output + project mode + config tables
+## MS-projectmode — ★ COMPLETE (2026-06-03) — per-module output + project mode + config tables
+**★ DONE:** ItemB complete (S0–S8, #181–#194 + S8 close). All 5 targets emit per-module native-import trees (DV13);
+project mode is real — the `Scaffolder` emits per-target manifests + formatter/opt-in-linter configs + README +
+`@test` functions transpiled to each target's test framework, honoring `bock.project` `[targets.<T>]` config
+(defaults per §20.6.2); `--source-only` is bare (DV18). 430 exec pairs / 0 failed REQUIRE=all. rust+go transpiled
+tests RUN-verified; js/ts/python compile-verified (→ Q-ci-projectmode-tooling for full cert). **ItemB was v1.0's last
+mapped engineering item → v1.0 engineering runway clear; what remains for v1.0 is release actions (all escalate) +
+two non-blocking pre-release follow-ups (Q-ci-projectmode-tooling, Q-go-gofmt-listclosure).** [Historical record below.]
 **v1.0's last engineering milestone** (ItemB, expanded). Two owner decisions 2026-06-02 (eyes-open, after the
 orchestrator surfaced the cost): (1) **DQ19 → per-module native tree is the v1 output model** (not bundling) —
 re-opens **DV13** (native per-target cross-file imports that compile+run); (2) **config tables pulled forward

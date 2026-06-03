@@ -1738,3 +1738,31 @@ Blocked: none. main 53df918, 0 open PRs, worktrees == main only. CLEAN. **Next p
   RESULT: **S6 DONE — project mode is real on all 5** (manifests/configs/README via the Scaffolder; harness exercises
     it). DV13 + DV18 CLOSED. main 6434237; 0 open PRs; worktrees == main. NEXT: **pre-S7 operator checkpoint** (agreed),
     then S7 — transpiled `@test` files per framework + the formatter-clean release gate (the last build-feature stage).
+
+[2026-06-03 03:17 UTC] ★ ItemB COMPLETE — MS-projectmode DONE (S7 #194 + core.error #193 + S8 close)
+  Operator at the pre-S7 checkpoint chose: (1) fix core.error on js/ts/python before v1.0; (2) run S7+S8 autonomously
+    to ItemB-done. Also cleared dependabot earlier (#178/#179/#180) per operator ask. Ran sequentially (single-fixer
+    per bock-codegen): core.error fix → S7 → S8.
+  core.error fix (#193, Q-error-message-jstspy): SHARED `disambiguate_method_name`/`collect_record_field_names` in
+    generator.rs consumed by all 4 backends (go refactored onto it byte-identically); js/ts/python now rename a method
+    colliding with a same-named field (field kept). Stdlib audit: core.error.message is the ONLY such collision in the
+    11 modules. exec_core_error fixture un-restricted to all 5. 430/0.
+  S7 (#194): Bock `@test` → per-target test files (Vitest|Jest / pytest|unittest / cargo test / go test), framework-
+    branched, wired into the scaffolded project; assertion lowering. rust+go RUN-verified (cargo test / go test pass);
+    js/ts/python compile-verified only — VERIFIED host/CI lacks vitest/jest/npx/pytest/prettier/black (do not exist
+    here), so full run-cert for those 3 needs CI provisioning. Formatter-clean gate enforced rust(rustfmt)+go(gofmt) +
+    2 codegen-hygiene fixes. New FOUNDs triaged → Q-ci-projectmode-tooling (CI must install the runners/formatters to
+    certify js/ts/python project-mode per §20.6.2) + Q-go-gofmt-listclosure (pre-existing go list-method inline-closure
+    not gofmt-clean in emitted program code).
+  S8 (this PR): docs — fixed `docs/src/getting-started.md` stale build-output path (`.bock/build/` → `build/<target>/`)
+    + documented project-mode default; tooling.md/project-schema.md already current from S5–S7; mdbook clean. Tracking
+    closed: ItemB DONE, MS-projectmode COMPLETE, snapshot/milestones/queue reconciled, 2 FOUNDs filed, ItemD unblocked.
+  PROCESS NOTE: S6a's engineer STALLED (backgrounded a job + waited; sub-agents get no re-invoke) — orchestrator took
+    over its worktree, re-verified, fixed fmt, landed #190. Added "verify foreground, finish push→PR synchronously,
+    no background-and-wait" to all subsequent engineer prompts; no further stalls. Re-verify-before-merge caught S1's
+    fmt drift too. All 14 PRs this block (#181–#194) merged gate-clean; CI matrix green each; worktrees/branches cleaned.
+  RESULT: **★ ItemB DONE — project mode is real on all 5 (per-module native output + scaffolding + config tables +
+    transpiled tests); DV13 + DV18 CLOSED; 430/0. ItemB was v1.0's last mapped engineering item → v1.0 engineering
+    runway is CLEAR.** Remaining for v1.0 = release actions (ALL escalate to operator) + 2 non-blocking pre-release
+    follow-ups (Q-ci-projectmode-tooling, Q-go-gofmt-listclosure). ItemD (external get-started) unblocked but escalates.
+  NEXT: present ItemB-complete to operator; await direction on v1.0 release prep (escalates) and/or the follow-ups.
