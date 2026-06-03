@@ -1,0 +1,17 @@
+// TEST: class_method_body_type_error
+// EXPECT: error E4001 at 15:5
+//
+// Q-impl-body-typecheck (ClassDecl arm): a `class` method body is now
+// type-checked just like an `impl` method body. `self.count` is `Int`, but
+// `describe` is declared `-> String`, so the body must fail to check with
+// `E4001`. Before the fix `ClassDecl` fell through `check_item`'s `_ => Void`
+// arm and the body was never walked.
+module userapp
+
+class Counter {
+  count: Int
+
+  public fn describe(self) -> String {
+    self.count
+  }
+}

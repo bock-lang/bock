@@ -179,6 +179,14 @@ fn conformance_effects_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/effects")
 }
 
+/// Resolve the conformance directory that holds type-checker *diagnostic*
+/// fixtures whose expectation is an `// EXPECT: error E<code> at <l>:<c>` for a
+/// type error the checker must report (e.g. a type error inside an impl/class
+/// method body, per Q-impl-body-typecheck). Driven through `bock check`.
+fn conformance_types_diagnostics_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/types-diagnostics")
+}
+
 /// Build `case`'s source for `target` into `project_dir`, returning the
 /// directory containing the emitted `main.<ext>` (i.e. `project_dir/build/<target>`).
 fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
@@ -493,5 +501,81 @@ fn conformance_effect_diagnostic_fixtures_check_as_declared() {
     assert!(
         checked >= 2,
         "expected >= 2 effect diagnostic fixtures, checked {checked}"
+    );
+}
+
+/// The type-checker *diagnostic* fixtures under `conformance/types-diagnostics/`
+/// pin type errors the checker must report but cannot run (they fail to check):
+/// each declares an `// EXPECT: error E<code> at <line>:<col>`. These are driven
+/// through `bock check`, mirroring [`conformance_effect_diagnostic_fixtures_check_as_declared`].
+///
+/// Q-impl-body-typecheck: before the fix, `check_item` dispatched only `FnDecl`
+/// and `ConstDecl`; `ImplBlock`/`ClassDecl` fell through to a `record Void` arm,
+/// so type errors inside impl/class method bodies were silently missed. These
+/// fixtures assert a method-body type error now surfaces its declared `E4001`
+/// at the body expression's location — for both an `impl` and a `class`.
+#[test]
+fn conformance_method_body_diagnostic_fixtures_check_as_declared() {
+    let dir = conformance_types_diagnostics_dir();
+    let discovered = discover_tests(&dir);
+    assert!(
+        !discovered.is_empty(),
+        "no type diagnostic fixtures discovered under {}",
+        dir.display()
+    );
+
+    let mut checked = 0usize;
+    for result in discovered {
+        let case = result.expect("type diagnostic fixture failed to load");
+
+        let Some((code, location)) = case.expectations.iter().find_map(|e| match e {
+            Expectation::ErrorAt { code, location } => Some((code.clone(), location.clone())),
+            _ => None,
+        }) else {
+            panic!(
+                "type diagnostic fixture `{}` declares no `// EXPECT: error ...` directive",
+                case.name
+            );
+        };
+
+        // Run `bock check` on the ORIGINAL fixture path so the directive's
+        // `<line>:<col>` lines up with the file as written on disk (including
+        // the leading `// TEST:` / `// EXPECT:` comment lines).
+        let output = Command::new(bock_binary())
+            .arg("check")
+            .arg(&case.path)
+            .output()
+            .expect("failed to spawn bock check");
+
+        assert!(
+            !output.status.success(),
+            "type diagnostic fixture `{}` checked clean but expected `{code}`:\nstdout:\n{}\nstderr:\n{}",
+            case.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            combined.contains(&code),
+            "type diagnostic fixture `{}` did not surface `{code}`:\n{combined}",
+            case.name,
+        );
+        let loc_str = format!("{}:{}", location.line, location.col);
+        assert!(
+            combined.contains(&loc_str),
+            "type diagnostic fixture `{}` did not report location `{loc_str}`:\n{combined}",
+            case.name,
+        );
+        checked += 1;
+    }
+
+    assert!(
+        checked >= 2,
+        "expected >= 2 type diagnostic fixtures, checked {checked}"
     );
 }

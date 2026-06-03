@@ -1,0 +1,76 @@
+// TEST: exec_method_body_list_ops
+// EXPECT: output "apple,pear,fig;cheap=2;pricey=20"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-impl-body-typecheck codegen-reach payoff. The checker stamps codegen
+// metadata (`recv_kind`, `list_concat`) onto nodes *during body-checking*.
+// Before the fix, impl/class method bodies were never walked, so those stamps
+// only reached FREE-function call sites; method-body `.map()`/`.filter()` and
+// `+`-concat relied on codegen syntactic fallbacks. Now that method bodies are
+// type-checked, the same metadata is stamped inside them too.
+//
+// This fixture exercises, ENTIRELY INSIDE IMPL METHOD BODIES:
+//   - `self.items + [item]` — List `+` concat (stamped `list_concat`),
+//   - `self.items.map((it) => it.name)` — a List method whose receiver is a
+//     `self` record field (stamped `recv_kind`; must not re-pass the receiver),
+//   - `self.items.filter((it) => …)` — likewise.
+//
+// Printed (`;`-joined): the joined projected names after two `add`s, the count
+// of items priced < 20, and the summed price of items priced >= 20.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+record Item {
+  name: String
+  price: Int
+}
+
+record Catalog {
+  items: List[Item]
+}
+
+impl Catalog {
+  // List `+` concat in a method body: `self.items + [item]`.
+  fn add(self, item: Item) -> Catalog {
+    Catalog { items: self.items + [item] }
+  }
+
+  // `.map()` over a `self`-field List in a method body. The projection is
+  // bound to a typed `let` before returning so every backend has the result
+  // element type at the projection site (the inline-return form additionally
+  // stresses Go's nested-IIFE return-type inference, tracked separately — see
+  // `exec_list_map_filter_record`).
+  fn names(self) -> List[String] {
+    let projected: List[String] = self.items.map((it) => it.name)
+    projected
+  }
+
+  // `.filter()` over a `self`-field List in a method body.
+  fn cheap(self) -> List[Item] {
+    self.items.filter((it) => it.price < 20)
+  }
+
+  fn pricey_sum(self) -> Int {
+    let pricey: List[Item] = self.items.filter((it) => it.price >= 20)
+    let prices: List[Int] = pricey.map((it) => it.price)
+    prices.reduce((a, b) => a + b)
+  }
+}
+
+fn main() -> Void {
+  let empty: Catalog = Catalog { items: [] }
+  let c1: Catalog = empty.add(Item { name: "apple", price: 10 })
+  let c2: Catalog = c1.add(Item { name: "pear", price: 20 })
+  let catalog: Catalog = c2.add(Item { name: "fig", price: 10 })
+
+  let names: List[String] = catalog.names()
+  let joined: String = names.join(",")
+
+  let cheap: List[Item] = catalog.cheap()
+  let cheapCount: Int = cheap.len()
+
+  let pricey: Int = catalog.pricey_sum()
+
+  println("${joined};cheap=${cheapCount};pricey=${pricey}")
+}

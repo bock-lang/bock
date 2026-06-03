@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bock_air::stubs::{TypeInfo, Value};
 use bock_air::{AIRNode, EnumVariantPayload, NodeId, NodeKind};
-use bock_ast::{BinOp, Literal, TypeConstraint, TypeExpr, TypePath, UnaryOp};
+use bock_ast::{BinOp, GenericParam, Literal, TypeConstraint, TypeExpr, TypePath, UnaryOp};
 use bock_errors::{DiagnosticBag, DiagnosticCode, Span};
 
 use crate::traits::{resolve_impl, ImplTable, TraitRef};
@@ -1393,11 +1393,263 @@ impl TypeChecker {
             NodeKind::ConstDecl { .. } => {
                 self.check_const_decl(node);
             }
+            NodeKind::ImplBlock { .. } => {
+                self.check_impl_block(node);
+            }
+            NodeKind::ClassDecl { .. } => {
+                self.check_class_decl(node);
+            }
             // Other top-level items: record as Void for now.
             _ => {
                 self.record(node, Type::Primitive(PrimitiveType::Void));
             }
         }
+    }
+
+    /// Type-check every method **body** in an `impl` block.
+    ///
+    /// Mirrors [`Self::check_fn_decl`] per method, but establishes the impl
+    /// context first: the impl's generic params become fresh type vars (with
+    /// their bounds recorded), `Self` is mapped to the concrete target type,
+    /// and `self` is bound in scope to that target. For a generic impl
+    /// (`impl[T] Foo[T] { … }`) the target is a `Generic` whose args are those
+    /// fresh vars, so field/method access through `record_generic_params`
+    /// substitution resolves the same way it does at external call sites.
+    ///
+    /// Method signatures are already registered in `method_types` by
+    /// [`Self::collect_sig`]; this pass only walks the bodies that pass missed,
+    /// so type errors inside methods are reported and the checker's codegen
+    /// metadata stamps (`recv_kind`, `list_concat`) reach method bodies.
+    fn check_impl_block(&mut self, node: &mut AIRNode) {
+        let (generic_params, target) = match &node.kind {
+            NodeKind::ImplBlock {
+                generic_params,
+                target,
+                ..
+            } => (generic_params.clone(), target.clone()),
+            _ => return,
+        };
+
+        let target_name = match &target.kind {
+            NodeKind::TypeNamed { path, .. } => Some(type_path_to_name(path)),
+            _ => None,
+        };
+        let Some(target_name) = target_name else {
+            self.record(node, Type::Primitive(PrimitiveType::Void));
+            return;
+        };
+
+        let (impl_gp_map, target_ty) = self.build_impl_context(&generic_params, &target_name);
+
+        if let NodeKind::ImplBlock { methods, .. } = &mut node.kind {
+            let mut methods = std::mem::take(methods);
+            for method in methods.iter_mut() {
+                self.check_method_body(method, &target_ty, &impl_gp_map);
+            }
+            if let NodeKind::ImplBlock { methods: slot, .. } = &mut node.kind {
+                *slot = methods;
+            }
+        }
+
+        self.record(node, Type::Primitive(PrimitiveType::Void));
+    }
+
+    /// Type-check every method **body** in a `class` declaration. See
+    /// [`Self::check_impl_block`]; classes are the inherent-impl analogue with
+    /// declared fields and optional base inheritance (already folded into
+    /// `method_types`/`record_field_types` by [`Self::collect_sig`]).
+    fn check_class_decl(&mut self, node: &mut AIRNode) {
+        let (generic_params, class_name) = match &node.kind {
+            NodeKind::ClassDecl {
+                generic_params,
+                name,
+                ..
+            } => (generic_params.clone(), name.name.clone()),
+            _ => return,
+        };
+
+        let (impl_gp_map, target_ty) = self.build_impl_context(&generic_params, &class_name);
+
+        if let NodeKind::ClassDecl { methods, .. } = &mut node.kind {
+            let mut methods = std::mem::take(methods);
+            for method in methods.iter_mut() {
+                self.check_method_body(method, &target_ty, &impl_gp_map);
+            }
+            if let NodeKind::ClassDecl { methods: slot, .. } = &mut node.kind {
+                *slot = methods;
+            }
+        }
+
+        self.record(node, Type::Primitive(PrimitiveType::Void));
+    }
+
+    /// Build the per-method type context shared by impl and class bodies:
+    /// a `gp_map` mapping each of the impl/class's generic params to a fresh
+    /// type var (with inline trait bounds recorded) plus `Self` -> the concrete
+    /// target, and the target type itself (`Generic` when the impl is generic,
+    /// `Named` otherwise) to bind `self`.
+    fn build_impl_context(
+        &mut self,
+        generic_params: &[GenericParam],
+        target_name: &str,
+    ) -> (HashMap<String, Type>, Type) {
+        let mut gp_map: HashMap<String, Type> = generic_params
+            .iter()
+            .map(|g| (g.name.name.clone(), self.fresh_var()))
+            .collect();
+
+        // Record inline trait bounds (e.g. `impl[T: Show] Foo[T]`) on the
+        // fresh type vars so method bodies can resolve trait methods on `T`.
+        for gp in generic_params {
+            if let Some(Type::TypeVar(id)) = gp_map.get(&gp.name.name) {
+                let bound_names: Vec<String> = gp.bounds.iter().map(type_path_to_name).collect();
+                if !bound_names.is_empty() {
+                    self.type_var_bounds
+                        .entry(*id)
+                        .or_default()
+                        .extend(bound_names);
+                }
+            }
+        }
+
+        let target_ty = if generic_params.is_empty() {
+            Type::Named(crate::NamedType {
+                name: target_name.to_string(),
+            })
+        } else {
+            // Generic target: `Foo[T, U]` with the impl's params as args, so
+            // field/method access resolves through `record_generic_params`.
+            let args: Vec<Type> = generic_params
+                .iter()
+                .map(|g| gp_map[&g.name.name].clone())
+                .collect();
+            Type::Generic(GenericType {
+                constructor: target_name.to_string(),
+                args,
+            })
+        };
+
+        // `Self` written anywhere in a method body or signature resolves to the
+        // concrete target (mirrors the signature substitution in `collect_sig`).
+        gp_map.insert("Self".to_string(), target_ty.clone());
+
+        (gp_map, target_ty)
+    }
+
+    /// Type-check a single impl/class method body in place.
+    ///
+    /// `target_ty` is the concrete (or generic-instantiated) type the method is
+    /// attached to; `self` is bound to it. `impl_gp_map` carries the impl/class
+    /// generic params + `Self`; the method's own generic params are layered on
+    /// top. This is the per-function template of [`Self::check_fn_decl`],
+    /// extended with the impl context.
+    fn check_method_body(
+        &mut self,
+        node: &mut AIRNode,
+        target_ty: &Type,
+        impl_gp_map: &HashMap<String, Type>,
+    ) {
+        let (generic_params, params, return_type, effect_clause, where_clause) =
+            match node.kind.clone() {
+                NodeKind::FnDecl {
+                    generic_params,
+                    params,
+                    return_type,
+                    effect_clause,
+                    where_clause,
+                    ..
+                } => (
+                    generic_params,
+                    params,
+                    return_type,
+                    effect_clause,
+                    where_clause,
+                ),
+                // Methods are always FnDecl; ignore anything else defensively.
+                _ => return,
+            };
+
+        self.env.push_scope();
+
+        // Start from the impl context (impl generic params + `Self`) and layer
+        // the method's own generic params on top.
+        let mut gp_map = impl_gp_map.clone();
+        for gp in &generic_params {
+            gp_map.insert(gp.name.name.clone(), self.fresh_var());
+        }
+
+        // Record trait bounds on the method's own type variables.
+        for gp in &generic_params {
+            if let Some(Type::TypeVar(id)) = gp_map.get(&gp.name.name) {
+                let bound_names: Vec<String> = gp.bounds.iter().map(type_path_to_name).collect();
+                if !bound_names.is_empty() {
+                    self.type_var_bounds
+                        .entry(*id)
+                        .or_default()
+                        .extend(bound_names);
+                }
+            }
+        }
+        for clause in &where_clause {
+            if let Some(Type::TypeVar(id)) = gp_map.get(&clause.param.name) {
+                let bound_names: Vec<String> =
+                    clause.bounds.iter().map(type_path_to_name).collect();
+                if !bound_names.is_empty() {
+                    self.type_var_bounds
+                        .entry(*id)
+                        .or_default()
+                        .extend(bound_names);
+                }
+            }
+        }
+
+        // Bind params. A `self` receiver (no annotation) binds to the target
+        // type; everything else resolves through `gp_map` (so `Self` and the
+        // impl/method generics map to the concrete instantiation).
+        for p in &params {
+            if let NodeKind::Param { pattern, ty, .. } = &p.kind {
+                if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                    if name.name == "self" && ty.is_none() {
+                        self.env.define("self".to_string(), target_ty.clone());
+                        continue;
+                    }
+                    let pty = self.air_type_node_to_type(p.kind.param_ty_node(), &gp_map);
+                    self.env.define(name.name.clone(), pty);
+                } else if let Some(pat_name) = p.kind.param_pat_name() {
+                    let pty = self.air_type_node_to_type(p.kind.param_ty_node(), &gp_map);
+                    self.env.define(pat_name, pty);
+                }
+            }
+        }
+
+        let ret_ty = return_type
+            .as_deref()
+            .map(|n| self.air_type_node_to_type(n, &gp_map))
+            .unwrap_or(Type::Primitive(PrimitiveType::Void));
+
+        // Inject effect operation types from the method's `with` clause.
+        {
+            let mut visited = std::collections::HashSet::new();
+            for effect_tp in &effect_clause {
+                let ename = type_path_to_name(effect_tp);
+                self.inject_effect_ops_into_env(&ename, &mut visited);
+            }
+        }
+
+        self.check_where_clause(&where_clause, &gp_map, node.span);
+
+        self.return_ty_stack.push(ret_ty.clone());
+        if let NodeKind::FnDecl { body, .. } = &mut node.kind {
+            self.check_node(body, &ret_ty);
+        }
+        self.return_ty_stack.pop();
+
+        self.env.pop_scope();
+
+        // Methods record Void as their item-level type (their signature already
+        // lives in `method_types`); the body walk's purpose is diagnostics +
+        // codegen metadata stamping, not a fresh signature.
+        self.record(node, Type::Primitive(PrimitiveType::Void));
     }
 
     /// Type-check a function declaration node in place.
@@ -1746,13 +1998,15 @@ impl TypeChecker {
                 match &obj_ty {
                     Type::Error => Type::Error,
                     Type::Named(nt) => {
-                        // Look up method on the named type from inherent impls.
-                        if let Some(methods) = self.method_types.get(&nt.name) {
-                            if let Some(fn_ty) = methods.get(&field_name) {
-                                return self.record(node, fn_ty.clone());
-                            }
-                        }
-                        // Look up record field type from the declaration.
+                        // Prefer a same-named *field* over a method in bare
+                        // value position. A getter method whose name matches a
+                        // field (`impl Error for SimpleError { fn message(self)
+                        // -> String { self.message } }`) is idiomatic; reading
+                        // `self.message` must yield the field's type, not the
+                        // method's function type. Method *calls* still resolve
+                        // the method type — the `Call` handler resolves a
+                        // FieldAccess callee against `method_types` directly
+                        // (see `resolve_user_method_fn_type`).
                         if let Some(fields) = self.record_field_types.get(&nt.name) {
                             if let Some((_, field_ty)) =
                                 fields.iter().find(|(n, _)| n == &field_name)
@@ -1760,23 +2014,19 @@ impl TypeChecker {
                                 return self.record(node, field_ty.clone());
                             }
                         }
+                        // Look up method on the named type from inherent impls.
+                        if let Some(methods) = self.method_types.get(&nt.name) {
+                            if let Some(fn_ty) = methods.get(&field_name) {
+                                return self.record(node, fn_ty.clone());
+                            }
+                        }
                         self.fresh_var()
                     }
                     Type::Generic(g) => {
-                        // User-defined generic type: look up methods/fields
-                        // by constructor name, substituting type params.
-                        if let Some(methods) = self.method_types.get(&g.constructor) {
-                            if let Some(fn_ty) = methods.get(&field_name) {
-                                let resolved = if let Some(params) =
-                                    self.record_generic_params.get(&g.constructor)
-                                {
-                                    substitute_type_params(fn_ty, params, &g.args)
-                                } else {
-                                    fn_ty.clone()
-                                };
-                                return self.record(node, resolved);
-                            }
-                        }
+                        // User-defined generic type: look up fields/methods by
+                        // constructor name, substituting type params. Prefer a
+                        // same-named *field* over a method in bare value
+                        // position (see the `Named` case above for rationale).
                         if let Some(fields) = self.record_field_types.get(&g.constructor) {
                             if let Some((_, field_ty)) =
                                 fields.iter().find(|(n, _)| n == &field_name)
@@ -1787,6 +2037,18 @@ impl TypeChecker {
                                     substitute_type_params(field_ty, params, &g.args)
                                 } else {
                                     field_ty.clone()
+                                };
+                                return self.record(node, resolved);
+                            }
+                        }
+                        if let Some(methods) = self.method_types.get(&g.constructor) {
+                            if let Some(fn_ty) = methods.get(&field_name) {
+                                let resolved = if let Some(params) =
+                                    self.record_generic_params.get(&g.constructor)
+                                {
+                                    substitute_type_params(fn_ty, params, &g.args)
+                                } else {
+                                    fn_ty.clone()
                                 };
                                 return self.record(node, resolved);
                             }
@@ -1904,7 +2166,7 @@ impl TypeChecker {
                 };
 
                 // Infer callee type via mutable sub-node
-                let callee_ty = if let NodeKind::Call { callee, .. } = &mut node.kind {
+                let mut callee_ty = if let NodeKind::Call { callee, .. } = &mut node.kind {
                     self.infer_node(callee)
                 } else {
                     unreachable!()
@@ -1915,9 +2177,23 @@ impl TypeChecker {
                 // [recv, …] }`. Inferring the callee above recorded the
                 // receiver's type in the side-table, so stamp the call node with
                 // the receiver category for codegen (see `RECV_KIND_META_KEY`).
-                if let NodeKind::FieldAccess { object, .. } = &callee_clone.kind {
+                if let NodeKind::FieldAccess { object, field, .. } = &callee_clone.kind {
                     if let Some(recv_ty) = self.types.get(&object.id).cloned() {
                         self.stamp_recv_kind(node, &recv_ty);
+                        // The FieldAccess handler prefers a same-named *field*
+                        // over a method in value position, so a method call
+                        // whose name collides with a field would otherwise see
+                        // the (non-callable) field type here. In call-callee
+                        // position the method takes precedence: re-resolve the
+                        // method's function type from `method_types` and use it.
+                        let recv_ty = self.subst.apply(&recv_ty);
+                        if !matches!(callee_ty, Type::Function(_)) {
+                            if let Some(fn_ty) =
+                                self.resolve_user_method_fn_type(&recv_ty, &field.name)
+                            {
+                                callee_ty = fn_ty;
+                            }
+                        }
                     }
                 }
 
@@ -3052,6 +3328,35 @@ impl TypeChecker {
         None
     }
 
+    /// Resolve the full *function* type of a user-defined method (registered in
+    /// `method_types`) on a receiver type, with the type's generic params
+    /// substituted to the receiver's concrete arguments.
+    ///
+    /// Used by the `Call` handler so a method *call* whose name collides with a
+    /// same-named record field still resolves the method (the `FieldAccess`
+    /// handler prefers the field in bare value position; this restores the
+    /// method type when the FieldAccess is a call callee).
+    fn resolve_user_method_fn_type(&self, receiver_ty: &Type, method: &str) -> Option<Type> {
+        let receiver_ty = self.subst.apply(receiver_ty);
+        match &receiver_ty {
+            Type::Named(nt) => self
+                .method_types
+                .get(&nt.name)
+                .and_then(|m| m.get(method))
+                .cloned(),
+            Type::Generic(g) => self.method_types.get(&g.constructor).and_then(|m| {
+                m.get(method).map(|fn_ty| {
+                    if let Some(params) = self.record_generic_params.get(&g.constructor) {
+                        substitute_type_params(fn_ty, params, &g.args)
+                    } else {
+                        fn_ty.clone()
+                    }
+                })
+            }),
+            _ => None,
+        }
+    }
+
     /// Resolve the return type of a method call on a known receiver type.
     ///
     /// Returns a concrete type when the receiver type and method name
@@ -4121,9 +4426,20 @@ impl TypeChecker {
             NodeKind::TypeOptional { inner } => {
                 Type::Optional(Box::new(self.air_type_node_to_type(inner, gp_map)))
             }
-            NodeKind::TypeSelf => Type::Named(crate::NamedType {
-                name: "Self".into(),
-            }),
+            NodeKind::TypeSelf => {
+                // Inside an impl/class method body the context maps `Self` to
+                // the concrete target (see `build_impl_context`); honor it so a
+                // `-> Self` return or `other: Self` param resolves to the target
+                // type. Outside that context (e.g. trait declarations) `Self`
+                // stays an abstract `Named("Self")` placeholder.
+                if let Some(ty) = gp_map.get("Self") {
+                    ty.clone()
+                } else {
+                    Type::Named(crate::NamedType {
+                        name: "Self".into(),
+                    })
+                }
+            }
             NodeKind::Param { ty, .. } => {
                 if let Some(ty_node) = ty {
                     self.air_type_node_to_type(ty_node, gp_map)
@@ -5374,6 +5690,199 @@ mod tests {
         // params: [self -> Counter, other: Self -> Counter]
         assert_eq!(fn_ty.params, vec![counter.clone(), counter]);
         assert_eq!(*fn_ty.ret, Type::Primitive(PrimitiveType::Int));
+    }
+
+    // ── impl/class method-body checking (Q-impl-body-typecheck) ───────────
+
+    /// Build `impl <target> { fn <method>(self) -> <ret> { <tail> } }`, i.e. an
+    /// inherent impl whose single method has a real (non-empty) body. Used to
+    /// exercise the body-checking pass that `check_item` now performs.
+    fn impl_with_bodied_method(
+        gen: &NodeIdGen,
+        target: &str,
+        method: &str,
+        ret: AIRNode,
+        tail: AIRNode,
+    ) -> AIRNode {
+        let self_pat = make_node(
+            gen,
+            NodeKind::BindPat {
+                name: ident("self"),
+                is_mut: false,
+            },
+        );
+        let self_param = make_node(
+            gen,
+            NodeKind::Param {
+                pattern: Box::new(self_pat),
+                ty: None,
+                default: None,
+            },
+        );
+        let body = make_node(
+            gen,
+            NodeKind::Block {
+                stmts: vec![],
+                tail: Some(Box::new(tail)),
+            },
+        );
+        let method_node = make_node(
+            gen,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: bock_ast::Visibility::Public,
+                is_async: false,
+                name: ident(method),
+                generic_params: vec![],
+                params: vec![self_param],
+                return_type: Some(Box::new(ret)),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        make_node(
+            gen,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(type_named_node(gen, target)),
+                where_clause: vec![],
+                methods: vec![method_node],
+            },
+        )
+    }
+
+    /// A method body whose tail expression's type disagrees with the declared
+    /// return type must now be reported — before the fix, `check_item` skipped
+    /// `ImplBlock`, so the body was never walked and the mismatch was silent.
+    #[test]
+    fn impl_method_body_type_error_is_reported() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        // impl Widget { fn id(self) -> Int { "hello" } }  — String vs Int.
+        let ret = type_named_node(&gen, "Int");
+        let tail = str_lit(&gen);
+        let impl_node = impl_with_bodied_method(&gen, "Widget", "id", ret, tail);
+        let mut module = make_node(
+            &gen,
+            NodeKind::Module {
+                path: None,
+                annotations: vec![],
+                imports: vec![],
+                items: vec![impl_node],
+            },
+        );
+
+        checker.check_module(&mut module);
+        assert!(
+            checker.diags.has_errors(),
+            "expected a method-body type error, got none"
+        );
+    }
+
+    /// A well-typed method body must still check clean (no false positive).
+    #[test]
+    fn impl_method_body_well_typed_is_clean() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        // impl Widget { fn name(self) -> String { "hello" } }
+        let ret = type_named_node(&gen, "String");
+        let tail = str_lit(&gen);
+        let impl_node = impl_with_bodied_method(&gen, "Widget", "name", ret, tail);
+        let mut module = make_node(
+            &gen,
+            NodeKind::Module {
+                path: None,
+                annotations: vec![],
+                imports: vec![],
+                items: vec![impl_node],
+            },
+        );
+
+        checker.check_module(&mut module);
+        assert!(
+            !checker.diags.has_errors(),
+            "well-typed method body should not error: {:?}",
+            checker.diags.iter().collect::<Vec<_>>()
+        );
+    }
+
+    /// A getter method whose name matches a record field (`fn message(self) ->
+    /// String { self.message }`) must read the *field* in value position, not
+    /// resolve `self.message` to the method's own function type (which would be
+    /// `Fn(Self) -> String`, mismatching the `-> String` return). This is the
+    /// `core.error` shape the body-checking pass first surfaced; the
+    /// `FieldAccess` handler now prefers the same-named field.
+    #[test]
+    fn impl_getter_named_like_field_reads_the_field() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        // record Err { message: String }
+        let field = bock_ast::RecordDeclField {
+            id: gen.next(),
+            span: span(),
+            name: ident("message"),
+            ty: TypeExpr::Named {
+                id: gen.next(),
+                span: span(),
+                path: TypePath {
+                    segments: vec![ident("String")],
+                    span: span(),
+                },
+                args: vec![],
+            },
+            default: None,
+        };
+        let record_node = make_node(
+            &gen,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: bock_ast::Visibility::Public,
+                name: ident("Err"),
+                generic_params: vec![],
+                fields: vec![field],
+            },
+        );
+
+        // impl Err { fn message(self) -> String { self.message } }
+        let self_ref = make_node(
+            &gen,
+            NodeKind::Identifier {
+                name: ident("self"),
+            },
+        );
+        let field_access = make_node(
+            &gen,
+            NodeKind::FieldAccess {
+                object: Box::new(self_ref),
+                field: ident("message"),
+            },
+        );
+        let ret = type_named_node(&gen, "String");
+        let impl_node = impl_with_bodied_method(&gen, "Err", "message", ret, field_access);
+
+        let mut module = make_node(
+            &gen,
+            NodeKind::Module {
+                path: None,
+                annotations: vec![],
+                imports: vec![],
+                items: vec![record_node, impl_node],
+            },
+        );
+
+        checker.check_module(&mut module);
+        assert!(
+            !checker.diags.has_errors(),
+            "field-named getter should read the field, not the method: {:?}",
+            checker.diags.iter().collect::<Vec<_>>()
+        );
     }
 
     // ── check_mode: lambda from context ──────────────────────────────────
