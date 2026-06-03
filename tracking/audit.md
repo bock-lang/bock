@@ -1953,3 +1953,34 @@ AWAITING OPERATOR (2 decisions, nothing in flight): (1) **examples-hardening dir
     remaining leverage order = Q-rust-cargo-workspace (cheap, +3 rust) → E (go-enum-boxing) → F (rust-move) → G
     (rust-string) → J → K → D (deep) → misc. NEXT: checkpoint with operator on the next batch (rust/go are the long poles;
     Q-rust-cargo-workspace + E/F/G would lift rust/go, which are currently 2/1 of 20). Plus the baseline-refresh ratchet.
+
+[2026-06-03 18:01 UTC] rust batch L/F/G (#210) + go E (#209) DONE — parallel dispatch; combined-state verified
+  Input: operator chose "Rust (L+F+G) + Go (E) in parallel." Dispatched TWO concurrent worktree-isolated engineer
+    sessions (foreground; Opus 4.8): fix/rust-codegen (L+F+G) + fix/go-enum-boxing (E). Scoped to avoid the shared
+    generator.rs (rust→rs.rs/scaffold.rs, go→go.rs; distinct `rust_`/`go_` fixture prefixes). Both reported generator.rs
+    UNTOUCHED → no rebase needed; file sets fully disjoint (verified via `comm`).
+  RE-VERIFY-BEFORE-MERGE: watched both PRs' CI to all-green (the discipline), then — because two concurrent codegen/
+    checker PRs land together and weren't CI-tested COMBINED — merged both + ran conformance REQUIRE=all on the merged
+    main: **476/0** (460 + 11 rust [move_reuse×5 + effect_forwarding×5 + string_num×1] + 5 go [enum_return_boxing×5]).
+    Combined state clean. main a7a0083.
+  #210 (rust L+F+G): L = empty `[workspace]` in generated Cargo.toml (scaffold.rs; verified in-repo). F = clone-on-reuse
+    extended to params/self-call/MethodCall/effect-op-args/for-iterables/closure-captures + effect-handler double-borrow
+    fix. G = §18.3 String/numeric methods → native rust + a `string_concat` checker stamp (`String + String`→`format!`).
+    Touched rs.rs, scaffold.rs, bock-types/checker.rs (additive stamp), 3 fixtures, 1 docs line.
+  #209 (go E): boxed enum variants into the sealed interface at value-position if/match IIFE returns (4 root causes incl.
+    a block-in-expr-position closure that dropped its statements + the void-arm `(int,error)` arity bug). go.rs + fixture.
+  EXAMPLES MATRIX (re-ran the gate on merged main): **RUST 2→8 runtime-working** (calculator, effect-showcase,
+    inventory-system, markdown-parser, task-api, microservice now build+run); js 7 · ts 4 · py 9 unchanged; **go STILL 1.**
+    HONEST: go E landed correctly (conformance +5, boxing fixed) but moved NO go example — each now hits a NEXT barrier
+    (§18.3 string-methods missing on go, match-exprpos, a Result-payload type-assert). Necessary, not sufficient.
+  RATCHET: refreshed the examples-exec baseline (#211) to lock in the rust+js gains as the new regression floor (operator-
+    decided "ratchet up as clusters land"; gate stays informational).
+  TRIAGE: L/F/G/E → DONE. NEW: **Q-string-num-jstspygo** (G's String/num lowerings are rust-only; js/ts/py/go still emit
+    undefined `s.slice`/`n.toFloat` — split out, HIGH-ish: unblocks go + js/ts/py runtime). Folded into Q-examples-codegen-
+    misc: (j) rust guard-let codegen, (k) rust mut-param emission, (l) rust list-pattern codegen [all ownership-demo, #210],
+    (m) go Result-payload type-assert [#209].
+  STRATEGIC (for operator): **go is the lone stuck target (1/20).** Unlike rust (one batch → 2→8), go needs a CHAIN —
+    Q-string-num-jstspygo + Q-match-exprpos (D, deep/all-backend) + go-Result-payload — before ANY go example completes.
+    Worth deciding whether go holds the same v1.0 "examples green" bar or tiers to v1.1. SESSION IS LONG → recommend a
+    checkpoint/digest here before the next batch.
+  NEXT: land this tracking PR + #211; checkpoint with operator (go bar + next batch: Q-string-num-jstspygo is the unblock).

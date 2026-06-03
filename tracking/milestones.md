@@ -130,13 +130,16 @@ exercises the stdlib's FREE functions but not the real-world-shaped method/closu
 **leverage order**; the examples-exec CI gate lands **informational-first**, ratcheting to blocking as clusters land.
 - **Acceptance:** all 20 `examples/` **compile AND run** on all 5 targets in CI (the Q-examples-exec-coverage gate,
   flipped to blocking); no regressions vs the ratchet.
-- **Progress (2026-06-03 16:56):** the gate (M, #204, informational) + clusters **A+B+C (#205)** + **Q-impl-body-typecheck
-  (#207)** landed. Runtime-working rose **js 2→7 · ts 2→4 · py 7→9 / 20** (rust 2, go 1 unchanged — blocked on E/F/G/D),
-  0 regressions, conformance **455→460**. #207 made the checker type-check impl/class method bodies — caught a REAL latent
-  `core.error` field/method value-position bug + fixed a `Self` false-positive; a correctness win (example output
-  byte-identical — codegen fallbacks already covered method-body list ops). Cluster C: const done; enum-variant/trait-name
-  residue now runtime (→ K). **Remaining (leverage order):** Q-rust-cargo-workspace (cheap, +3 rust), E (go-enum-boxing),
-  F (rust-move), G (rust-string), J (js-effect-export), K (py-circular), D (match-exprpos, deep), Q-examples-codegen-misc.
+- **Progress (2026-06-03 18:01):** landed **8 PRs (#204–#211)** — gate (M), A+B+C (#205), Q-impl-body-typecheck (#207),
+  **rust L/F/G (#210)**, **go E (#209)**, baseline ratchet (#211). Combined conformance **430→476** REQUIRE=all.
+  Runtime-working examples: **js 2→7 · ts 2→4 · py 7→9 · RUST 2→8 · go 1→1** / 20. **rust jumped hard** (L cargo-workspace
+  + F move/borrow + G String/num). **go is the lone stuck target (still 1/20)** — E (enum-return boxing) was a necessary
+  prerequisite but cleared only one barrier; go examples now hit a deeper chain (§18.3 string-methods missing on go +
+  match-exprpos + a Result-payload type-assert), so NO go example completes yet. G's String/num lowerings are rust-only →
+  the js/ts/py/**go** split is Q-string-num-jstspygo. **Remaining (leverage order):** Q-string-num-jstspygo (unblocks go +
+  js/ts/py runtime) → J (js-effect-export) → K (py-circular) → **D (match-exprpos — deep, all-backend, go-blocking)** →
+  Q-examples-codegen-misc (13 sub-items). **STRATEGIC NOTE:** go (1/20) needs Q-string-num-jstspygo + D + go-Result-payload
+  chained before any go example completes — worth an operator check on whether go holds the same v1.0 bar or tiers to v1.1.
 - **Mapped items (queue.md), leverage order:** `Q-list-method-codegen` (A, HIGH, all 5 — receiver dup'd as 1st arg) →
   `Q-rust-cargo-workspace` (L, cheap, recovers 3 rust in-repo) → `Q-list-concat-codegen` (B) → `Q-const-enum-naming` (C)
   → `Q-go-enum-return-boxing` (E) → `Q-rust-move-codegen` (F) → `Q-rust-string-num-methods` (G) → `Q-js-effect-export`
