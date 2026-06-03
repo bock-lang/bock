@@ -2684,11 +2684,210 @@ pub fn inherited_default_methods(
         .collect()
 }
 
+// ─── Field/method name-collision disambiguation ───────────────────────────────
+//
+// Several stdlib (and user) types declare a *field* and a *method* that share a
+// Bock name — the canonical case is `core.error`'s `SimpleError`, which has a
+// `message: String` field *and* a `message()` method (the `Error` trait method).
+// In Bock these are distinct (`self.message` vs `self.message()`), but most
+// target object models collapse a field and a same-named method onto one member
+// slot, which breaks at codegen:
+//
+//   - Go: `go build` rejects a struct with a field and method of the same name.
+//   - TS: `class { message: string }` + `interface { message(): string }` is a
+//     "Duplicate identifier".
+//   - JS: the instance field `this.message` shadows the prototype method, so
+//     `obj.message()` is "not a function".
+//   - Python: the dataclass field overwrites the method attribute on the class.
+//   - Rust: a field and an inherent method *may* share a name, so it is a no-op.
+//
+// The shared remedy: when a type has a method whose *emitted* name equals one of
+// its *emitted* field names, the **method** is renamed (the field keeps its
+// name) by appending a disambiguating suffix, and the rename is applied
+// identically at the trait-interface declaration, the receiver/impl method, and
+// every call site so they always agree. The two helpers below let every backend
+// (go/ts/js/py) share this policy — collecting field names in the backend's own
+// casing and routing both declarations and call sites through one rename — so
+// any future field/method pair is handled uniformly without per-collision code.
+
+/// Collect every record/class field name in the module, mapped through the
+/// backend's `cased` name function (`to_pascal_case` for Go, `to_camel_case`
+/// for js/ts, identity/snake for Python). Backends use the returned set with
+/// [`disambiguate_method_name`] to detect a method whose emitted name collides
+/// with a field's emitted name.
+///
+/// The set is intentionally a *union* across all records/classes in the module
+/// (not per-type): it mirrors the Go backend's original behavior and is a safe
+/// over-approximation — at worst it renames a method on a type that happens to
+/// share a name with an *unrelated* type's field, which is harmless because the
+/// rename is applied consistently at the method's declaration and all its call
+/// sites. Keeping it module-global keeps the lookup a single `HashSet` shared by
+/// declaration and call-site emission, which run at different points.
+#[must_use]
+pub fn collect_record_field_names<F>(
+    module: &AIRNode,
+    cased: F,
+) -> std::collections::HashSet<String>
+where
+    F: Fn(&str) -> String,
+{
+    let mut names = std::collections::HashSet::new();
+    if let NodeKind::Module { items, .. } = &module.kind {
+        for item in items {
+            if let NodeKind::RecordDecl { fields, .. } | NodeKind::ClassDecl { fields, .. } =
+                &item.kind
+            {
+                for f in fields {
+                    names.insert(cased(&f.name.name));
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Disambiguate a method's emitted name against the type's field names.
+///
+/// `cased_name` is the method name already mapped through the backend's casing
+/// rule (so the comparison is apples-to-apples with the `field_names` produced
+/// by [`collect_record_field_names`] using the *same* casing). When the cased
+/// method name is also a field name, the method is renamed by appending
+/// `suffix` directly to the cased name — the suffix is the backend's
+/// already-cased disambiguator (`"Method"` for Go's Pascal and js/ts's camel,
+/// `"_method"` for Python's snake), so `message`/`Message` become
+/// `messageMethod`/`MessageMethod`/`message_method`. The cased prefix is left
+/// untouched (no re-casing), so camelCase names with internal capitals survive
+/// intact. Non-colliding names pass through unchanged.
+///
+/// Backends call this identically at the method declaration and at every call
+/// site, so the renamed method always resolves.
+#[must_use]
+pub fn disambiguate_method_name(
+    cased_name: String,
+    field_names: &std::collections::HashSet<String>,
+    suffix: &str,
+) -> String {
+    if field_names.contains(&cased_name) {
+        format!("{cased_name}{suffix}")
+    } else {
+        cased_name
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disambiguate_method_name_suffixes_only_on_collision() {
+        let mut fields = std::collections::HashSet::new();
+        fields.insert("message".to_string());
+        fields.insert("Message".to_string());
+        // Camel/snake non-colliding name passes through unchanged.
+        assert_eq!(
+            disambiguate_method_name("render".to_string(), &fields, "Method"),
+            "render"
+        );
+        // Colliding camel name gets the camel suffix.
+        assert_eq!(
+            disambiguate_method_name("message".to_string(), &fields, "Method"),
+            "messageMethod"
+        );
+        // Colliding Pascal name (Go) gets the Pascal suffix.
+        assert_eq!(
+            disambiguate_method_name("Message".to_string(), &fields, "Method"),
+            "MessageMethod"
+        );
+        // Colliding snake name (Python) gets the snake suffix.
+        assert_eq!(
+            disambiguate_method_name("message".to_string(), &fields, "_method"),
+            "message_method"
+        );
+    }
+
+    #[test]
+    fn collect_record_field_names_unions_records_and_classes() {
+        use bock_ast::{Ident, RecordDeclField, TypeExpr, TypePath, Visibility};
+        use bock_errors::{FileId, Span};
+
+        fn span() -> Span {
+            Span {
+                file: FileId(0),
+                start: 0,
+                end: 0,
+            }
+        }
+        fn ident(name: &str) -> Ident {
+            Ident {
+                name: name.to_string(),
+                span: span(),
+            }
+        }
+        fn ty() -> TypeExpr {
+            TypeExpr::Named {
+                id: 0,
+                span: span(),
+                path: TypePath {
+                    segments: vec![ident("String")],
+                    span: span(),
+                },
+                args: vec![],
+            }
+        }
+        fn field(name: &str) -> RecordDeclField {
+            RecordDeclField {
+                id: 0,
+                span: span(),
+                name: ident(name),
+                ty: ty(),
+                default: None,
+            }
+        }
+
+        let record = AIRNode::new(
+            1,
+            span(),
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("SimpleError"),
+                generic_params: vec![],
+                fields: vec![field("message")],
+            },
+        );
+        let class = AIRNode::new(
+            2,
+            span(),
+            NodeKind::ClassDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Handler"),
+                generic_params: vec![],
+                base: None,
+                traits: vec![],
+                fields: vec![field("state")],
+                methods: vec![],
+            },
+        );
+        let module = AIRNode::new(
+            0,
+            span(),
+            NodeKind::Module {
+                path: None,
+                annotations: vec![],
+                imports: vec![],
+                items: vec![record, class],
+            },
+        );
+
+        // Identity casing → raw field names unioned from a record and a class.
+        let names = collect_record_field_names(&module, |n| n.to_string());
+        assert!(names.contains("message"));
+        assert!(names.contains("state"));
+        assert_eq!(names.len(), 2);
+    }
 
     #[test]
     fn output_file_stores_path_and_content() {

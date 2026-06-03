@@ -185,6 +185,17 @@ impl CodeGenerator for JsGenerator {
         let trait_decls = crate::generator::collect_trait_decls(modules);
         let record_names = crate::generator::collect_record_names(modules);
         let public_symbols = crate::generator::collect_public_symbols_for_esm(modules);
+        // Program-wide field/method name-collision set (camelCased). Built across
+        // *all* reachable modules so a call site in `main.js` to a renamed method
+        // declared in `core/error.js` agrees with that declaration — the method
+        // and its cross-module call sites must rename identically.
+        let mut field_method_collisions = HashSet::new();
+        for (module, _) in modules {
+            field_method_collisions.extend(crate::generator::collect_record_field_names(
+                module,
+                to_camel_case,
+            ));
+        }
 
         let main_is_async = modules
             .iter()
@@ -205,6 +216,9 @@ impl CodeGenerator for JsGenerator {
             // construction (`use`d from another module) lowers to `new Name(...)`
             // rather than a bare object literal that drops its prototype methods.
             ctx.record_names = record_names.clone();
+            // Program-wide collision set so renamed methods and their
+            // cross-module call sites agree (see above).
+            ctx.field_method_collisions = field_method_collisions.clone();
             // Effect-op resolution needs the whole reachable set: a bare op in
             // one module may belong to an effect declared in another.
             ctx.seed_effect_registries(modules);
@@ -441,6 +455,15 @@ struct EmitCtx {
     /// enums + variants, traits, classes, effects, consts) is re-exported.
     /// Computed in `generate_project`.
     export_names: Vec<crate::generator::EsmExport>,
+    /// Camel-cased record/class field names in the module being emitted, used to
+    /// disambiguate a method whose camelCased name collides with a field name
+    /// (`core.error`'s `message` field + `message()` method). A JS instance
+    /// field shadows a same-named prototype method, so the *method* is renamed
+    /// (`messageMethod`) at its prototype attachment, its class-body emission,
+    /// and every call site via [`Self::js_method_name`]; the field keeps its
+    /// name. Populated at the start of the `Module` arm (shared collector with
+    /// go/ts/py).
+    field_method_collisions: HashSet<String>,
 }
 
 impl EmitCtx {
@@ -473,7 +496,30 @@ impl EmitCtx {
             public_symbols: HashMap::new(),
             self_module_path: String::new(),
             export_names: Vec::new(),
+            field_method_collisions: HashSet::new(),
         }
+    }
+
+    /// Disambiguate an *already-rendered* JS method member name against the
+    /// program's field names: when the rendered name collides with a field name,
+    /// append a `Method` suffix (`message` → `messageMethod`), else return it
+    /// unchanged.
+    ///
+    /// JS renders method names two ways — the prototype attachment and
+    /// `FieldAccess`-in-call-position use the raw Bock name, while
+    /// `emit_class_method` and the `MethodCall` arm use `to_camel_case` — so this
+    /// helper takes whatever each site already produced and only adds the suffix,
+    /// preserving each site's existing casing (a switch to camelCase would change
+    /// snake_case method names, breaking call sites that still spell them raw).
+    /// For the field/method collisions this targets (single-word field names like
+    /// `message`, where raw == camelCase) the renderings agree. Shared policy
+    /// with go/ts/py (see [`crate::generator::disambiguate_method_name`]).
+    fn js_method_name(&self, rendered: &str) -> String {
+        crate::generator::disambiguate_method_name(
+            rendered.to_string(),
+            &self.field_method_collisions,
+            "Method",
+        )
     }
 
     /// Returns the variant info for `path` if its last segment is a registered
@@ -1707,6 +1753,18 @@ impl EmitCtx {
         self.mark_span(node.span);
         match &node.kind {
             NodeKind::Module { items, imports, .. } => {
+                // Field/method name-collision set (camelCased, to match the
+                // method-name casing). A method whose camelCased name equals a
+                // field name is renamed via `js_method_name`. In the per-module
+                // path this is pre-seeded program-wide by `generate_project` so a
+                // call site in one file agrees with the renamed method declared
+                // in another; we *extend* here so the single-module
+                // `generate_module` path (no pre-seed) is also covered.
+                self.field_method_collisions
+                    .extend(crate::generator::collect_record_field_names(
+                        node,
+                        to_camel_case,
+                    ));
                 if self.per_module {
                     // Per-module native-import path (the real build): each module
                     // is emitted to its own `.js` file and the runtime helpers
@@ -1907,7 +1965,7 @@ impl EmitCtx {
                         }
                         self.writeln(&format!(
                             "{target_name}.prototype.{} = {async_kw}function({}) {{",
-                            name.name,
+                            self.js_method_name(&name.name),
                             all_params.join(", "),
                         ));
                         self.indent += 1;
@@ -2096,7 +2154,7 @@ impl EmitCtx {
             if let Some(ep) = effects_param {
                 all_params.push(ep);
             }
-            let method_name = to_camel_case(&name.name);
+            let method_name = self.js_method_name(&to_camel_case(&name.name));
             self.writeln(&format!(
                 "{async_kw}{method_name}({}) {{",
                 all_params.join(", "),
@@ -2636,6 +2694,38 @@ impl EmitCtx {
                         }
                     }
                 }
+                // A trait/record method call lowers to `Call(FieldAccess(recv,
+                // method), [recv, ...])` (the receiver is re-passed as `self`,
+                // sharing the receiver's NodeId — see `desugared_self_call`).
+                // When the method name collides with a field name, the *method*
+                // was renamed at its declaration (`<name>Method`); rename the
+                // call's member access to match so it resolves. A genuine field
+                // *read* (bare `FieldAccess`, not in call position) and a
+                // field-closure call `(p.f)(x)` (distinct receiver nodes) keep
+                // the field name. Shared policy with go/ts/py. Unlike Python's
+                // implicit `self`, JS prototype functions take an explicit `self`
+                // param, so all `args` (the re-passed receiver included) are kept.
+                if let NodeKind::FieldAccess { object, field } = &callee.kind {
+                    if crate::generator::desugared_self_call(callee, args).is_some() {
+                        // The generic fall-through emits the field name raw, so
+                        // disambiguate against the raw name (matches the raw
+                        // prototype attachment).
+                        let renamed = self.js_method_name(&field.name);
+                        if renamed != field.name {
+                            self.emit_expr(object)?;
+                            let _ = write!(self.buf, ".{renamed}");
+                            self.buf.push('(');
+                            for (i, arg) in args.iter().enumerate() {
+                                if i > 0 {
+                                    self.buf.push_str(", ");
+                                }
+                                self.emit_expr(&arg.value)?;
+                            }
+                            self.buf.push(')');
+                            return Ok(());
+                        }
+                    }
+                }
                 // Pass handler args to effectful function calls.
                 let effects_arg = if let NodeKind::Identifier { name } = &callee.kind {
                     self.build_effects_call_arg_js(&name.name)
@@ -2669,7 +2759,11 @@ impl EmitCtx {
                     return Ok(());
                 }
                 self.emit_expr(receiver)?;
-                let _ = write!(self.buf, ".{}", to_camel_case(&method.name));
+                let _ = write!(
+                    self.buf,
+                    ".{}",
+                    self.js_method_name(&to_camel_case(&method.name))
+                );
                 self.buf.push('(');
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -6667,6 +6761,136 @@ mod tests {
         assert!(
             !out.contains("f()._tag") && !out.contains("f()._0"),
             "call scrutinee must not be re-emitted inline, got: {out}"
+        );
+    }
+
+    #[test]
+    fn method_colliding_with_field_is_disambiguated() {
+        // record SimpleError { message: String }
+        let record_decl = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("SimpleError"),
+                generic_params: vec![],
+                fields: vec![bock_ast::RecordDeclField {
+                    id: 0,
+                    span: span(),
+                    name: ident("message"),
+                    ty: bock_ast::TypeExpr::Named {
+                        id: 0,
+                        span: span(),
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                    default: None,
+                }],
+            },
+        );
+        // impl Error for SimpleError { fn message(self) { self.message } }
+        let method = node(
+            10,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("message"),
+                generic_params: vec![],
+                params: vec![param_node(11, "self")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    12,
+                    vec![],
+                    Some(node(
+                        13,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(14, "self")),
+                            field: ident("message"),
+                        },
+                    )),
+                )),
+            },
+        );
+        let impl_block = node(
+            20,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                target: Box::new(node(
+                    21,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["SimpleError"]),
+                        args: vec![],
+                    },
+                )),
+                trait_path: Some(type_path(&["Error"])),
+                trait_args: vec![],
+                generic_params: vec![],
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        );
+        // fn read(e: SimpleError) { e.message() }  → Call(FieldAccess(e,message),[e])
+        let read_fn = node(
+            30,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("read"),
+                generic_params: vec![],
+                params: vec![param_node(31, "e")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    32,
+                    vec![],
+                    Some(node(
+                        33,
+                        NodeKind::Call {
+                            callee: Box::new(node(
+                                34,
+                                NodeKind::FieldAccess {
+                                    // The lowerer reuses the *same* receiver node
+                                    // in both the field-access object and the self
+                                    // arg; `desugared_self_call` keys on the shared
+                                    // NodeId, so the test must too.
+                                    object: Box::new(id_node(35, "e")),
+                                    field: ident("message"),
+                                },
+                            )),
+                            type_args: vec![],
+                            args: vec![AirArg {
+                                label: None,
+                                value: id_node(35, "e"),
+                            }],
+                        },
+                    )),
+                )),
+            },
+        );
+        let out = gen(&module(vec![], vec![record_decl, impl_block, read_fn]));
+        // The field is still set on the instance under its own name.
+        assert!(
+            out.contains("this.message = message"),
+            "field should remain `message`, got: {out}"
+        );
+        // The method (prototype) and call site are renamed to `messageMethod`.
+        assert!(
+            out.contains("SimpleError.prototype.messageMethod = "),
+            "prototype method should be `messageMethod`, got: {out}"
+        );
+        assert!(
+            out.contains(".messageMethod(e)"),
+            "call site should be `.messageMethod(e)`, got: {out}"
+        );
+        // The method body still *reads* the field via `self.message`.
+        assert!(
+            out.contains("return self.message;"),
+            "method body should read the field `self.message`, got: {out}"
         );
     }
 }

@@ -505,6 +505,16 @@ impl CodeGenerator for PyGenerator {
         let trait_decls = crate::generator::collect_trait_decls(modules);
         // Map of public symbol → declaring module, for the implicit-import pass.
         let public_symbols = collect_public_symbol_modules(modules);
+        // Program-wide field/method name-collision set (snake_cased). Built across
+        // *all* reachable modules so a call site in `main.py` to a renamed method
+        // declared in `core/error.py` agrees with that declaration.
+        let mut field_method_collisions = std::collections::HashSet::new();
+        for (module, _) in modules {
+            field_method_collisions.extend(crate::generator::collect_record_field_names(
+                module,
+                to_snake_case,
+            ));
+        }
 
         let main_is_async = modules
             .iter()
@@ -523,6 +533,7 @@ impl CodeGenerator for PyGenerator {
             ctx.per_module = true;
             ctx.enum_variants = enum_variants.clone();
             ctx.trait_decls = trait_decls.clone();
+            ctx.field_method_collisions = field_method_collisions.clone();
             // Effect-op resolution needs the whole reachable set: a bare op in
             // one module may belong to an effect declared in another.
             ctx.seed_effect_registries(modules);
@@ -757,6 +768,16 @@ struct PyEmitCtx {
     /// `from <module_path> import <symbol_name>` for each, grouped by module,
     /// after the explicit imports. Computed in `generate_project`.
     implicit_imports: Vec<(String, String)>,
+    /// Snake-cased record/class field names across the reachable program, used to
+    /// disambiguate a method whose snake_cased name collides with a field name
+    /// (`core.error`'s `message` field + `message()` method). A `@dataclass`
+    /// field overwrites a same-named method attribute on the class, so the
+    /// *method* is renamed (`message_method`) at its definition and every call
+    /// site via [`Self::py_method_name`]; the field keeps its name. Pre-seeded
+    /// program-wide by `generate_project` (and extended per-module by the
+    /// `Module` arm for the single-module `generate_module` path). Shared policy
+    /// with go/js/ts.
+    field_method_collisions: std::collections::HashSet<String>,
 }
 
 impl PyEmitCtx {
@@ -794,7 +815,21 @@ impl PyEmitCtx {
             needs_runtime_ordering: false,
             needs_runtime_concurrency: false,
             implicit_imports: Vec::new(),
+            field_method_collisions: std::collections::HashSet::new(),
         }
+    }
+
+    /// The Python method name for a Bock method, disambiguated against the
+    /// program's field names so a method whose snake_cased name collides with a
+    /// field gets a `_method` suffix (`message` → `message_method`). Applied
+    /// identically at the method definition and every call site (shared policy
+    /// with go/js/ts — see [`crate::generator::disambiguate_method_name`]).
+    fn py_method_name(&self, name: &str) -> String {
+        crate::generator::disambiguate_method_name(
+            to_snake_case(name),
+            &self.field_method_collisions,
+            "_method",
+        )
     }
 
     fn finish(mut self) -> String {
@@ -1853,6 +1888,16 @@ impl PyEmitCtx {
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         match &node.kind {
             NodeKind::Module { items, imports, .. } => {
+                // Field/method name-collision set (snake_cased). Pre-seeded
+                // program-wide by `generate_project` so a call site in one file
+                // agrees with the renamed method declared in another; extended
+                // here so the single-module `generate_module` path (no pre-seed)
+                // is also covered.
+                self.field_method_collisions
+                    .extend(crate::generator::collect_record_field_names(
+                        node,
+                        to_snake_case,
+                    ));
                 if self.per_module {
                     // Per-module native-import path (the real build): each module
                     // is emitted to its own file and the shared runtime preludes
@@ -2267,7 +2312,9 @@ impl PyEmitCtx {
                             .as_deref()
                             .map(|t| format!(" -> {}", self.type_to_py(t)))
                             .unwrap_or_default();
-                        let fn_name = to_snake_case(&name.name);
+                        // Rename a field-colliding method consistently with the
+                        // inlined-impl path (`emit_class_method`) and call sites.
+                        let fn_name = self.py_method_name(&name.name);
                         self.writeln(&format!(
                             "{async_kw}def {fn_name}({}){}:",
                             all_params.join(", "),
@@ -2565,7 +2612,10 @@ impl PyEmitCtx {
                 .as_deref()
                 .map(|t| format!(" -> {}", self.type_to_py(t)))
                 .unwrap_or_default();
-            let fn_name = to_snake_case(&name.name);
+            // A method whose name collides with a field is renamed (`message`
+            // → `message_method`); the dataclass field would otherwise overwrite
+            // the method attribute. Renamed identically at every call site.
+            let fn_name = self.py_method_name(&name.name);
             self.writeln(&format!(
                 "{async_kw}def {fn_name}({}){}:",
                 all_params.join(", "),
@@ -3105,7 +3155,7 @@ impl PyEmitCtx {
                     crate::generator::desugared_self_call(callee, args)
                 {
                     self.emit_expr(recv)?;
-                    let _ = write!(self.buf, ".{}", to_snake_case(&method.name));
+                    let _ = write!(self.buf, ".{}", self.py_method_name(&method.name));
                     self.buf.push('(');
                     for (i, arg) in rest.iter().enumerate() {
                         if i > 0 {
@@ -3169,7 +3219,7 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 self.emit_expr(receiver)?;
-                let _ = write!(self.buf, ".{}", to_snake_case(&method.name));
+                let _ = write!(self.buf, ".{}", self.py_method_name(&method.name));
                 self.buf.push('(');
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -7292,6 +7342,131 @@ mod tests {
         assert_eq!(
             typevar_count, 1,
             "shared type param T must be declared exactly once, got {typevar_count} in: {out}"
+        );
+    }
+
+    #[test]
+    fn method_colliding_with_field_is_disambiguated() {
+        // record SimpleError { message: String }
+        let record_decl = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("SimpleError"),
+                generic_params: vec![],
+                fields: vec![named_field("message", "String")],
+            },
+        );
+        // impl Error for SimpleError { fn message(self) -> String { self.message } }
+        let method = node(
+            10,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("message"),
+                generic_params: vec![],
+                params: vec![param_node(11, "self")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    12,
+                    vec![],
+                    Some(node(
+                        13,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(14, "self")),
+                            field: ident("message"),
+                        },
+                    )),
+                )),
+            },
+        );
+        let impl_block = node(
+            20,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                target: Box::new(node(
+                    21,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["SimpleError"]),
+                        args: vec![],
+                    },
+                )),
+                trait_path: Some(type_path(&["Error"])),
+                trait_args: vec![],
+                generic_params: vec![],
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        );
+        // fn read(e: SimpleError) -> String { e.message() }
+        let read_fn = node(
+            30,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("read"),
+                generic_params: vec![],
+                params: vec![typed_param_node(31, "e", "SimpleError")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    32,
+                    vec![],
+                    Some(node(
+                        33,
+                        NodeKind::Call {
+                            callee: Box::new(node(
+                                34,
+                                NodeKind::FieldAccess {
+                                    // The lowerer reuses the *same* receiver node
+                                    // in both the field-access object and the
+                                    // self arg; `desugared_self_call` keys on the
+                                    // shared NodeId, so the test must too.
+                                    object: Box::new(id_node(35, "e")),
+                                    field: ident("message"),
+                                },
+                            )),
+                            type_args: vec![],
+                            args: vec![AirArg {
+                                label: None,
+                                value: id_node(35, "e"),
+                            }],
+                        },
+                    )),
+                )),
+            },
+        );
+        let out = gen(&module(vec![], vec![record_decl, impl_block, read_fn]));
+        // The dataclass field stays `message`.
+        assert!(
+            out.contains("message: str"),
+            "dataclass field should remain `message: str`, got: {out}"
+        );
+        // The inlined method and the call site are renamed to `message_method`
+        // so the dataclass field no longer overwrites the method attribute.
+        assert!(
+            out.contains("def message_method(self)"),
+            "method should be `def message_method`, got: {out}"
+        );
+        assert!(
+            out.contains(".message_method()"),
+            "call site should be `.message_method()`, got: {out}"
+        );
+        // The method body still reads the field via `self.message`.
+        assert!(
+            out.contains("return self.message"),
+            "method body should read the field `self.message`, got: {out}"
+        );
+        // No bare `def message(self)` that the field would clobber.
+        assert!(
+            !out.contains("def message(self)"),
+            "must NOT emit a `def message(self)` clobbered by the field, got: {out}"
         );
     }
 }
