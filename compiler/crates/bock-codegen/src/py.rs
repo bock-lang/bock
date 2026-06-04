@@ -8206,8 +8206,19 @@ mod tests {
 
     /// Run generated Python through `python3 -m py_compile` for syntax validation.
     fn check_py_syntax(code: &str) -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir();
-        let path = dir.join("bock_test_output.py");
+        // Unique filename per call: `cargo test` runs these checks on parallel
+        // threads, so a shared fixed path races — one test's `py_compile` reads or
+        // removes the file another test just wrote, yielding spurious "must parse"
+        // failures (this flaked every CI lane except ubuntu-stable once the new
+        // value-position match tests added more concurrent callers).
+        let path = dir.join(format!(
+            "bock_test_output_{}_{}.py",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&path, code).expect("failed to write temp file");
         let result = std::process::Command::new("python3")
             .arg("-m")
