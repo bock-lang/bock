@@ -959,6 +959,9 @@ impl CodeGenerator for PyGenerator {
     }
 
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
+        // Shared pre-pass: hoist value-position diverging control flow (see
+        // `hoist_value_cf`) into declare-then-assign temp blocks.
+        let module = &crate::generator::hoist_value_cf(module.clone());
         let mut ctx = PyEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
@@ -1014,6 +1017,15 @@ impl CodeGenerator for PyGenerator {
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
+        // Shared pre-pass: hoist value-position diverging control flow on every
+        // module before registry collection or emission (see `hoist_value_cf`).
+        let hoisted: Vec<(AIRModule, &std::path::Path)> = modules
+            .iter()
+            .map(|(m, p)| (crate::generator::hoist_value_cf((*m).clone()), *p))
+            .collect();
+        let modules: Vec<(&AIRModule, &std::path::Path)> =
+            hoisted.iter().map(|(m, p)| (m, *p)).collect();
+        let modules = modules.as_slice();
         // Emit only modules the entry program actually `use`s (plus the entry
         // itself), dependency-ordered — never the prelude-only stdlib (see
         // `reachable_modules`).
@@ -3929,6 +3941,14 @@ impl PyEmitCtx {
                     .as_ref()
                     .map(|t| format!(": {}", self.type_to_py(t)))
                     .unwrap_or_default();
+                // Declare-only temp from the shared value-CF hoist: Python has no
+                // declarations, so pre-bind `name = None`; the relocated control
+                // flow that follows assigns it on every non-diverging path.
+                if node.metadata.contains_key(crate::generator::DECL_ONLY_META) {
+                    let ind = self.indent_str();
+                    let _ = writeln!(self.buf, "{ind}{binding}{type_hint} = None");
+                    return Ok(());
+                }
                 // Expression-position control flow (a value-`loop`, a `match`
                 // with a diverging/statement arm, a statement-`if`) cannot be a
                 // Python expression. Pre-declare the binding (so it is always
@@ -9149,9 +9169,15 @@ mod tests {
             out.contains("while True:"),
             "value-loop should hoist to `while True:`, got: {out}"
         );
+        // The shared AIR value-CF hoist introduces a `__bock_cf_N` temp: the
+        // `break 5` assigns it (`__bock_cf_0 = 5`) then `break`, and `r` reads it.
         assert!(
-            out.contains("r = 5"),
-            "break value should assign the target `r = 5`, got: {out}"
+            out.contains("__bock_cf_0 = 5"),
+            "break value should assign the hoisted temp `__bock_cf_0 = 5`, got: {out}"
+        );
+        assert!(
+            out.contains("r = __bock_cf_0"),
+            "the let should read the hoisted temp `r = __bock_cf_0`, got: {out}"
         );
         assert!(
             out.contains("break"),
@@ -9200,6 +9226,73 @@ mod tests {
         assert!(
             imports.is_empty(),
             "a field named `total` must not implicit-import `service.total`, got: {imports:?}"
+        );
+    }
+
+    /// `fn f() { let x = if (c) { 1 } else { return 0 }  x }` — value-position
+    /// `if` with a diverging else. The shared value-CF hoist pre-binds a temp
+    /// and lowers the `if` to statements, never `# unsupported` or an invalid
+    /// `lambda` capturing the `return`.
+    fn diverging_value_if_fn() -> AIRNode {
+        let then_b = block(2, vec![], Some(int_lit(3, "1")));
+        let ret = node(
+            5,
+            NodeKind::Return {
+                value: Some(Box::new(int_lit(6, "0"))),
+            },
+        );
+        let else_b = block(4, vec![], Some(ret));
+        let if_node = node(
+            1,
+            NodeKind::If {
+                let_pattern: None,
+                condition: Box::new(id_node(7, "c")),
+                then_block: Box::new(then_b),
+                else_block: Some(Box::new(else_b)),
+            },
+        );
+        let let_x = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "x")),
+                ty: None,
+                value: Box::new(if_node),
+            },
+        );
+        let body = block(20, vec![let_x], Some(id_node(21, "x")));
+        let f = node(
+            30,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        module(vec![], vec![f])
+    }
+
+    #[test]
+    fn diverging_value_if_hoists_to_stmt_form_no_unsupported() {
+        let out = gen(&diverging_value_if_fn());
+        assert!(
+            !out.contains("# unsupported"),
+            "diverging value-if must not emit `# unsupported`, got: {out}"
+        );
+        assert!(
+            out.contains("__bock_cf_0 = 1"),
+            "value arm must assign the temp, got: {out}"
+        );
+        assert!(
+            out.contains("return 0"),
+            "diverging arm must keep its return, got: {out}"
         );
     }
 }

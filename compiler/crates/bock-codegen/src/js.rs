@@ -107,6 +107,10 @@ impl CodeGenerator for JsGenerator {
     }
 
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
+        // Shared pre-pass: hoist value-position diverging control flow into
+        // declare-then-assign temp blocks so the diverging arms emit as
+        // statements rather than `/* unsupported */`.
+        let module = &crate::generator::hoist_value_cf(module.clone());
         let mut ctx = EmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
@@ -166,6 +170,16 @@ impl CodeGenerator for JsGenerator {
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
+        // Shared pre-pass: hoist value-position diverging control flow (see
+        // `hoist_value_cf`) on every module before any registry collection or
+        // emission, so all targets emit valid statement-form code.
+        let hoisted: Vec<(AIRModule, &std::path::Path)> = modules
+            .iter()
+            .map(|(m, p)| (crate::generator::hoist_value_cf((*m).clone()), *p))
+            .collect();
+        let modules: Vec<(&AIRModule, &std::path::Path)> =
+            hoisted.iter().map(|(m, p)| (m, *p)).collect();
+        let modules = modules.as_slice();
         // Emit only modules the entry program actually `use`s (plus the entry
         // itself), dependency-ordered — never the prelude-only stdlib.
         let reachable = crate::generator::reachable_modules(modules);
@@ -2678,6 +2692,18 @@ impl EmitCtx {
                 value,
                 ..
             } => {
+                // Declare-only temp from the shared value-CF hoist: emit a bare
+                // `let name;` (no initialiser); the relocated control flow that
+                // follows assigns it on every non-diverging path.
+                if node.metadata.contains_key(crate::generator::DECL_ONLY_META) {
+                    if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                        let ind = self.indent_str();
+                        let js_name = js_value_ident(&name.name);
+                        self.mark_simple_let_declared(&js_name);
+                        let _ = writeln!(self.buf, "{ind}let {js_name};");
+                        return Ok(());
+                    }
+                }
                 let ind = self.indent_str();
                 // A simple `let name = …` is subject to JS redeclaration rules.
                 // Bock allows re-binding the same name in one scope (shadowing);
@@ -7948,6 +7974,74 @@ mod tests {
         assert!(
             !out.contains("function eval("),
             "bare `function eval(` is a strict-mode SyntaxError, got: {out}"
+        );
+    }
+
+    /// Build `fn f() { let x = if (c) { 1 } else { return 0 }  x }` — a value-
+    /// position `if` whose else branch diverges via `return`. The shared
+    /// value-CF hoist must lower it to a declare-then-assign temp, never an IIFE
+    /// (which would capture the `return`) or `/* unsupported */`.
+    fn diverging_value_if_fn() -> AIRNode {
+        let then_b = block(2, vec![], Some(int_lit(3, "1")));
+        let ret = node(
+            5,
+            NodeKind::Return {
+                value: Some(Box::new(int_lit(6, "0"))),
+            },
+        );
+        let else_b = block(4, vec![], Some(ret));
+        let if_node = node(
+            1,
+            NodeKind::If {
+                let_pattern: None,
+                condition: Box::new(id_node(7, "c")),
+                then_block: Box::new(then_b),
+                else_block: Some(Box::new(else_b)),
+            },
+        );
+        let let_x = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "x")),
+                ty: None,
+                value: Box::new(if_node),
+            },
+        );
+        let body = block(20, vec![let_x], Some(id_node(21, "x")));
+        let f = node(
+            30,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        module(vec![], vec![f])
+    }
+
+    #[test]
+    fn diverging_value_if_hoists_to_stmt_form_no_iife() {
+        let out = gen(&diverging_value_if_fn());
+        assert!(
+            !out.contains("/* unsupported */"),
+            "diverging value-if must not emit `/* unsupported */`, got: {out}"
+        );
+        // The value arm assigns the hoisted temp; the diverging arm keeps return.
+        assert!(
+            out.contains("bockCf0 = MessageType") || out.contains("bockCf0 = 1"),
+            "value arm must assign the temp, got: {out}"
+        );
+        assert!(
+            out.contains("return 0"),
+            "diverging arm must keep its return (not wrapped in an IIFE), got: {out}"
         );
     }
 }
