@@ -4650,6 +4650,41 @@ impl TsEmitCtx {
         }
     }
 
+    /// Render the scrutinee reference (hoisted temp name, else the inline
+    /// scrutinee expression) to a `String` instead of straight to `self.buf`,
+    /// by swapping in a scratch buffer for the duration. Used by the ADT-arm
+    /// payload bindings to build the narrowing cast around the reference.
+    fn scrutinee_ref_string(
+        &mut self,
+        scrutinee: &AIRNode,
+        temp: Option<&str>,
+    ) -> Result<String, CodegenError> {
+        let saved = std::mem::take(&mut self.buf);
+        let result = self.emit_scrutinee_ref(scrutinee, temp);
+        let rendered = std::mem::replace(&mut self.buf, saved);
+        result.map(|()| rendered)
+    }
+
+    /// Wrap a scrutinee reference in a discriminated-union narrowing cast so a
+    /// constructor/record arm's payload binding is pinned to the matched
+    /// variant's member type — `(<ref> as Extract<typeof <ref>, { _tag:
+    /// "<variant>" }>)`.
+    ///
+    /// TS narrows `s` to the matched member inside a reachable `case "<variant>":`
+    /// arm, so `s._0` is the payload type. But narrowing is control-flow-scoped:
+    /// when an earlier statement-position `match` has every arm `return`, TS
+    /// marks the rest of the function unreachable and stops narrowing, so a later
+    /// arm's bare `s._0` widens back to the full union payload and tripping
+    /// TS2345 (e.g. `T | E` passed to a `T` parameter — the task-api blocker).
+    /// `Extract<typeof s, { _tag: "<variant>" }>` selects the matched member
+    /// structurally, independent of reachability, so the binding never widens.
+    /// `Extract` on a non-union or `any` scrutinee is a no-op / `any`, and on a
+    /// non-matching member yields `never` (whose `._N` assigns anywhere), so the
+    /// cast is sound for every ADT scrutinee shape.
+    fn narrowing_cast(scrutinee_ref: &str, variant: &str) -> String {
+        format!("({scrutinee_ref} as Extract<typeof {scrutinee_ref}, {{ _tag: \"{variant}\" }}>)")
+    }
+
     /// Emit a TS label before a loop iff a contained statement-arm `match`
     /// needs to `break`/`continue` the loop. Pair with [`Self::pop_loop_frame`].
     /// Also pushes a `None` loop result-sink frame; a value-position loop (see
@@ -4748,12 +4783,15 @@ impl TsEmitCtx {
                     self.writeln(&format!("case \"{variant_name}\": {{"));
                     if !fields.is_empty() {
                         self.indent += 1;
+                        // Cast the scrutinee to the matched variant member so each
+                        // payload binding stays the variant's payload type even in
+                        // control-flow-unreachable arms (see `narrowing_cast`).
+                        let scrut_ref = self.scrutinee_ref_string(scrutinee, temp)?;
+                        let cast = Self::narrowing_cast(&scrut_ref, variant_name);
                         for (i, field) in fields.iter().enumerate() {
                             let binding = self.pattern_to_binding_name(field);
                             let ind = self.indent_str();
-                            let _ = write!(self.buf, "{ind}const {binding} = ");
-                            self.emit_scrutinee_ref(scrutinee, temp)?;
-                            let _ = writeln!(self.buf, "._{i};");
+                            let _ = writeln!(self.buf, "{ind}const {binding} = {cast}._{i};");
                         }
                         self.indent -= 1;
                     }
@@ -4767,20 +4805,26 @@ impl TsEmitCtx {
                     }
                     if !fields.is_empty() {
                         self.indent += 1;
+                        // For a struct-payload enum variant (`is_adt`), pin each
+                        // field binding to the matched member via the narrowing
+                        // cast so it survives control-flow-unreachable arms (see
+                        // `narrowing_cast`). A non-ADT record destructure binds off
+                        // the un-narrowed scrutinee as before.
+                        let scrut_ref = self.scrutinee_ref_string(scrutinee, temp)?;
+                        let access = if is_adt {
+                            Self::narrowing_cast(&scrut_ref, variant_name)
+                        } else {
+                            scrut_ref
+                        };
                         for f in fields {
                             let field_name = &f.name.name;
-                            if let Some(pat) = &f.pattern {
-                                let binding = self.pattern_to_binding_name(pat);
-                                let ind = self.indent_str();
-                                let _ = write!(self.buf, "{ind}const {binding} = ");
-                                self.emit_scrutinee_ref(scrutinee, temp)?;
-                                let _ = writeln!(self.buf, ".{field_name};");
-                            } else {
-                                let ind = self.indent_str();
-                                let _ = write!(self.buf, "{ind}const {field_name} = ");
-                                self.emit_scrutinee_ref(scrutinee, temp)?;
-                                let _ = writeln!(self.buf, ".{field_name};");
-                            }
+                            let binding = match &f.pattern {
+                                Some(pat) => self.pattern_to_binding_name(pat),
+                                None => field_name.clone(),
+                            };
+                            let ind = self.indent_str();
+                            let _ =
+                                writeln!(self.buf, "{ind}const {binding} = {access}.{field_name};");
                         }
                         self.indent -= 1;
                     }
@@ -7933,8 +7977,10 @@ mod tests {
             "switch should dispatch on the hoisted temp, got: {out}"
         );
         assert!(
-            out.contains("const x = __match1._0;"),
-            "payload binding should read the hoisted temp (for narrowing), got: {out}"
+            out.contains(
+                r#"const x = (__match1 as Extract<typeof __match1, { _tag: "Some" }>)._0;"#
+            ),
+            "payload binding should read the hoisted temp through the narrowing cast, got: {out}"
         );
         // The call must not be re-emitted inline (single evaluation).
         assert!(
@@ -8840,6 +8886,71 @@ mod tests {
         assert!(
             out.contains(">= 10") && out.contains("<= 20"),
             "`10..=20` should test `>= 10 && <= 20`, got: {out}"
+        );
+    }
+
+    /// Q-ts-match-narrowing: a constructor-pattern arm's payload binding casts
+    /// the scrutinee through `Extract<typeof s, { _tag: "<variant>" }>` before
+    /// reading `._N`. TS control-flow narrowing on `s._tag` reaches the arm body
+    /// *only while the arm is reachable*; when an earlier statement-position
+    /// `match` has every arm `return`, TS marks everything after it unreachable
+    /// and stops narrowing, so a later arm's `const x = s._0` widens back to the
+    /// full union payload (`T | E`) — passing it to a `T`-typed callee is TS2345.
+    /// The `Extract` cast pins the binding to the matched variant's payload type
+    /// regardless of reachability, so it never widens.
+    #[test]
+    fn ts_match_narrow_payload_binding_casts_through_extract() {
+        // match r { Ok(x) => x; Err(e) => e }  over a bare identifier `r`.
+        let ok_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Ok"]),
+                        fields: vec![bind_pat(22, "x")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(23, vec![], Some(id_node(24, "x")))),
+            },
+        );
+        let err_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    31,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Err"]),
+                        fields: vec![bind_pat(32, "e")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(33, vec![], Some(id_node(34, "e")))),
+            },
+        );
+        let match_stmt = node(
+            40,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(41, "r")),
+                arms: vec![ok_arm, err_arm],
+            },
+        );
+        let f = ts_fn_decl(
+            1,
+            "run",
+            vec![typed_param_node(2, "r", "Result")],
+            None,
+            block(3, vec![match_stmt], None),
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains(r#"const x = (r as Extract<typeof r, { _tag: "Ok" }>)._0;"#),
+            "Ok-arm payload binding should cast through Extract for narrowing, got: {out}"
+        );
+        assert!(
+            out.contains(r#"const e = (r as Extract<typeof r, { _tag: "Err" }>)._0;"#),
+            "Err-arm payload binding should cast through Extract for narrowing, got: {out}"
         );
     }
 }
