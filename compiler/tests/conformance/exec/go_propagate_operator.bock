@@ -1,0 +1,34 @@
+// TEST: exec_go_propagate_operator
+// EXPECT: output "ok:5;err:boom"
+// EXPECT: targets go
+//
+// Go regression guard: the `?` propagate operator must unwrap-or-early-return
+// on the Go backend (type-zoo / task-api regression). `expr?` on a
+// `Result[T, E]` either binds the `Ok` payload `T` and continues, or returns
+// the propagated `Err` (with the enclosing function's zero value for the
+// success arm) from the enclosing function. Before the fix `?` was a no-op on
+// Go: it neither unwrapped nor early-returned, so the bound value was the whole
+// `__bockResult` struct (`go build` type error) and a failing step never
+// short-circuited. It now lowers to a tag check: on `Err`/`None` it returns the
+// zero value + the propagated error/None, on success it binds the payload.
+module main
+
+fn parse_pos(n: Int) -> Result[Int, String] {
+  if (n > 0) { Ok(n) } else { Err("boom") }
+}
+
+fn add_one(n: Int) -> Result[Int, String] {
+  let v = parse_pos(n)?
+  Ok(v + 1)
+}
+
+fn run(n: Int) -> String {
+  match add_one(n) {
+    Ok(v) => "ok:${v}"
+    Err(e) => "err:${e}"
+  }
+}
+
+fn main() -> Void {
+  println("${run(4)};${run(0)}")
+}

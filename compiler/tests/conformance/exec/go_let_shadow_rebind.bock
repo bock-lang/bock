@@ -1,0 +1,29 @@
+// TEST: exec_go_let_shadow_rebind
+// EXPECT: output "10;7"
+// EXPECT: targets go
+//
+// Go regression guard: re-binding an immutable `let` in one scope (the Bock
+// idiom for "update an immutable value", `let acc = …; let acc = f(acc)`)
+// shadows the prior binding. Go's `:=` rejects re-declaration with no new
+// variable on the left ("no new variables on left side of :="), so the go
+// emitter declares the first binding with `:=` and lowers each subsequent
+// same-name binding in the same block to a plain assignment (`acc = …`).
+// Before the fix this emitted `acc := …` repeatedly → a `go build` error (the
+// todo-list example's `let list = list.add(…)`). `bump` additionally re-binds
+// a *parameter* name (`let n = …`), which is the same Go scope as the
+// parameter, so it too must lower to an assignment.
+module main
+
+fn bump(n: Int) -> Int {
+  let n = n + 1
+  let n = n + 1
+  n
+}
+
+fn main() -> Void {
+  let acc = 1
+  let acc = acc + 2
+  let acc = acc + 3
+  let acc = acc + 4
+  println("${acc};${bump(5)}")
+}
