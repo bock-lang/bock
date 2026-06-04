@@ -951,6 +951,14 @@ struct GoEmitCtx {
     switch_label_depth: usize,
     /// Monotonic counter for unique loop-label names.
     loop_label_counter: usize,
+    /// Monotonic counter for unique guard-let discriminant temp names
+    /// (`__guard0`, `__guard1`, …), so two `guard (let …)` statements in the same
+    /// block do not collide.
+    guard_counter: usize,
+    /// Monotonic counter for unique `?`-propagation temp names (`__try0`,
+    /// `__try1`, …). Go has no native `?`; each propagate hoists the operand into
+    /// a `__tryN` local before its unwrap-or-early-return lowering.
+    try_counter: usize,
     /// Depth of enclosing *expression-position* `loop` IIFEs (`let r = loop { …
     /// break <v> }`). Bock's `loop` is a value-producing expression whose
     /// `break <v>` yields the loop's value; Go's `for`+`break` carries no value.
@@ -1104,6 +1112,28 @@ struct GoEmitCtx {
     /// lambda emitter recover a concrete return type structurally from the body.
     /// Scoped per function/lambda body and restored on exit.
     var_go_type: HashMap<String, String>,
+    /// Stack of value names already declared in each *Go block scope* currently
+    /// open, innermost frame last. Used to lower a shadowing `let` correctly:
+    /// Bock permits re-binding the same name in one block (the immutable-update
+    /// idiom, `let acc = …; let acc = f(acc)`), but Go's `:=` rejects a
+    /// re-declaration with no new variable on the left side. When a `let`'s name
+    /// is already in the *innermost* frame, the binding lowers to a plain
+    /// assignment (`acc = …`) instead of a fresh declaration (`acc := …` /
+    /// `var acc T = …`). A new frame is pushed on entry to each Go block body
+    /// (see [`Self::emit_block_body_inner`]) and popped on exit; the function's
+    /// body frame is pre-seeded with the parameter names (via
+    /// [`Self::pending_scope_seed`]) so a `let` shadowing a parameter (same Go
+    /// scope) also reassigns. A name first declared in a *nested* block is not in
+    /// an outer frame, so it stays a `:=` declaration — Go permits that legal
+    /// inner-scope shadow.
+    go_declared_scopes: Vec<HashSet<String>>,
+    /// Names to merge into the next Go block frame pushed by
+    /// [`Self::emit_block_body_inner`]. Set at function/method entry to the
+    /// parameter names so the function body's frame (which shares the function's
+    /// single Go scope — there is no extra brace for the body) treats a `let`
+    /// shadowing a parameter as a reassignment. Consumed (taken) by the next
+    /// frame push so it never leaks into a nested block.
+    pending_scope_seed: Option<Vec<String>>,
     /// Maps a declare-only temp name (from the shared value-CF hoist) → the Go
     /// type inferred for its `var __bock_cf_N T` declaration. Go has no
     /// deferred-init `var x` (it needs a type), so a block emitter pre-scans each
@@ -1355,6 +1385,8 @@ impl GoEmitCtx {
             loop_labels: Vec::new(),
             switch_label_depth: 0,
             loop_label_counter: 0,
+            guard_counter: 0,
+            try_counter: 0,
             loop_expr_depth: 0,
             fn_optional_ret_elem: HashMap::new(),
             var_optional_elem: HashMap::new(),
@@ -1377,6 +1409,8 @@ impl GoEmitCtx {
             const_names: std::collections::HashSet::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             var_go_type: HashMap::new(),
+            go_declared_scopes: Vec::new(),
+            pending_scope_seed: None,
             decl_only_types: HashMap::new(),
             record_param_fields: HashMap::new(),
             record_field_list_elem: HashMap::new(),
@@ -3279,6 +3313,21 @@ impl GoEmitCtx {
     /// type is concrete. Returns the previous scope for restore on exit. Pass
     /// `None` for `expected` when there are no specialised types (an ordinary
     /// typed lambda / fn body).
+    /// The emitted Go binding names of a function/method's value parameters,
+    /// used to pre-seed the body's Go block frame for shadowing-`let` tracking.
+    fn param_binding_names(&self, params: &[AIRNode]) -> Vec<String> {
+        params
+            .iter()
+            .filter_map(|p| match &p.kind {
+                NodeKind::Param { pattern, .. } => {
+                    let n = self.pattern_to_binding_name(pattern);
+                    (n != "_").then_some(n)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn enter_param_go_types_with_expected(
         &mut self,
         params: &[AIRNode],
@@ -5847,6 +5896,15 @@ impl GoEmitCtx {
             | NodeKind::Block { .. }
             | NodeKind::HandlingBlock { .. }
             | NodeKind::Assign { .. } => self.emit_stmt(node),
+            // A bare `expr?` statement (`save_task(task)?`): the success value is
+            // discarded, but the failure path must still early-return the
+            // propagated error/None from the enclosing function. Emit the unwrap
+            // prelude only — the success payload is unused, and asserting it (e.g.
+            // a `Result[Void, _]` whose `Ok(())` boxes `nil`) would panic.
+            NodeKind::Propagate { expr: inner } => {
+                let _ = self.emit_try_unwrap(inner)?;
+                Ok(())
+            }
             _ => {
                 self.write_indent();
                 self.emit_expr(node)?;
@@ -6020,6 +6078,10 @@ impl GoEmitCtx {
         // already covers `self.field`; this covers a non-self generic-record
         // param. Restored alongside the other param scopes on exit.
         let saved_go_types = self.enter_param_go_types_with_expected(params, None);
+        // Seed the function body's Go block frame with the parameter names so a
+        // `let` that shadows a parameter (the same Go scope — the body gets no
+        // extra brace) lowers to a reassignment, not a re-declaration.
+        self.pending_scope_seed = Some(self.param_binding_names(params));
         if name == "main" || is_void {
             self.emit_block_body(body)?;
         } else {
@@ -6244,6 +6306,12 @@ impl GoEmitCtx {
                 saved_map_scope,
                 saved_set_scope,
             ) = self.enter_param_optional_scope(rest);
+            // Seed the method body's Go block frame with the receiver var and the
+            // value parameter names (same Go scope as the body) so a shadowing
+            // `let` reassigns rather than re-declares.
+            let mut method_seed = self.param_binding_names(rest);
+            method_seed.push(receiver_var.clone());
+            self.pending_scope_seed = Some(method_seed);
             if return_type.is_some() && !is_void {
                 let prev_ret = self.current_fn_ret_type.take();
                 let prev_ret_coll = self.current_fn_ret_collection_elem.take();
@@ -6417,7 +6485,71 @@ impl GoEmitCtx {
                     let _ = writeln!(self.buf, "{ind}var {binding} {type_str}");
                     return Ok(());
                 }
+                // `let x = expr?` — the `?` operand is unwrapped (or the enclosing
+                // function returns early) into a temp, then bound to `x`. Handled
+                // before the general `let` paths so the early-return statements are
+                // emitted at statement position (Go has no expression-level
+                // early-return). Only a plain `BindPat` target is handled here; a
+                // destructuring `let (a, b) = expr?` is rare and falls through.
+                if let NodeKind::Propagate { expr: inner } = &value.kind {
+                    if matches!(pattern.kind, NodeKind::BindPat { .. }) {
+                        let binding = self.pattern_to_go_binding(pattern);
+                        let payload = self.emit_try_unwrap(inner)?;
+                        let ind = self.indent_str();
+                        let _ = writeln!(self.buf, "{ind}{binding} := {payload}");
+                        self.writeln(&format!("_ = {binding}"));
+                        // Record the Ok element type so a later typed use of the
+                        // binding resolves, and track it for shadowing-`let`.
+                        if let Some((ok, _)) = self.scrutinee_result_elems(inner) {
+                            self.var_go_type.insert(binding.clone(), ok);
+                        } else if let Some(elem) = self.scrutinee_optional_elem(inner) {
+                            self.var_go_type.insert(binding.clone(), elem);
+                        }
+                        if binding != "_" {
+                            self.go_record_declared(&binding);
+                        }
+                        return Ok(());
+                    }
+                }
                 let binding = self.pattern_to_go_binding(pattern);
+                // Shadowing re-bind of a name already declared in this Go block
+                // (the immutable-update idiom, `let acc = …; let acc = f(acc)`,
+                // and the todo-list example's `let list = list.add(…)`). Go's
+                // `:=` / `var` reject a re-declaration ("no new variables on left
+                // side of :="), so lower it to a plain assignment `acc = …`. Only
+                // a simple `BindPat` participates — a tuple/record destructure or
+                // `_` is not the rebind idiom and keeps its declaration. The
+                // existing `var_*`-scope recording below is skipped for a reassign
+                // (the name's type is fixed by its first declaration), but the
+                // value's expected-type hint is preserved so a branchy RHS still
+                // lowers to a correctly-typed IIFE.
+                if matches!(pattern.kind, NodeKind::BindPat { .. })
+                    && binding != "_"
+                    && self.go_name_declared_in_block(&binding)
+                {
+                    let ind = self.indent_str();
+                    let _ = write!(self.buf, "{ind}{binding} = ");
+                    let prev_expected_type = self.current_expected_type.take();
+                    if let Some(existing) = self.var_go_type.get(&binding) {
+                        self.current_expected_type = Some(existing.clone());
+                    }
+                    let prev_expected = self.expected_collection_elem.take();
+                    if matches!(
+                        value.kind,
+                        NodeKind::ListLiteral { .. }
+                            | NodeKind::MapLiteral { .. }
+                            | NodeKind::SetLiteral { .. }
+                    ) {
+                        if let Some(t) = ty {
+                            self.expected_collection_elem = self.collection_elem_go_types(t);
+                        }
+                    }
+                    self.emit_expr(value)?;
+                    self.current_expected_type = prev_expected_type;
+                    self.expected_collection_elem = prev_expected;
+                    self.buf.push('\n');
+                    return Ok(());
+                }
                 if let Some(t) = ty {
                     // Record an `Optional[T]` binding's element type so a later
                     // `match binding { Some(x) => ... }` can type-assert `x`.
@@ -6609,6 +6741,13 @@ impl GoEmitCtx {
                     self.current_expected_type = prev_expected_type;
                     self.buf.push('\n');
                 }
+                // Record this name as declared in the current Go block scope so a
+                // later same-name `let` in the same block reassigns (see the
+                // shadowing short-circuit above). Only a simple `BindPat`
+                // introduces a tracked declaration.
+                if matches!(pattern.kind, NodeKind::BindPat { .. }) && binding != "_" {
+                    self.go_record_declared(&binding);
+                }
                 Ok(())
             }
             NodeKind::If {
@@ -6799,10 +6938,13 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::Guard {
+                let_pattern,
                 condition,
                 else_block,
-                ..
             } => {
+                if let Some(pat) = let_pattern {
+                    return self.emit_guard_let(pat, condition, else_block);
+                }
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}if !(");
                 self.emit_expr(condition)?;
@@ -8681,6 +8823,228 @@ impl GoEmitCtx {
         Ok(())
     }
 
+    /// Lower `guard (let PAT = COND) else { … }` (Go has no `let-else`).
+    ///
+    /// The pattern's bindings must stay live for the rest of the enclosing block
+    /// (the whole point of guard-let), and the else arm must diverge (Bock's
+    /// guard semantics guarantee it — `return`/`break`/`continue`/`panic`). The
+    /// prior boolean `if !(cond)` lowering both negated a non-bool discriminant
+    /// (`!(__bockResult{…})` — a `go build` error) and dropped the bound names
+    /// (`undefined: v`). This emits:
+    ///
+    /// ```text
+    /// __guardN := <cond>
+    /// if !(<discriminant test>) { <else, diverges> }
+    /// <name> := <typed payload of __guardN>   // bindings live after the guard
+    /// ```
+    ///
+    /// `Ok`/`Some` payloads are asserted to their concrete element type (recovered
+    /// from the scrutinee's `Result`/`Optional` element), so typed downstream use
+    /// (`compare(guess, target)`) compiles; other constructor / record / tuple
+    /// patterns reuse the shared bind emitter. A bare-bind pattern (always
+    /// matches) emits only the binding (the else is unreachable).
+    fn emit_guard_let(
+        &mut self,
+        pat: &AIRNode,
+        condition: &AIRNode,
+        else_block: &AIRNode,
+    ) -> Result<(), CodegenError> {
+        let n = self.guard_counter;
+        self.guard_counter += 1;
+        let guard_tmp = format!("__guard{n}");
+
+        // Evaluate the discriminant once into a typed local (`:=`), so the test
+        // and the payload bindings read off one stable value.
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}{guard_tmp} := ");
+        self.emit_expr(condition)?;
+        self.buf.push('\n');
+
+        // The else arm runs when the pattern does NOT match; it diverges.
+        let test = self.pattern_test_go(pat, &guard_tmp);
+        if !test.is_empty() {
+            self.writeln(&format!("if !({test}) {{"));
+            self.indent += 1;
+            self.emit_block_body(else_block)?;
+            self.indent -= 1;
+            self.writeln("}");
+        } else {
+            // A bare-bind/wildcard pattern always matches; bind `__guard` itself
+            // so it is not "declared and not used", and drop the dead else arm.
+            self.writeln(&format!("_ = {guard_tmp}"));
+        }
+
+        // Introduce the pattern's bindings into the *enclosing* scope (live after
+        // the guard). Constructor payloads get a concrete-typed assertion.
+        self.emit_guard_let_binds(pat, condition, &guard_tmp)?;
+        Ok(())
+    }
+
+    /// Emit the bindings a guard-let pattern introduces, into the current
+    /// (enclosing) Go block scope. Reuses the concrete payload typing the
+    /// Optional/Result match arms apply (`__bockAsInt64`, `.v.(string)`, …) for an
+    /// `Ok`/`Some` payload bind; everything else falls back to the shared
+    /// [`Self::pattern_binds_go`] emitter. Each emitted name is recorded in the
+    /// block's declared-name frame so a later same-name `let` reassigns.
+    fn emit_guard_let_binds(
+        &mut self,
+        pat: &AIRNode,
+        condition: &AIRNode,
+        access: &str,
+    ) -> Result<(), CodegenError> {
+        if let NodeKind::ConstructorPat { path, fields } = &pat.kind {
+            let leaf = path.segments.last().map_or("", |s| s.name.as_str());
+            // Optional/Result single-payload constructor: assert the boxed
+            // `interface{}` payload to its concrete element type so typed use of
+            // the bound value compiles.
+            if matches!(leaf, "Some" | "Ok" | "Err") {
+                if let Some(f) = fields.first() {
+                    if let NodeKind::BindPat { name, .. } = &f.kind {
+                        let bind = go_value_ident(&name.name);
+                        if bind != "_" {
+                            let elem_ty = match leaf {
+                                "Some" => self.scrutinee_optional_elem(condition),
+                                "Ok" => self.scrutinee_result_elems(condition).map(|(ok, _)| ok),
+                                _ => self.scrutinee_result_elems(condition).map(|(_, e)| e),
+                            };
+                            let rhs = match elem_ty.as_deref() {
+                                Some("int64") => format!("__bockAsInt64({access}.v)"),
+                                Some("float64") => format!("__bockAsFloat64({access}.v)"),
+                                Some(ty) => format!("{access}.v.({ty})"),
+                                None => format!("{access}.v"),
+                            };
+                            self.writeln(&format!("{bind} := {rhs}"));
+                            self.writeln(&format!("_ = {bind}"));
+                            self.go_record_declared(&bind);
+                            return Ok(());
+                        }
+                    }
+                    // Nested payload pattern (`Ok(Ok(v))`, `Some((a, b))`): the
+                    // payload is re-asserted to its runtime struct where needed
+                    // and the shared emitter recurses.
+                    let child = go_typed_access(f, &format!("{access}.v"));
+                    return self.emit_guard_let_binds_generic(f, &child);
+                }
+                return Ok(());
+            }
+        }
+        // User-enum / record / tuple / bind patterns: the shared bind emitter
+        // already extracts payloads off the asserted variant struct.
+        self.emit_guard_let_binds_generic(pat, access)
+    }
+
+    /// Fallback guard-let binder: emit `pat`'s bindings off `access` via the
+    /// shared [`Self::pattern_binds_go`] machinery, then record each bound name in
+    /// the current Go block frame so a later same-name `let` reassigns.
+    fn emit_guard_let_binds_generic(
+        &mut self,
+        pat: &AIRNode,
+        access: &str,
+    ) -> Result<(), CodegenError> {
+        self.pattern_binds_go(pat, access)?;
+        let mut binds = String::new();
+        self.collect_binds_go(pat, access, &mut binds);
+        for stmt in binds.split("; ") {
+            // Each emitted bind is `name := …`; record the `name`.
+            if let Some(name) = stmt.split_whitespace().next() {
+                if name != "_" {
+                    self.go_record_declared(name);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower a `?` propagation operand (Go has no native `?`).
+    ///
+    /// Emits, at statement position, the unwrap-or-early-return prelude for
+    /// `<inner>?`:
+    ///
+    /// ```text
+    /// __tryN := <inner>
+    /// if __tryN.tag == "Err" { return __tryN }     // Result: propagate the Err
+    /// // or, for an Optional operand:
+    /// if __tryN.tag == "None" { return __bockNone() }
+    /// ```
+    ///
+    /// and returns the Go expression that reads the success payload
+    /// (`__tryN.v` asserted to the concrete `Ok`/`Some` element type when known).
+    /// The enclosing function returns a `__bockResult` / `__bockOption`, so an
+    /// `Err` operand re-propagates directly (`return __tryN`) and a `None` operand
+    /// returns `__bockNone()`. Bock's type checker guarantees the operand's
+    /// container and error type are compatible with the enclosing return type, so
+    /// no zero-value reconstruction of a *different* error type is needed.
+    ///
+    /// `?` is only reached in statement-adjacent positions in practice (`let x =
+    /// e?`, a bare `e?` statement, a tail `e?`); a `?` nested inside a larger
+    /// expression (`Ok(f()? + 1)`) is not hoisted by this path — the inner emit
+    /// goes through the normal expression emitter. None of the v1 examples nest
+    /// `?` that way.
+    fn emit_try_unwrap(&mut self, inner: &AIRNode) -> Result<String, CodegenError> {
+        let n = self.try_counter;
+        self.try_counter += 1;
+        let tmp = format!("__try{n}");
+
+        // Evaluate the operand once.
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}{tmp} := ");
+        self.emit_expr(inner)?;
+        self.buf.push('\n');
+
+        // Decide Result vs Optional. Both lower to a runtime-tag check, but the
+        // failure tag (`Err` vs `None`) and propagation value differ. Preference:
+        //   1. the operand's recoverable `Result`/`Optional` element type;
+        //   2. otherwise the enclosing function's return container
+        //      (`__bockResult` → Result, `__bockOption` → Optional);
+        //   3. default to Result — the overwhelmingly common case, and
+        //      `return __tryN` is always a valid `__bockResult` to propagate.
+        let result_elems = self.scrutinee_result_elems(inner);
+        let opt_elem = self.scrutinee_optional_elem(inner);
+        let is_optional = if result_elems.is_some() {
+            false
+        } else if opt_elem.is_some() {
+            true
+        } else {
+            self.current_fn_ret_type.as_deref() == Some("__bockOption")
+        };
+        if is_optional {
+            // Optional operand: a `None` short-circuits to the enclosing fn's
+            // `None`. `__bockNone` is the runtime `__bockOption` None value.
+            self.writeln(&format!("if {tmp}.tag == \"None\" {{"));
+            self.indent += 1;
+            self.writeln("return __bockNone");
+            self.indent -= 1;
+            self.writeln("}");
+            Ok(self.try_payload_access(&tmp, opt_elem.as_deref()))
+        } else {
+            self.writeln(&format!("if {tmp}.tag == \"Err\" {{"));
+            self.indent += 1;
+            self.writeln(&format!("return {tmp}"));
+            self.indent -= 1;
+            self.writeln("}");
+            let ok_ty = result_elems.map(|(ok, _)| ok);
+            Ok(self.try_payload_access(&tmp, ok_ty.as_deref()))
+        }
+    }
+
+    /// The Go expression that reads a `?`-unwrapped payload from `tmp.v`, asserted
+    /// to the concrete element type `elem` when known. Numeric payloads use the
+    /// widening helpers (an untyped Go constant boxed as `int`/`float64` would
+    /// panic on a hard `.(int64)` assertion); everything else uses a direct type
+    /// assertion, falling back to the bare `interface{}` payload when the element
+    /// type is not statically recoverable.
+    fn try_payload_access(&self, tmp: &str, elem: Option<&str>) -> String {
+        match elem {
+            Some("int64") => format!("__bockAsInt64({tmp}.v)"),
+            Some("float64") => format!("__bockAsFloat64({tmp}.v)"),
+            // A `Void`/unit payload (`Result[Void, _]` → `Ok(())` boxes `nil`)
+            // and the `interface{}` fallback both read the raw payload — a hard
+            // `.(struct{})` / `.(interface{})` assertion on a boxed `nil` panics.
+            Some("struct{}") | Some("interface{}") | Some("any") | None => format!("{tmp}.v"),
+            Some(ty) => format!("{tmp}.v.({ty})"),
+        }
+    }
+
     /// Build the boolean test that selects `pat` against the Go expression
     /// `access` (a correctly-typed value at this pattern position). Returns the
     /// empty string for a pattern that always matches (wildcard / bare bind).
@@ -9300,6 +9664,43 @@ impl GoEmitCtx {
     }
 
     fn emit_block_body_inner(
+        &mut self,
+        node: &AIRNode,
+        emit_return: bool,
+    ) -> Result<(), CodegenError> {
+        // Open a fresh Go block scope for shadowing-`let` tracking. The frame is
+        // pre-seeded with any pending parameter names (function/method entry), so
+        // a `let` shadowing a parameter — which is the *same* Go scope, the body
+        // gets no extra brace — reassigns rather than re-declares. Popped on exit
+        // regardless of which return path the body takes.
+        let mut frame = HashSet::new();
+        if let Some(seed) = self.pending_scope_seed.take() {
+            frame.extend(seed);
+        }
+        self.go_declared_scopes.push(frame);
+        let result = self.emit_block_body_inner_scoped(node, emit_return);
+        self.go_declared_scopes.pop();
+        result
+    }
+
+    /// Whether `name` is already declared in the innermost open Go block scope.
+    /// A shadowing `let` of such a name must lower to a plain assignment (`=`),
+    /// not a fresh `:=` / `var` declaration (which Go rejects as "no new
+    /// variables on left side of :=").
+    fn go_name_declared_in_block(&self, name: &str) -> bool {
+        self.go_declared_scopes
+            .last()
+            .is_some_and(|frame| frame.contains(name))
+    }
+
+    /// Record `name` as declared in the innermost open Go block scope.
+    fn go_record_declared(&mut self, name: &str) {
+        if let Some(frame) = self.go_declared_scopes.last_mut() {
+            frame.insert(name.to_string());
+        }
+    }
+
+    fn emit_block_body_inner_scoped(
         &mut self,
         node: &AIRNode,
         emit_return: bool,
@@ -13769,6 +14170,290 @@ mod tests {
         assert!(
             out.contains("return 0"),
             "diverging arm must keep its return, got: {out}"
+        );
+    }
+
+    // ── Q-guard-let-shared (go) ───────────────────────────────────────────────
+
+    /// `guard (let Ok(v) = cond) else { return … }` must test the discriminant
+    /// tag and bind the payload into the *enclosing* scope (live after the
+    /// guard), not negate the non-bool `__bockResult` and drop the binding.
+    #[test]
+    fn go_guard_let_tests_tag_and_binds_payload() {
+        // guard (let Ok(v) = res) else { return }
+        let guard = node(
+            10,
+            NodeKind::Guard {
+                let_pattern: Some(Box::new(node(
+                    11,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Ok"]),
+                        fields: vec![bind_pat(12, "v")],
+                    },
+                ))),
+                condition: Box::new(id_node(13, "res")),
+                else_block: Box::new(block(
+                    14,
+                    vec![node(15, NodeKind::Return { value: None })],
+                    None,
+                )),
+            },
+        );
+        // fn check() -> Void { guard …; }
+        let f = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("check"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(21, vec![guard], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        // The discriminant is hoisted into a `__guard` temp and tested by tag,
+        // never negated as a bool.
+        assert!(
+            out.contains("__guard0 := res"),
+            "guard-let must hoist the discriminant, got: {out}"
+        );
+        assert!(
+            out.contains("if !(__guard0.tag == \"Ok\")"),
+            "guard-let must test the tag, got: {out}"
+        );
+        assert!(
+            !out.contains("if !(res)"),
+            "guard-let must not negate the non-bool discriminant, got: {out}"
+        );
+        // The else arm diverges, then the payload binding lands after the `if`.
+        assert!(
+            out.contains("v := __guard0.v"),
+            "guard-let must bind the payload after the guard, got: {out}"
+        );
+    }
+
+    // ── Q-let-shadow-const (go) ───────────────────────────────────────────────
+
+    /// A shadowing `let` re-binding a name already declared in the block lowers
+    /// to a reassignment (`acc = …`), not a colliding re-declaration
+    /// (`acc := …` / `var acc … = …` — Go's "no new variables on left side").
+    #[test]
+    fn go_let_shadow_rebinds_as_assignment() {
+        let stmts = vec![
+            // let acc = 1
+            node(
+                10,
+                NodeKind::LetBinding {
+                    is_mut: false,
+                    pattern: Box::new(bind_pat(11, "acc")),
+                    ty: None,
+                    value: Box::new(int_lit(12, "1")),
+                },
+            ),
+            // let acc = acc + 2  (shadow → reassignment)
+            node(
+                13,
+                NodeKind::LetBinding {
+                    is_mut: false,
+                    pattern: Box::new(bind_pat(14, "acc")),
+                    ty: None,
+                    value: Box::new(node(
+                        15,
+                        NodeKind::BinaryOp {
+                            op: BinOp::Add,
+                            left: Box::new(id_node(16, "acc")),
+                            right: Box::new(int_lit(17, "2")),
+                        },
+                    )),
+                },
+            ),
+        ];
+        let f = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("run"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(21, stmts, Some(id_node(22, "acc")))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        // First binding declares; the second reassigns.
+        assert!(
+            out.contains("acc = (acc + 2)"),
+            "the shadowing re-bind must be an assignment, got: {out}"
+        );
+        // No second declaration of `acc`.
+        assert!(
+            out.matches("acc :=").count() + out.matches("var acc").count() <= 1,
+            "a shadowing re-bind must not re-declare `acc`, got: {out}"
+        );
+    }
+
+    /// A `let` shadowing a *parameter* (the same Go scope as the body) must also
+    /// reassign, not re-declare.
+    #[test]
+    fn go_let_shadow_of_param_rebinds_as_assignment() {
+        // fn bump(n) { let n = n + 1; n }
+        let let_n = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "n")),
+                ty: None,
+                value: Box::new(node(
+                    12,
+                    NodeKind::BinaryOp {
+                        op: BinOp::Add,
+                        left: Box::new(id_node(13, "n")),
+                        right: Box::new(int_lit(14, "1")),
+                    },
+                )),
+            },
+        );
+        let f = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("bump"),
+                generic_params: vec![],
+                params: vec![typed_param_node(21, "n", "Int")],
+                return_type: Some(Box::new(node(
+                    22,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Int"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(23, vec![let_n], Some(id_node(24, "n")))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("n = (n + 1)"),
+            "a `let` shadowing a param must reassign, got: {out}"
+        );
+        assert!(
+            !out.contains("n := (n + 1)") && !out.contains("var n int64 = (n + 1)"),
+            "a `let` shadowing a param must not re-declare, got: {out}"
+        );
+    }
+
+    // ── Q-propagate-operator-noop (go) ────────────────────────────────────────
+
+    /// `let v = expr?` must unwrap the `Ok`/`Some` payload and early-return the
+    /// propagated error/None on failure — not pass `expr` through unchanged
+    /// (which bound the whole `__bockResult` and never short-circuited).
+    #[test]
+    fn go_propagate_let_unwraps_and_early_returns() {
+        // let v = f()?
+        let let_v = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "v")),
+                ty: None,
+                value: Box::new(node(
+                    12,
+                    NodeKind::Propagate {
+                        expr: Box::new(node(
+                            13,
+                            NodeKind::Call {
+                                callee: Box::new(id_node(14, "f")),
+                                args: vec![],
+                                type_args: vec![],
+                            },
+                        )),
+                    },
+                )),
+            },
+        );
+        // fn g() -> Result[Int, String] { let v = f()?; Ok(v) }
+        let body_tail = node(
+            15,
+            NodeKind::Call {
+                callee: Box::new(id_node(16, "Ok")),
+                args: vec![AirArg {
+                    label: None,
+                    value: id_node(17, "v"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let f = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("g"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: Some(Box::new(node(
+                    22,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Result"]),
+                        args: vec![
+                            node(
+                                23,
+                                NodeKind::TypeNamed {
+                                    path: type_path(&["Int"]),
+                                    args: vec![],
+                                },
+                            ),
+                            node(
+                                24,
+                                NodeKind::TypeNamed {
+                                    path: type_path(&["String"]),
+                                    args: vec![],
+                                },
+                            ),
+                        ],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(21, vec![let_v], Some(body_tail))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        // The operand is hoisted; failure early-returns the propagated Err.
+        assert!(
+            out.contains("__try0 := f()"),
+            "propagate must hoist the operand, got: {out}"
+        );
+        assert!(
+            out.contains("if __try0.tag == \"Err\""),
+            "propagate must check the Err tag, got: {out}"
+        );
+        assert!(
+            out.contains("return __try0"),
+            "propagate must early-return the propagated Err, got: {out}"
+        );
+        // The success payload is bound to `v` (not the whole `__bockResult`).
+        assert!(
+            out.contains("v := __try0.v") || out.contains("v := __bockAsInt64(__try0.v)"),
+            "propagate must bind the unwrapped payload, got: {out}"
+        );
+        // It is no longer a no-op passthrough.
+        assert!(
+            !out.contains("v := f()\n"),
+            "propagate must not pass the operand through unchanged, got: {out}"
         );
     }
 }

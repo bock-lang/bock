@@ -1,0 +1,32 @@
+// TEST: exec_go_guard_let_binding
+// EXPECT: output "ok:hello;ok:world;bailed"
+// EXPECT: targets go
+//
+// guard-let binds a name that stays in scope for the rest of the block on the
+// Go backend (guessing-game regression). `guard (let Ok(v) = expr) else { … }`
+// must lower so `v` is usable after the guard. The Go backend previously
+// lowered guard-let to a boolean `if !(cond)` guard, which (a) negated a
+// non-bool `__bockResult` value (`go build` error) and (b) dropped the `v`
+// binding (`undefined: v`). It now tests the discriminant tag and extracts the
+// payload into a declared local on the success path, with the else arm
+// diverging (which guard already guarantees).
+module main
+
+fn validate(input: String) -> Result[String, String] {
+  if (input == "") { Err("empty") } else { Ok(input) }
+}
+
+fn check(input: String) -> String {
+  guard (let Ok(v) = validate(input)) else {
+    return "bailed"
+  }
+  // `v` is bound by the guard and live here.
+  "ok:${v}"
+}
+
+fn main() -> Void {
+  let a = check("hello")
+  let b = check("world")
+  let c = check("")
+  println("${a};${b};${c}")
+}
