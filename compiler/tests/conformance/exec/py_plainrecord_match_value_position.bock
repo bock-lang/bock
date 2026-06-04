@@ -1,0 +1,47 @@
+// TEST: exec_py_plainrecord_match_value_position
+// EXPECT: output "x=7;y-axis:5;at(3,4)"
+// EXPECT: targets python
+//
+// Value-position (function-tail) `match` over a RECORD whose arms bind plain
+// fields (`Point { x, .. } => "x=${x}"`) or a literal+bind mix
+// (`Point { x: 0, y } => …`). On Python this previously emitted a
+// `(lambda __v: …)` conditional chain that tested every record arm as `if True`
+// (collapsing later arms) and left the field binding FREE
+// (`(lambda __v: f"x={x}")(p)` → `NameError: name 'x'`) — the
+// Q-plainrecord-valpos-match (py half) crash.
+//
+// The fix routes a value-position record match to statement-form `match`/`case`,
+// whose `emit_pattern` binds each field by name (`case Point(x=x):`,
+// `case Point(x=0, y=y):`). `get_x` exercises the bare-bind `..` rest form;
+// `on_axis` and `loc` exercise the literal+bind record arms.
+//
+// PYTHON-ONLY: locks in the Python value-position record lowering.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Point {
+  x: Int
+  y: Int
+}
+
+fn get_x(p: Point) -> String {
+  match p {
+    Point { x, .. } => "x=${x}"
+  }
+}
+
+fn on_axis(p: Point) -> String {
+  match p {
+    Point { x: 0, y } => "y-axis:${y}"
+    Point { x, y } => "at(${x},${y})"
+  }
+}
+
+fn main() -> Void {
+  let a = get_x(Point { x: 7, y: 99 })
+  let b = on_axis(Point { x: 0, y: 5 })
+  let c = on_axis(Point { x: 3, y: 4 })
+  println("${a};${b};${c}")
+}

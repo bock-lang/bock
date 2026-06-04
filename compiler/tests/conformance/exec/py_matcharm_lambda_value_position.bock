@@ -1,0 +1,56 @@
+// TEST: exec_py_matcharm_lambda_value_position
+// EXPECT: output "neg;zero;big;small:50;a:1,2;some;none"
+// EXPECT: targets python
+//
+// Value-position (function-tail) `match` whose arms the legacy
+// `(lambda __v: …)` conditional chain could not test or bind:
+//
+//   - GUARD arms (`n if (n < 0) => …`): the chain DROPPED the guard entirely, so
+//     every input took the first arm. (Q-py-matcharm-lambda-binding: the arm
+//     body lambda `(lambda __v: f"x={x}")(p)` mis-bound the payload — same root
+//     value-match lowering gap.)
+//   - TUPLE arms (`(a, b) => "a:${a},${b}"`): bindings were left free.
+//   - NESTED constructor (`Some(Ok(n)) => …`): only the OUTER `Some` was tested,
+//     the inner `Ok` never checked and `n` left free.
+//
+// The fix routes these value-position matches to statement-form `match`/`case`,
+// where `emit_match_arm` keeps the guard (`case n if (n < 0):`) and
+// `emit_pattern` tests+binds the tuple and the nested constructor
+// (`case (a, b):`, `case _BockSome(_BockOk(n)):`).
+//
+// PYTHON-ONLY: locks in the Python value-position guard / tuple / nested lowering.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn classify(n: Int) -> String {
+  match n {
+    n if (n < 0) => "neg"
+    n if (n == 0) => "zero"
+    n if (n > 100) => "big"
+    n => "small:${n}"
+  }
+}
+
+fn pair_str(t: (Int, Int)) -> String {
+  match t {
+    (a, b) => "a:${a},${b}"
+  }
+}
+
+fn nested(v: Optional[Result[Int, String]]) -> String {
+  match v {
+    Some(Ok(n)) => "some"
+    Some(Err(e)) => "err:${e}"
+    None => "none"
+  }
+}
+
+fn main() -> Void {
+  let g = "${classify(-5)};${classify(0)};${classify(200)};${classify(50)}"
+  let t = pair_str((1, 2))
+  let s = nested(Some(Ok(9)))
+  let n = nested(None)
+  println("${g};${t};${s};${n}")
+}
