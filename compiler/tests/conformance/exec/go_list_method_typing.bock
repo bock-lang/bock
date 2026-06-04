@@ -1,0 +1,54 @@
+// TEST: exec_go_list_method_typing
+// EXPECT: output "done=2;pending=1;titles=3"
+// EXPECT: targets js, ts, python, rust, go
+//
+// List combinator element typing on the Go backend (the todo-list cluster). Two
+// related defects, both producing `interface{}` where a concrete record type is
+// required:
+//
+//   1. `.map((it) => { if (..) { it.finish() } else { it } })` emitted a
+//      `func(it interface{}) interface{}` closure and a `[]interface{}` result,
+//      so `it.done` failed (`interface{} has no field`) and the result was not
+//      assignable to `[]Item`. The element type is now threaded through the
+//      closure param and the result slice (block/if-bodied closures included).
+//   2. A lambda passed to a *non-generic* fn taking a concrete `Fn(Item) -> Bool`
+//      param (`count_where(items, (it) => it.done)`) erased to
+//      `func(it interface{}) bool`; the param type is now pinned to `Item`.
+//
+// Asserted on all five targets so the computed result (not just a clean Go
+// compile) is verified.
+module main
+
+public record Item {
+  id: Int
+  title: String
+  done: Bool
+}
+
+impl Item {
+  public fn finish(self) -> Item {
+    Item { id: self.id, title: self.title, done: true }
+  }
+}
+
+public fn count_where(items: List[Item], pred: Fn(Item) -> Bool) -> Int {
+  items.filter(pred).len()
+}
+
+fn main() -> Void {
+  let items = [
+    Item { id: 1, title: "a", done: false },
+    Item { id: 2, title: "b", done: false },
+    Item { id: 3, title: "c", done: false }
+  ]
+  // `.map` with a block/if closure body that returns `Item` in each branch.
+  let updated = items.map((it) => {
+    if (it.id == 1) { it.finish() } else if (it.id == 3) { it.finish() } else { it }
+  })
+  // Lambda argument to a non-generic fn with a concrete `Fn(Item) -> Bool` param.
+  let done = count_where(updated, (it) => it.done == true)
+  let pending = count_where(updated, (it) => it.done == false)
+  // `.map` producing a primitive element from a record field.
+  let titles = updated.map((it) => it.title)
+  println("done=${done};pending=${pending};titles=${titles.len()}")
+}

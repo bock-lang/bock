@@ -311,12 +311,48 @@ func __bockRange(lo int64, hi int64, inclusive bool) []int64 {
 }
 ";
 
+/// Integer exponentiation helper for the `**` operator on integer operands.
+/// Go has no `**` and `math.Pow` returns `float64` (losing integer precision and
+/// type), so an `Int ** Int` lowers to a call to this helper, which does
+/// fast exponentiation-by-squaring and stays in `int64`. A negative exponent
+/// yields `0` (an integer power with a negative exponent has no `int64` value;
+/// Bock callers using fractional results use `Float ** Float`, which routes to
+/// `math.Pow`). Gated by [`go_module_uses_int_pow`] so it is emitted only when a
+/// `**` with non-float operands is present.
+const INT_POW_RUNTIME_GO: &str = "// ── Bock integer-power runtime ──
+func __bockIntPow(base int64, exp int64) int64 {
+	if exp < 0 {
+		return 0
+	}
+	result := int64(1)
+	for exp > 0 {
+		if exp&1 == 1 {
+			result *= base
+		}
+		base *= base
+		exp >>= 1
+	}
+	return result
+}
+";
+
 /// True if the module references a `Range` node anywhere (so the range runtime
 /// helper must be emitted). Mirrors [`go_module_uses_optional`]. `RangePat`
 /// (a match-arm range pattern) does not contain the `Range {` substring, so it
 /// is not matched — the helper is only needed for range *values*.
 fn go_module_uses_range(items: &[AIRNode]) -> bool {
     items.iter().any(|n| format!("{n:?}").contains("Range {"))
+}
+
+/// True if the module contains any `**` (`BinOp::Pow`) operator (so the
+/// integer-power runtime helper must be emitted). The float path lowers to
+/// `math.Pow`; the int path calls [`INT_POW_RUNTIME_GO`]'s `__bockIntPow`. We
+/// emit the helper whenever *any* `**` is present (Go tolerates an unused
+/// package-level func, so a float-only program harmlessly carries it), rather
+/// than re-deriving operand types here. Mirrors [`go_module_uses_range`]'s
+/// structural debug scan: a `BinaryOp { op: Pow` renders that substring.
+fn go_module_uses_int_pow(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| format!("{n:?}").contains("op: Pow"))
 }
 
 /// True if the module references `Optional`, `Some`, or `None` anywhere (so the
@@ -827,6 +863,7 @@ impl GoGenerator {
         let mut uses_result = false;
         let mut uses_ordering = false;
         let mut uses_range = false;
+        let mut uses_int_pow = false;
         for (module, _) in modules {
             if let NodeKind::Module { items, .. } = &module.kind {
                 uses_concurrency |= go_module_uses_concurrency(items);
@@ -834,6 +871,7 @@ impl GoGenerator {
                 uses_result |= go_module_uses_result(items);
                 uses_ordering |= go_module_uses_ordering(items);
                 uses_range |= go_module_uses_range(items);
+                uses_int_pow |= go_module_uses_int_pow(items);
             }
         }
         // The real `core.compare.Ordering` enum is authoritative when reachable
@@ -844,7 +882,13 @@ impl GoGenerator {
             .is_some_and(|info| info.enum_name == "Ordering");
 
         let emit_ordering = uses_ordering && !ordering_enum_reachable;
-        if !(uses_concurrency || uses_optional || uses_result || uses_range || emit_ordering) {
+        if !(uses_concurrency
+            || uses_optional
+            || uses_result
+            || uses_range
+            || uses_int_pow
+            || emit_ordering)
+        {
             return None;
         }
 
@@ -871,6 +915,10 @@ impl GoGenerator {
         }
         if uses_range {
             content.push_str(RANGE_RUNTIME_GO);
+            content.push('\n');
+        }
+        if uses_int_pow {
+            content.push_str(INT_POW_RUNTIME_GO);
             content.push('\n');
         }
         // Each runtime block is joined with a trailing `\n`, which leaves a blank
@@ -1072,6 +1120,10 @@ struct GoEmitCtx {
     /// as [`Self::optional_runtime_emitted`] (a duplicate `func __bockRange`
     /// would not compile).
     range_runtime_emitted: bool,
+    /// Set once the [`INT_POW_RUNTIME_GO`] helper (`__bockIntPow`) has been
+    /// emitted; deduped exactly as [`Self::range_runtime_emitted`] (a duplicate
+    /// `func __bockIntPow` would not compile).
+    int_pow_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Go has no sum type, so a user enum is
     /// a sealed interface + per-variant structs named `{enum}{variant}`
     /// (e.g. `ShapeCircle`). The registry lets a construction emit the variant
@@ -1264,6 +1316,16 @@ struct GoEmitCtx {
     /// `max_of`) infer its element type rather than collapsing to
     /// `[]interface{}` / `[any]`. Generic fns live in [`Self::fn_signatures`].
     fn_return_go_types: HashMap<String, String>,
+    /// Maps a *non-generic* top-level fn name → its value params' declared type
+    /// nodes (the same `Vec<Option<AIRNode>>` shape [`Self::fn_signatures`] holds
+    /// for generic fns). A non-generic fn taking a concrete `Fn(Todo) -> Bool`
+    /// parameter — e.g. `count_where(todos, pred)` — must still pin an untyped
+    /// `(t) => t.done` lambda argument to `func(t Todo) bool`; without this map
+    /// the lambda erases to `func(t interface{}) bool` and `t.Done` fails (Go has
+    /// no field on `interface{}`). Pre-scanned alongside `fn_signatures`; consumed
+    /// at the call site as the lambda-specialisation fallback when the callee is
+    /// not generic.
+    fn_param_types: HashMap<String, Vec<Option<AIRNode>>>,
     /// The concrete Go parameter types an *untyped lambda argument* should adopt
     /// at its current call site, derived from the callee's generic signature
     /// specialised by the other arguments ([`Self::fn_signatures`]). A lambda's
@@ -1404,6 +1466,7 @@ impl GoEmitCtx {
             numeric_runtime_emitted: false,
             ordering_runtime_emitted: false,
             range_runtime_emitted: false,
+            int_pow_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             type_aliases: HashMap::new(),
             const_names: std::collections::HashSet::new(),
@@ -1426,6 +1489,7 @@ impl GoEmitCtx {
             fn_signatures: HashMap::new(),
             fn_sealed_bound: std::collections::HashSet::new(),
             fn_return_go_types: HashMap::new(),
+            fn_param_types: HashMap::new(),
             expected_lambda_param_types: None,
             forced_lambda_ret: None,
             expected_collection_elem: None,
@@ -1457,6 +1521,7 @@ impl GoEmitCtx {
         c.numeric_runtime_emitted = false;
         c.ordering_runtime_emitted = false;
         c.range_runtime_emitted = false;
+        c.int_pow_runtime_emitted = false;
         c.per_module = false;
         c
     }
@@ -1650,6 +1715,20 @@ impl GoEmitCtx {
                                     .insert(name.name.clone(), self.type_to_go(ret));
                             }
                         }
+                        // Record the value params' declared type nodes so an
+                        // untyped lambda argument to a concrete `Fn(...)` param
+                        // (`count_where(todos, (t) => t.done)`) can be specialised
+                        // to `func(t Todo) bool` rather than `func(t interface{})`.
+                        let param_tys: Vec<Option<AIRNode>> = params
+                            .iter()
+                            .map(|p| match &p.kind {
+                                NodeKind::Param { ty, .. } => ty.as_deref().cloned(),
+                                _ => None,
+                            })
+                            .collect();
+                        if param_tys.iter().any(Option::is_some) {
+                            self.fn_param_types.insert(name.name.clone(), param_tys);
+                        }
                     }
                 }
             }
@@ -1823,6 +1902,48 @@ impl GoEmitCtx {
                 }),
                 _ => false,
             }
+        })
+    }
+
+    /// True if any arm's top-level pattern is a bare `BindPat` (`x => …`,
+    /// `mut x => …`). Such a match cannot use the value-switch IIFE in expression
+    /// position: a bind has no value to `case` on, so the switch lowering emits
+    /// the broken `case interface{}:` and drops the bound name. The
+    /// expression-position emitter routes these to the if-chain IIFE instead
+    /// (which binds `x := root` in an unconditional `else`). Statement position is
+    /// unaffected — `emit_match`'s `value_switch_binds` already handles it via the
+    /// `switch __v := scrutinee; __v` form. Mirrors the `match_needs_ifchain`
+    /// gate without touching that shared single-discriminant fast-path.
+    fn go_value_match_has_bind_arm(arms: &[AIRNode]) -> bool {
+        arms.iter().any(|arm| {
+            matches!(
+                &arm.kind,
+                NodeKind::MatchArm { pattern, .. }
+                    if matches!(pattern.kind, NodeKind::BindPat { .. })
+            )
+        })
+    }
+
+    /// True if any arm matches a *plain* (non-enum-variant) record with only
+    /// bind/wildcard fields (`Point { x, .. }`, `Point { x, y }`). Such an arm is
+    /// not "structured" by `match_needs_ifchain` (no nested sub-pattern), so a
+    /// value-position match made solely of these stays on the value-switch
+    /// fast-path — which emits the broken `case Point:` (a Go *type* in expression
+    /// position) and drops the field binds (`undefined: x`). A plain record is a
+    /// concrete struct, not a sealed-interface value, so it has no value/type to
+    /// switch on at all; route the match to the if-chain IIFE, whose
+    /// `pattern_test_go` / `collect_binds_go` read each field directly off
+    /// `access.<Field>`. (A record arm with a *literal* field — `Point { x: 0 }` —
+    /// is already structured, so `match_needs_ifchain` diverts it; this only
+    /// covers the all-bind/wildcard plain-record arm.) Does not touch the shared
+    /// `match_needs_ifchain`.
+    fn go_value_match_has_plain_record_arm(&self, arms: &[AIRNode]) -> bool {
+        arms.iter().any(|arm| {
+            let NodeKind::MatchArm { pattern, .. } = &arm.kind else {
+                return false;
+            };
+            matches!(&pattern.kind, NodeKind::RecordPat { path, .. }
+                if self.user_variant_for_path(path).is_none())
         })
     }
 
@@ -2257,6 +2378,56 @@ impl GoEmitCtx {
                 ) {
                     (Some(k), Some(v)) => Some((k, v)),
                     _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The Go element type of a `List` *value* expression, so an untyped binding
+    /// to it (`let updated = items.map(..)`, `let evens = xs.filter(..)`) records
+    /// its element type — letting a *chained* combinator on the binding
+    /// (`updated.map((it) => it.title)`) type its closure param and a later use as
+    /// a typed call argument keep `[]T` rather than erasing to `[]interface{}`.
+    ///
+    /// Handles a homogeneous list literal directly, and the closure-taking
+    /// combinators `filter`/`map`/`flat_map` whose *receiver* element type is
+    /// recoverable: `filter` preserves the element; `map` yields the closure's
+    /// inferred return type (with the receiver element pinned as the closure
+    /// param type); `flat_map` yields that return type's slice element. `None`
+    /// when the element can't be recovered (the caller leaves the binding untyped
+    /// — never a wrong type).
+    fn value_list_elem_go_type(&mut self, value: &AIRNode) -> Option<String> {
+        // A homogeneous list literal / typed `List[T]` identifier directly.
+        if let Some(slice) = self.infer_go_expr_type(value) {
+            if let Some(elem) = slice.strip_prefix("[]") {
+                return Some(elem.to_string());
+            }
+        }
+        // A list combinator (`xs.map(..)`, `xs.filter(..)`) reaches codegen as the
+        // desugared `Call(FieldAccess(xs, "map"), [cb])`, not a `MethodCall`;
+        // recognise it through the shared desugar resolver.
+        let NodeKind::Call { callee, args, .. } = &value.kind else {
+            return None;
+        };
+        let (recv, method, rest) =
+            crate::generator::desugared_list_functional_method(value, callee, args)?;
+        let recv_elem = self.list_receiver_elem_go_type(recv)?;
+        match method {
+            "filter" => Some(recv_elem),
+            "map" | "flat_map" => {
+                let cb = rest.first()?;
+                let NodeKind::Lambda { params, body } = &cb.value.kind else {
+                    return None;
+                };
+                let saved = self.enter_param_go_types_with_expected(params, Some(&[recv_elem]));
+                let ret = self.infer_block_tail_type(body);
+                self.var_go_type = saved;
+                let ret = ret?;
+                if method == "flat_map" {
+                    ret.strip_prefix("[]").map(str::to_string)
+                } else {
+                    Some(ret)
                 }
             }
             _ => None,
@@ -3867,6 +4038,24 @@ impl GoEmitCtx {
     /// literal — directly, or under a unary negation (`-1`) — else `None`. Used
     /// to box an `Optional`/`Result` payload literal at its concrete dynamic type
     /// (see [`Self::box_payload_str`]).
+    /// Decide whether a `**` (`BinOp::Pow`) should lower to the floating-point
+    /// path (`math.Pow`) or the integer path (`__bockIntPow`). Returns `true` if
+    /// either operand is statically float-typed (a `Float` literal, or a binding
+    /// inferred to `float64`/`float32`). When neither operand resolves to a float
+    /// — the common `2 ** 10` integer case, or an unresolved operand — the integer
+    /// helper is chosen, which keeps exact integer precision. Both operands are
+    /// coerced to the chosen numeric type at the call site, so a mixed
+    /// `Int ** Float` still routes to `math.Pow` and type-checks.
+    fn pow_is_float(&self, left: &AIRNode, right: &AIRNode) -> bool {
+        let is_float = |this: &Self, n: &AIRNode| -> bool {
+            matches!(
+                this.infer_go_expr_type(n).as_deref(),
+                Some("float64") | Some("float32")
+            )
+        };
+        is_float(self, left) || is_float(self, right)
+    }
+
     fn numeric_literal_go_type(node: &AIRNode) -> Option<&'static str> {
         match &node.kind {
             NodeKind::Literal { lit } => match lit {
@@ -4317,7 +4506,12 @@ impl GoEmitCtx {
             Some(t.to_string())
         } else if let NodeKind::Lambda { params, body } = &closure.kind {
             let saved = self.enter_param_go_types_with_expected(params, Some(param_types));
-            let r = self.infer_go_expr_type(body);
+            // Use the block-tail inference (not the bare-expr one): a `.map`
+            // closure whose body is a block / `if` / `match` (e.g.
+            // `(t) => { if (t.id == id) { t.complete() } else { t } }`) needs its
+            // value tail typed so the result slice is `[]Todo`, not `[]interface{}`
+            // (`infer_go_expr_type` alone returns `None` for a block/if body).
+            let r = self.infer_block_tail_type(body);
             self.var_go_type = saved;
             r
         } else {
@@ -5499,6 +5693,11 @@ impl GoEmitCtx {
                     self.buf.push('\n');
                     self.range_runtime_emitted = true;
                 }
+                if !self.int_pow_runtime_emitted && go_module_uses_int_pow(items) {
+                    self.buf.push_str(INT_POW_RUNTIME_GO);
+                    self.buf.push('\n');
+                    self.int_pow_runtime_emitted = true;
+                }
                 // `@test` functions are transpiled separately into `go test` files
                 // (project mode, §20.6.2 — see `generate_tests`), never into the
                 // runtime package.
@@ -6678,6 +6877,19 @@ impl GoEmitCtx {
                         self.var_optional_elem
                             .insert(self.pattern_to_binding_name(pattern), elem);
                     }
+                    // Record an untyped `List`-typed binding's Go element type — a
+                    // homogeneous list literal (`let items = [Item{1}, Item{2}]` →
+                    // `Item`) or a list-combinator result (`let updated =
+                    // items.map(..)`, `let evens = xs.filter(..)`). Without this a
+                    // later `updated.map((it) => …)` cannot type the closure param
+                    // `it` to `Item` (it falls back to `interface{}`, so `it.title`
+                    // and the `[]Item` result both fail), and a use of the binding
+                    // as a typed call argument erases to `[]interface{}`.
+                    if let Some(elem) = self.value_list_elem_go_type(value) {
+                        let name = self.pattern_to_binding_name(pattern);
+                        self.var_list_elem.insert(name.clone(), elem.clone());
+                        self.var_go_type.insert(name, format!("[]{elem}"));
+                    }
                     // An untyped `let m = if (..) { Text } else { Image }` lowers
                     // its value to an expression IIFE. Without an expected type the
                     // IIFE falls back to the enclosing fn's return type
@@ -7172,6 +7384,22 @@ impl GoEmitCtx {
                     let _ = write!(self.buf, "append(append([]{elem}{{}}, {l}...), {r}...)");
                     return Ok(());
                 }
+                // `a ** b`: Go has no `**`. A *float* power lowers to `math.Pow`
+                // (which takes and returns `float64`); an *integer* power lowers
+                // to the `__bockIntPow` runtime helper (stays in `int64`, exact).
+                // Operands are coerced to the chosen numeric type so a mixed
+                // `2 ** f` (Int literal ** Float) still type-checks.
+                if matches!(op, BinOp::Pow) {
+                    let l = self.expr_to_string(left)?;
+                    let r = self.expr_to_string(right)?;
+                    if self.pow_is_float(left, right) {
+                        self.needs_math_import = true;
+                        let _ = write!(self.buf, "math.Pow(float64({l}), float64({r}))");
+                    } else {
+                        let _ = write!(self.buf, "__bockIntPow(int64({l}), int64({r}))");
+                    }
+                    return Ok(());
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {
@@ -7180,6 +7408,8 @@ impl GoEmitCtx {
                     BinOp::Mul => " * ",
                     BinOp::Div => " / ",
                     BinOp::Rem => " % ",
+                    // `Pow` is lowered above (math.Pow / __bockIntPow) and never
+                    // reaches this arm; kept for match exhaustiveness.
                     BinOp::Pow => " /* pow */ ",
                     BinOp::Eq => " == ",
                     BinOp::Ne => " != ",
@@ -7390,15 +7620,32 @@ impl GoEmitCtx {
                 // strictly more complete than the arg-only one — it also pins a
                 // `T` that only appears behind `Optional[T]`/`Result[T, E]`, which
                 // is exactly the `filter`/`and_then` lambda case.
-                let lambda_bindings = fn_sig.as_ref().map(|(gp, ptys, _)| {
-                    let binds = match (&synthesized_type_args, gp.len()) {
-                        (Some(syn), n) if syn.len() == n => {
-                            gp.iter().cloned().zip(syn.iter().cloned()).collect()
+                let lambda_bindings = fn_sig
+                    .as_ref()
+                    .map(|(gp, ptys, _)| {
+                        let binds = match (&synthesized_type_args, gp.len()) {
+                            (Some(syn), n) if syn.len() == n => {
+                                gp.iter().cloned().zip(syn.iter().cloned()).collect()
+                            }
+                            _ => self.bind_fn_type_params(gp, ptys, args),
+                        };
+                        (gp.clone(), ptys.clone(), binds)
+                    })
+                    .or_else(|| {
+                        // Non-generic callee: no type params to bind, but its
+                        // concrete `Fn(...)` param types still pin an untyped lambda
+                        // argument (`count_where(todos, (t) => t.done)` →
+                        // `func(t Todo) bool`). Empty gp/bindings means
+                        // `specialise_lambda_param_types` renders the param types
+                        // verbatim.
+                        if let NodeKind::Identifier { name } = &callee.kind {
+                            self.fn_param_types
+                                .get(&name.name)
+                                .map(|ptys| (Vec::new(), ptys.clone(), HashMap::new()))
+                        } else {
+                            None
                         }
-                        _ => self.bind_fn_type_params(gp, ptys, args),
-                    };
-                    (gp.clone(), ptys.clone(), binds)
-                });
+                    });
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         self.buf.push_str(", ");
@@ -7484,9 +7731,15 @@ impl GoEmitCtx {
                     self.enter_param_go_types_with_expected(params, expected_params.as_deref());
                 // A predicate combinator pins the return type to `bool` (consumed
                 // here so it never leaks to a nested lambda); otherwise infer it.
+                // Use the block-tail inference so a lambda whose body is a block /
+                // `if` / `match` (`(t) => { if (..) { t.complete() } else { t } }`)
+                // gets a concrete return type (`Todo`) rather than `interface{}` —
+                // this must agree with the result-slice element type the
+                // list-combinator emitter derives from the same inference, or
+                // `append(__out, __f(__x))` mismatches `[]Todo` vs `interface{}`.
                 let forced_ret = self.forced_lambda_ret.take();
                 let ret_ty = forced_ret.unwrap_or_else(|| {
-                    self.infer_go_expr_type(body)
+                    self.infer_block_tail_type(body)
                         .unwrap_or_else(|| "interface{}".to_string())
                 });
                 let _ = write!(
@@ -7914,25 +8167,39 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => {
-                // `Optional` / `Result` matches dispatch on the runtime tag.
-                if go_match_is_optional(arms) {
-                    return self.emit_optional_match_expr(scrutinee, arms);
-                }
-                if go_match_is_result(arms) {
-                    return self.emit_result_match_expr(scrutinee, arms);
-                }
                 // Guards, or-/tuple/list/range patterns, and nested
                 // constructor/record patterns cannot ride the value/type
                 // `switch` IIFE below (its `case <cond>` form has no slot for a
                 // relational/length test or a fall-through guard — they collapse
                 // to a broken `case interface{}:`). Route them to the shared
                 // if/else-if chain, wrapped in a typed IIFE whose arm bodies
-                // `return` the match's value. The statement-position `emit_match`
-                // routes the same set via `match_needs_ifchain`; doing it here
-                // keeps expression-position parity. Optional/Result already
-                // returned above, so this only diverts the previously-broken
-                // value/type-switch cases.
-                if crate::generator::match_needs_ifchain(arms) {
+                // `return` the match's value.
+                //
+                // This `match_needs_ifchain` check comes BEFORE the Optional/Result
+                // tag-switch fast-paths (mirroring the statement-position
+                // `emit_match`, which checks it first): a *nested* Optional/Result
+                // pattern (`Some(Ok(n))`) is structured, so the tag-switch
+                // `emit_optional_match_expr` cannot bind its nested payload
+                // (`undefined: n`). The if-chain's `collect_binds_go` recurses
+                // through the nested `Some`/`Ok` tags and binds `n` off the typed
+                // `.v` payloads. A *flat* `Some(x)`/`Ok(v)` match is not structured,
+                // so it still takes the tag-switch fast-path below.
+                //
+                // Two further go.rs-local diversions (NOT in the shared
+                // `match_needs_ifchain`, which keeps these on the switch fast-path —
+                // correct only for *statement* position, where `emit_match` binds
+                // `__v`): a bare-bind arm (`x => …`, `mut x => …`) has no value to
+                // switch on, so the value-switch IIFE emits `case interface{}:` (a
+                // *type* in expression position) and drops the name; and a *plain*
+                // record arm (`Point { x, .. }`) is a concrete struct, not a
+                // sealed-interface value, so `case Point:` is likewise invalid. The
+                // if-chain IIFE tests/binds every pattern kind (a bare bind → an
+                // unconditional `else` with `x := root`; a plain record → field
+                // reads off `root.X`).
+                if crate::generator::match_needs_ifchain(arms)
+                    || Self::go_value_match_has_bind_arm(arms)
+                    || self.go_value_match_has_plain_record_arm(arms)
+                {
                     let iife_ret = self.expected_iife_type();
                     let iife_ty = iife_ret.as_deref().unwrap_or("interface{}");
                     // Each arm yields the SAME type as the whole match, so a
@@ -7955,6 +8222,16 @@ impl GoEmitCtx {
                     self.write_indent();
                     self.buf.push_str("}()");
                     return Ok(());
+                }
+                // Flat `Optional` / `Result` matches dispatch on the runtime tag
+                // (`Some(x)`/`None`, `Ok(v)`/`Err(e)`). A *nested* such match
+                // (`Some(Ok(n))`) was diverted to the if-chain above, so only the
+                // single-level tag-switch reaches here.
+                if go_match_is_optional(arms) {
+                    return self.emit_optional_match_expr(scrutinee, arms);
+                }
+                if go_match_is_result(arms) {
+                    return self.emit_result_match_expr(scrutinee, arms);
                 }
                 // A user-enum match (including a reachable `core.compare.Ordering`
                 // enum) dispatches on the dynamic concrete-variant *type*
@@ -8624,6 +8901,16 @@ impl GoEmitCtx {
         // nested) routes here. Additive: everything else keeps its existing
         // switch / tag-chain lowering (see `match_needs_ifchain`).
         if crate::generator::match_needs_ifchain(arms) {
+            return self.emit_match_ifchain(scrutinee, arms);
+        }
+        // A plain (non-enum-variant) record pattern with only bind/wildcard
+        // fields (`Point { x, .. }`) is a concrete Go struct, not a
+        // sealed-interface value: it has no type/value to `switch` on
+        // (`switch __v.(type) { case Point: }` is invalid — `__v` is not an
+        // interface). Route it to the if-chain, which reads each field directly
+        // off `access.<Field>`. Mirrors the expression-position diversion. Does
+        // not touch the shared `match_needs_ifchain`.
+        if self.go_value_match_has_plain_record_arm(arms) {
             return self.emit_match_ifchain(scrutinee, arms);
         }
         // `Optional` / `Result` matches dispatch on the runtime tag, not a Go
@@ -14789,6 +15076,196 @@ mod tests {
         assert!(
             out.contains("n >= 10") && out.contains("n <= 20"),
             "`10..=20` should test `n >= 10 && n <= 20`, got: {out}"
+        );
+    }
+
+    fn float_lit(id: u32, val: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::Literal {
+                lit: Literal::Float(val.into()),
+            },
+        )
+    }
+
+    fn pow_fn(name: &str, ret_ty: &str, left: AIRNode, right: AIRNode) -> AIRNode {
+        let pow = node(
+            10,
+            NodeKind::BinaryOp {
+                op: BinOp::Pow,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: Some(Box::new(node(
+                    2,
+                    NodeKind::TypeNamed {
+                        path: type_path(&[ret_ty]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(3, vec![], Some(pow))),
+            },
+        )
+    }
+
+    #[test]
+    fn pow_int_lowers_to_int_pow_helper() {
+        // `2 ** 10` (Int ** Int) must NOT emit the broken `(2 /* pow */ 10)`
+        // (a Go syntax error) — it lowers to the `__bockIntPow` runtime helper
+        // with both operands coerced to `int64`, and the helper is emitted.
+        let f = pow_fn("p", "Int", int_lit(11, "2"), int_lit(12, "10"));
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("__bockIntPow(int64(2), int64(10))"),
+            "Int pow should lower to __bockIntPow, got: {out}"
+        );
+        assert!(
+            !out.contains("/* pow */"),
+            "Int pow must not emit the broken `/* pow */` form, got: {out}"
+        );
+        assert!(
+            out.contains("func __bockIntPow("),
+            "the integer-power runtime helper must be emitted, got: {out}"
+        );
+    }
+
+    #[test]
+    fn pow_float_lowers_to_math_pow() {
+        // `2.0 ** 3.0` (Float ** Float) lowers to `math.Pow` (float64 in/out)
+        // and pulls in the `math` import.
+        let f = pow_fn("p", "Float", float_lit(11, "2.0"), float_lit(12, "3.0"));
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("math.Pow(float64(2.0), float64(3.0))"),
+            "Float pow should lower to math.Pow, got: {out}"
+        );
+        assert!(
+            out.contains("\"math\""),
+            "Float pow must import the math package, got: {out}"
+        );
+        assert!(
+            !out.contains("/* pow */"),
+            "Float pow must not emit the broken `/* pow */` form, got: {out}"
+        );
+    }
+
+    fn match_arm(id: u32, pattern: AIRNode, body_str: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::MatchArm {
+                pattern: Box::new(pattern),
+                guard: None,
+                body: Box::new(block(id + 1, vec![], Some(str_lit(id + 2, body_str)))),
+            },
+        )
+    }
+
+    fn constructor_pat(id: u32, name: &str, fields: Vec<AIRNode>) -> AIRNode {
+        node(
+            id,
+            NodeKind::ConstructorPat {
+                path: type_path(&[name]),
+                fields,
+            },
+        )
+    }
+
+    #[test]
+    fn go_valpos_bind_match_routes_to_ifchain_and_binds() {
+        // Q-go-valpos-bind-match: `return match n { x => "got ${x}" }`. A bare
+        // bind has no value to switch on, so the value-switch IIFE emitted the
+        // broken `case interface{}:` and dropped `x`. It must route to the
+        // if-chain, binding `x := n` in an unconditional `else`.
+        let arm = match_arm(20, bind_pat(21, "x"), "got it");
+        let f = return_match_fn("EchoBinding", "n", "Int", vec![arm]);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("case interface{}"),
+            "bind-pattern match must not emit `case interface{{}}`, got: {out}"
+        );
+        assert!(
+            out.contains("x := n"),
+            "the bind arm must introduce `x := n`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn go_valpos_nested_optional_match_binds_nested_payload() {
+        // Q-go-nested-optional-match: `match val { Some(Ok(n)) => …; Some(Err(e))
+        // => …; None => … }`. The nested arm must route to the if-chain (the flat
+        // tag-switch dropped the nested `n`), testing both `.tag`s and binding `n`
+        // off the typed nested `.v` payload — never `undefined: n`.
+        let some_ok = constructor_pat(
+            20,
+            "Some",
+            vec![constructor_pat(21, "Ok", vec![bind_pat(22, "n")])],
+        );
+        let some_err = constructor_pat(
+            30,
+            "Some",
+            vec![constructor_pat(31, "Err", vec![bind_pat(32, "e")])],
+        );
+        let none = constructor_pat(40, "None", vec![]);
+        let arms = vec![
+            match_arm(50, some_ok, "got n"),
+            match_arm(53, some_err, "err e"),
+            match_arm(56, none, "nothing"),
+        ];
+        let f = return_match_fn("NestedUnwrap", "val", "Optional", arms);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("val.tag == \"Some\"") && out.contains(".tag == \"Ok\""),
+            "nested Optional/Result match must test both tags, got: {out}"
+        );
+        assert!(
+            out.contains("n := "),
+            "the nested `Ok(n)` payload must be bound, got: {out}"
+        );
+        assert!(
+            !out.contains("case interface{}"),
+            "nested match must not emit a broken `case interface{{}}`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn go_valpos_plain_record_match_routes_to_ifchain_and_binds() {
+        // Q-plainrecord-valpos-match: `match p { Point { x, .. } => "x=${x}" }`. A
+        // plain record is a concrete struct (no sealed-interface type/value to
+        // switch on), so the value/type-switch emitted the broken `case Point:`
+        // and dropped `x`. It must route to the if-chain, reading `x := p.X`.
+        let rec_pat = node(
+            20,
+            NodeKind::RecordPat {
+                path: type_path(&["Point"]),
+                fields: vec![bock_air::AirRecordPatternField {
+                    name: ident("x"),
+                    pattern: None,
+                }],
+                rest: true,
+            },
+        );
+        let arm = match_arm(30, rec_pat, "x val");
+        let f = return_match_fn("GetX", "p", "Point", vec![arm]);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("case Point") && !out.contains("case interface{}"),
+            "plain-record match must not emit `case Point` / `case interface{{}}`, got: {out}"
+        );
+        assert!(
+            out.contains("x := p.X"),
+            "the plain-record field must be bound as `x := p.X`, got: {out}"
         );
     }
 }

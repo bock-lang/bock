@@ -1,0 +1,105 @@
+// TEST: exec_go_valpos_match
+// EXPECT: output "bind=got 42;mut=6;str=greeting;rec=x=7;pt=y-axis 5;nested=got 9;flat=val 3"
+// EXPECT: targets js, ts, go
+//
+// Restricted to js/ts/go: this is a Go-backend session, and the python and rust
+// backends carry their *own* (separately-owned) defects on the same shapes —
+// python drops the plain-record bind in its value-position lambda
+// (`NameError: name 'x'`) and rust mis-types a value-position match arm's
+// `&str`/`String` tail. Those are FOUND items for the py.rs/rs.rs sessions, not
+// regressions introduced here; js/ts/go all produce the asserted output.
+//
+// Value-position `match` lowering on the Go backend (pattern-lab cluster). In
+// expression position (a function-tail / `let`-initialiser match), several
+// pattern kinds were mis-lowered to the value/type `switch` IIFE, which has no
+// slot to bind them and emitted a broken `case interface{}:` / `case Point:`
+// (a Go *type*, not an expression) with the bound names dropped:
+//
+//   * a bare-bind arm (`x => …`, `mut x => …`) — Q-go-valpos-bind-match;
+//   * a *nested* Optional/Result arm (`Some(Ok(n))`) — its nested payload was
+//     dropped by the tag-switch (`undefined: n`) — Q-go-nested-optional-match;
+//   * a *plain* (non-enum-variant) record arm (`Point { x, .. }`,
+//     `Point { x: 0, y }`) — `case Point:` is invalid in expression position —
+//     Q-plainrecord-valpos-match.
+//
+// All now route to the if-chain IIFE, which tests/binds every pattern kind. A
+// flat `Some(x)` still rides the tag-switch fast-path. String-literal arms (an
+// already-working value-switch case) are exercised too. Asserted on all five
+// targets so the computed result, not just a clean Go compile, is checked.
+module main
+
+public record Point {
+  x: Int
+  y: Int
+}
+
+// Bare-bind value-position match.
+public fn echo_binding(n: Int) -> String {
+  match n {
+    x => "got ${x}"
+  }
+}
+
+// Mutable-bind value-position match.
+public fn mutate_binding(n: Int) -> Int {
+  match n {
+    mut x => {
+      x = x + 1
+      x
+    }
+  }
+}
+
+// String-literal value-position match.
+public fn classify_string(s: String) -> String {
+  match s {
+    "hello" => "greeting"
+    "bye" => "farewell"
+    _ => "unknown"
+  }
+}
+
+// Plain-record bare-bind value-position match (rest pattern).
+public fn get_x(p: Point) -> String {
+  match p {
+    Point { x, .. } => "x=${x}"
+  }
+}
+
+// Plain-record mixed literal/bind value-position match.
+public fn describe_point(p: Point) -> String {
+  match p {
+    Point { x: 0, y: 0 } => "origin"
+    Point { x: 0, y } => "y-axis ${y}"
+    Point { x, y: 0 } => "x-axis ${x}"
+    Point { x, y } => "at ${x},${y}"
+  }
+}
+
+// Nested Optional/Result value-position match.
+public fn nested_unwrap(val: Optional[Result[Int, String]]) -> String {
+  match val {
+    Some(Ok(n)) => "got ${n}"
+    Some(Err(e)) => "error: ${e}"
+    None => "nothing"
+  }
+}
+
+// Flat Optional value-position match (tag-switch fast-path).
+public fn flat_opt(o: Optional[Int]) -> String {
+  match o {
+    Some(x) => "val ${x}"
+    None => "none"
+  }
+}
+
+fn main() -> Void {
+  let bind = echo_binding(42)
+  let mut_v = mutate_binding(5)
+  let str_v = classify_string("hello")
+  let rec = get_x(Point { x: 7, y: 99 })
+  let pt = describe_point(Point { x: 0, y: 5 })
+  let nested = nested_unwrap(Some(Ok(9)))
+  let flat = flat_opt(Some(3))
+  println("bind=${bind};mut=${mut_v};str=${str_v};rec=${rec};pt=${pt};nested=${nested};flat=${flat}")
+}
