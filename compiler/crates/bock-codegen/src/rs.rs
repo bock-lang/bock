@@ -695,6 +695,29 @@ struct RsEmitCtx {
     /// `use crate::<module_path>::<symbol_name>;` for each. Computed in
     /// `generate_project`.
     implicit_imports: Vec<(String, String)>,
+    /// Armed while emitting the body of a function whose declared return type is
+    /// a `Fn(..) -> ..` (lowered to `impl Fn`). Promoted to
+    /// [`Self::returning_fn_closure`] only for the body's *tail* expression (the
+    /// returned value) by `emit_block_body`, so an intermediate `.map`/`.filter`
+    /// closure earlier in the body is unaffected.
+    return_closure_tail: bool,
+    /// Set only while emitting the *tail* expression of a closure-returning
+    /// function (see [`Self::return_closure_tail`]). A closure
+    /// (`Lambda`/`Compose`) produced here must `move`-capture its environment:
+    /// the returned `impl Fn` outlives the function frame, so borrowing a
+    /// captured param/local would be a dangling reference (E0373/E0507). The
+    /// function's `impl Fn` params additionally gain a `+ 'static` bound so the
+    /// moved captures satisfy the `'static` default of the returned `impl Fn`
+    /// (E0310).
+    returning_fn_closure: bool,
+    /// Snake-cased names of in-scope `let` bindings whose value is a Rust
+    /// collection (`Vec`/`HashMap`/`HashSet`) — recognised from the binding's
+    /// RHS (`map.keys()`, a list literal, …) or a `List`/`Map`/`Set` type
+    /// annotation. A `Vec`/`HashMap`/`HashSet` does not implement
+    /// `std::fmt::Display`, so an interpolation of such a binding (`"keys=${keys}"`)
+    /// must use the `Debug` formatter (`{:?}`) instead of `{}` (E0277). Seeded
+    /// per-block in [`Self::emit_block_body`]; saved/restored so it never leaks.
+    collection_bindings: std::collections::HashSet<String>,
 }
 
 impl RsEmitCtx {
@@ -722,6 +745,9 @@ impl RsEmitCtx {
             trait_decls: crate::generator::TraitDeclRegistry::new(),
             per_module: false,
             implicit_imports: Vec::new(),
+            return_closure_tail: false,
+            returning_fn_closure: false,
+            collection_bindings: std::collections::HashSet::new(),
         }
     }
 
@@ -756,6 +782,9 @@ impl RsEmitCtx {
             trait_decls: self.trait_decls.clone(),
             per_module: false,
             implicit_imports: Vec::new(),
+            return_closure_tail: false,
+            returning_fn_closure: false,
+            collection_bindings: std::collections::HashSet::new(),
         }
     }
 
@@ -2369,6 +2398,38 @@ impl RsEmitCtx {
     // ── Type emission ────────────────────────────────────────────────────────
 
     /// Emit an AIR type node to a Rust type string.
+    /// Render a type that appears in a function signature's *param* or *return*
+    /// position. A Bock `Fn(A) -> B` value there is lowered to `impl Fn(A) -> B`
+    /// rather than the bare `fn(A) -> B` pointer: a Bock closure may capture
+    /// (`(x) => f(g(x))` capturing `f`/`g`, the `>>`-compose and curried-call
+    /// shapes), and a capturing closure does not coerce to a `fn` pointer
+    /// (E0308). `impl Fn` accepts both fn-items and capturing closures. Only the
+    /// outermost function type is widened — a nested `Fn` (e.g. a `Fn` returning
+    /// a `Fn`) keeps the pointer form, which is rare and still coerces for the
+    /// non-capturing case. Type *aliases* keep the `fn` pointer via
+    /// [`Self::type_to_rs`]: `impl Trait` is not nameable in a `type` alias.
+    fn type_to_rs_fn_pos(&mut self, node: &AIRNode) -> String {
+        self.type_to_rs_fn_pos_bounded(node, false)
+    }
+
+    /// As [`Self::type_to_rs_fn_pos`], but when `static_bound` is set an `impl
+    /// Fn` lowering gains `+ 'static`. Used for the params of a function that
+    /// *returns* a closure (see [`Self::returning_fn_closure`]): the moved
+    /// captures must be `'static` to satisfy the returned `impl Fn` (E0310).
+    fn type_to_rs_fn_pos_bounded(&mut self, node: &AIRNode, static_bound: bool) -> String {
+        if let NodeKind::TypeFunction { params, ret, .. } = &node.kind {
+            let param_strs: Vec<String> = params.iter().map(|p| self.type_to_rs(p)).collect();
+            let bound = if static_bound { " + 'static" } else { "" };
+            format!(
+                "impl Fn({}) -> {}{bound}",
+                param_strs.join(", "),
+                self.type_to_rs(ret)
+            )
+        } else {
+            self.type_to_rs(node)
+        }
+    }
+
     fn type_to_rs(&mut self, node: &AIRNode) -> String {
         match &node.kind {
             NodeKind::TypeNamed { path, args } => {
@@ -2408,6 +2469,7 @@ impl RsEmitCtx {
             "Int" => "i64".into(),
             "Float" => "f64".into(),
             "Bool" => "bool".into(),
+            "Char" => "char".into(),
             "String" => "String".into(),
             "Void" | "Unit" => "()".into(),
             "List" => "Vec".into(),
@@ -3084,12 +3146,21 @@ impl RsEmitCtx {
                 || Self::body_reuses_match_binding(body)
                 || self.params_drive_clone_bound_record(params, body));
         let generics = self.generic_params_to_rs_with_clone(generic_params, add_clone_bound);
-        let param_strs = self.collect_param_strs(params);
+        // A function whose declared return type is a `Fn(..) -> ..` returns an
+        // `impl Fn` (a closure). Its closure params then need `+ 'static` and the
+        // tail closure must `move`-capture — see `returning_fn_closure`.
+        let returns_fn_closure =
+            return_type.is_some_and(|t| matches!(&t.kind, NodeKind::TypeFunction { .. }));
+        let param_strs = if returns_fn_closure {
+            self.collect_param_strs_static_fn(params)
+        } else {
+            self.collect_param_strs(params)
+        };
         let effects = self.effects_params(effect_clause);
         let mut all_params = param_strs;
         all_params.extend(effects);
         let ret = return_type
-            .map(|t| format!(" -> {}", self.type_to_rs(t)))
+            .map(|t| format!(" -> {}", self.type_to_rs_fn_pos(t)))
             .unwrap_or_default();
         let where_cl = self.where_clause_to_rs(where_clause);
         if !effect_clause.is_empty() {
@@ -3121,7 +3192,14 @@ impl RsEmitCtx {
         // A by-value, non-`Copy` parameter reused after a move must clone on each
         // by-value pass (`E0382`). See `seed_reused_params`.
         let seeded = self.seed_reused_params(params, body);
+        let prev_returning = self.return_closure_tail;
+        // The flag is consulted only at the function's tail expression (the
+        // returned value), so an intermediate `.map`/`.filter` closure in the
+        // body is unaffected — only the returned closure gets `move`. See
+        // `returning_fn_closure` / `return_closure_tail`.
+        self.return_closure_tail = returns_fn_closure;
         self.emit_block_body(body)?;
+        self.return_closure_tail = prev_returning;
         for name in seeded {
             self.reused_let_bindings.remove(&name);
         }
@@ -3173,7 +3251,7 @@ impl RsEmitCtx {
             // the trait signature (`fn compare(&self, other: &Key)`); the call
             // site borrows the argument to match. See `self_operand_methods`.
             let borrow_operands = self.self_operand_methods.contains(&name.name);
-            let param_strs = self.collect_param_strs_inner(rest, borrow_operands);
+            let param_strs = self.collect_param_strs_inner(rest, borrow_operands, false);
             let effects = self.effects_params(effect_clause);
             let mut all_params = vec![receiver];
             all_params.extend(param_strs);
@@ -3245,7 +3323,7 @@ impl RsEmitCtx {
             // by shared reference, so the bound value can be reused after the
             // call (Bock value semantics) — see `self_operand_methods`.
             let borrow_operands = self.self_operand_methods.contains(&name.name);
-            let param_strs = self.collect_param_strs_inner(rest, borrow_operands);
+            let param_strs = self.collect_param_strs_inner(rest, borrow_operands, false);
             let effects = self.effects_params(effect_clause);
             let mut all_params = vec![receiver];
             all_params.extend(param_strs);
@@ -3300,14 +3378,28 @@ impl RsEmitCtx {
     }
 
     fn collect_param_strs(&mut self, params: &[AIRNode]) -> Vec<String> {
-        self.collect_param_strs_inner(params, false)
+        self.collect_param_strs_inner(params, false, false)
+    }
+
+    /// As [`Self::collect_param_strs`], but every `Fn`-typed param gains a
+    /// `+ 'static` bound on its `impl Fn` lowering. Used for the params of a
+    /// function that returns a closure — see [`Self::returning_fn_closure`].
+    fn collect_param_strs_static_fn(&mut self, params: &[AIRNode]) -> Vec<String> {
+        self.collect_param_strs_inner(params, false, true)
     }
 
     /// As [`Self::collect_param_strs`], but when `borrow` is set each param's
     /// declared type is emitted as a shared reference (`other: &Target`). Used
     /// for the operands of a `Self`-operand trait method (`compare`/`eq`/…),
-    /// which Rust must take by reference to match Bock's value semantics.
-    fn collect_param_strs_inner(&mut self, params: &[AIRNode], borrow: bool) -> Vec<String> {
+    /// which Rust must take by reference to match Bock's value semantics. When
+    /// `static_fn` is set, a `Fn`-typed param's `impl Fn` lowering gains
+    /// `+ 'static` (a closure-returning function — see `collect_param_strs_static_fn`).
+    fn collect_param_strs_inner(
+        &mut self,
+        params: &[AIRNode],
+        borrow: bool,
+        static_fn: bool,
+    ) -> Vec<String> {
         let mut result = Vec::new();
         for p in params {
             if let NodeKind::Param {
@@ -3331,7 +3423,7 @@ impl RsEmitCtx {
                 let amp = if borrow { "&" } else { "" };
                 let type_ann = ty
                     .as_ref()
-                    .map(|t| format!(": {amp}{}", self.type_to_rs(t)))
+                    .map(|t| format!(": {amp}{}", self.type_to_rs_fn_pos_bounded(t, static_fn)))
                     .unwrap_or_else(|| ": _".into());
                 if let Some(def) = default {
                     // Rust doesn't have default params; emit a comment.
@@ -3530,14 +3622,42 @@ impl RsEmitCtx {
                 // (`E0382`). The loop body keeps owned element bindings (matching
                 // Bock's by-value `for`); iterating `&coll` would change them to
                 // references and break the body.
-                let clone_iter = self.arg_is_reused_binding(iterable);
+                //
+                // The iterable may be a *field access* of a reused binding
+                // (`for row in dataset.rows` while `dataset` is used again after
+                // the loop): iterating `dataset.rows` partially moves `dataset`,
+                // so a later `dataset.clone()`/`dataset.field` is a use of a
+                // partially-moved value (`E0382`). Cloning the field access
+                // (`dataset.rows.clone()`) leaves the owner intact.
+                let clone_iter = self.iterable_is_reused(iterable);
                 self.emit_expr(iterable)?;
                 if clone_iter {
                     self.buf.push_str(".clone()");
                 }
                 self.buf.push_str(" {\n");
                 self.indent += 1;
+                // A loop body's tail is not a function return — disarm the
+                // closure-return `move` so a loop-tail closure isn't `move`d.
+                let prev_tail = std::mem::replace(&mut self.return_closure_tail, false);
+                // The loop variable binds an owned, by-value element each
+                // iteration (Bock's by-value `for`). If the body passes it
+                // by value to a call and *also* reads it afterward
+                // (`is_category(e, …)` then `e.amount`), the first pass moves it
+                // (`E0382`). Seed it as a reused binding so the call-arg emitter
+                // clones the by-value pass. Only when read more than once and not
+                // a `Copy` scalar (cloning those is needless noise).
+                let prev_reused = self.reused_let_bindings.clone();
+                let mut loop_bindings = Vec::new();
+                Self::collect_pattern_binding_names(pattern, &mut loop_bindings);
+                for b in &loop_bindings {
+                    let rs_name = to_snake_case(b);
+                    if Self::count_identifier_uses(body, &rs_name) > 1 {
+                        self.reused_let_bindings.insert(rs_name);
+                    }
+                }
                 self.emit_block_body(body)?;
+                self.reused_let_bindings = prev_reused;
+                self.return_closure_tail = prev_tail;
                 self.indent -= 1;
                 self.writeln("}");
                 Ok(())
@@ -3548,7 +3668,9 @@ impl RsEmitCtx {
                 self.emit_expr(condition)?;
                 self.buf.push_str(" {\n");
                 self.indent += 1;
+                let prev_tail = std::mem::replace(&mut self.return_closure_tail, false);
                 self.emit_block_body(body)?;
+                self.return_closure_tail = prev_tail;
                 self.indent -= 1;
                 self.writeln("}");
                 Ok(())
@@ -3556,7 +3678,9 @@ impl RsEmitCtx {
             NodeKind::Loop { body } => {
                 self.writeln("loop {");
                 self.indent += 1;
+                let prev_tail = std::mem::replace(&mut self.return_closure_tail, false);
                 self.emit_block_body(body)?;
+                self.return_closure_tail = prev_tail;
                 self.indent -= 1;
                 self.writeln("}");
                 Ok(())
@@ -3834,6 +3958,30 @@ impl RsEmitCtx {
                     let _ = write!(self.buf, "format!(\"{{}}{{}}\", {l}, {r})");
                     return Ok(());
                 }
+                // `**` has no Rust operator. An `Int ** Int` lowers to
+                // `i64::pow`, whose exponent is `u32` (not `i64`) — so the
+                // exponent is cast `(rhs) as u32` (E0308 otherwise). A
+                // `Float ** _` lowers to `f64::powf`, whose exponent is `f64`;
+                // a Float-literal operand on either side selects this path so
+                // `b ** 3.0` type-checks instead of calling the (nonexistent)
+                // `f64::pow`. The float exponent is cast `(rhs) as f64` to
+                // admit an integer-literal exponent (`2.0 ** 3`).
+                if *op == BinOp::Pow {
+                    if Self::pow_is_float(left, right) {
+                        self.buf.push('(');
+                        self.emit_expr(left)?;
+                        self.buf.push_str(").powf((");
+                        self.emit_expr(right)?;
+                        self.buf.push_str(") as f64)");
+                    } else {
+                        self.buf.push('(');
+                        self.emit_expr(left)?;
+                        self.buf.push_str(").pow((");
+                        self.emit_expr(right)?;
+                        self.buf.push_str(") as u32)");
+                    }
+                    return Ok(());
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {
@@ -3842,7 +3990,7 @@ impl RsEmitCtx {
                     BinOp::Mul => " * ",
                     BinOp::Div => " / ",
                     BinOp::Rem => " % ",
-                    BinOp::Pow => ".pow(",
+                    BinOp::Pow => unreachable!("Pow handled above"),
                     BinOp::Eq => " == ",
                     BinOp::Ne => " != ",
                     BinOp::Lt => " < ",
@@ -3858,12 +4006,7 @@ impl RsEmitCtx {
                     BinOp::Is => " /* is */ ",
                 };
                 self.buf.push_str(op_str);
-                if *op == BinOp::Pow {
-                    self.emit_expr(right)?;
-                    self.buf.push(')');
-                } else {
-                    self.emit_expr(right)?;
-                }
+                self.emit_expr(right)?;
                 self.buf.push(')');
                 Ok(())
             }
@@ -4103,7 +4246,19 @@ impl RsEmitCtx {
             }
             NodeKind::Lambda { params, body } => {
                 let param_strs = self.collect_param_strs(params);
-                let _ = write!(self.buf, "|{}| ", param_strs.join(", "));
+                // A closure returned in tail position of a closure-returning
+                // function must `move`-capture (the returned `impl Fn` outlives
+                // the frame). See `returning_fn_closure`.
+                let move_kw = if self.returning_fn_closure {
+                    "move "
+                } else {
+                    ""
+                };
+                // A closure *nested* inside the returned one is not itself the
+                // return value — disarm so it doesn't also get `move`.
+                let prev_ret = std::mem::replace(&mut self.returning_fn_closure, false);
+                let prev_tail = std::mem::replace(&mut self.return_closure_tail, false);
+                let _ = write!(self.buf, "{move_kw}|{}| ", param_strs.join(", "));
                 // A closure used as `.map`/`.filter`/… is `FnMut`/`Fn` — it may
                 // run many times, so a by-value pass of a *captured* (non-param)
                 // binding moves it out of the closure on the first call (`E0507`).
@@ -4131,18 +4286,32 @@ impl RsEmitCtx {
                         self.reused_let_bindings.insert(name);
                     }
                 }
-                self.emit_expr(body)?;
+                let r = self.emit_expr(body);
                 self.reused_let_bindings = prev_reused_let;
+                self.returning_fn_closure = prev_ret;
+                self.return_closure_tail = prev_tail;
+                r?;
                 Ok(())
             }
             NodeKind::Pipe { left, right } => self.emit_pipe(left, right),
             NodeKind::Compose { left, right } => {
-                // `f >> g` → `|x| g(f(x))`
-                let _ = write!(self.buf, "|x| ");
+                // `f >> g` → `|x| g(f(x))`. In tail position of a closure-
+                // returning function the composed closure captures `f`/`g`, so
+                // it must `move` (the returned `impl Fn` outlives the frame).
+                let move_kw = if self.returning_fn_closure {
+                    "move "
+                } else {
+                    ""
+                };
+                let prev_ret = std::mem::replace(&mut self.returning_fn_closure, false);
+                let prev_tail = std::mem::replace(&mut self.return_closure_tail, false);
+                let _ = write!(self.buf, "{move_kw}|x| ");
                 self.emit_expr(right)?;
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 self.buf.push_str("(x))");
+                self.returning_fn_closure = prev_ret;
+                self.return_closure_tail = prev_tail;
                 Ok(())
             }
             NodeKind::Await { expr } => {
@@ -4289,7 +4458,16 @@ impl RsEmitCtx {
                             self.buf.push_str(&escape_format_string(s));
                         }
                         AirInterpolationPart::Expr(expr) => {
-                            self.buf.push_str("{}");
+                            // A `Vec`/`HashMap`/`HashSet` has no `Display`, so an
+                            // interpolated collection value (a collection-typed
+                            // binding, or a `.keys()`/list-literal expression)
+                            // uses the `Debug` formatter (`{:?}`). See
+                            // `collection_bindings` / `expr_is_collection_valued`.
+                            if self.expr_interpolates_collection(expr) {
+                                self.buf.push_str("{:?}");
+                            } else {
+                                self.buf.push_str("{}");
+                            }
                             let mut sub = RsEmitCtx::new();
                             sub.indent = self.indent;
                             // The sub-context must see the same enum-variant
@@ -4630,13 +4808,156 @@ impl RsEmitCtx {
                 continue;
             };
             let rs_name = to_snake_case(&name.name);
-            if Self::count_identifier_uses(body, &rs_name) > 1
+            // A param is move-reused if read by value more than once, OR read
+            // even once *inside a loop body* — the loop re-executes that read on
+            // each iteration, so the value is moved on the first pass and gone on
+            // the second (`category_total`'s `cat` in `for e in …`). A single use
+            // outside any loop is a one-shot move and needs no clone.
+            if (Self::count_identifier_uses(body, &rs_name) > 1
+                || Self::identifier_used_in_loop(body, &rs_name))
                 && self.reused_let_bindings.insert(rs_name.clone())
             {
                 added.push(rs_name);
             }
         }
         added
+    }
+
+    /// True when `name` is read anywhere inside a loop body (`for`/`while`/
+    /// `loop`) within `node`. A binding consumed by value there is moved on the
+    /// first iteration and unavailable on the next (`E0382`), so it must be
+    /// cloned at each by-value pass — see [`Self::seed_reused_params`].
+    fn identifier_used_in_loop(node: &AIRNode, name: &str) -> bool {
+        struct LoopUseScan<'a> {
+            name: &'a str,
+            in_loop: usize,
+            found: bool,
+        }
+        impl bock_air::visitor::Visitor for LoopUseScan<'_> {
+            fn visit_node(&mut self, node: &AIRNode) {
+                match &node.kind {
+                    NodeKind::For { body, .. }
+                    | NodeKind::While { body, .. }
+                    | NodeKind::Loop { body, .. } => {
+                        self.in_loop += 1;
+                        bock_air::visitor::Visitor::visit_node(self, body);
+                        self.in_loop -= 1;
+                        // The loop's non-body children (iterable/condition) are
+                        // not re-executed per iteration; skip the default walk so
+                        // they aren't double-visited or wrongly counted.
+                    }
+                    NodeKind::Identifier { name } => {
+                        if self.in_loop > 0 && to_snake_case(&name.name) == self.name {
+                            self.found = true;
+                        }
+                    }
+                    _ => bock_air::visitor::walk_node(self, node),
+                }
+            }
+        }
+        let mut s = LoopUseScan {
+            name,
+            in_loop: 0,
+            found: false,
+        };
+        bock_air::visitor::Visitor::visit_node(&mut s, node);
+        s.found
+    }
+
+    /// Decide whether a `**` (`BinOp::Pow`) lowers to the float path
+    /// (`f64::powf`) or the int path (`i64::pow`). Returns `true` when either
+    /// operand is a statically-`Float` expression — currently a `Float` literal
+    /// (`b ** 3.0`, `2.0 ** n`). The rust backend has no full local
+    /// type-inference environment, so an unannotated `Float`-typed binding on
+    /// both sides falls back to the int path; the common cases (`2 ** 10` int,
+    /// `x ** 2.0` float) are covered by the literal probe. Choosing the int path
+    /// when unsure keeps exact integer precision, matching the go backend.
+    fn pow_is_float(left: &AIRNode, right: &AIRNode) -> bool {
+        Self::expr_is_float_literal(left) || Self::expr_is_float_literal(right)
+    }
+
+    /// True when `node` is (syntactically) a `Float` literal, looking through a
+    /// unary negation (`-2.0`). Used to route `**` lowering — see
+    /// [`Self::pow_is_float`].
+    fn expr_is_float_literal(node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::Literal {
+                lit: Literal::Float(_),
+            } => true,
+            NodeKind::UnaryOp {
+                op: UnaryOp::Neg,
+                operand,
+            } => Self::expr_is_float_literal(operand),
+            _ => false,
+        }
+    }
+
+    /// True when an AIR type node is a `List`/`Map`/`Set` — a Rust
+    /// `Vec`/`HashMap`/`HashSet`, none of which implement `std::fmt::Display`.
+    /// A binding of such a type interpolated into a string must use the `Debug`
+    /// formatter. See [`Self::collection_bindings`].
+    fn type_is_display_collection(ty: &AIRNode) -> bool {
+        matches!(
+            &ty.kind,
+            NodeKind::TypeNamed { path, .. }
+                if path.segments.last().is_some_and(|s|
+                    matches!(s.name.as_str(), "List" | "Map" | "Set"))
+        )
+    }
+
+    /// True when `value` (a `let` RHS) syntactically evaluates to a Rust
+    /// collection (`Vec`/`HashMap`/`HashSet`) — a list/map/set literal, a list
+    /// concatenation (`a + [..]`), or a collection-returning desugared method
+    /// (`.keys()`/`.values()`/`.entries()`/`.to_list()`). Used to mark the
+    /// binding for `{:?}` interpolation (a collection has no `Display`). A
+    /// best-effort syntactic probe — when in doubt it returns `false` (the
+    /// binding keeps the default `{}`, which is correct for non-collections).
+    fn expr_is_collection_valued(value: &AIRNode) -> bool {
+        match &value.kind {
+            NodeKind::ListLiteral { .. }
+            | NodeKind::MapLiteral { .. }
+            | NodeKind::SetLiteral { .. } => true,
+            // `a + [..]` / `[..] + b` — a list concatenation is still a `Vec`.
+            NodeKind::BinaryOp {
+                op: BinOp::Add,
+                left,
+                right,
+            } => Self::expr_is_collection_valued(left) || Self::expr_is_collection_valued(right),
+            // A desugared collection-returning method (`map.keys()` etc.). The
+            // method name is the trailing field of the callee.
+            NodeKind::Call { callee, .. } => {
+                if let NodeKind::FieldAccess { field, .. } = &callee.kind {
+                    matches!(
+                        field.name.as_str(),
+                        "keys" | "values" | "entries" | "to_list"
+                    )
+                } else {
+                    false
+                }
+            }
+            NodeKind::MethodCall { method, .. } => matches!(
+                method.name.as_str(),
+                "keys" | "values" | "entries" | "to_list"
+            ),
+            _ => false,
+        }
+    }
+
+    /// True when an interpolated expression evaluates to a Rust collection
+    /// (`Vec`/`HashMap`/`HashSet`) — either a bare identifier naming a tracked
+    /// [`Self::collection_bindings`] binding (`${keys}`) or a directly
+    /// collection-valued expression (`${map.keys()}`, `${[1, 2]}`). Such a value
+    /// formats with `{:?}`, not `{}` (collections have no `Display` — E0277).
+    fn expr_interpolates_collection(&self, expr: &AIRNode) -> bool {
+        if let NodeKind::Identifier { name } = &expr.kind {
+            if self
+                .collection_bindings
+                .contains(&to_snake_case(&name.name))
+            {
+                return true;
+            }
+        }
+        Self::expr_is_collection_valued(expr)
     }
 
     /// True when an AIR type node lowers to a `Copy` Rust scalar
@@ -4671,6 +4992,23 @@ impl RsEmitCtx {
             }
             _ => false,
         }
+    }
+
+    /// True when a `for` iterable should be cloned to avoid moving (or partially
+    /// moving) a binding that is reused after the loop. Covers a bare reused
+    /// binding (`for n in nodes` with `nodes` used again — [`Self::arg_is_reused_binding`])
+    /// *and* a field access of one (`for row in dataset.rows` with `dataset`
+    /// reused: iterating the field partially moves the owner, so a later use of
+    /// `dataset` is `E0382`). A field access is cloned when its root binding is
+    /// reused.
+    fn iterable_is_reused(&self, iterable: &AIRNode) -> bool {
+        if self.arg_is_reused_binding(iterable) {
+            return true;
+        }
+        if let NodeKind::FieldAccess { object, .. } = &iterable.kind {
+            return self.arg_is_reused_binding(object);
+        }
+        false
     }
 
     fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
@@ -5084,12 +5422,24 @@ impl RsEmitCtx {
             // reused binding from an enclosing block stays cloned in nested
             // blocks; saved/restored so the additions never leak outward.
             let prev_reused_let = self.reused_let_bindings.clone();
+            // Track which `let` bindings hold a Rust collection so an
+            // interpolation of one formats with `{:?}` (a `Vec`/`HashMap`/
+            // `HashSet` has no `Display`). See `collection_bindings`.
+            let prev_collection = self.collection_bindings.clone();
             for s in stmts {
-                if let NodeKind::LetBinding { pattern, .. } = &s.kind {
+                if let NodeKind::LetBinding {
+                    pattern, value, ty, ..
+                } = &s.kind
+                {
                     if let NodeKind::BindPat { name, .. } = &pattern.kind {
                         let rs_name = to_snake_case(&name.name);
                         if Self::count_identifier_uses(node, &rs_name) > 1 {
-                            self.reused_let_bindings.insert(rs_name);
+                            self.reused_let_bindings.insert(rs_name.clone());
+                        }
+                        if ty.as_deref().is_some_and(Self::type_is_display_collection)
+                            || Self::expr_is_collection_valued(value)
+                        {
+                            self.collection_bindings.insert(rs_name);
                         }
                     }
                 }
@@ -5098,6 +5448,7 @@ impl RsEmitCtx {
                 self.emit_node(s)?;
             }
             self.reused_let_bindings = prev_reused_let;
+            self.collection_bindings = prev_collection;
             self.task_bound_names = prev;
             if let Some(t) = tail {
                 // A statement tail (`return`/`break`/`continue`/assignment) is
@@ -5110,7 +5461,11 @@ impl RsEmitCtx {
                 }
                 // Tail expression without semicolon (Rust implicit return).
                 self.write_indent();
-                self.emit_expr(t)?;
+                let prev = self.returning_fn_closure;
+                self.returning_fn_closure = self.return_closure_tail;
+                let r = self.emit_expr(t);
+                self.returning_fn_closure = prev;
+                r?;
                 self.buf.push('\n');
             }
         } else if crate::generator::node_is_statement(node) {
@@ -5118,7 +5473,11 @@ impl RsEmitCtx {
         } else {
             // Single expression as body (implicit return).
             self.write_indent();
-            self.emit_expr(node)?;
+            let prev = self.returning_fn_closure;
+            self.returning_fn_closure = self.return_closure_tail;
+            let r = self.emit_expr(node);
+            self.returning_fn_closure = prev;
+            r?;
             self.buf.push('\n');
         }
         Ok(())
@@ -8486,6 +8845,384 @@ mod tests {
         assert!(
             out.contains("return Err") || out.contains("return 0"),
             "diverging arm must keep its return, got: {out}"
+        );
+    }
+
+    // ── Rust-specific example-hardening regression tests ─────────────────────
+
+    fn float_lit(id: u32, val: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::Literal {
+                lit: Literal::Float(val.into()),
+            },
+        )
+    }
+
+    fn pow(id: u32, left: AIRNode, right: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::BinaryOp {
+                op: BinOp::Pow,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+    }
+
+    fn type_named_node(id: u32, name: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::TypeNamed {
+                path: type_path(&[name]),
+                args: vec![],
+            },
+        )
+    }
+
+    /// `let c: Char = 'A'` annotates the binding `char`, not the unknown `Char`
+    /// (E0425). The example `type-zoo` exercises this.
+    #[test]
+    fn rust_char_type_annotation_lowers_to_char() {
+        let ty = type_named_node(3, "Char");
+        let let_node = node(
+            1,
+            NodeKind::LetBinding {
+                pattern: Box::new(bind_pat(2, "c")),
+                value: Box::new(str_lit(4, "A")),
+                ty: Some(Box::new(ty)),
+                is_mut: false,
+            },
+        );
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_node(&let_node).unwrap();
+        assert!(ctx.buf.contains("let c: char ="), "got: {}", ctx.buf);
+        assert!(!ctx.buf.contains("Char"), "got: {}", ctx.buf);
+    }
+
+    /// `2 ** 10` lowers to `i64::pow` with a `u32`-cast exponent — `pow` takes
+    /// `u32`, so emitting `10_i64` is E0308. The `type-zoo` `power` case.
+    #[test]
+    fn rust_int_pow_casts_exponent_to_u32() {
+        let expr = pow(1, int_lit(2, "2"), int_lit(3, "10"));
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&expr).unwrap();
+        assert_eq!(ctx.buf, "(2_i64).pow((10_i64) as u32)", "got: {}", ctx.buf);
+    }
+
+    /// `b ** 3.0` (a Float-literal operand) lowers to `f64::powf` — `f64` has no
+    /// `pow`. The exponent is cast `as f64` to admit an integer-literal exponent.
+    #[test]
+    fn rust_float_pow_uses_powf() {
+        let expr = pow(1, id_node(2, "b"), float_lit(3, "3.0"));
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&expr).unwrap();
+        assert_eq!(ctx.buf, "(b).powf((3.0_f64) as f64)", "got: {}", ctx.buf);
+    }
+
+    /// A function declared to return `Fn(Int) -> Int` lowers its return type to
+    /// `impl Fn(i64) -> i64`, its `Fn`-typed params to `impl Fn(..) + 'static`,
+    /// and its tail closure to `move |..|` — a capturing closure cannot coerce
+    /// to a `fn` pointer (E0308) and the returned `impl Fn` outlives the frame
+    /// (E0373/E0310). The `type-zoo` `compose_int` shape.
+    #[test]
+    fn rust_closure_returning_fn_uses_impl_fn_and_move() {
+        let fn_ty = |id: u32| {
+            node(
+                id,
+                NodeKind::TypeFunction {
+                    params: vec![type_named_node(id + 1, "Int")],
+                    ret: Box::new(type_named_node(id + 2, "Int")),
+                    effects: vec![],
+                },
+            )
+        };
+        // body: `(x) => f(g(x))`
+        let inner_call = node(
+            30,
+            NodeKind::Call {
+                callee: Box::new(id_node(31, "g")),
+                args: vec![AirArg {
+                    label: None,
+                    value: id_node(32, "x"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let outer_call = node(
+            33,
+            NodeKind::Call {
+                callee: Box::new(id_node(34, "f")),
+                args: vec![AirArg {
+                    label: None,
+                    value: inner_call,
+                }],
+                type_args: vec![],
+            },
+        );
+        let lambda = node(
+            35,
+            NodeKind::Lambda {
+                params: vec![node(
+                    36,
+                    NodeKind::Param {
+                        pattern: Box::new(bind_pat(37, "x")),
+                        ty: None,
+                        default: None,
+                    },
+                )],
+                body: Box::new(outer_call),
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("compose_int"),
+                generic_params: vec![],
+                params: vec![
+                    node(
+                        2,
+                        NodeKind::Param {
+                            pattern: Box::new(bind_pat(3, "f")),
+                            ty: Some(Box::new(fn_ty(10))),
+                            default: None,
+                        },
+                    ),
+                    node(
+                        4,
+                        NodeKind::Param {
+                            pattern: Box::new(bind_pat(5, "g")),
+                            ty: Some(Box::new(fn_ty(15))),
+                            default: None,
+                        },
+                    ),
+                ],
+                return_type: Some(Box::new(fn_ty(20))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(40, vec![], Some(lambda))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("-> impl Fn(i64) -> i64"),
+            "return must be impl Fn, got: {out}"
+        );
+        assert!(
+            out.contains("f: impl Fn(i64) -> i64 + 'static"),
+            "params must carry + 'static, got: {out}"
+        );
+        assert!(
+            out.contains("move |x"),
+            "tail closure must move, got: {out}"
+        );
+        assert!(check_rs_syntax(&out), "generated rust must parse: {out}");
+    }
+
+    /// A non-`Copy` param read *inside a loop* (`for e in xs { is_cat(e, cat) }`)
+    /// is moved on the first iteration, so each by-value pass must clone — even
+    /// though the param appears only once textually. The `expense-tracker`
+    /// `category_total` shape (param `cat`).
+    #[test]
+    fn rust_param_used_in_loop_is_cloned() {
+        // for e in expenses { other(cat) }
+        let call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "other")),
+                args: vec![AirArg {
+                    label: None,
+                    value: id_node(12, "cat"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let for_node = node(
+            13,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(14, "e")),
+                iterable: Box::new(id_node(15, "expenses")),
+                body: Box::new(block(16, vec![call], None)),
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("category_total"),
+                generic_params: vec![],
+                params: vec![
+                    typed_param_node(2, "expenses", "Expenses"),
+                    typed_param_node(3, "cat", "Category"),
+                ],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(5, vec![for_node], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("other(cat.clone())"), "got: {out}");
+    }
+
+    /// A `for` loop variable passed by value to a call and *then* read again
+    /// (`is_cat(e, cat)` then `e.amount`) must clone the by-value pass — the
+    /// first consumer moves the element (E0382). The `expense-tracker` `e` shape.
+    #[test]
+    fn rust_loop_var_passed_then_read_is_cloned() {
+        let call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "consume")),
+                args: vec![AirArg {
+                    label: None,
+                    value: id_node(12, "e"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let read = node(
+            17,
+            NodeKind::FieldAccess {
+                object: Box::new(id_node(18, "e")),
+                field: ident("amount"),
+            },
+        );
+        let for_node = node(
+            13,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(14, "e")),
+                iterable: Box::new(id_node(15, "items")),
+                body: Box::new(block(16, vec![call], Some(read))),
+            },
+        );
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_node(&for_node).unwrap();
+        assert!(ctx.buf.contains("consume(e.clone())"), "got: {}", ctx.buf);
+    }
+
+    /// Iterating a *field access* of a binding reused after the loop
+    /// (`for row in dataset.rows` then `dataset.clone()`) clones the iterable so
+    /// the owner is not partially moved (E0382). The `ml-data-prep` shape.
+    #[test]
+    fn rust_for_over_reused_field_clones_iterable() {
+        // let dataset = ...; for row in dataset.rows { } ; use(dataset)
+        let for_node = node(
+            13,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(14, "row")),
+                iterable: Box::new(node(
+                    15,
+                    NodeKind::FieldAccess {
+                        object: Box::new(id_node(16, "dataset")),
+                        field: ident("rows"),
+                    },
+                )),
+                body: Box::new(block(17, vec![], None)),
+            },
+        );
+        let use_call = node(
+            20,
+            NodeKind::Call {
+                callee: Box::new(id_node(21, "use_it")),
+                args: vec![AirArg {
+                    label: None,
+                    value: id_node(22, "dataset"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let let_dataset = node(
+            1,
+            NodeKind::LetBinding {
+                pattern: Box::new(bind_pat(2, "dataset")),
+                value: Box::new(int_lit(3, "0")),
+                ty: None,
+                is_mut: false,
+            },
+        );
+        let body = block(40, vec![let_dataset, for_node, use_call], None);
+        let f = fn_decl_tail_with_body(50, "main", body);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("for row in dataset.rows.clone()"),
+            "got: {out}"
+        );
+    }
+
+    fn fn_decl_tail_with_body(id: u32, name: &str, body: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
+    }
+
+    /// A collection-typed binding interpolated into a string formats with `{:?}`
+    /// — a `Vec`/`HashMap`/`HashSet` has no `Display` (E0277). The `type-zoo`
+    /// `${keys}` (from `map.keys()`) shape.
+    #[test]
+    fn rust_interpolated_collection_binding_uses_debug_fmt() {
+        // let keys = map.keys(); println("k=${keys}")
+        let keys_call = node(
+            10,
+            NodeKind::MethodCall {
+                receiver: Box::new(id_node(11, "map")),
+                method: ident("keys"),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let let_keys = node(
+            1,
+            NodeKind::LetBinding {
+                pattern: Box::new(bind_pat(2, "keys")),
+                value: Box::new(keys_call),
+                ty: None,
+                is_mut: false,
+            },
+        );
+        let interp = node(
+            20,
+            NodeKind::Interpolation {
+                parts: vec![
+                    AirInterpolationPart::Literal("k=".to_string()),
+                    AirInterpolationPart::Expr(Box::new(id_node(21, "keys"))),
+                ],
+            },
+        );
+        let print = node(
+            22,
+            NodeKind::Call {
+                callee: Box::new(id_node(23, "println")),
+                args: vec![AirArg {
+                    label: None,
+                    value: interp,
+                }],
+                type_args: vec![],
+            },
+        );
+        let body = block(30, vec![let_keys, print], None);
+        let f = fn_decl_tail_with_body(40, "main", body);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("\"k={:?}\""),
+            "interpolated collection must use {{:?}}, got: {out}"
         );
     }
 }
