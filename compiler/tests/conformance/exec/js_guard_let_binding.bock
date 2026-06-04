@@ -1,0 +1,46 @@
+// TEST: js_guard_let_binding
+// EXPECT: output "ok=43;fallback=0;loop=5"
+// EXPECT: targets js
+//
+// JS exec guard for `guard (let Pat = expr) else { … }` (Q-guard-let-shared).
+// Before the fix the bound names were dropped on the js backend, so a use of
+// the pattern binding after the guard raised a `ReferenceError` at runtime.
+// The js lowering now:
+//   * evaluates the scrutinee once into a temp,
+//   * runs the else-branch (which must diverge) when the pattern does not match,
+//   * binds the pattern's names into the *enclosing* scope so they are in scope
+//     for the rest of the block (`v` below).
+// `run_loop` additionally exercises a guard inside a `loop` whose else-branch
+// `continue`s — the guessing-game idiom — which also requires a value-less
+// tail-position `loop` to lower to a `while (true)` statement rather than
+// `return /* unsupported */`.
+// Targeted at js because the other backends are lowered by concurrent sessions.
+module main
+
+fn parse(s: String) -> Result[Int, String] {
+  if (s == "ok") { Ok(42) } else { Err("bad") }
+}
+
+fn run(s: String) -> Int {
+  guard (let Ok(v) = parse(s)) else {
+    return 0
+  }
+  v + 1
+}
+
+fn run_loop() -> Int {
+  let mut n = 0
+  loop {
+    n = n + 1
+    guard (let Ok(v) = parse("ok")) else {
+      continue
+    }
+    if (n >= 3) {
+      break v - 37
+    }
+  }
+}
+
+fn main() -> Void {
+  println("ok=${run("ok")};fallback=${run("no")};loop=${run_loop()}")
+}
