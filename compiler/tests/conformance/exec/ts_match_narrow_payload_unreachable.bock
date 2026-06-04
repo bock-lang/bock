@@ -1,0 +1,59 @@
+// TEST: ts_match_narrow_payload_unreachable
+// EXPECT: output "id 1"
+// EXPECT: targets ts
+//
+// Q-ts-match-narrowing regression guard — the examples/real-world/task-api
+// blocker, reduced to its core shape. `demo` is a `Void`-returning function with
+// TWO consecutive statement-position `match`es over a `Result[Task, String]`,
+// exactly like `run_demo`'s `create_task → match` sequence. Each `Ok` arm's tail
+// is a `println`, and because the function returns `Void` the TS emitter lowers
+// each arm to `return console.log(...)`. So the FIRST match's both arms `return`
+// — which makes TS mark everything after it (the second match) unreachable.
+//
+// TS control-flow narrowing is reachability-scoped: in that unreachable region,
+// `switch (r2._tag) { case "Ok": const t = r2._0; … }` no longer narrows `r2`,
+// so `r2._0` widened back to the full union payload `Task | string`. Passing it
+// to `show(t: Task)` then failed strict `tsc` with TS2345 ("'string | Task' is
+// not assignable to 'Task'") — the precise diagnostic that blocked task-api on
+// ts. The emitter now pins each constructor-arm payload binding to the matched
+// member via `const t = (r2 as Extract<typeof r2, { _tag: "Ok" }>)._0;`, which
+// holds regardless of reachability, so the binding never widens. The harness
+// type-checks the scaffolded project with strict `tsc -p .` before running, so
+// this fixture compiled only after the fix.
+//
+// Restricted to `ts`: the unreachable-narrowing widening is a TypeScript
+// flow-analysis artifact with no analogue on the other backends (js is untyped;
+// rust/go/python narrow structurally). `main` is intentionally NOT `public`
+// (see hello_world.bock for the Go entry-point rationale).
+module main
+
+record Task {
+  id: Int
+}
+
+fn show(t: Task) -> String {
+  "id ${t.id}"
+}
+
+fn make(id: Int) -> Result[Task, String] {
+  Ok(Task { id: id })
+}
+
+fn demo() -> Void {
+  let r1 = make(1)
+  match r1 {
+    Ok(t) => println(show(t))
+    Err(e) => println("err ${e}")
+  }
+  // To TS this match is unreachable (both arms above `return`), so narrowing on
+  // `r2._tag` no longer reaches `r2._0` — the widening trigger the cast fixes.
+  let r2 = make(2)
+  match r2 {
+    Ok(t) => println(show(t))
+    Err(e) => println("err ${e}")
+  }
+}
+
+fn main() -> Void {
+  demo()
+}
