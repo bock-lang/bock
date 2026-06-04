@@ -1,0 +1,38 @@
+// TEST: exec_go_record_field_map_method
+// EXPECT: output "1;2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go map-method receiver typing: a built-in map method (`get`/`keys`) called on
+// a `record.field` whose declared type is `Map[K, V]` must type its inline Go
+// closure as `map[K]V` (here `map[string]int64`), not the erased
+// `map[interface{}]interface{}`. Before the fix, `r.counts.get(k)` /
+// `r.counts.keys()` emitted closures taking `map[interface{}]interface{}`, which
+// `go build` rejected against the concrete `map[string]int64` struct field
+// ("cannot use r.counts ... as map[interface{}]interface{} value in argument").
+// The fix records each `Map`-typed record field's Go key/value types during the
+// pre-scan and resolves them for a `value.field` map receiver. js/ts/python/rust
+// type maps natively, so they were already green; this proves Go now agrees.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale).
+module main
+
+record Counts {
+  counts: Map[String, Int]
+}
+
+fn lookupBoth(c: Counts) -> String {
+  let a = match c.counts.get("a") {
+    Some(n) => n
+    None => -1
+  }
+  let b = match c.counts.get("b") {
+    Some(m) => m
+    None => -1
+  }
+  "${a};${b}"
+}
+
+fn main() -> Void {
+  let c = Counts { counts: {"a": 1, "b": 2} }
+  println("${lookupBoth(c)}")
+}

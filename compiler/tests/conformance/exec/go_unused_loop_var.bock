@@ -1,0 +1,25 @@
+// TEST: exec_go_unused_loop_var
+// EXPECT: output "3"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go rejects a `range` loop variable that is never read ("declared and not
+// used"), which Bock permits (`for x in data { count = count + 1 }` ignores `x`).
+// The Go backend must emit `for _, _ := range data` as `for range data` (the
+// `for _, _ :=` form is itself rejected as "no new variables on left side of
+// :="). Before the fix, a counting loop over an unused element failed `go build`.
+// js/ts/python/rust permit an unused loop binding; this proves Go now agrees.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale).
+module main
+
+fn countItems(data: List[Int]) -> Int {
+  let mut count = 0
+  for x in data {
+    count = count + 1
+  }
+  count
+}
+
+fn main() -> Void {
+  println("${countItems([10, 20, 30])}")
+}

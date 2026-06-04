@@ -1,0 +1,41 @@
+// TEST: exec_go_compose_typed_pipeline
+// EXPECT: output "15;27"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go function-composition typing: `f >> g` desugars (in shared AIR) to
+// `(__compose_x) => g(f(__compose_x))` with an *untyped* `__compose_x`. The Go
+// backend must type the synthesised param from `f`'s first declared parameter
+// (`[]int64` here), so the composed closure's param is `[]int64`, not the erased
+// `interface{}` that breaks the inner `.map`/`.fold` element arithmetic, and the
+// lambda's return resolves from the outer fn `g`. Before the fix `go build`
+// rejected the composed value ("need type assertion" on the param, mismatched
+// result slice). The pipelines are applied directly to keep the test focused on
+// compose codegen. js/ts/python/rust type this natively; this proves Go now
+// agrees.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale).
+module main
+
+fn doubleAll(xs: List[Int]) -> List[Int] {
+  xs.map((x) => x * 2)
+}
+
+fn incAll(xs: List[Int]) -> List[Int] {
+  xs.map((x) => x + 1)
+}
+
+fn tripleAll(xs: List[Int]) -> List[Int] {
+  xs.map((x) => x * 3)
+}
+
+fn sumList(xs: List[Int]) -> Int {
+  xs.fold(0, (acc, v) => acc + v)
+}
+
+fn main() -> Void {
+  let prep = doubleAll >> incAll
+  let prep2 = incAll >> tripleAll
+  let a = [1, 2, 3]
+  let b = [1, 2, 3]
+  println("${sumList(prep(a))};${sumList(prep2(b))}")
+}

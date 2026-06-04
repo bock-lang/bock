@@ -1,0 +1,38 @@
+// TEST: exec_go_map_method_call_ret_type
+// EXPECT: output "9"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go list-combinator element typing through a method-call closure body:
+// `items.map((p) => p.value())` must size its result slice from the method's
+// declared return type (`Float` → `[]float64`), not the erased `[]interface{}`.
+// Before the fix, `infer_go_expr_type` returned `None` for a `recv.method()`
+// call (it only handled free-fn `Call`s), so `.map`'s result was `[]interface{}`
+// and the following `.fold(0.0, (acc, v) => acc + v)` failed `go build` with
+// "invalid operation: acc + v (mismatched types float64 and interface{})". The
+// fix records each method's Go return type during the pre-scan and resolves a
+// `Call`-with-`FieldAccess` (method-call) callee to it. js/ts/python/rust infer
+// this natively; this proves Go now agrees.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale).
+module main
+
+record Item {
+  price: Float
+}
+
+impl Item {
+  fn value(self) -> Float {
+    self.price * 3.0
+  }
+}
+
+fn total(items: List[Item]) -> Float {
+  let values = items.map((p) => p.value())
+  values.fold(0.0, (acc, v) => acc + v)
+}
+
+fn main() -> Void {
+  let items = [Item { price: 1.0 }, Item { price: 2.0 }]
+  let t = total(items)
+  println("${t.to_int()}")
+}

@@ -1,0 +1,28 @@
+// TEST: exec_go_empty_list_arg_typed
+// EXPECT: output "empty;7"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go collection element typing: an empty list literal `[]` passed directly as a
+// call argument whose parameter is a typed `List[Int]` must emit `[]int64{}`
+// (not the erased `[]interface{}{}` Go rejects against the declared `[]int64`
+// parameter). Before the fix, `findFirst([])` generated
+// `findFirst([]interface{}{})` and `go build` failed with
+// "cannot use []interface{}{} as []int64 value in argument". The fix sets the
+// expected collection element type from the callee's recorded parameter type
+// while emitting the argument, the same mechanism already used to specialise
+// lambda arguments. js/ts/python/rust type collections natively, so they were
+// already green; this proves Go now agrees.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale).
+module main
+
+fn findFirst(items: List[Int]) -> String {
+  match items {
+    [] => "empty"
+    [first, ..rest] => "${first}"
+  }
+}
+
+fn main() -> Void {
+  println("${findFirst([])};${findFirst([7, 8, 9])}")
+}
