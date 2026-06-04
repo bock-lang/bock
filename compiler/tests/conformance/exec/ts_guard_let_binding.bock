@@ -1,0 +1,32 @@
+// TEST: ts_guard_let_binding
+// EXPECT: output "ok:hello;ok:world;bailed"
+// EXPECT: targets ts
+//
+// guard-let binds a name that stays in scope for the rest of the block (TS
+// backend, guessing-game regression). `guard (let Ok(v) = expr) else { … }`
+// must lower so `v` is usable after the guard. The TS backend previously
+// lowered guard-let to a boolean `if (!(cond))` guard, dropping the binding —
+// `tsc` then reported TS2304 "Cannot find name 'v'". It now evaluates the
+// scrutinee once into a temp, tests the pattern's tag (diverging in the else,
+// which guard guarantees), then binds the payload into the enclosing scope so
+// the value is live for the rest of the block (mirrors js #217 / rust #216).
+module main
+
+fn validate(input: String) -> Result[String, String] {
+  if (input == "") { Err("empty") } else { Ok(input) }
+}
+
+fn check(input: String) -> String {
+  guard (let Ok(v) = validate(input)) else {
+    return "bailed"
+  }
+  // `v` is bound by the guard and live here.
+  "ok:${v}"
+}
+
+fn main() -> Void {
+  let a = check("hello")
+  let b = check("world")
+  let c = check("")
+  println("${a};${b};${c}")
+}

@@ -1,0 +1,30 @@
+// TEST: ts_let_shadow_rebind
+// EXPECT: output "10;7"
+// EXPECT: targets ts
+//
+// TS regression guard: re-binding an immutable `let` in one scope (the Bock
+// idiom for "update an immutable value", `let acc = …; let acc = f(acc)`)
+// shadows the prior binding. TS `const`/`let` reject re-declaration in a single
+// block scope (TS2451 "Cannot redeclare block-scoped variable"), so the ts
+// emitter declares the first binding `let` and lowers each subsequent same-name
+// binding to a plain assignment (`acc = …`). Before the fix this emitted
+// `const acc = …` repeatedly → TS2451 (the todo-list example's
+// `let list = list.add(…)`). `bump` additionally re-binds a *parameter* name
+// (`let n = …`), which is the same TS block scope as the parameter, so it too
+// must lower to an assignment. Targeted at ts because the redeclaration rule is
+// JS/TS-specific (mirrors js #217).
+module main
+
+fn bump(n: Int) -> Int {
+  let n = n + 1
+  let n = n + 1
+  n
+}
+
+fn main() -> Void {
+  let acc = 1
+  let acc = acc + 2
+  let acc = acc + 3
+  let acc = acc + 4
+  println("${acc};${bump(5)}")
+}

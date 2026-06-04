@@ -1,0 +1,61 @@
+// TEST: ts_propagate_operator
+// EXPECT: output "ok:2;err:division by zero;some:20;none"
+// EXPECT: targets ts
+//
+// TS regression guard: the `?` propagation operator (`expr?`). Before the fix
+// the ts backend lowered `expr?` to a no-op passthrough, so a `Result[T,E]` /
+// `Optional[T]` value flowed where the unwrapped `T` was expected — `tsc` then
+// rejected it (TS2345/TS2322/TS2339, the type-zoo + task-api examples). It now
+// lowers `?` to the standard Rust-like unwrap-or-early-return: evaluate the
+// value once into a temp, early-return the failure container (`Err`/`None`)
+// from the enclosing fn, and continue with the unwrapped payload. The enclosing
+// fn's declared return type selects the single failure tag tested (`Err` for
+// `Result`, `None` for `Optional`), which also preserves TS narrowing of the
+// payload access. Exercised in let-binding, bare-statement, and tail positions.
+module main
+
+fn safe_div(a: Int, b: Int) -> Result[Int, String] {
+  if (b == 0) { Err("division by zero") } else { Ok(a / b) }
+}
+
+// `?` in let-binding position, twice; the first `?` divides by `x`, so
+// `chained(0)` early-returns the `Err` from the first `?` (exercising
+// unwrap-or-early-return), while `chained(8)` flows through both unwraps.
+fn chained(x: Int) -> Result[Int, String] {
+  let half = safe_div(8, x)?
+  let quarter = safe_div(half, 2)?
+  Ok(quarter)
+}
+
+fn first(xs: List[Int]) -> Optional[Int] {
+  xs.first()
+}
+
+// `?` on an Optional, then return a derived Optional.
+fn first_doubled(xs: List[Int]) -> Optional[Int] {
+  let v = first(xs)?
+  Some(v + v)
+}
+
+fn show_result(r: Result[Int, String]) -> String {
+  match r {
+    Ok(v) => "ok:${v}"
+    Err(e) => "err:${e}"
+  }
+}
+
+fn show_option(o: Optional[Int]) -> String {
+  match o {
+    Some(v) => "some:${v}"
+    None => "none"
+  }
+}
+
+fn main() -> Void {
+  let a = show_result(chained(2))
+  let b = show_result(chained(0))
+  let c = show_option(first_doubled([10, 20, 30]))
+  let empty: List[Int] = []
+  let d = show_option(first_doubled(empty))
+  println("${a};${b};${c};${d}")
+}

@@ -671,6 +671,35 @@ struct TsEmitCtx {
     /// has no value destination. Indexed by loop nesting, so an inner ordinary
     /// loop inside a value loop does not capture the outer sink.
     loop_value_sinks: Vec<Option<ValueSink>>,
+    /// Failure tag of the *enclosing function's* result/optional return type,
+    /// driving the `?` (`Propagate`) early-return guard. `"Err"` when the fn
+    /// returns `Result[T, E]`, `"None"` when it returns `Optional[T]` / `T?`,
+    /// `None` otherwise. Set in [`Self::emit_fn_decl`] / [`Self::emit_class_method`]
+    /// from the declared return type and restored after the body, so the guard
+    /// tests the single discriminant that actually exists on the value — which
+    /// also lets TS narrow the success access (`._0`) to the payload type.
+    current_fn_propagate_tag: Option<&'static str>,
+    /// Per-TS-lexical-block stack of simple `let`/`const` binding state. Bock
+    /// permits re-binding (`let x = …; let x = …`) which shadows the prior
+    /// binding in the same scope; TS `const`/`let` forbid re-declaration in one
+    /// block scope (TS2451). Each frame records the TS idents already declared in
+    /// the block and, of those, which need `let` (because they are re-bound or
+    /// assigned later). The first declaration of a re-bound name uses `let`;
+    /// every subsequent binding of the same name emits a plain assignment
+    /// (`x = …`) rather than a redeclaration. Mirrors the js backend (#217). See
+    /// [`LetScope`].
+    let_scopes: Vec<LetScope>,
+}
+
+/// One TS lexical block's `let`/`const` binding state — see
+/// [`TsEmitCtx::let_scopes`].
+#[derive(Default)]
+struct LetScope {
+    /// Simple TS idents already emitted as a declaration in this block.
+    declared: HashSet<String>,
+    /// Of the block's simple bindings, those that are re-bound or assigned and
+    /// so must be declared with `let` (not `const`) at their first declaration.
+    needs_let: HashSet<String>,
 }
 
 impl TsEmitCtx {
@@ -716,6 +745,25 @@ impl TsEmitCtx {
             field_method_collisions: HashSet::new(),
             value_sink: None,
             loop_value_sinks: Vec::new(),
+            current_fn_propagate_tag: None,
+            let_scopes: Vec::new(),
+        }
+    }
+
+    /// Classify a function's declared return type into the failure tag its `?`
+    /// operator early-returns: `Some("Err")` for `Result[…]`, `Some("None")` for
+    /// `Optional[…]` / `T?`, `None` for anything else.
+    fn propagate_tag_for_return(ret: Option<&AIRNode>) -> Option<&'static str> {
+        match ret.map(|r| &r.kind) {
+            Some(NodeKind::TypeOptional { .. }) => Some("None"),
+            Some(NodeKind::TypeNamed { path, .. }) => {
+                match path.segments.last().map(|s| s.name.as_str()) {
+                    Some("Result") => Some("Err"),
+                    Some("Optional") => Some("None"),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -3047,6 +3095,13 @@ impl TsEmitCtx {
             | NodeKind::Block { .. }
             | NodeKind::HandlingBlock { .. }
             | NodeKind::Assign { .. } => self.emit_stmt(node),
+            // A bare `expr?` statement (`save_task(task)?`): the Ok/Some payload
+            // is discarded, but the `?` still early-returns the Err/None from the
+            // enclosing fn. Lower the early-return guard and drop the payload.
+            NodeKind::Propagate { expr } => {
+                self.emit_propagate(expr)?;
+                Ok(())
+            }
             // Expression nodes that appear as statements:
             _ => {
                 self.write_indent();
@@ -3102,7 +3157,10 @@ impl TsEmitCtx {
             self.current_handler_vars
                 .insert(ename.clone(), to_camel_case(ename));
         }
-        self.emit_block_body(body)?;
+        let prev_prop_tag = self.current_fn_propagate_tag;
+        self.current_fn_propagate_tag = Self::propagate_tag_for_return(return_type);
+        self.emit_fn_body_seeded(params, body)?;
+        self.current_fn_propagate_tag = prev_prop_tag;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         self.writeln("}");
@@ -3145,7 +3203,10 @@ impl TsEmitCtx {
                 self.current_handler_vars
                     .insert(ename.clone(), to_camel_case(ename));
             }
-            self.emit_block_body(body)?;
+            let prev_prop_tag = self.current_fn_propagate_tag;
+            self.current_fn_propagate_tag = Self::propagate_tag_for_return(return_type.as_deref());
+            self.emit_fn_body_seeded(params, body)?;
+            self.current_fn_propagate_tag = prev_prop_tag;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
             self.writeln("}");
@@ -3477,6 +3538,72 @@ impl TsEmitCtx {
                     let _ = writeln!(self.buf, "{ind}let {binding}{ty_str};");
                     return Ok(());
                 }
+                // `let name = expr?` — the `?` unwraps the Ok/Some payload and
+                // early-returns the Err/None from the enclosing fn. Lower the
+                // unwrap in statement position (a temp + early-return guard),
+                // then bind `name` to the payload access. See `emit_propagate`.
+                if let NodeKind::Propagate { expr } = &value.kind {
+                    if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                        let ts_name = ts_value_ident(&name.name);
+                        let access = self.emit_propagate(expr)?;
+                        let kw = if *is_mut || self.simple_let_needs_let(&ts_name) {
+                            "let"
+                        } else {
+                            "const"
+                        };
+                        if self.simple_let_redeclared(&ts_name) {
+                            let ind = self.indent_str();
+                            let _ = writeln!(self.buf, "{ind}{ts_name} = {access};");
+                        } else {
+                            self.mark_simple_let_declared(&ts_name);
+                            let ind = self.indent_str();
+                            let _ = writeln!(self.buf, "{ind}{kw} {ts_name}{ty_str} = {access};");
+                        }
+                        return Ok(());
+                    }
+                    // A non-simple destructuring binding over a `?` value: unwrap
+                    // into a temp, then destructure from it.
+                    let access = self.emit_propagate(expr)?;
+                    let ind = self.indent_str();
+                    let _ = writeln!(self.buf, "{ind}{kw} {binding}{ty_str} = {access};");
+                    return Ok(());
+                }
+                // A simple `let name = …` is subject to TS redeclaration rules
+                // (TS2451). Bock allows re-binding the same name in one scope
+                // (shadowing); TS does not, so the second-and-later binding of a
+                // simple name becomes a plain assignment, and the first
+                // declaration uses `let` (not `const`) when the name is later
+                // re-bound/assigned. Mirrors the js backend (#217). The `?`
+                // unwrap (`Propagate`) value takes a separate statement-form path
+                // above, so it is excluded here.
+                if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                    if !matches!(value.kind, NodeKind::Propagate { .. }) {
+                        let ts_name = ts_value_ident(&name.name);
+                        if self.simple_let_redeclared(&ts_name) {
+                            let ind = self.indent_str();
+                            let _ = write!(self.buf, "{ind}{ts_name} = ");
+                            let prev_expected = self.current_expected_type.take();
+                            self.current_expected_type = ty_ts;
+                            self.emit_expr(value)?;
+                            self.current_expected_type = prev_expected;
+                            self.buf.push_str(";\n");
+                            return Ok(());
+                        }
+                        if !self.value_needs_stmt_form(value) {
+                            let needs_let = *is_mut || self.simple_let_needs_let(&ts_name);
+                            let kw = if needs_let { "let" } else { "const" };
+                            self.mark_simple_let_declared(&ts_name);
+                            let ind = self.indent_str();
+                            let _ = write!(self.buf, "{ind}{kw} {ts_name}{ty_str} = ");
+                            let prev_expected = self.current_expected_type.take();
+                            self.current_expected_type = ty_ts;
+                            self.emit_expr(value)?;
+                            self.current_expected_type = prev_expected;
+                            self.buf.push_str(";\n");
+                            return Ok(());
+                        }
+                    }
+                }
                 // A control-flow initialiser with no TS expression form (a `loop`,
                 // or a value `if`/`match` with a `return`/`break` arm) is lowered
                 // in statement position: declare the binding `let`, then emit the
@@ -3632,24 +3759,55 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::Guard {
+                let_pattern,
                 condition,
                 else_block,
-                ..
             } => {
-                let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}if (!(");
-                self.emit_expr(condition)?;
-                self.buf.push_str(")) {\n");
-                self.indent += 1;
-                self.emit_block_body(else_block)?;
-                self.indent -= 1;
-                self.writeln("}");
+                if let Some(pat) = let_pattern {
+                    // `guard (let pat = expr) else { … }`: evaluate `expr` once,
+                    // run the else (which must diverge) when `pat` does not
+                    // match, then bind `pat`'s names into the *enclosing* scope
+                    // so they are in scope for the statements after the guard.
+                    // Mirrors the js lowering (#217).
+                    self.match_temp_counter += 1;
+                    let tmp = format!("__guard{}", self.match_temp_counter);
+                    let ind = self.indent_str();
+                    let _ = write!(self.buf, "{ind}const {tmp} = ");
+                    self.emit_expr(condition)?;
+                    self.buf.push_str(";\n");
+                    let test = self.pattern_test_ts(pat, &tmp);
+                    // A bare bind / wildcard pattern always matches → no `if`.
+                    if !test.is_empty() {
+                        let ind = self.indent_str();
+                        let _ = writeln!(self.buf, "{ind}if (!({test})) {{");
+                        self.indent += 1;
+                        self.emit_block_body(else_block)?;
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                    // Bindings land in the enclosing scope (no nested block), so
+                    // they are visible to the statements following the guard.
+                    self.pattern_binds_ts(pat, &tmp)?;
+                } else {
+                    let ind = self.indent_str();
+                    let _ = write!(self.buf, "{ind}if (!(");
+                    self.emit_expr(condition)?;
+                    self.buf.push_str(")) {\n");
+                    self.indent += 1;
+                    self.emit_block_body(else_block)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => self.emit_match(scrutinee, arms, false),
             NodeKind::Block { stmts, tail } => {
+                // A statement-position block is its own TS `{}` lexical scope, so
+                // it gets its own `let` scope frame (a name re-bound inside is
+                // independent of the enclosing block's bindings).
                 self.writeln("{");
                 self.indent += 1;
+                self.enter_let_scope(node);
                 for s in stmts {
                     self.emit_node(s)?;
                 }
@@ -3658,6 +3816,7 @@ impl TsEmitCtx {
                     self.emit_expr(t)?;
                     self.buf.push_str(";\n");
                 }
+                self.leave_let_scope();
                 self.indent -= 1;
                 self.writeln("}");
                 Ok(())
@@ -3723,6 +3882,54 @@ impl TsEmitCtx {
                 Ok(())
             }
         }
+    }
+
+    /// Lower the `?` propagation operator (`inner?`) in statement position.
+    ///
+    /// Emits a temp holding `inner` once, then an early-return guard that
+    /// returns the temp unchanged from the enclosing fn when the value is the
+    /// failure variant (`Err` for `Result`, `None` for `Optional`), and returns
+    /// the *access expression* for the success payload (`__propN._0`) so the
+    /// caller can bind/use the unwrapped value. The runtime representation is a
+    /// tagged object (`{ _tag, _0 }`) shared with `match`/method lowering, so the
+    /// same guard covers both container kinds: the failure value *is* the temp
+    /// (an `Err`/`None`), so `return __propN` propagates it as-is, and the
+    /// payload is always `._0`. Implements the standard Rust-like `?` semantics
+    /// (early-return on failure, unwrap on success).
+    fn emit_propagate(&mut self, inner: &AIRNode) -> Result<String, CodegenError> {
+        self.match_temp_counter += 1;
+        let tmp = format!("__prop{}", self.match_temp_counter);
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}const {tmp} = ");
+        self.emit_expr(inner)?;
+        self.buf.push_str(";\n");
+        // Failure variant → propagate the container unchanged. When the enclosing
+        // fn's return type tells us the failure tag (`Err` for `Result`, `None`
+        // for `Optional`), test that single discriminant: it is a real member of
+        // the value's tag union, so TS both accepts the comparison *and* narrows
+        // the success access (`{tmp}._0`) to the payload type after the guard.
+        let test = match self.current_fn_propagate_tag {
+            Some(tag) => format!("{tmp}._tag === \"{tag}\""),
+            // Unknown container kind (no typed return) → fall back to testing
+            // both failure tags with the `._tag` widened to `string`, so the
+            // (always-false but legal) cross-container arm does not trip a TS2367
+            // "no overlap" error. This path forgoes narrowing; the typed-return
+            // path above (which every example hits) keeps it.
+            None => {
+                format!("({tmp}._tag as string) === \"Err\" || ({tmp}._tag as string) === \"None\"")
+            }
+        };
+        let ind = self.indent_str();
+        let _ = writeln!(self.buf, "{ind}if ({test}) {{");
+        self.indent += 1;
+        let ind = self.indent_str();
+        // `as never` lets the `Err`/`None` container satisfy the fn's declared
+        // return type without re-narrowing it here (the value is already the
+        // correct container shape; the cast only quiets the structural check).
+        let _ = writeln!(self.buf, "{ind}return {tmp} as never;");
+        self.indent -= 1;
+        self.writeln("}");
+        Ok(format!("{tmp}._0"))
     }
 
     // ── Expressions ─────────────────────────────────────────────────────────
@@ -4019,7 +4226,17 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::Propagate { expr } => {
+                // `expr?` in *expression* position (nested inside a larger
+                // expression). Early-return has no expression form in TS, so the
+                // statement-position lowerings (LetBinding value, bare statement,
+                // block tail — see `emit_propagate`) handle the common cases. Here
+                // we can only unwrap the payload (`._0`); the Err/None branch is
+                // *not* propagated, so this is a partial lowering. The examples in
+                // scope never hit it (their `?` is always statement-positioned).
+                // Tracked as OPEN: nested expression-position `?`.
+                self.buf.push('(');
                 self.emit_expr(expr)?;
+                self.buf.push_str(")._0");
                 Ok(())
             }
             NodeKind::Range { lo, hi, inclusive } => {
@@ -4234,9 +4451,13 @@ impl TsEmitCtx {
                 Ok(())
             }
             NodeKind::Block { stmts, tail } => {
-                // IIFE
+                // IIFE. The IIFE body is its own TS lexical scope, so it gets its
+                // own `let` scope frame — a name re-bound across two *sibling*
+                // IIFEs (e.g. two arms of an expression-position `match`) is two
+                // independent declarations, not a redeclaration.
                 self.buf.push_str("(() => {\n");
                 self.indent += 1;
+                self.enter_let_scope(node);
                 for s in stmts {
                     self.emit_node(s)?;
                 }
@@ -4246,6 +4467,7 @@ impl TsEmitCtx {
                     self.emit_expr(t)?;
                     self.buf.push_str(";\n");
                 }
+                self.leave_let_scope();
                 self.indent -= 1;
                 self.write_indent();
                 self.buf.push_str("})()");
@@ -4868,7 +5090,110 @@ impl TsEmitCtx {
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
+    /// Returns true if `ts_name` has already been declared in the innermost
+    /// `let` scope, so a further binding of it must be a plain assignment rather
+    /// than a `const`/`let` re-declaration (which TS rejects with TS2451).
+    fn simple_let_redeclared(&self, ts_name: &str) -> bool {
+        self.let_scopes
+            .last()
+            .is_some_and(|s| s.declared.contains(ts_name))
+    }
+
+    /// Returns true if `ts_name` is re-bound or assigned later in its block, so
+    /// its first declaration must use `let` (not `const`) to allow reassignment.
+    fn simple_let_needs_let(&self, ts_name: &str) -> bool {
+        self.let_scopes
+            .last()
+            .is_some_and(|s| s.needs_let.contains(ts_name))
+    }
+
+    /// Record that `ts_name` has now been declared in the innermost `let` scope.
+    fn mark_simple_let_declared(&mut self, ts_name: &str) {
+        if let Some(s) = self.let_scopes.last_mut() {
+            s.declared.insert(ts_name.to_string());
+        }
+    }
+
+    /// Push a fresh `let` scope for a TS block, pre-scanning `block`'s direct
+    /// statements to find which simple `let`-bound names are re-bound or
+    /// assigned within the block (so their first declaration emits `let`). Only
+    /// the block's own statements are scanned — nested blocks open their own
+    /// scopes, so a name re-bound only in a nested block does not force `let`
+    /// here. Mirrors the js backend (#217).
+    fn enter_let_scope(&mut self, block: &AIRNode) {
+        let mut needs_let = HashSet::new();
+        if let NodeKind::Block { stmts, tail } = &block.kind {
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut visit = |n: &AIRNode, needs_let: &mut HashSet<String>| match &n.kind {
+                NodeKind::LetBinding { pattern, .. } => {
+                    if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                        let ts = ts_value_ident(&name.name);
+                        // A re-binding of an already-seen name needs `let`.
+                        if !seen.insert(ts.clone()) {
+                            needs_let.insert(ts);
+                        }
+                    }
+                }
+                NodeKind::Assign { target, .. } => {
+                    if let NodeKind::Identifier { name } = &target.kind {
+                        needs_let.insert(ts_value_ident(&name.name));
+                    }
+                }
+                _ => {}
+            };
+            for s in stmts {
+                visit(s, &mut needs_let);
+            }
+            if let Some(t) = tail {
+                visit(t, &mut needs_let);
+            }
+        }
+        self.let_scopes.push(LetScope {
+            declared: HashSet::new(),
+            needs_let,
+        });
+    }
+
+    /// Pop the innermost `let` scope pushed by [`Self::enter_let_scope`].
+    fn leave_let_scope(&mut self) {
+        self.let_scopes.pop();
+    }
+
     fn emit_block_body(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        self.enter_let_scope(node);
+        let r = self.emit_block_body_inner(node);
+        self.leave_let_scope();
+        r
+    }
+
+    /// Emit a function/method body whose top-level `let` scope is pre-seeded with
+    /// the function's `params` as already-declared names. A Bock `let x = …` that
+    /// shadows a parameter `x` is the same block scope as the TS parameter, so it
+    /// must lower to a plain assignment (`x = …`) rather than a `let`/`const`
+    /// redeclaration (which TS rejects). Mirrors the js backend (#217).
+    fn emit_fn_body_seeded(
+        &mut self,
+        params: &[AIRNode],
+        body: &AIRNode,
+    ) -> Result<(), CodegenError> {
+        self.enter_let_scope(body);
+        if let Some(scope) = self.let_scopes.last_mut() {
+            for p in params {
+                if let NodeKind::Param { pattern, .. } = &p.kind {
+                    if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                        let ts = ts_value_ident(&name.name);
+                        scope.needs_let.insert(ts.clone());
+                        scope.declared.insert(ts);
+                    }
+                }
+            }
+        }
+        let r = self.emit_block_body_inner(body);
+        self.leave_let_scope();
+        r
+    }
+
+    fn emit_block_body_inner(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         if let NodeKind::Block { stmts, tail } = &node.kind {
             for s in stmts {
                 self.emit_node(s)?;
@@ -4885,6 +5210,18 @@ impl TsEmitCtx {
                     self.write_indent();
                     self.emit_expr(t)?;
                     self.buf.push_str(";\n");
+                    return Ok(());
+                }
+                // A tail-position `expr?`: emit the early-return guard, then
+                // `return` the unwrapped payload (the fn's value). Through the
+                // sink when one is active (statement-position control flow).
+                if let NodeKind::Propagate { expr } = &t.kind {
+                    let access = self.emit_propagate(expr)?;
+                    if let Some(sink) = self.value_sink.clone() {
+                        return self.emit_sink_value_str(&access, &sink);
+                    }
+                    let ind = self.indent_str();
+                    let _ = writeln!(self.buf, "{ind}return {access};");
                     return Ok(());
                 }
                 // Expression-position control flow whose branches carry
@@ -5165,6 +5502,23 @@ impl TsEmitCtx {
                 let _ = write!(self.buf, "{ind}{name} = ");
                 self.emit_expr(node)?;
                 self.buf.push_str(";\n");
+            }
+        }
+        Ok(())
+    }
+
+    /// Deliver an already-rendered value expression `value` through `sink`
+    /// (`return value;` / `name = value;`). Used by the tail-position `?`
+    /// lowering, whose unwrapped payload is a literal access string rather than
+    /// an [`AIRNode`].
+    fn emit_sink_value_str(&mut self, value: &str, sink: &ValueSink) -> Result<(), CodegenError> {
+        let ind = self.indent_str();
+        match sink {
+            ValueSink::Return => {
+                let _ = writeln!(self.buf, "{ind}return {value};");
+            }
+            ValueSink::Assign(name) => {
+                let _ = writeln!(self.buf, "{ind}{name} = {value};");
             }
         }
         Ok(())
@@ -7947,6 +8301,271 @@ mod tests {
         assert!(
             out.contains("return 0"),
             "diverging arm must keep its return (not wrapped in an IIFE), got: {out}"
+        );
+    }
+
+    // ── ts codegen fixes (examples audit): guard-let, let-shadow, `?` ─────────
+
+    /// `let [mut] name = value` binding node.
+    fn ts_let_binding(id: u32, name: &str, is_mut: bool, value: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::LetBinding {
+                is_mut,
+                pattern: Box::new(node(
+                    id + 1,
+                    NodeKind::BindPat {
+                        name: ident(name),
+                        is_mut,
+                    },
+                )),
+                ty: None,
+                value: Box::new(value),
+            },
+        )
+    }
+
+    /// A no-arg call `callee()`.
+    fn ts_call(id: u32, callee: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::Call {
+                callee: Box::new(id_node(id + 1, callee)),
+                args: vec![],
+                type_args: vec![],
+            },
+        )
+    }
+
+    /// A `fn name(params) -> ret { body }` declaration. `ret` is an optional
+    /// return-type name (e.g. `Result`/`Optional`) for the `?` lowering tests.
+    fn ts_fn_decl(
+        id: u32,
+        name: &str,
+        params: Vec<AIRNode>,
+        ret: Option<&str>,
+        body: AIRNode,
+    ) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params,
+                return_type: ret.map(|r| Box::new(type_node(id + 500, r))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
+    }
+
+    #[test]
+    fn ts_guard_let_binds_into_enclosing_scope() {
+        // fn run() { guard (let Ok(guess) = parse()) else { return }; guess }
+        let guard = node(
+            10,
+            NodeKind::Guard {
+                let_pattern: Some(Box::new(node(
+                    11,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Ok"]),
+                        fields: vec![bind_pat(12, "guess")],
+                    },
+                ))),
+                condition: Box::new(ts_call(13, "parse")),
+                else_block: Box::new(block(
+                    15,
+                    vec![node(16, NodeKind::Return { value: None })],
+                    None,
+                )),
+            },
+        );
+        let body = block(2, vec![guard], Some(id_node(20, "guess")));
+        let out = gen(&module(
+            vec![],
+            vec![ts_fn_decl(1, "run", vec![], None, body)],
+        ));
+        // The guard evaluates the scrutinee once into a temp, tests the Ok tag,
+        // diverges in the else, then binds `guess` into the enclosing scope.
+        assert!(
+            out.contains("const __guard1 = parse();"),
+            "guard-let must evaluate the scrutinee once into a temp, got: {out}"
+        );
+        assert!(
+            out.contains("if (!(__guard1._tag === \"Ok\"))"),
+            "guard-let must test the pattern's tag, got: {out}"
+        );
+        assert!(
+            out.contains("const guess = __guard1._0;"),
+            "guard-let must bind the payload into the enclosing scope, got: {out}"
+        );
+        // The binding must NOT be inside the else block (it follows the guard).
+        let bind_pos = out.find("const guess = __guard1._0;").unwrap();
+        let else_pos = out.find("if (!(__guard1._tag").unwrap();
+        assert!(
+            bind_pos > else_pos,
+            "the binding must follow the guard's else, got: {out}"
+        );
+    }
+
+    #[test]
+    fn ts_let_shadow_rebinds_to_assignment_not_redeclaration() {
+        // fn run() { let acc = 1; let acc = 2; let acc = 3 }
+        let body = block(
+            2,
+            vec![
+                ts_let_binding(10, "acc", false, int_lit(11, "1")),
+                ts_let_binding(20, "acc", false, int_lit(21, "2")),
+                ts_let_binding(30, "acc", false, int_lit(31, "3")),
+            ],
+            None,
+        );
+        let out = gen(&module(
+            vec![],
+            vec![ts_fn_decl(1, "run", vec![], None, body)],
+        ));
+        // First binding declares `let` (re-bound later), subsequent ones assign.
+        assert!(
+            out.contains("let acc = 1;"),
+            "first re-bound `let` should declare with `let`, got: {out}"
+        );
+        assert!(
+            out.contains("acc = 2;") && out.contains("acc = 3;"),
+            "later bindings should be plain assignments, got: {out}"
+        );
+        assert!(
+            !out.contains("const acc"),
+            "a re-bound binding must not emit `const acc` (TS2451), got: {out}"
+        );
+        // Exactly one declaration of `acc` (the first `let`); no redeclaration.
+        assert_eq!(
+            out.matches("let acc").count(),
+            1,
+            "exactly one `let acc` declaration expected, got: {out}"
+        );
+    }
+
+    #[test]
+    fn ts_let_shadow_of_param_lowers_to_assignment() {
+        // fn run(x: Int) { let x = 1; x }  — `let x` shadows the param in the
+        // same TS block scope, so it must be an assignment, not a redeclaration.
+        let body = block(
+            2,
+            vec![ts_let_binding(10, "x", false, int_lit(11, "1"))],
+            Some(id_node(20, "x")),
+        );
+        let f = ts_fn_decl(1, "run", vec![typed_param_node(3, "x", "Int")], None, body);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("x = 1;") && !out.contains("const x = 1;") && !out.contains("let x = 1;"),
+            "a `let` shadowing a param must lower to assignment, got: {out}"
+        );
+    }
+
+    #[test]
+    fn ts_propagate_let_unwraps_and_early_returns_result() {
+        // fn run() -> Result { let v = f()?; v }
+        let body = block(
+            2,
+            vec![ts_let_binding(
+                10,
+                "v",
+                false,
+                node(
+                    12,
+                    NodeKind::Propagate {
+                        expr: Box::new(ts_call(13, "f")),
+                    },
+                ),
+            )],
+            Some(id_node(20, "v")),
+        );
+        let out = gen(&module(
+            vec![],
+            vec![ts_fn_decl(1, "run", vec![], Some("Result"), body)],
+        ));
+        assert!(
+            out.contains("const __prop1 = f();"),
+            "`?` must evaluate the inner once into a temp, got: {out}"
+        );
+        // Result return → single `Err` discriminant (preserves TS narrowing).
+        assert!(
+            out.contains("if (__prop1._tag === \"Err\") {"),
+            "`?` in a Result fn must guard on the Err tag, got: {out}"
+        );
+        assert!(
+            out.contains("return __prop1 as never;"),
+            "`?` must early-return the failure container, got: {out}"
+        );
+        assert!(
+            out.contains("const v = __prop1._0;"),
+            "`?` must bind the unwrapped payload, got: {out}"
+        );
+    }
+
+    #[test]
+    fn ts_propagate_optional_guards_on_none_tag() {
+        // fn run() -> Optional { let v = f()?; v }
+        let body = block(
+            2,
+            vec![ts_let_binding(
+                10,
+                "v",
+                false,
+                node(
+                    12,
+                    NodeKind::Propagate {
+                        expr: Box::new(ts_call(13, "f")),
+                    },
+                ),
+            )],
+            Some(id_node(20, "v")),
+        );
+        let out = gen(&module(
+            vec![],
+            vec![ts_fn_decl(1, "run", vec![], Some("Optional"), body)],
+        ));
+        assert!(
+            out.contains("if (__prop1._tag === \"None\") {"),
+            "`?` in an Optional fn must guard on the None tag, got: {out}"
+        );
+    }
+
+    #[test]
+    fn ts_propagate_bare_statement_early_returns_discards_payload() {
+        // fn run() -> Result { f()?; g() }  — the `?` value is discarded but the
+        // early-return guard still fires.
+        let body = block(
+            2,
+            vec![node(
+                10,
+                NodeKind::Propagate {
+                    expr: Box::new(ts_call(11, "f")),
+                },
+            )],
+            Some(ts_call(20, "g")),
+        );
+        let out = gen(&module(
+            vec![],
+            vec![ts_fn_decl(1, "run", vec![], Some("Result"), body)],
+        ));
+        assert!(
+            out.contains("const __prop1 = f();"),
+            "a bare `expr?` statement must still hoist + guard, got: {out}"
+        );
+        assert!(
+            out.contains("if (__prop1._tag === \"Err\") {")
+                && out.contains("return __prop1 as never;"),
+            "a bare `expr?` must early-return on failure, got: {out}"
+        );
+        // The discarded payload is not bound to anything.
+        assert!(
+            !out.contains("__prop1._0"),
+            "a bare `expr?` discards the payload (no `._0` use), got: {out}"
         );
     }
 }
