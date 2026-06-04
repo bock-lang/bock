@@ -884,6 +884,76 @@ fn control_flow_has_raise_branch(node: &AIRNode) -> bool {
     }
 }
 
+/// Whether a **value-position** `if` (one consumed as an expression — a
+/// function tail, a `return` value) must be lowered to a statement-form
+/// `if`/`elif`/`else` rather than a Python ternary.
+///
+/// The ternary form (`<then> if <cond> else <else>`) emits only each branch's
+/// *tail* expression: any statements in a branch block — most importantly a
+/// `let` binding — are silently dropped, so a later reference to that binding
+/// becomes a `NameError` (the microservice `handle_delete_user` is the canonical
+/// case: its `if (authorized) { let role = …; if (role == "admin") … }` lost the
+/// `role` binding inside the ternary). Routing such an `if` to statement form
+/// (each branch recursing through `emit_block_body`, which emits the `let` then
+/// `return`s the tail) preserves the bindings. A branch is "droppable" when its
+/// block carries statements (or nests another droppable `if`/`elif`).
+fn if_value_needs_stmt_form(node: &AIRNode) -> bool {
+    let NodeKind::If {
+        then_block,
+        else_block,
+        ..
+    } = &node.kind
+    else {
+        return false;
+    };
+    block_has_droppable_stmts(then_block)
+        || else_block.as_deref().is_some_and(|eb| {
+            if matches!(eb.kind, NodeKind::If { .. }) {
+                if_value_needs_stmt_form(eb)
+            } else {
+                block_has_droppable_stmts(eb)
+            }
+        })
+}
+
+/// True when a block carries leading statements that a value/ternary lowering
+/// would drop (it emits only the tail). An empty-statement block is safe as a
+/// ternary branch; a block with a `let` / expression statement is not. See
+/// [`if_value_needs_stmt_form`].
+fn block_has_droppable_stmts(node: &AIRNode) -> bool {
+    matches!(&node.kind, NodeKind::Block { stmts, .. } if !stmts.is_empty())
+}
+
+/// Whether a **value-position** `match` (one consumed as an expression — a
+/// function tail, a `return` value) must be lowered to a statement-form
+/// `match`/`case` rather than the `(lambda __v: …)` conditional chain.
+///
+/// The conditional chain can correctly express a flat dispatch that binds at
+/// most a single payload: a literal, range, list, `Some(x)`/`Ok`/`Err`/`None`,
+/// a whole-scrutinee bind, or a wildcard. It **cannot** test or bind:
+///
+/// - guards (it dropped the guard entirely),
+/// - or / tuple / nested-constructor / range / list patterns (caught by the
+///   shared [`crate::generator::match_needs_ifchain`]),
+/// - **record patterns** — even a bare-bind one (`Point { x, .. } => "x=${x}"`),
+///   whose field binding the chain left free (`(lambda __v: f"x={x}")(p)` →
+///   `NameError: name 'x'`). The shared recogniser treats a bare-bind record
+///   field as *not* structured, so it returns false for that shape; this
+///   py-local predicate adds record patterns on top so the Python backend routes
+///   them to the statement-form `emit_pattern`, which binds `case Point(x=x):`
+///   by field name. (Kept py-local rather than widening the shared recogniser,
+///   which the if-chain backends consult for their own switch fast-path.)
+fn match_value_needs_stmt_form(arms: &[AIRNode]) -> bool {
+    crate::generator::match_needs_ifchain(arms)
+        || arms.iter().any(|arm| {
+            matches!(
+                &arm.kind,
+                NodeKind::MatchArm { pattern, .. }
+                    if matches!(pattern.kind, NodeKind::RecordPat { .. })
+            )
+        })
+}
+
 /// Compute the implicit cross-module imports for `module`: public symbols
 /// declared in *other* reachable modules that `module` references but neither
 /// declares locally nor imports explicitly. Returns `(module_path, name)`
@@ -5008,10 +5078,27 @@ impl PyEmitCtx {
         {
             let ind = self.indent_str();
             let _ = write!(self.buf, "{ind}case ");
-            self.emit_pattern(pattern)?;
-            if let Some(g) = guard {
-                self.buf.push_str(" if ");
-                self.emit_expr(g)?;
+            // A range pattern (`1..10 => …`) has no Python `case` literal form:
+            // lower it to a capture-plus-guard `case __rv if lo <= __rv < hi:`.
+            // The capture binds the whole scrutinee so the relational test can run
+            // (Python `match`/`case` cannot reference the scrutinee name inside a
+            // `case`). A user guard, if any, is AND-ed onto the range test.
+            if let NodeKind::RangePat { lo, hi, inclusive } = &pattern.kind {
+                let lo_s = range_bound_to_py(lo);
+                let hi_s = range_bound_to_py(hi);
+                let upper = if *inclusive { "<=" } else { "<" };
+                let _ = write!(self.buf, "__rv if {lo_s} <= __rv {upper} {hi_s}");
+                if let Some(g) = guard {
+                    self.buf.push_str(" and (");
+                    self.emit_expr(g)?;
+                    self.buf.push(')');
+                }
+            } else {
+                self.emit_pattern(pattern)?;
+                if let Some(g) = guard {
+                    self.buf.push_str(" if ");
+                    self.emit_expr(g)?;
+                }
             }
             self.buf.push_str(":\n");
             self.indent += 1;
@@ -5862,12 +5949,32 @@ impl PyEmitCtx {
                     return self.emit_tail_control_flow(t);
                 }
                 // A `match` with statement arms yields no value: emit a Python
-                // `match`/`case` statement, not a `return (lambda ...)`.
+                // `match`/`case` statement, not a `return (lambda ...)`. A value
+                // match whose arms need the structural if-chain (guards,
+                // or/tuple/record/range/list patterns, or a nested constructor)
+                // is *also* routed here: the `(lambda __v: …)` conditional chain
+                // cannot test or bind those — it dropped guards, tested record /
+                // tuple / or arms as `if True`, and emitted the arm body with the
+                // pattern binding free (`(lambda __v: f"x={x}")(p)` → `NameError`).
+                // The statement-form `emit_pattern` binds and tests every pattern
+                // kind correctly (each expression arm body becomes `return <v>`).
                 if let NodeKind::Match { scrutinee, arms } = &t.kind {
-                    if crate::generator::match_has_statement_arm(arms) {
+                    if crate::generator::match_has_statement_arm(arms)
+                        || match_value_needs_stmt_form(arms)
+                    {
                         self.emit_match(scrutinee, arms)?;
                         return Ok(());
                     }
+                }
+                // A value-position `if` whose branch block carries statements (a
+                // `let` binding) can't be a ternary: the ternary emits only each
+                // branch's tail, dropping the `let` (a later reference then
+                // `NameError`s — the microservice `handle_delete_user` case). Emit
+                // it as statement-form `if`/`elif`/`else`, each branch recursing
+                // through `emit_block_body` so the binding is kept and the tail
+                // `return`ed.
+                if if_value_needs_stmt_form(t) {
+                    return self.emit_tail_control_flow(t);
                 }
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}return ");
@@ -5891,7 +5998,13 @@ impl PyEmitCtx {
         } else if control_flow_has_raise_branch(node) {
             return self.emit_tail_control_flow(node);
         } else if let NodeKind::Match { scrutinee, arms } = &node.kind {
-            if crate::generator::match_has_statement_arm(arms) {
+            // See the tail-position note above: a value match needing the
+            // structural if-chain (guards, or/tuple/record/range/list, nested
+            // constructor) is lowered to statement-form `match`/`case` so every
+            // pattern binds and tests correctly, instead of a `(lambda __v: …)`
+            // chain that drops guards and leaves pattern bindings free.
+            if crate::generator::match_has_statement_arm(arms) || match_value_needs_stmt_form(arms)
+            {
                 self.emit_match(scrutinee, arms)?;
             } else {
                 let ind = self.indent_str();
@@ -5899,6 +6012,11 @@ impl PyEmitCtx {
                 self.emit_expr(node)?;
                 self.buf.push('\n');
             }
+        } else if if_value_needs_stmt_form(node) {
+            // See the tail-position note above: a value `if` whose branch block
+            // carries a `let` can't be a ternary (the binding would be dropped) —
+            // emit statement-form `if`/`elif`/`else`.
+            return self.emit_tail_control_flow(node);
         } else {
             // Single expression as body.
             let ind = self.indent_str();
@@ -6475,7 +6593,7 @@ fn escape_fstring_triple(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bock_air::{AirArg, AirRecordField};
+    use bock_air::{AirArg, AirRecordField, AirRecordPatternField};
     use bock_ast::{Ident, TypePath};
     use bock_errors::{FileId, Span};
 
@@ -9913,6 +10031,238 @@ mod tests {
         assert!(
             out.contains("return 0"),
             "diverging arm must keep its return, got: {out}"
+        );
+    }
+
+    // ── Value-position match: plain-record / tuple / guard / or / nested ────────
+    //
+    // These cover the value-position (`match` consumed as a value / function
+    // tail) lowering for the pattern kinds that the legacy `(lambda __v: …)`
+    // conditional chain could not bind: a bare-bind record field
+    // (`Point { x, .. } => "x=${x}"` — Q-plainrecord-valpos-match, py half), a
+    // tuple destructure, a guard arm (`n if (n < 0) => …`), an or-pattern, and a
+    // nested constructor (`Some(Ok(n)) => …`). The chain emitted the body lambda
+    // with the binding free (`(lambda __v: f"x={x}")(p)` → `NameError: name 'x'`),
+    // dropped the guard entirely, and tested or/record/tuple arms as `if True`
+    // (collapsing every later arm). The fix routes a value-position match needing
+    // the if-chain to the statement-form `match`/`case` machinery, which binds
+    // and tests every pattern kind correctly.
+
+    /// Build a single-arg `fn <name>(p) -> ...` whose body is a value-position
+    /// (tail) `match p { <arms> }`. The arms are expression-bodied.
+    fn match_fn(name: &str, arms: Vec<AIRNode>) -> AIRNode {
+        let match_node = node(
+            900,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(901, "p")),
+                arms,
+            },
+        );
+        let f = node(
+            910,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![param_node(911, "p")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(912, vec![], Some(match_node))),
+            },
+        );
+        module(vec![], vec![f])
+    }
+
+    fn record_pat_field(_id: u32, name: &str, pat: Option<AIRNode>) -> AirRecordPatternField {
+        AirRecordPatternField {
+            name: ident(name),
+            pattern: pat.map(Box::new),
+        }
+    }
+
+    /// `Point { x, .. } => "x=${x}"` — a bare-bind record field in value
+    /// position. Must bind `x` from the scrutinee, never emit a free `x`.
+    #[test]
+    fn py_plainrecord_match_binds_field_in_value_position() {
+        let arm = node(
+            100,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    101,
+                    NodeKind::RecordPat {
+                        path: type_path(&["Point"]),
+                        fields: vec![record_pat_field(102, "x", None)],
+                        rest: true,
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(103, vec![], Some(id_node(104, "x")))),
+            },
+        );
+        let out = gen(&match_fn("get_x", vec![arm]));
+        // The field bind must be introduced (statement-form `case Point(x=x):`),
+        // not left free inside a `(lambda __v: … x …)` chain.
+        assert!(
+            out.contains("match p:") && out.contains("case Point(x=x):"),
+            "plain-record value match must bind the field via case Point(x=x), got:\n{out}"
+        );
+        assert!(
+            !out.contains("(lambda __v: x)"),
+            "must not emit the field name free inside a value lambda, got:\n{out}"
+        );
+        // Inject a real `Point` dataclass (after the leading `from __future__`
+        // line, which must stay first) so `case Point(x=x):` has a class to bind.
+        let stubbed = out.replacen(
+            "from __future__ import annotations\n",
+            "from __future__ import annotations\nfrom dataclasses import dataclass as _dc\n@_dc\nclass Point:\n    x: int = 0\n",
+            1,
+        );
+        assert!(
+            !has_python3() || check_py_syntax(&stubbed),
+            "generated python must parse, got:\n{stubbed}"
+        );
+    }
+
+    /// `n if (n < 0) => "neg"  _ => "nonneg"` — a guard arm in value position.
+    /// The guard test must survive (the legacy chain dropped it, so every input
+    /// took the first arm).
+    #[test]
+    fn py_matcharm_guard_value_position_keeps_guard() {
+        let guarded = node(
+            200,
+            NodeKind::MatchArm {
+                pattern: Box::new(bind_pat(201, "n")),
+                guard: Some(Box::new(node(
+                    202,
+                    NodeKind::BinaryOp {
+                        op: BinOp::Lt,
+                        left: Box::new(id_node(203, "n")),
+                        right: Box::new(int_lit(204, "0")),
+                    },
+                ))),
+                body: Box::new(block(205, vec![], Some(str_lit(206, "neg")))),
+            },
+        );
+        let default = node(
+            210,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(211, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(block(212, vec![], Some(str_lit(213, "nonneg")))),
+            },
+        );
+        let out = gen(&match_fn("classify", vec![guarded, default]));
+        assert!(
+            out.contains("match p:") && out.contains("case n if (n < 0):"),
+            "guard arm in value position must keep its guard test, got:\n{out}"
+        );
+        assert!(
+            !has_python3() || check_py_syntax(&out),
+            "generated python must parse, got:\n{out}"
+        );
+    }
+
+    /// `(0, _) => "zero"  (n, s) => "${n}: ${s}"` — tuple patterns in value
+    /// position must bind `n`/`s` and test the literal element.
+    #[test]
+    fn py_tuple_match_value_position_binds_and_tests() {
+        let zero_arm = node(
+            300,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    301,
+                    NodeKind::TuplePat {
+                        elems: vec![
+                            node(
+                                302,
+                                NodeKind::LiteralPat {
+                                    lit: Literal::Int("0".into()),
+                                },
+                            ),
+                            node(303, NodeKind::WildcardPat),
+                        ],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(304, vec![], Some(str_lit(305, "zero")))),
+            },
+        );
+        let bind_arm = node(
+            310,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    311,
+                    NodeKind::TuplePat {
+                        elems: vec![bind_pat(312, "n"), bind_pat(313, "s")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(314, vec![], Some(id_node(315, "n")))),
+            },
+        );
+        let out = gen(&match_fn("describe", vec![zero_arm, bind_arm]));
+        assert!(
+            out.contains("match p:")
+                && out.contains("case (0, _):")
+                && out.contains("case (n, s):"),
+            "tuple value match must test the literal and bind elements, got:\n{out}"
+        );
+        assert!(
+            !has_python3() || check_py_syntax(&out),
+            "generated python must parse, got:\n{out}"
+        );
+    }
+
+    /// `Some(Ok(n)) => "${n}"  …` — a nested constructor in value position must
+    /// test the inner `Ok` and bind `n`, not collapse to `isinstance(__v, …)`
+    /// with `n` free.
+    #[test]
+    fn py_nested_constructor_match_value_position_binds_inner() {
+        let some_ok = node(
+            400,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    401,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Some"]),
+                        fields: vec![node(
+                            402,
+                            NodeKind::ConstructorPat {
+                                path: type_path(&["Ok"]),
+                                fields: vec![bind_pat(403, "n")],
+                            },
+                        )],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(404, vec![], Some(id_node(405, "n")))),
+            },
+        );
+        let none_arm = node(
+            410,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    411,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["None"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(412, vec![], Some(str_lit(413, "none")))),
+            },
+        );
+        let out = gen(&match_fn("nested", vec![some_ok, none_arm]));
+        assert!(
+            out.contains("match p:") && out.contains("case _BockSome(_BockOk(n)):"),
+            "nested constructor value match must test+bind the inner Ok, got:\n{out}"
+        );
+        assert!(
+            !has_python3() || check_py_syntax(&out),
+            "generated python must parse, got:\n{out}"
         );
     }
 }
