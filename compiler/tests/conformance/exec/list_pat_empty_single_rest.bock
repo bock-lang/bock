@@ -1,0 +1,35 @@
+// TEST: list_pat_empty_single_rest
+// EXPECT: output "empty;one:7;head:1,tail:3"
+//
+// Q-list-range-pattern-shared: a `match` over list patterns (`[]`, `[only]`,
+// `[first, ..rest]`) must lower correctly on EVERY target. The shared recogniser
+// `match_needs_ifchain` now flags `ListPat`, so ts/go route the whole match to
+// the if/else-if chain (length test + positional element binds + a `..rest`
+// slice bind); js/rust/py already handled it via their own paths. This fixture
+// runs on all five targets (no `// EXPECT: targets`) and executes an
+// expression-position `return match`, asserting the head element and rest-slice
+// length bind correctly — not just that it builds.
+module main
+
+fn describe(items: List[Int]) -> String {
+  match items {
+    [] => "empty"
+    [only] => "one:${only}"
+    [first, ..rest] => "head:${first},tail:${rest.len()}"
+  }
+}
+
+fn main() -> Void {
+  // Bind each list to an explicitly-typed `let` first: an empty list literal
+  // passed inline (`describe([])`) leaves Go unable to infer the element type
+  // (`[]interface{}` vs the `[]int64` parameter) — a separate empty-literal
+  // inference trait, not a list-pattern concern. A typed binding side-steps it
+  // so this fixture stays focused on the pattern lowering.
+  let e: List[Int] = []
+  let s: List[Int] = [7]
+  let m: List[Int] = [1, 2, 3, 4]
+  let a = describe(e)
+  let b = describe(s)
+  let c = describe(m)
+  println("${a};${b};${c}")
+}

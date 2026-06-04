@@ -8,8 +8,9 @@
 // than one default clause in switch statement", the ownership-demo example). The
 // js emitter now routes list-pattern matches to the if/else-if chain and tests
 // `Array.isArray(x) && x.length …`, binding head elements positionally and a
-// `..rest` to the trailing slice. Targeted at js because the other backends do
-// not yet lower list patterns (shared gap reported as an OPEN).
+// `..rest` to the trailing slice. List patterns are now lowered on ALL five
+// backends via the shared `match_needs_ifchain` recogniser (Q-list-range-pattern-
+// shared); cross-target executing coverage lives in `list_pat_*.bock`.
 module main
 
 fn head_or_zero(xs: List[Int]) -> Int {

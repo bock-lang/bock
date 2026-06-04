@@ -1,0 +1,33 @@
+// TEST: list_pat_stmt_position
+// EXPECT: output "empty;7:0;1:2;1:0"
+//
+// Q-list-range-pattern-shared: list-pattern matches in *statement* position
+// (the match is the body of a `let`, whose value is then read) must also bind
+// elements and `..rest` on every target. Exercises `[]` / `[first, ..rest]`
+// where the arm reads both the head element and the rest-slice length, on all
+// five targets. `[first, ..rest]` over a single-element list `[7]` / `[1]`
+// exercises an empty `..rest` tail (length 0).
+//
+// All bound elements are consumed inside string interpolation (never returned as
+// a bare value): the Rust backend matches list patterns on `(xs).as_slice()`, so
+// an element binds as `&i64` — fine for `Display`/interpolation, but returning it
+// where an owned `i64` is expected is a separate Rust ref-binding trait. Each
+// list is bound to an explicitly-typed `let` so the Go empty-list-literal
+// element-type inference is not exercised either.
+module main
+
+fn head_and_tail_len(xs: List[Int]) -> String {
+  let r = match xs {
+    [] => "empty"
+    [first, ..rest] => "${first}:${rest.len()}"
+  }
+  r
+}
+
+fn main() -> Void {
+  let e: List[Int] = []
+  let one: List[Int] = [7]
+  let three: List[Int] = [1, 2, 3]
+  let single: List[Int] = [1]
+  println("${head_and_tail_len(e)};${head_and_tail_len(one)};${head_and_tail_len(three)};${head_and_tail_len(single)}")
+}

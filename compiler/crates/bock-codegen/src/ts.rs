@@ -4951,6 +4951,34 @@ impl TsEmitCtx {
                 }
                 tests.join(" && ")
             }
+            NodeKind::ListPat { elems, rest } => {
+                // `[a, b]` requires an array of exactly len(elems); `[a, ..rest]`
+                // requires at least len(elems). Element sub-patterns are tested
+                // positionally; the rest binds the slice and adds no test.
+                // Mirrors `pattern_test_js`.
+                let n = elems.len();
+                let len_test = if rest.is_some() {
+                    format!("{access}.length >= {n}")
+                } else {
+                    format!("{access}.length === {n}")
+                };
+                let mut tests = vec![format!("Array.isArray({access})"), len_test];
+                for (i, e) in elems.iter().enumerate() {
+                    let sub = self.pattern_test_ts(e, &format!("{access}[{i}]"));
+                    if !sub.is_empty() {
+                        tests.push(sub);
+                    }
+                }
+                tests.join(" && ")
+            }
+            NodeKind::RangePat { lo, hi, inclusive } => {
+                // `lo..hi` → `access >= lo && access < hi`; `lo..=hi` uses `<=`.
+                // Mirrors `pattern_test_js`.
+                let lo_s = range_bound_to_ts(lo);
+                let hi_s = range_bound_to_ts(hi);
+                let upper = if *inclusive { "<=" } else { "<" };
+                format!("{access} >= {lo_s} && {access} {upper} {hi_s}")
+            }
             NodeKind::OrPat { alternatives } => {
                 let alts: Vec<String> = alternatives
                     .iter()
@@ -4973,7 +5001,14 @@ impl TsEmitCtx {
     /// Mirrors `pattern_binds_js`.
     fn pattern_binds_ts(&mut self, pat: &AIRNode, access: &str) -> Result<(), CodegenError> {
         match &pat.kind {
-            NodeKind::BindPat { name, .. } => {
+            // Skip a self-binding (`const n = n` / `const n = (n as any)`): when
+            // an arm's bind name equals the scrutinee access — e.g.
+            // `match n { n if … }`, whose if-chain root is the `(n as any)` cast —
+            // the name already refers to the value. Emitting `const n = (n as any)`
+            // shadows the parameter and the RHS reads the just-declared `const`
+            // (TS2448, used before declaration). The guard lets such a binding
+            // fall through to the no-op `_` arm.
+            NodeKind::BindPat { name, .. } if !ts_bind_is_self_reference(&name.name, access) => {
                 let ind = self.indent_str();
                 let _ = writeln!(
                     self.buf,
@@ -5004,6 +5039,24 @@ impl TsEmitCtx {
                     self.pattern_binds_ts(e, &format!("{access}[{i}]"))?;
                 }
             }
+            NodeKind::ListPat { elems, rest } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.pattern_binds_ts(e, &format!("{access}[{i}]"))?;
+                }
+                // `..rest` binds the remaining elements as a slice; a bare `..`
+                // (RestPat) or absent rest binds nothing. Mirrors `pattern_binds_js`.
+                if let Some(r) = rest {
+                    if let NodeKind::BindPat { name, .. } = &r.kind {
+                        let ind = self.indent_str();
+                        let _ = writeln!(
+                            self.buf,
+                            "{ind}const {} = {access}.slice({});",
+                            ts_value_ident(&name.name),
+                            elems.len()
+                        );
+                    }
+                }
+            }
             NodeKind::OrPat { alternatives } => {
                 if let Some(first) = alternatives.first() {
                     self.pattern_binds_ts(first, access)?;
@@ -5025,6 +5078,12 @@ impl TsEmitCtx {
     fn collect_binds_ts(&self, pat: &AIRNode, access: &str, out: &mut String) {
         match &pat.kind {
             NodeKind::BindPat { name, .. } => {
+                // Skip a self-binding (`const n = (n as any)`) — redundant and a
+                // TS2448 TDZ error inside the guard-evaluating IIFE. See
+                // `pattern_binds_ts`.
+                if ts_bind_is_self_reference(&name.name, access) {
+                    return;
+                }
                 let _ = write!(out, "const {} = {access}; ", ts_value_ident(&name.name));
             }
             NodeKind::ConstructorPat { fields, .. } => {
@@ -5046,6 +5105,21 @@ impl TsEmitCtx {
             NodeKind::TuplePat { elems } => {
                 for (i, e) in elems.iter().enumerate() {
                     self.collect_binds_ts(e, &format!("{access}[{i}]"), out);
+                }
+            }
+            NodeKind::ListPat { elems, rest } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.collect_binds_ts(e, &format!("{access}[{i}]"), out);
+                }
+                if let Some(r) = rest {
+                    if let NodeKind::BindPat { name, .. } = &r.kind {
+                        let _ = write!(
+                            out,
+                            "const {} = {access}.slice({}); ",
+                            ts_value_ident(&name.name),
+                            elems.len()
+                        );
+                    }
                 }
             }
             NodeKind::OrPat { alternatives } => {
@@ -5625,6 +5699,16 @@ fn ts_value_ident(name: &str) -> String {
     )
 }
 
+/// True when binding `bind_name` against `access` would be a self-reference:
+/// the access is either the bare TS name (`n`) or its if-chain cast form
+/// (`(n as any)`). Emitting `const n = (n as any)` shadows the parameter and
+/// reads the freshly-declared `const` in its own initialiser (TS2448), so such
+/// a binding must be skipped. Mirrors the JS `js != access` self-bind guard.
+fn ts_bind_is_self_reference(bind_name: &str, access: &str) -> bool {
+    let ts = ts_value_ident(bind_name);
+    access == ts || access == format!("({ts} as any)")
+}
+
 /// Spell `name` the way the TS backend emits the symbol's declaration / call
 /// sites for an `import`/`export` specifier in the per-module path: a function
 /// is camelCased and keyword-escaped via [`ts_value_ident`]; any other kind
@@ -5693,6 +5777,19 @@ fn escape_js_string(s: &str) -> String {
 
 /// Render a literal as a TS value expression — used by the if-chain match
 /// lowering to compare a scrutinee against a literal pattern (`<access> === …`).
+/// Render a `RangePat` bound (`lo`/`hi`) as a TS expression. Range bounds are
+/// literals (`1..10`) or a const identifier (`MIN..MAX`); anything else falls
+/// back to the wrapped literal/identifier text, or `0` for an unrecognised node.
+/// Mirrors `range_bound_to_js`.
+fn range_bound_to_ts(node: &AIRNode) -> String {
+    match &node.kind {
+        NodeKind::LiteralPat { lit } => ts_literal(lit),
+        NodeKind::Literal { lit } => ts_literal(lit),
+        NodeKind::Identifier { name } => ts_value_ident(&name.name),
+        _ => "0".to_string(),
+    }
+}
+
 fn ts_literal(lit: &Literal) -> String {
     match lit {
         Literal::Int(s) | Literal::Float(s) => s.clone(),
@@ -8566,6 +8663,183 @@ mod tests {
         assert!(
             !out.contains("__prop1._0"),
             "a bare `expr?` discards the payload (no `._0` use), got: {out}"
+        );
+    }
+
+    /// A list-pattern `match` (`[] / [only] / [first, ..rest]`) must route to the
+    /// if-chain (the shared recogniser now flags `ListPat`), with a length test
+    /// per arm and positional element / `..rest` slice binds — not the broken
+    /// `switch` fast-path (duplicate `default:`, unbound `only`/`first`/`rest`).
+    #[test]
+    fn ts_list_pattern_match_lowers_to_ifchain_with_binds() {
+        // match items { [] => "e"; [only] => only?; [first, ..rest] => first? }
+        let empty_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::ListPat {
+                        elems: vec![],
+                        rest: None,
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(22, vec![], Some(str_lit(23, "empty")))),
+            },
+        );
+        let single_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    31,
+                    NodeKind::ListPat {
+                        elems: vec![bind_pat(32, "only")],
+                        rest: None,
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(33, vec![], Some(id_node(34, "only")))),
+            },
+        );
+        let head_rest_arm = node(
+            40,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    41,
+                    NodeKind::ListPat {
+                        elems: vec![bind_pat(42, "first")],
+                        rest: Some(Box::new(bind_pat(43, "rest"))),
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(44, vec![], Some(id_node(45, "first")))),
+            },
+        );
+        // A trailing wildcard keeps `[first, ..rest]` a *conditional* arm so its
+        // `length >= 1` test is emitted (a final arm becomes the bare `else`).
+        let else_arm = node(
+            46,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(47, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(block(48, vec![], Some(str_lit(49, "other")))),
+            },
+        );
+        let match_stmt = node(
+            50,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(51, "items")),
+                arms: vec![empty_arm, single_arm, head_rest_arm, else_arm],
+            },
+        );
+        let f = ts_fn_decl(
+            1,
+            "describeList",
+            vec![typed_param_node(2, "items", "Array")],
+            Some("String"),
+            block(3, vec![match_stmt], None),
+        );
+        let out = gen(&module(vec![], vec![f]));
+        // No switch fast-path; arms are an if/else-if chain.
+        assert!(
+            !out.contains("switch ("),
+            "list-pattern match must not use the switch fast-path, got: {out}"
+        );
+        // Empty list: exact-length test.
+        assert!(
+            out.contains(".length === 0"),
+            "`[]` arm should test length === 0, got: {out}"
+        );
+        // `[only]`: length 1 and binds `only`.
+        assert!(
+            out.contains(".length === 1") && out.contains("const only = "),
+            "`[only]` should test length === 1 and bind `only`, got: {out}"
+        );
+        // `[first, ..rest]`: length >= 1, binds `first` and `rest` (a slice).
+        assert!(
+            out.contains(".length >= 1"),
+            "`[first, ..rest]` should test length >= 1, got: {out}"
+        );
+        assert!(
+            out.contains("const first = ")
+                && out.contains("const rest = ")
+                && out.contains(".slice(1)"),
+            "`[first, ..rest]` should bind `first` and a `rest = …slice(1)`, got: {out}"
+        );
+    }
+
+    /// A range-pattern `match` (`1..10`, `100..=200`) must route to the if-chain
+    /// and emit a relational bounds test (`>= lo && < hi` exclusive, `<=` for
+    /// inclusive) — not a `switch` whose every arm collapses to `default:`.
+    #[test]
+    fn ts_range_pattern_match_lowers_to_ifchain_with_bounds() {
+        // match n { 1..10 => "a"; 10..=20 => "b"; _ => "c" }
+        let lo_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::RangePat {
+                        lo: Box::new(int_lit(22, "1")),
+                        hi: Box::new(int_lit(23, "10")),
+                        inclusive: false,
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(24, vec![], Some(str_lit(25, "a")))),
+            },
+        );
+        let hi_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    31,
+                    NodeKind::RangePat {
+                        lo: Box::new(int_lit(32, "10")),
+                        hi: Box::new(int_lit(33, "20")),
+                        inclusive: true,
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(34, vec![], Some(str_lit(35, "b")))),
+            },
+        );
+        let else_arm = node(
+            40,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(41, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(block(42, vec![], Some(str_lit(43, "c")))),
+            },
+        );
+        let match_stmt = node(
+            50,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(51, "n")),
+                arms: vec![lo_arm, hi_arm, else_arm],
+            },
+        );
+        let f = ts_fn_decl(
+            1,
+            "classifyRange",
+            vec![typed_param_node(2, "n", "Int")],
+            Some("String"),
+            block(3, vec![match_stmt], None),
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("switch ("),
+            "range-pattern match must not use the switch fast-path, got: {out}"
+        );
+        // Exclusive `1..10` → `>= 1 && < 10`.
+        assert!(
+            out.contains(">= 1") && out.contains("< 10"),
+            "`1..10` should test `>= 1 && < 10`, got: {out}"
+        );
+        // Inclusive `10..=20` → `>= 10 && <= 20`.
+        assert!(
+            out.contains(">= 10") && out.contains("<= 20"),
+            "`10..=20` should test `>= 10 && <= 20`, got: {out}"
         );
     }
 }

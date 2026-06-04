@@ -10,11 +10,11 @@
 // patterns match `&[T]` and a `..tail` rest binds to a sized `&[T]`. Exercised
 // in both statement and expression position.
 //
-// Rust-targeted: list/array patterns in `match` are also currently mis-lowered
-// on the js / ts / python / go backends (ts/js/go fail to compile, python
-// matches the empty arm for every input), but those are distinct cross-backend
-// defects out of this fix's scope (Rust-only). Tracked separately — see the
-// PR's OPEN note.
+// Rust-targeted (this fixture). List/range patterns are now lowered on ALL five
+// backends via the shared `match_needs_ifchain` recogniser (Q-list-range-pattern-
+// shared); the cross-target executing coverage lives in
+// `list_pat_empty_single_rest.bock`, `list_pat_stmt_position.bock`, and
+// `range_pat_classify.bock` (no `// EXPECT: targets`, so all five run).
 module main
 
 fn describe(items: List[Int]) -> String {

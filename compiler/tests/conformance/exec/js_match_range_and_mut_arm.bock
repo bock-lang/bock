@@ -11,8 +11,10 @@
 //   * A `mut x` bind arm whose body reassigns the binding (`x = x + 1`) was
 //     emitted as `const x = …` → "Assignment to constant variable". The arm
 //     binding now honors `mut` and emits `let`.
-// Targeted at js because the other backends do not yet lower range patterns
-// (shared gap reported as an OPEN).
+// Range patterns are now lowered on ALL five backends via the shared
+// `match_needs_ifchain` recogniser (Q-list-range-pattern-shared); cross-target
+// executing coverage lives in `range_pat_classify.bock`. (The `mut x` bind-arm
+// reassignment guard this fixture also pins remains js-targeted.)
 module main
 
 fn band(n: Int) -> String {

@@ -1777,11 +1777,24 @@ pub fn match_needs_ifchain(arms: &[AIRNode]) -> bool {
 }
 
 /// True if `pat` (a pattern node) can only be lowered via the if/else-if chain
-/// — i.e. it is an or-pattern, a tuple pattern, or a constructor/record pattern
-/// carrying a nested structured sub-pattern. See [`match_needs_ifchain`].
+/// — i.e. it is an or-pattern, a tuple pattern, a **list** pattern (`[]`,
+/// `[x]`, `[first, ..rest]`), a **range** pattern (`1..10`, `1..=10`), or a
+/// constructor/record pattern carrying a nested structured sub-pattern. See
+/// [`match_needs_ifchain`].
+///
+/// List and range patterns join the always-if-chain set because neither has a
+/// single `switch` discriminant: a list match needs a length test plus
+/// positional element / `..rest` binds, and a range match is a relational
+/// `lo <= x < hi` test. Routing them uniformly through the if-chain on every
+/// backend that consults this recogniser (ts, go) lets one shared `pattern_test`
+/// / `pattern_binds` per backend handle them, instead of each backend needing a
+/// bespoke detour (cf. js's former local `match_has_unswitchable_pattern`).
 fn pattern_needs_ifchain(pat: &AIRNode) -> bool {
     match &pat.kind {
-        NodeKind::OrPat { .. } | NodeKind::TuplePat { .. } => true,
+        NodeKind::OrPat { .. }
+        | NodeKind::TuplePat { .. }
+        | NodeKind::ListPat { .. }
+        | NodeKind::RangePat { .. } => true,
         NodeKind::ConstructorPat { fields, .. } => fields.iter().any(field_is_structured),
         NodeKind::RecordPat { fields, .. } => fields
             .iter()
@@ -5273,6 +5286,69 @@ mod tests {
             None,
         )];
         assert!(match_needs_ifchain(&nested));
+    }
+
+    #[test]
+    fn match_needs_ifchain_detects_list_pattern() {
+        // `[]`, `[only]`, `[first, ..rest]`: a list pattern has no single
+        // `switch` discriminant — every backend that consults the recogniser
+        // (ts, go) must route these to the if-chain so elements / `..rest` bind.
+        let empty = vec![arm_with(
+            1,
+            n(
+                2,
+                NodeKind::ListPat {
+                    elems: vec![],
+                    rest: None,
+                },
+            ),
+            None,
+        )];
+        assert!(match_needs_ifchain(&empty));
+
+        let head_rest = vec![arm_with(
+            10,
+            n(
+                11,
+                NodeKind::ListPat {
+                    elems: vec![n(
+                        12,
+                        NodeKind::BindPat {
+                            name: ident("first"),
+                            is_mut: false,
+                        },
+                    )],
+                    rest: Some(Box::new(n(
+                        13,
+                        NodeKind::BindPat {
+                            name: ident("rest"),
+                            is_mut: false,
+                        },
+                    ))),
+                },
+            ),
+            None,
+        )];
+        assert!(match_needs_ifchain(&head_rest));
+    }
+
+    #[test]
+    fn match_needs_ifchain_detects_range_pattern() {
+        // `1..10` / `1..=10`: a range pattern is a relational test, not a single
+        // discriminant, so it cannot ride the `switch` fast-path.
+        let range = vec![arm_with(
+            1,
+            n(
+                2,
+                NodeKind::RangePat {
+                    lo: Box::new(int_lit(3)),
+                    hi: Box::new(int_lit(4)),
+                    inclusive: false,
+                },
+            ),
+            None,
+        )];
+        assert!(match_needs_ifchain(&range));
     }
 
     #[test]
