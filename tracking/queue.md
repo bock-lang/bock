@@ -12,7 +12,16 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-04 15:55 — main f5543bc, 0 open PRs (after this tracking PR), clean, CI green.** #224 LANDED:
+_**Last reconciled 2026-06-04 17:30 — main fdb16d9, 0 open PRs (after this tracking PR), clean, CI green.** ★ PER-BACKEND
+FAN-OUT LANDED (#226 js · #227 ts · #228 py · #229 go) — 4 file-disjoint sessions, each owning ONE emitter (generator.rs /
+bock-air / bock-types untouched in all); combined-state verified locally (conformance REQUIRE=all, 0 failed) BEFORE merge,
+then re-confirmed on merged main (0 failed). Cleared **Q-guard-let-shared + Q-let-shadow-const + Q-propagate-operator-noop**
+across js/ts/py/go (rust was already done for the first two). **Examples matrix: js 16 · ts 7→9 · py 12→13 · rust 10 · go
+8→9 / 20 — 53→57 runtime-working (49→57 across this whole session).** FOUND→queue: Q-propagate-exprpos-shared (nested `?` —
+js/ts/go all converged), Q-ts-match-narrowing (task-api ts), Q-go-pow-operator + Q-go-list-method-typing (type-zoo/todo-list
+go), Q-py-matcharm-lambda-binding (pattern-lab py). NEXT: Q-list-range-pattern-shared (the shared generator.rs recogniser) +
+Q-examples-baseline-ratchet. ↓ —
+PRIOR: Last reconciled 2026-06-04 15:55 — main f5543bc. #224 LANDED:
 **Q-exprpos-shared-desugar DONE** — the shared match-exprpos core (value-position diverging control-flow), implemented as a
 codegen pre-pass `hoist_value_cf` (NOT an AIR desugar — the temp's type is only derivable at codegen; go infers it
 structurally). Examples **js 14→16 · ts 7 · py 12 · rust 9→10 · go 7→8**; chat-protocol now runs js+go; conformance 548/0; 0
@@ -137,9 +146,15 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   chat-protocol runs on js+go but still fails the other three for distinct reasons: **rust** `@concurrent`→tokio wiring + an
   `E0507` move in `serialize`; **python** forward-reference ordering (`Serializable` used before defined); **ts**
   `--experimental-strip-types` `.js`-import resolution. Three separable residual codegen gaps; split when picked up.
-- **[Q-propagate-operator-noop] The `?`/Propagate operator is a no-op on js/ts/python (drops the unwrap)** — bug · ready ·
-  **HIGH — semantic gap** · `compiler/crates/bock-codegen/` (js/ts/py; check rust/go) · — · links #219,
-  MS-examples-hardening, DV/§ · note: FOUND 2026-06-03 (#219, ts session). `expr?` (Result/Optional propagation) lowers to
+- **[Q-propagate-operator-noop] The `?`/Propagate operator is a no-op on js/ts/python (drops the unwrap)** — bug · **DONE (#226 js · #227 ts · #228 py · #229 go)** ·
+  `compiler/crates/bock-codegen/` (js/ts/py/go) · — · links #219, #226, #227, #228, #229,
+  MS-examples-hardening · note: **DONE 2026-06-04 (per-backend fan-out) — lowered `?` to unwrap-or-early-return on all 4
+  (js: pre-stmt hoist `const __tryN; if _tag===Err/None return __tryN` then read `._0`; ts: hoist + `return __propN as never`
+  typed by the enclosing fn's return container; py: `_bock_try` unwrap + a `try/except _BockPropagate` envelope on the fn;
+  go: `emit_try_unwrap` tag-test + zero-value/err early-return). Standard Rust-like semantics — NO Design escalation needed
+  (DQ20's deferral resolved by implementation). RESIDUAL → Q-propagate-exprpos-shared (a nested `?` inside a larger
+  expression `f(g()?)` has no expression-form early-return; js/ts/go all independently converged on this; no v1 example
+  hits it).** ORIG: FOUND 2026-06-03 (#219, ts session). `expr?` (Result/Optional propagation) lowers to
   a no-op on js/ts/python — it does NOT unwrap the payload nor early-return the error, so a `BockResult<T,E>` flows where a
   `T` is expected (type-zoo, task-api remaining errors all trace here). Real semantics bug, not just codegen-shape. Lower
   `?` to each target's unwrap-or-early-return. Verify rust/go too. (DQ20 had deferred `expr?`; this re-opens it as v1.0
@@ -151,15 +166,43 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `match_has_unswitchable_pattern`; #216 (rust) did `as_slice()` matching; #218 (py) did `case` list-patterns — but a
   SHARED `match_needs_ifchain` extension would let all backends route uniformly (ts/go still fail to build these). Extend
   the shared recogniser. Examples: pattern-lab.
-- **[Q-guard-let-shared] `guard (let Pat = expr)` binding dropped on js/ts/python/go** — bug · ready ·
-  `compiler/crates/bock-codegen/` (js/ts/py/go) · — · links #216, MS-examples-hardening · note: FOUND 2026-06-03 (fan-out).
-  #216 fixed guard-let on RUST (lowered to `let-else`); js/ts/python/go still drop the bound names (js `ReferenceError`,
-  python `NameError`, ts/go compile error). guessing-game `guard (let Ok(guess) = …)`. Lower guard-let to bind in scope on
-  the other 4 backends.
-- **[Q-let-shadow-const] `let` shadowing emitted as repeated `const`/`let` collision (ts/py/go; js done)** — bug · ready ·
-  `compiler/crates/bock-codegen/` (ts/py/go) · — · links #217, MS-examples-hardening · note: FOUND 2026-06-03 (fan-out).
-  A shadowing `let` (same name re-bound in a nested/same scope) emits a second `const`/binding → ts `TS2451`, etc.
-  (todo-list). #217 fixed JS (per-block let-scope tracking); ts/python/go still affected. Mirror the js fix.
+- **[Q-guard-let-shared] `guard (let Pat = expr)` binding dropped on js/ts/python/go** — bug · **DONE (#226 js · #227 ts · #228 py · #229 go; rust #216)** ·
+  `compiler/crates/bock-codegen/` (js/ts/py/go) · — · links #216, #226, #227, #228, #229, MS-examples-hardening · note:
+  **DONE 2026-06-04 (fan-out) — guard-let binds the pattern payload into the enclosing scope on all 4 (rust was #216 via
+  `let-else`; ts/go hoist the scrutinee into `__guardN`, test the tag with a diverging else, bind the payload). js/py: the
+  real guessing-game blocker was a value-less tail-position loop falling through to `return /* unsupported */` / `# unsupported`
+  — fixed alongside. guessing-game now builds clean ×5 (its run is gated only by its own `todo()` placeholder stubs).** ORIG:
+  FOUND 2026-06-03 (fan-out). #216 fixed guard-let on RUST (lowered to `let-else`); js/ts/python/go still drop the bound names.
+- **[Q-let-shadow-const] `let` shadowing emitted as repeated `const`/`let` collision (ts/py/go; js done)** — bug · **DONE (#227 ts · #228 py · #229 go; js #217)** ·
+  `compiler/crates/bock-codegen/` (ts/py/go) · — · links #217, #227, #228, #229, MS-examples-hardening · note: **DONE
+  2026-06-04 (fan-out) — mirrored the js #217 per-block let-scope tracking: ts emits `let`-first / assign-after (fixes
+  TS2451 — todo-list build→pass+run); py renames a shadowing inner-block binding to a fresh alias (`{name}__sN`, committed
+  after the RHS so `let y = y + 10` still reads the outer `y`); go turns a colliding `:=` into reassignment.** ORIG: FOUND
+  2026-06-03 (fan-out). A shadowing `let` emits a second `const`/binding → ts `TS2451`, etc. (todo-list). #217 fixed JS.
+- **[Q-propagate-exprpos-shared] Nested `?` inside a larger expression not hoisted (shared)** — impl · ready ·
+  `compiler/crates/bock-codegen/src/generator.rs` (a codegen pre-pass like `hoist_value_cf`) · — · links #226, #227, #229,
+  Q-propagate-operator-noop, Q-exprpos-shared-desugar · note: FOUND 2026-06-04 (the per-backend fan-out CONVERGED — js, ts,
+  AND go all independently reported it). The #226–#229 `?` lowering handles statement-adjacent positions (`let x = e?`, bare
+  `e?`, tail); a `?` nested inside a larger expression (`f(g()?)`, `Ok(f()? + 1)`) has no expression-form early-return, so
+  it's left un-hoisted. Same shape as Q-exprpos-shared-desugar → a shared pre-pass that hoists the `?` to a statement before
+  the consumer. **No current v1 example hits it** (LOW priority; do when the exprpos-shared machinery is next touched).
+- **[Q-ts-match-narrowing] TS `match` over Result/Optional doesn't narrow the payload binding** — bug · ready ·
+  `compiler/crates/bock-codegen/src/ts.rs` · — · links #227, MS-examples-hardening · note: FOUND 2026-06-04 (#227). In a
+  statement-position `match` switch-lowering, the payload bind `const x = scrutinee._0` is typed `T | E` inside `case "Ok"`
+  (no narrowing) → `TS2345` (e.g. `formatTask(task)`). Sole remaining ts blocker for task-api. Narrow the binding per arm
+  (cast/guard) in `emit_match`.
+- **[Q-go-pow-operator] Go `**` power operator not lowered** — bug · ready · `compiler/crates/bock-codegen/src/go.rs` · — ·
+  links #229, MS-examples-hardening · note: FOUND 2026-06-04 (#229). `a ** b` emits `(a /* pow */ b)` → go `syntax error:
+  unexpected literal`. Lower to `math.Pow` (float) / an int-pow helper. Blocks type-zoo on go.
+- **[Q-go-list-method-typing] Go `.map`/lambda element typing uses `interface{}`** — bug · ready ·
+  `compiler/crates/bock-codegen/src/go.rs` · — · links #229, Q-list-method-codegen, MS-examples-hardening · note: FOUND
+  2026-06-04 (#229). `.map`-with-closure emits `func(t interface{})` + `[]interface{}` where concrete `Todo`/`[]Todo` are
+  required (`t.Done undefined`, `cannot use …[]interface{} as []Todo`). Blocks todo-list on go; likely related to the older
+  Q-list-method-codegen cluster. Thread the element type through the lambda + result slice.
+- **[Q-py-matcharm-lambda-binding] Python match-arm lambda doesn't bind the pattern payload** — bug · ready ·
+  `compiler/crates/bock-codegen/src/py.rs` · — · links #228, Q-match-exprpos, MS-examples-hardening · note: FOUND 2026-06-04
+  (#228). A match arm whose body is a lambda mis-binds the pattern payload — `(lambda __v: f"x={x}")(p)` raises `NameError:
+  name 'x'`. Match-arm pattern-binding/scope defect in the value-position match lowering. Blocks pattern-lab on py.
 - **[Q-stdlib-fmtcheck] Enable `fmt --check` on stdlib `.bock`** — chore · ready ·
   `.github/workflows/`, `stdlib/` · — · links #119 · note: now that `bock fmt`
   emits valid Bock (#119), the stdlib `.bock` files (hand-authored to avoid the old

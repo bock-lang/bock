@@ -2107,3 +2107,31 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
   SIDE-TASK (operator, parallel): drafted a github-linguist new-language submission for Bock (languages.yml entry, samples,
     PR body) but did NOT open it — flagged that linguist's "used in hundreds of repos" bar is unmet (pre-1.0) and there's no
     standalone grammar repo yet. Operator acknowledged + asked to discard the draft; discarded.
+
+[2026-06-04 17:30 UTC] ✦ PER-BACKEND FAN-OUT — #226–#229 cleared guard-let + let-shadow + propagate-`?` across js/ts/py/go
+  Input: operator (AskUserQuestion) chose "Fan out by backend now" for the post-#224 shared-lowering remainder.
+  DISPATCH: 4 CONCURRENT foreground worktree-isolated engineer sessions (Opus), decomposed along the BACKEND axis — each
+    owns exactly ONE emitter (js.rs / ts.rs / py.rs / go.rs) + uniquely-prefixed fixtures, with the HARD rule: no
+    generator.rs / bock-air / bock-types / other-backend edits; report any shared need as OPEN. Items: js = guard-let +
+    `?`; ts/py/go = guard-let + let-shadow + `?`. (rust: guard-let/let-shadow already done #216/#217; no rust session.)
+    Q-list-range-pattern-shared deliberately EXCLUDED — it has a shared generator.rs recogniser component, so it can't ride
+    a by-backend fan-out; held as a sequential follow-on.
+  RESULT: all 4 landed (#226 js b4443b5 · #227 ts a983559 · #228 py 63f30b9 · #229 go e11e6a5). `?` lowered to
+    unwrap-or-early-return on all 4 (no Design escalation — standard Rust-like semantics resolved DQ20's deferral). guard-let
+    binds payload into scope ×4; let-shadow mirrors the js #217 per-block tracking ×3 (ts/py/go). DISCIPLINE: verified
+    file-disjoint (`uniq -d` over the 4 diffs = empty), then built a local integration branch merging all 4 and ran the FULL
+    gate + conformance REQUIRE=all on the COMBINED state (0 failed) BEFORE pushing — the "4 concurrent PRs never CI'd
+    together" lesson. Each PR then gated on its own `mergeStateStatus=CLEAN` + 0 failed before merge. Post-merge re-confirmed
+    on real main fdb16d9: examples audit + conformance REQUIRE=all → 0 failed.
+  EXAMPLES MATRIX (merged main): js 16 · ts 7→9 · py 12→13 · rust 10 · go 8→9 / 20 — 53→57 runtime-working (49→57 across the
+    whole session). Wins: ts todo-list + type-zoo FAIL→PASS; py type-zoo build→pass; go task-api FAIL→PASS (first go pass);
+    guessing-game now builds clean ×5. (js count flat at 16 but type-zoo/task-api went from silently-wrong to correct — the
+    "conformance-green is not sufficient" trap: a no-op `?` produced clean exits with wrong values.)
+  CONVERGENCE: js, ts, AND go all independently reported the SAME residual — a `?` nested inside a larger expression
+    (`f(g()?)`) has no expression-form early-return → filed Q-propagate-exprpos-shared (same shape as Q-exprpos-shared-desugar;
+    no v1 example hits it; LOW). Distinct FOUND → queue: Q-ts-match-narrowing (TS2345, sole task-api/ts blocker),
+    Q-go-pow-operator (`**` not lowered → type-zoo/go), Q-go-list-method-typing (`.map` element typing interface{} →
+    todo-list/go), Q-py-matcharm-lambda-binding (pattern-lab/py).
+  STATE: main fdb16d9, 0 open PRs (after this tracking PR), clean, CI green. All worktrees/branches/caches cleaned.
+    NEXT (operator's call): Q-list-range-pattern-shared (sequential, shared recogniser) + Q-examples-baseline-ratchet (lock
+    the 57/100 floor à la #221). The shared-lowering phase is now essentially complete bar the list/range recogniser.
