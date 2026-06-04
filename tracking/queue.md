@@ -12,7 +12,15 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-04 17:30 — main fdb16d9, 0 open PRs (after this tracking PR), clean, CI green.** ★ PER-BACKEND
+_**Last reconciled 2026-06-04 19:32 — main 99f21ae, 0 open PRs (after this tracking PR), clean, CI green.** ★★ SHARED-LOWERING
+PHASE COMPLETE ★★ #231 landed **Q-list-range-pattern-shared** (the last shared item) — `pattern_needs_ifchain` recognizes
+`ListPat`/`RangePat`; ts/go gained list/range binding; pattern-lab ts FAIL→PASS. **Examples matrix now js 16 · ts 9→11 · py
+13 · rust 10 · go 9 / 20 — 57→59 runtime-working (49→59 across this whole session).** This completes the shared-lowering
+core (#224 exprpos + #226–#229 guard-let/let-shadow/propagate + #231 list/range). **NEXT = Q-examples-baseline-ratchet** (lock
+the 59/100 floor à la #221) + a fan-out over the residual per-backend FOUND bugs: Q-ts-match-narrowing, Q-go-pow-operator,
+Q-go-list-method-typing, Q-py-matcharm-lambda-binding, Q-plainrecord-valpos-match, Q-go-valpos-bind-match,
+Q-go-nested-optional-match, Q-rust-str-literal-match (+ LOW Q-propagate-exprpos-shared). ↓ —
+PRIOR: Last reconciled 2026-06-04 17:30 — main fdb16d9. ★ PER-BACKEND
 FAN-OUT LANDED (#226 js · #227 ts · #228 py · #229 go) — 4 file-disjoint sessions, each owning ONE emitter (generator.rs /
 bock-air / bock-types untouched in all); combined-state verified locally (conformance REQUIRE=all, 0 failed) BEFORE merge,
 then re-confirmed on merged main (0 failed). Cleared **Q-guard-let-shared + Q-let-shadow-const + Q-propagate-operator-noop**
@@ -159,13 +167,31 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `T` is expected (type-zoo, task-api remaining errors all trace here). Real semantics bug, not just codegen-shape. Lower
   `?` to each target's unwrap-or-early-return. Verify rust/go too. (DQ20 had deferred `expr?`; this re-opens it as v1.0
   example-blocking — may need a Design check on the exact semantics.)
-- **[Q-list-range-pattern-shared] `match` over list/range patterns mis-lowered (shared)** — bug · ready ·
-  `compiler/crates/bock-codegen/src/generator.rs` (+ per-backend) · — · links #216, #217, #218, MS-examples-hardening ·
-  note: FOUND 2026-06-03 (fan-out). `generator::match_needs_ifchain` doesn't recognize `ListPat`/`RangePat`, so list-
-  pattern (`[]`/`[x]`/`[first, *rest]`) and range-pattern (`1..10`) matches mis-lower. #217 (js) compensated LOCALLY via
-  `match_has_unswitchable_pattern`; #216 (rust) did `as_slice()` matching; #218 (py) did `case` list-patterns — but a
-  SHARED `match_needs_ifchain` extension would let all backends route uniformly (ts/go still fail to build these). Extend
-  the shared recogniser. Examples: pattern-lab.
+- **[Q-list-range-pattern-shared] `match` over list/range patterns mis-lowered (shared)** — bug · **DONE (#231)** ·
+  `compiler/crates/bock-codegen/src/generator.rs` (+ ts/go/py) · — · links #216, #217, #218, #231, MS-examples-hardening ·
+  note: **DONE 2026-06-04 (#231) — `pattern_needs_ifchain` now returns true for `ListPat`/`RangePat` so the shared recogniser
+  routes them to the if-chain uniformly. Routing-change risk was contained to ts+go (the only backends that consult
+  `match_needs_ifchain`; rust uses native slice/range `match`, py native `case`, js was already `A||A`). ts/go `emit_match_ifchain`
+  gained list/range binding (length test + element/`..rest` bind; range `>=lo && <hi` excl / `<=hi` incl per §Range); go
+  expr-position `match` now routes through a typed-IIFE if-chain. py value-position ternary path fixed directly. Companion
+  fixes the routing surfaced: ts self-binding skip (TS2448), go plain-record field access. pattern-lab ts FAIL→PASS (+1 other
+  ts example via the companions: ts 9→11); list/range output verified correct on all 5 via new `list_pat_*`/`range_pat_*`
+  fixtures; conformance REQUIRE=all 0 failed. ★ SHARED-LOWERING PHASE COMPLETE.** ORIG: FOUND 2026-06-03 (fan-out).
+- **[Q-plainrecord-valpos-match] Plain-record value-position `match` arm doesn't route to the if-chain (py/go)** — bug ·
+  ready · `compiler/crates/bock-codegen/` (py/go) · — · links #231, Q-match-exprpos, MS-examples-hardening · note: FOUND
+  2026-06-04 (#231). A bare-bind record arm (`Point { x, .. } => …`) in value position doesn't take the if-chain path → py
+  `get_x` NameError; go `GetX` emits `case interface{}` / undefined `x`. Blocks pattern-lab on py+go. (rust/ts unaffected.)
+- **[Q-go-valpos-bind-match] Go value-position bind / string-literal `match` → `case interface{}`** — bug · ready ·
+  `compiler/crates/bock-codegen/src/go.rs` · — · links #231, MS-examples-hardening · note: FOUND 2026-06-04 (#231). Go
+  value-position `match` on a bare bind (`EchoBinding`) or string literal (`classify_string`) emits `case interface{}` /
+  undefined bind. Distinct from the list/range path (those now route correctly). Blocks pattern-lab on go.
+- **[Q-go-nested-optional-match] Go nested-Optional value-position `match` drops nested payload binds** — bug · ready ·
+  `compiler/crates/bock-codegen/src/go.rs` · — · links #231, MS-examples-hardening · note: FOUND 2026-06-04 (#231).
+  `match opt { Some(Ok(n)) => … }` — `emit_optional_match_expr` drops the nested payload bind. Blocks pattern-lab on go.
+- **[Q-rust-str-literal-match] Rust `String`-vs-`&str` literal `match` → E0308** — bug · ready ·
+  `compiler/crates/bock-codegen/src/rs.rs` · — · links #231, MS-examples-hardening · note: FOUND 2026-06-04 (#231). Matching
+  a `String` scrutinee against `&str` literals (`classify_string`) emits an E0308 mismatch (needs `.as_str()` / deref).
+  Blocks pattern-lab on rust.
 - **[Q-guard-let-shared] `guard (let Pat = expr)` binding dropped on js/ts/python/go** — bug · **DONE (#226 js · #227 ts · #228 py · #229 go; rust #216)** ·
   `compiler/crates/bock-codegen/` (js/ts/py/go) · — · links #216, #226, #227, #228, #229, MS-examples-hardening · note:
   **DONE 2026-06-04 (fan-out) — guard-let binds the pattern payload into the enclosing scope on all 4 (rust was #216 via
