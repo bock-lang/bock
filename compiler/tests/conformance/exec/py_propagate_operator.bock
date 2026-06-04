@@ -1,0 +1,61 @@
+// TEST: exec_py_propagate_operator
+// EXPECT: output "ok=25;err=negative;some=8;none-bailed"
+// EXPECT: targets python
+//
+// Python backend: the `?` propagate operator must unwrap an `Ok`/`Some` payload
+// and early-return the `Err`/`None` from the enclosing function. The Python
+// backend previously lowered `expr?` to a bare `expr` no-op: `let a = step(x)?`
+// bound the whole `_BockOk(..)` object instead of its payload, and an
+// `Err`/`None` flowed onward where the payload type was expected (a `TypeError`
+// at the first arithmetic use). The fix lowers `?` to a `_bock_try(..)` helper
+// that returns the payload on success and raises a sentinel the enclosing
+// function's `try/except` re-returns on failure.
+//
+// (Plain `-`/`+` payloads, not `/`, so the result stays an integer — Int
+// division semantics are a separate backend concern, out of scope here.)
+//
+// Python-targeted; sibling fixtures cover js/ts/go. Rust uses native `?`.
+module main
+
+fn step(n: Int) -> Result[Int, String] {
+  if (n < 0) { Err("negative") } else { Ok(n - 5) }
+}
+
+// Two `?` in sequence: the first unwraps the payload, the second propagates the
+// Err from the enclosing function on the failing path.
+fn chained(x: Int) -> Result[Int, String] {
+  let a = step(x)?
+  let b = step(a)?
+  Ok(b)
+}
+
+// Optional `?`: Some unwraps, None early-returns None.
+fn add_one(o: Optional[Int]) -> Optional[Int] {
+  let v = o?
+  Some(v + 1)
+}
+
+fn describe_opt(o: Optional[Int]) -> String {
+  match add_one(o) {
+    Some(n) => "some=${n}"
+    None => "none-bailed"
+  }
+}
+
+fn main() -> Void {
+  // 35 -> 30 -> 25
+  let ok = chained(35)
+  let oks = match ok {
+    Ok(v) => "ok=${v}"
+    Err(e) => "okerr=${e}"
+  }
+  // negative input forces the Err path through the first `?`.
+  let bad = chained(-1)
+  let bads = match bad {
+    Ok(v) => "ok=${v}"
+    Err(e) => "err=${e}"
+  }
+  let s = describe_opt(Some(7))
+  let n = describe_opt(None)
+  println("${oks};${bads};${s};${n}")
+}

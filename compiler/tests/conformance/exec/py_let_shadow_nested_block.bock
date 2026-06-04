@@ -1,0 +1,57 @@
+// TEST: exec_py_let_shadow_nested_block
+// EXPECT: output "23;1;outer"
+// EXPECT: targets python
+//
+// Python backend: a `let` inside a *nested* block that shadows a name bound in
+// an enclosing scope must NOT stomp the outer binding. Python has function
+// scope (not block scope) for `=`, so naively emitting the inner `let y = …` as
+// `y = …` rebinds the outer `y` permanently — code after the nested block then
+// reads the inner value. The fix renames the shadowing inner binding to a fresh
+// alias for the duration of the nested block and rewrites its uses there, so the
+// outer `y` is untouched once the block ends.
+//
+// `nested`: outer `y = 1`; the inner block binds `let y = y + 10` (== 11) and
+// yields `y * 2` (== 22) into `z`; afterwards the *outer* `y` is still 1, so the
+// result is `1 + 22 == 23` (the bug returned `11 + 22 == 33`).
+//
+// Same-block re-binding (`let acc = …; let acc = acc + 1`) is a normal Python
+// rebind and is intentionally left alone (covered by py_let_shadow_rebind.bock).
+//
+// Python-targeted: this stomp is specific to Python's lack of block scope; JS/TS
+// have real block scope and Rust/Go shadow natively.
+module main
+
+fn nested() -> Int {
+  let y = 1
+  let z = {
+    let y = y + 10
+    y * 2
+  }
+  // The outer `y` must still be 1 here.
+  y + z
+}
+
+fn outer_after_if() -> Int {
+  let mut total = 0
+  let v = 1
+  if (true) {
+    let v = v + 100
+    total = total + v
+  }
+  // The outer `v` is unchanged by the inner shadow; `total` accumulated the
+  // inner shadow's value (101) but we only return the untouched outer `v`.
+  v
+}
+
+fn shadow_keeps_string() -> String {
+  let tag = "outer"
+  let _len = {
+    let tag = "inner"
+    tag.len()
+  }
+  tag
+}
+
+fn main() -> Void {
+  println("${nested()};${outer_after_if()};${shadow_keeps_string()}")
+}

@@ -1,0 +1,27 @@
+// TEST: exec_py_let_shadow_rebind
+// EXPECT: output "10;7"
+// EXPECT: targets python
+//
+// Python backend: re-binding an immutable `let` in one scope (the Bock idiom
+// for "update an immutable value", `let acc = …; let acc = f(acc)`) is a plain
+// rebind in Python — Python has no `const` and `=` always rebinds, so the
+// shadowing `let` must lower to a normal assignment with no broken or duplicate
+// output. `bump` additionally re-binds a *parameter* name (`let n = …`), which
+// shares the function scope with the parameter and must likewise be a plain
+// assignment. Mirrors js_let_rebind_shadow.bock, adapted to Python (where the
+// hazard is not redeclaration but mis-scoping / duplicate emission).
+module main
+
+fn bump(n: Int) -> Int {
+  let n = n + 1
+  let n = n + 1
+  n
+}
+
+fn main() -> Void {
+  let acc = 1
+  let acc = acc + 2
+  let acc = acc + 3
+  let acc = acc + 4
+  println("${acc};${bump(5)}")
+}

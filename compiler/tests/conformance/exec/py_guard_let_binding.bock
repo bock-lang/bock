@@ -1,0 +1,52 @@
+// TEST: exec_py_guard_let_binding
+// EXPECT: output "ok:hello;ok:world;bailed;loop:42"
+// EXPECT: targets python
+//
+// guard-let binds a name that stays in scope for the rest of the enclosing
+// block (Python backend). `guard (let Ok(v) = expr) else { … }` must lower so
+// `v` is usable after the guard, and the diverging else (return/continue/break)
+// runs only on the refuted path.
+//
+// This fixture pins two things:
+//   1. The guard's success binding (`v`) survives into the rest of the block.
+//   2. A bare `loop { … }` in *tail* position of a Void function is emitted as
+//      a `while True:` statement, not `return # unsupported` (which silently
+//      discarded the entire loop body — the guessing-game `play()` shape, whose
+//      body's tail is a `loop` containing a guard-let + break).
+//
+// Python-targeted: the Rust backend has its own let-else lowering
+// (rust_guard_let_binding.bock); js/ts/go are covered by sibling fixtures.
+module main
+
+fn validate(input: String) -> Result[String, String] {
+  if (input == "") { Err("empty") } else { Ok(input) }
+}
+
+fn check(input: String) -> String {
+  guard (let Ok(v) = validate(input)) else {
+    return "bailed"
+  }
+  // `v` is bound by the guard and live here.
+  "ok:${v}"
+}
+
+// Void function whose body *tail* is a `loop` (the guessing-game `play()`
+// shape). The loop runs a guard-let, then prints the assembled line and breaks.
+// A first refuted iteration would `continue`; here the input validates, so it
+// binds `v`, prints, and breaks on the first pass.
+fn run(a: String, b: String, c: String) -> Void {
+  loop {
+    guard (let Ok(v) = validate("42")) else {
+      continue
+    }
+    println("${a};${b};${c};loop:${v}")
+    break
+  }
+}
+
+fn main() -> Void {
+  let a = check("hello")
+  let b = check("world")
+  let c = check("")
+  run(a, b, c)
+}
