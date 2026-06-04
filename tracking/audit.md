@@ -2075,3 +2075,35 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
   (sequential, go-blocking) is the highest-leverage single next step; Q-propagate-operator-noop may route to Design.
   v1.0 examples-hardening is well underway (49/100 example-target passes, all 5 targets climbing); remaining = the
   shared-lowering core + residual misc.
+
+[2026-06-04 15:55 UTC] ✦ DISPATCH + MERGE — #224 Q-exprpos-shared-desugar (the shared match-exprpos core); per-backend fan-out next
+  Input: operator "Let's continue" → resumed the paused shared-lowering phase per the 2026-06-03 session-end digest.
+  DISPATCH: one focused SEQUENTIAL engineer session (worktree fix/exprpos-shared-desugar, owned bock-air + bock-codegen),
+    NOT a fan-out — the item conflicts with all backend emitters (the convergent finding of the #216–#220 fan-out), so it
+    had to run alone. Prompt anchored the temp-hoist shape + the `/* unsupported */` fallthrough sites + TDD + exec-real-
+    examples-×5 discipline (memory: conformance-green-is-not-sufficient).
+  RESULT (#224, merge commit f5543bc): the engineer implemented it as a shared **codegen pre-pass `hoist_value_cf`** rather
+    than the AIR S-AIR desugar I'd suggested — sound call, documented: the synthesised temp's type is only derivable at
+    codegen (go infers it structurally from the relocated node), and a codegen pre-pass runs after type/ownership/effect/
+    capability analysis, so it stays out of the interpreter/semantic blast radius while still running once for all 5
+    backends. Declare-only temp → relocate CF to stmt position (value-tails→`temp=v`, diverging tails kept) → read temp.
+  VERIFY (orchestrator re-ran the gate independently; memory: engineer-subagent-dispatch-discipline): fmt/clippy
+    (--workspace --all-targets -D warnings)/test/doc all green — and I re-ran `cargo test --workspace` SERIALLY
+    (--test-threads=1, REAL_TEST_EXIT=0) after spotting that the first background run's `&& echo OK` markers piped through
+    `tail` would have masked a cargo failure (no pipefail). conformance 548/0. Examples js 14→16 · ts 7 · py 12 · rust
+    9→10 · go 7→8; **chat-protocol now runs js+go**; 0 regressions. CI: all 13 checks SUCCESS incl. all 6 test lanes
+    (windows included — the #213/#214 cross-platform stdout trap), examples-exec (informational) green. Merged GATED on
+    `mergeStateStatus=CLEAN` + 0 failed (the #213 lesson). Re-synced local main → f5543bc, worktree/branch/cache cleaned.
+  TRIAGE of #224's FOUND tags → queue: **Q-examples-baseline-ratchet** (chore — lock the js/rust/go gains à la #221),
+    **Q-conformance-target-race** (bug — rust exec fixtures race on shared CARGO_TARGET_DIR under parallel cargo test;
+    serial is clean; harness isolation, not codegen), **Q-chat-protocol-residual** (bug — ts/py/rust still fail for
+    unrelated reasons: tokio/@concurrent + E0507, py forward-ref ordering, ts strip-types `.js` import). No spec divergence
+    (docs already state diverging branches are excluded from the type merge; #224 makes codegen implement that).
+  Q-match-exprpos now fully DONE (per-backend emitters #218/#219/#220 + shared core #224).
+  STATE: main f5543bc, 0 open PRs (after this tracking PR), clean, CI green. **The shared core having landed UN-blocks the
+    rest of shared-lowering for parallelism by backend** → NEXT = a per-backend fan-out: Q-guard-let-shared (js/ts/py/go),
+    Q-let-shadow-const (ts/py/go), Q-list-range-pattern-shared (generator match_needs_ifchain + per-backend),
+    Q-propagate-operator-noop (js/ts/py; may route to Design on `?` semantics). Awaiting operator go to dispatch the fan-out.
+  SIDE-TASK (operator, parallel): drafted a github-linguist new-language submission for Bock (languages.yml entry, samples,
+    PR body) but did NOT open it — flagged that linguist's "used in hundreds of repos" bar is unmet (pre-1.0) and there's no
+    standalone grammar repo yet. Operator acknowledged + asked to discard the draft; discarded.

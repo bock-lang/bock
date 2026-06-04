@@ -12,9 +12,16 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**SESSION-END PAUSE (2026-06-03 23:25) — main e1e776d, 0 open PRs, clean, CI green, nothing in flight.** Next session:
-the SHARED-lowering phase (sequential) — **Q-exprpos-shared-desugar** first (go-blocking). See the SESSION-END digest in
-audit.md. ↓ —
+_**Last reconciled 2026-06-04 15:55 — main f5543bc, 0 open PRs (after this tracking PR), clean, CI green.** #224 LANDED:
+**Q-exprpos-shared-desugar DONE** — the shared match-exprpos core (value-position diverging control-flow), implemented as a
+codegen pre-pass `hoist_value_cf` (NOT an AIR desugar — the temp's type is only derivable at codegen; go infers it
+structurally). Examples **js 14→16 · ts 7 · py 12 · rust 9→10 · go 7→8**; chat-protocol now runs js+go; conformance 548/0; 0
+regressions; all 13 CI checks green incl. windows. **With the shared core landed, the remaining shared-lowering items are
+parallelizable by backend again — NEXT = a per-backend fan-out:** Q-guard-let-shared (js/ts/py/go) · Q-let-shadow-const
+(ts/py/go) · Q-list-range-pattern-shared (generator match_needs_ifchain + per-backend) · Q-propagate-operator-noop (js/ts/py;
+may route to Design on `?` semantics). Plus chores: Q-examples-baseline-ratchet + FOUND follow-ups (Q-conformance-target-race,
+Q-chat-protocol-residual). ↓ —
+PRIOR: SESSION-END PAUSE (2026-06-03 23:25) — main e1e776d. Next was the shared-lowering phase, Q-exprpos-shared-desugar (now done). ↓ —
 Last reconciled: 2026-06-03 23:05 — **MS-examples-hardening: 17 PRs landed (#204–#221).** main e2117ee. Latest: a
 **5-WAY PARALLEL FAN-OUT — one cluster-batch per backend (#216 rust · #217 js · #218 py · #219 ts · #220 go), all
 file-disjoint, generator.rs untouched in every one.** Combined-state conformance **0 failed across 124 fixtures**
@@ -90,7 +97,7 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   treat a primitive type name as an expression value, so `Float.from(3)` doesn't
   resolve (`.into()` is the working primitive path). Minor usability gap.
 - **[Q-match-exprpos] Expression-position control-flow lowering — PER-BACKEND done; SHARED value-position desugar remains** —
-  impl · **PARTIALLY DONE (#218/#219/#220 per-backend); shared piece → Q-exprpos-shared-desugar** · `compiler/crates/bock-codegen/` ·
+  impl · **DONE (#218/#219/#220 per-backend emitters + #224 shared core)** · `compiler/crates/bock-codegen/` ·
   — · links #121, #176, #218, #219, #220, MS-examples-hardening, Q-exprpos-shared-desugar · note: the 5-backend fan-out
   (#217–#220) lowered the **tractable** expr-position cases per-backend (ts ValueSink `let r; if{ r=… } else { return }`;
   py statement-form hoist; go value-IIFE + loop_expr_depth) — context-audit now runs on ts/py/go, guessing-game/pattern-lab
@@ -100,15 +107,36 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   remaining core). This item now tracks only the per-backend emitter work (done); the shared desugar is the next focused
   (NON-parallel, generator.rs/AIR) session. Remaining example barriers routing through it: chat-protocol (early-return
   trapped in value-IIFE on go/ts), inventory map/fold.
-- **[Q-exprpos-shared-desugar] Shared AIR temp-hoist desugar for value-position diverging control-flow** — impl · ready ·
-  **HIGH — the real remaining match-exprpos core; go-blocking; NON-parallel (touches generator.rs/AIR)** ·
-  `compiler/crates/bock-codegen/src/generator.rs` (+ bock-air/bock-types if the desugar is AIR-level) · — · links
-  Q-match-exprpos, #217–#220 · note: FOUND 2026-06-03 (the 5-backend fan-out converged on this). A value-position
+- **[Q-exprpos-shared-desugar] Shared temp-hoist desugar for value-position diverging control-flow** — impl · **DONE (#224)** ·
+  `compiler/crates/bock-codegen/src/generator.rs` (+ js/ts/py/rs/go.rs) · — · links
+  Q-match-exprpos, #217–#220, #224 · note: **DONE (#224, 2026-06-04) — NOT an AIR desugar: implemented as a shared codegen
+  pre-pass `hoist_value_cf` (generator.rs), run atop every backend's generate_module/_project, chosen over the S-AIR layer
+  because the synthesised temp's type is only derivable at codegen (go infers it structurally from the relocated node).
+  Splices a declare-only temp before the consumer, relocates the CF to statement position rewriting value-tails to
+  `temp = <v>` and keeping diverging tails verbatim, reads the temp. Covers let/return/assign/call-arg/const/fn-tail.
+  Examples js 14→16 · rust 9→10 · go 7→8; chat-protocol runs js+go; conformance 548/0; 0 regressions.** ORIG (FOUND
+  2026-06-03, the 5-backend fan-out converged on this): A value-position
   control-flow expression whose arms DIVERGE (`let x = loop { … break v … }`, `let x = match s { A => v  B => return }`)
   has no clean per-backend IIFE lowering — needs a shared temp-hoist desugar (introduce a temp, lower the control-flow as
   statements assigning the temp, replace the expression with the temp) in the AIR/lowering layer so ALL backends emit valid
   code uniformly. The per-backend sessions each did the easy cases + reported this as the shared blocker. Do as ONE focused
   session (conflicts with all backend emitters → not parallelizable). Unblocks the last go/ts/chat-protocol barriers.
+- **[Q-examples-baseline-ratchet] Ratchet examples-exec baseline after the #224 gains** — chore · ready ·
+  `tools/examples-exec-baseline.txt` · — · links #221, #224 · note: FOUND 2026-06-04. #224 raised runtime-working js 14→16,
+  rust 9→10, go 7→8 (chat-protocol js+go). Re-run `BOCK_EXAMPLES_UPDATE_BASELINE=1 tools/scripts/examples-exec-audit.sh` and
+  commit the refreshed baseline (à la #221) to lock the gains as the regression floor; also drops the stale
+  `guessing-game/rust` build entry (benign value-less tail-loop `/* unsupported */`, byte-identical on main).
+- **[Q-conformance-target-race] Conformance exec test races on shared CARGO_TARGET_DIR (rust fixtures)** — bug · ready ·
+  `compiler/crates/bock-test-harness/` · — · links #224 · note: FOUND 2026-06-04 (#224 verify). Under `cargo test
+  --workspace` the rust execution fixtures run concurrent `cargo run` against one CARGO_TARGET_DIR → occasional
+  cross-fixture stdout contamination (exec_map_literal / exec_list_first_last_concat got another fixture's output). Serial
+  (`--test-threads=1`) is clean. Harness isolation gap, not codegen — give each rust fixture its own target dir or serialize
+  the rust-exec group.
+- **[Q-chat-protocol-residual] chat-protocol still fails ts/python/rust at runtime (unrelated to exprpos)** — bug · ready ·
+  `compiler/crates/bock-codegen/` (rust/py/ts) · — · links #224 · note: FOUND 2026-06-04 (#224). After the exprpos desugar
+  chat-protocol runs on js+go but still fails the other three for distinct reasons: **rust** `@concurrent`→tokio wiring + an
+  `E0507` move in `serialize`; **python** forward-reference ordering (`Serializable` used before defined); **ts**
+  `--experimental-strip-types` `.js`-import resolution. Three separable residual codegen gaps; split when picked up.
 - **[Q-propagate-operator-noop] The `?`/Propagate operator is a no-op on js/ts/python (drops the unwrap)** — bug · ready ·
   **HIGH — semantic gap** · `compiler/crates/bock-codegen/` (js/ts/py; check rust/go) · — · links #219,
   MS-examples-hardening, DV/§ · note: FOUND 2026-06-03 (#219, ts session). `expr?` (Result/Optional propagation) lowers to
