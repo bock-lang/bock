@@ -302,6 +302,15 @@ impl CodeGenerator for TsGenerator {
             };
             ctx.implicit_imports =
                 crate::generator::implicit_esm_imports_for(module, &public_symbols, &own_path);
+            // The shared scan keys on each symbol's emitted name; an enum variant
+            // is referenced in AIR by its *bare* source name, so a glob-imported
+            // (`use models.*`) variant is missed. Recover those variant imports
+            // (TS-local; see `extra_variant_imports_for`).
+            ctx.implicit_imports.extend(ctx.extra_variant_imports_for(
+                module,
+                &public_symbols,
+                &own_path,
+            ));
             ctx.public_symbols = public_symbols.clone();
             ctx.enum_variant_exports = crate::generator::enum_variant_value_names(module);
             ctx.emit_node(module)?;
@@ -492,6 +501,12 @@ enum ValueSink {
     Return,
     /// `<name> = <value>;`
     Assign(String),
+    /// `<value>;` — the value is discarded (the expression is a statement-
+    /// position tail: a loop body, a statement-`if`/`match` arm, etc., whose
+    /// value Bock drops). Distinct from [`ValueSink::Return`]: emitting `return`
+    /// here would abort the enclosing function (e.g. exit a `for` loop after one
+    /// iteration), so the value is emitted as a bare expression statement.
+    Discard,
 }
 
 /// Internal state for TypeScript emission.
@@ -977,6 +992,76 @@ impl TsEmitCtx {
             ));
         }
         Ok(())
+    }
+
+    /// Additional implicit cross-module imports for **enum variants** referenced
+    /// in `module` by their bare source spelling.
+    ///
+    /// The shared [`crate::generator::implicit_esm_imports_for`] scans the
+    /// module's debug rendering for each public symbol's *key* as a quoted token.
+    /// An enum variant's public-symbol key is its emitted value-name
+    /// (`Category_Electronics`), but the AIR references the variant by its bare
+    /// source name (`Identifier { name: "Electronics" }`) — the `{Enum}_{Variant}`
+    /// joining happens only at emit time (see the `Identifier` arm of
+    /// [`Self::emit_expr`]). So the shared scan never matches a glob-imported
+    /// (`use models.*`) variant, and `main.ts` omits the
+    /// `import { Category_Electronics } from "./models.js"` it needs — a
+    /// `ReferenceError`/TS2304 at every use site.
+    ///
+    /// This recovers those imports the same conservative way the shared scan
+    /// works: for each registered variant whose **bare** name appears as a quoted
+    /// token in the module's debug render, resolve its emitted value-name and add
+    /// the cross-module import when that value-name is a public `EnumVariant` of
+    /// another module not already declared/imported here.
+    ///
+    /// Note: the JS backend shares the same shared-scan gap (verified: its
+    /// `main.js` also omits the variant import and `ReferenceError`s at runtime).
+    /// The proper fix is in the shared collector; this TS-local recovery unblocks
+    /// the TS target without touching shared code. Tracked as an `OPEN`.
+    fn extra_variant_imports_for(
+        &self,
+        module: &AIRModule,
+        public_symbols: &HashMap<String, crate::generator::EsmSymbol>,
+        own_path: &str,
+    ) -> Vec<crate::generator::ImplicitEsmImport> {
+        let local = crate::generator::locally_declared_names(module);
+        let explicit = crate::generator::explicitly_imported_names(module);
+        let rendered = format!("{module:?}");
+        let mut out: Vec<crate::generator::ImplicitEsmImport> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (variant_src, info) in &self.enum_variants {
+            // Built-in Optional/Result variants lower inline — never imported.
+            if matches!(info.enum_name.as_str(), "Optional" | "Result") {
+                continue;
+            }
+            // Conservative reference check: the bare variant name as a quoted
+            // token in the module's debug rendering.
+            if !rendered.contains(&format!("\"{variant_src}\"")) {
+                continue;
+            }
+            let value_name = format!("{}_{}", info.enum_name, variant_src);
+            // Skip names the module already provides or imports explicitly.
+            if local.contains(&value_name) || explicit.contains(&value_name) {
+                continue;
+            }
+            let Some(sym) = public_symbols.get(&value_name) else {
+                continue;
+            };
+            // Only a *cross-module* enum-variant value needs importing.
+            if sym.module_path == own_path
+                || !matches!(sym.kind, crate::generator::EsmDeclKind::EnumVariant)
+            {
+                continue;
+            }
+            if seen.insert(value_name.clone()) {
+                out.push(crate::generator::ImplicitEsmImport {
+                    module_path: sym.module_path.clone(),
+                    name: value_name,
+                    kind: sym.kind,
+                });
+            }
+        }
+        out
     }
 
     /// Emit the trailing `export { … }` for this module's public enum-variant
@@ -3683,7 +3768,7 @@ impl TsEmitCtx {
                 self.emit_expr(iterable)?;
                 self.buf.push_str(") {\n");
                 self.indent += 1;
-                self.emit_block_body(body)?;
+                self.emit_loop_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
                 self.pop_loop_frame();
@@ -3696,7 +3781,7 @@ impl TsEmitCtx {
                 self.emit_expr(condition)?;
                 self.buf.push_str(") {\n");
                 self.indent += 1;
-                self.emit_block_body(body)?;
+                self.emit_loop_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
                 self.pop_loop_frame();
@@ -3706,7 +3791,7 @@ impl TsEmitCtx {
                 self.emit_loop_label_prefix(body);
                 self.writeln("while (true) {");
                 self.indent += 1;
-                self.emit_block_body(body)?;
+                self.emit_loop_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
                 self.pop_loop_frame();
@@ -4201,7 +4286,14 @@ impl TsEmitCtx {
                 if matches!(body.kind, NodeKind::Block { .. }) {
                     self.buf.push_str("{\n");
                     self.indent += 1;
-                    self.emit_block_body(body)?;
+                    // A lambda body is a fresh function-body tail context: its
+                    // tail is the lambda's return value, so clear any active
+                    // statement-position sink (e.g. a `Discard` from an enclosing
+                    // loop body) for the duration of the body.
+                    let prev_sink = self.value_sink.take();
+                    let r = self.emit_block_body(body);
+                    self.value_sink = prev_sink;
+                    r?;
                     self.indent -= 1;
                     self.write_indent();
                     self.buf.push('}');
@@ -4491,7 +4583,16 @@ impl TsEmitCtx {
                 let _ = write!(self.buf, "((){arrow_ret} => {{");
                 self.buf.push('\n');
                 self.indent += 1;
-                self.emit_match(scrutinee, arms, force_hoist)?;
+                // The IIFE arrow returns the matched arm's value, so its arm
+                // bodies deliver through a `Return` sink — *not* whatever
+                // statement-position sink is active outside (a `Discard` from an
+                // enclosing loop/statement context, or an `Assign` from an outer
+                // statement-form lowering). Reset for the IIFE body, restore after
+                // so the outer sink is untouched.
+                let prev_sink = self.value_sink.replace(ValueSink::Return);
+                let r = self.emit_match(scrutinee, arms, force_hoist);
+                self.value_sink = prev_sink;
+                r?;
                 self.indent -= 1;
                 self.write_indent();
                 self.buf.push_str("})()");
@@ -5284,6 +5385,24 @@ impl TsEmitCtx {
         r
     }
 
+    /// Emit a **loop body** (`for`/`while`/`loop`). A loop body is statement
+    /// position: its tail expression is discarded (Bock loops evaluate to Unit;
+    /// the body's value is not the function's value). The default
+    /// [`Self::emit_block_body`] treats a tail as a function-body return, which
+    /// for a loop body would `return console.log(i);` — aborting the function on
+    /// the first iteration. Activating a [`ValueSink::Discard`] for the body's
+    /// duration routes the tail to a bare expression statement instead. The sink
+    /// is saved/restored so it never leaks past the loop, and any nested lambda
+    /// clears it (a lambda body's tail is genuinely returned — see the
+    /// `NodeKind::Lambda` arm). A `break v` value still flows through the
+    /// separate per-loop `loop_value_sinks` stack, not this discard sink.
+    fn emit_loop_body(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        let prev_sink = self.value_sink.replace(ValueSink::Discard);
+        let r = self.emit_block_body(node);
+        self.value_sink = prev_sink;
+        r
+    }
+
     /// Emit a function/method body whose top-level `let` scope is pre-seeded with
     /// the function's `params` as already-declared names. A Bock `let x = …` that
     /// shadows a parameter `x` is the same block scope as the TS parameter, so it
@@ -5313,9 +5432,25 @@ impl TsEmitCtx {
 
     fn emit_block_body_inner(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         if let NodeKind::Block { stmts, tail } = &node.kind {
+            // Every non-tail statement is statement position: its value is
+            // discarded. A statement-position `if`/`match` whose branch/arm
+            // bodies end in an expression (e.g. `println(...)`) must NOT `return`
+            // that value — doing so aborts the function before the statements
+            // after the `if`/`match` run. Activate a `Discard` sink for the
+            // non-tail statements (restored before the tail, which keeps the
+            // function-body-return semantics). A nested loop/lambda overrides
+            // this sink within its own body, so the discard applies only to the
+            // immediate statement-position control flow.
+            let prev_sink = self.value_sink.replace(ValueSink::Discard);
+            let mut stmt_res = Ok(());
             for s in stmts {
-                self.emit_node(s)?;
+                stmt_res = self.emit_node(s);
+                if stmt_res.is_err() {
+                    break;
+                }
             }
+            self.value_sink = prev_sink;
+            stmt_res?;
             if let Some(t) = tail {
                 if crate::generator::node_is_statement(t) {
                     self.emit_node(t)?;
@@ -5497,12 +5632,14 @@ impl TsEmitCtx {
             }
             NodeKind::Loop { body } => {
                 self.emit_loop_label_prefix(body);
-                // The loop's value arrives through `break v`; record the sink so
-                // each `break v` writes it (`<binding> = v; break;`).
+                // The loop's value arrives through `break v` (recorded in the
+                // separate `loop_value_sinks` stack), NOT the body's tail — the
+                // body is statement position, so its tail is discarded via
+                // `emit_loop_body`.
                 self.set_loop_value_sink(sink.clone());
                 self.writeln("while (true) {");
                 self.indent += 1;
-                self.emit_block_body(body)?;
+                self.emit_loop_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
                 self.pop_loop_frame();
@@ -5621,6 +5758,11 @@ impl TsEmitCtx {
                 self.emit_expr(node)?;
                 self.buf.push_str(";\n");
             }
+            ValueSink::Discard => {
+                let _ = write!(self.buf, "{ind}");
+                self.emit_expr(node)?;
+                self.buf.push_str(";\n");
+            }
         }
         Ok(())
     }
@@ -5637,6 +5779,9 @@ impl TsEmitCtx {
             }
             ValueSink::Assign(name) => {
                 let _ = writeln!(self.buf, "{ind}{name} = {value};");
+            }
+            ValueSink::Discard => {
+                let _ = writeln!(self.buf, "{ind}{value};");
             }
         }
         Ok(())
@@ -8951,6 +9096,252 @@ mod tests {
         assert!(
             out.contains(r#"const e = (r as Extract<typeof r, { _tag: "Err" }>)._0;"#),
             "Err-arm payload binding should cast through Extract for narrowing, got: {out}"
+        );
+    }
+
+    // ── Statement-position tails must be discarded, not `return`ed ───────────
+    //
+    // A loop / statement-`if` / statement-`match` body's final expression is
+    // discarded in Bock (these are statements, not the function's value). The
+    // TS backend's `emit_block_body` had treated the tail as a function-body
+    // return, so e.g. `for i in … { println(i) }` emitted
+    // `for (… ) { return console.log(i); }` — the `return` aborts the function
+    // on the first iteration (the loop runs once, then the fn exits). These
+    // tests pin the discard behaviour for each statement context.
+
+    /// Build a `println(<arg>)` call node.
+    fn println_call(id: u32, arg: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::Call {
+                callee: Box::new(id_node(id + 1, "println")),
+                args: vec![AirArg {
+                    label: None,
+                    value: arg,
+                }],
+                type_args: vec![],
+            },
+        )
+    }
+
+    #[test]
+    fn ts_for_loop_body_tail_call_is_discarded_not_returned() {
+        // fn main() { for i in 1..=3 { println(i) } }
+        let range = node(
+            20,
+            NodeKind::Range {
+                lo: Box::new(int_lit(21, "1")),
+                hi: Box::new(int_lit(22, "3")),
+                inclusive: true,
+            },
+        );
+        let loop_body = block(30, vec![], Some(println_call(31, id_node(33, "i"))));
+        let for_loop = node(
+            10,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(11, "i")),
+                iterable: Box::new(range),
+                body: Box::new(loop_body),
+            },
+        );
+        let f = ts_fn_decl(1, "main", vec![], None, block(2, vec![for_loop], None));
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("return console.log"),
+            "a for-loop body's tail call must be a discarded statement, not a \
+             `return` (which aborts the loop after one iteration); got:\n{out}"
+        );
+        assert!(
+            out.contains("console.log(i);"),
+            "the loop body should still emit the call as a statement; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ts_while_loop_body_tail_call_is_discarded_not_returned() {
+        // fn main() { while (true) { println("x") } }
+        let cond = node(
+            20,
+            NodeKind::Literal {
+                lit: Literal::Bool(true),
+            },
+        );
+        let loop_body = block(30, vec![], Some(println_call(31, str_lit(33, "x"))));
+        let while_loop = node(
+            10,
+            NodeKind::While {
+                condition: Box::new(cond),
+                body: Box::new(loop_body),
+            },
+        );
+        let f = ts_fn_decl(1, "main", vec![], None, block(2, vec![while_loop], None));
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("return console.log"),
+            "a while-loop body's tail call must be a discarded statement, not a \
+             `return`; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn ts_statement_match_arm_tail_call_is_discarded_not_returned() {
+        // fn run(r: Result) { match r { Ok(v) => println(v); Err(e) => println(e) } }
+        // — the `match` is a non-tail statement (a sibling block follows), so its
+        // arm tails are discarded, not returned.
+        let ok_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Ok"]),
+                        fields: vec![bind_pat(22, "v")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(23, vec![], Some(println_call(24, id_node(26, "v"))))),
+            },
+        );
+        let err_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    31,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Err"]),
+                        fields: vec![bind_pat(32, "e")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(33, vec![], Some(println_call(34, id_node(36, "e"))))),
+            },
+        );
+        let match_stmt = node(
+            40,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(41, "r")),
+                arms: vec![ok_arm, err_arm],
+            },
+        );
+        // A trailing statement makes the match non-tail (statement position).
+        let trailer = println_call(50, str_lit(52, "done"));
+        let f = ts_fn_decl(
+            1,
+            "run",
+            vec![typed_param_node(2, "r", "Result")],
+            None,
+            block(3, vec![match_stmt], Some(trailer)),
+        );
+        let out = gen(&module(vec![], vec![f]));
+        // The arm bodies must emit the call as a bare statement (`console.log(v);`),
+        // never `return console.log(v);` — a `return` inside the `switch` would
+        // skip the code that follows the match.
+        assert!(
+            out.contains("console.log(v);") && out.contains("console.log(e);"),
+            "statement-position match arms should emit their tail call as a \
+             discarded statement; got:\n{out}"
+        );
+        assert!(
+            !out.contains("return console.log(v);") && !out.contains("return console.log(e);"),
+            "a statement-position match arm's tail call must be a discarded \
+             statement, not a `return` (which would skip the code after the \
+             match); got:\n{out}"
+        );
+    }
+
+    // ── Cross-module enum-variant glob import (inventory-system) ─────────────
+    //
+    // `module main` does `use models.*` and references a bare enum variant
+    // (`Electronics`) declared in `module models`. The variant emits as the
+    // value-const `Category_Electronics`, which must be imported from
+    // `./models.js`; the shared import scan keys on the value-name but the AIR
+    // references the bare source name, so the import was omitted (TS2304 /
+    // ReferenceError). `extra_variant_imports_for` recovers it.
+
+    /// A glob `use <path>.*` import AIR node.
+    fn import_glob(id: u32, path: &[&str]) -> AIRNode {
+        node(
+            id,
+            NodeKind::ImportDecl {
+                path: bock_ast::ModulePath {
+                    segments: path.iter().map(|s| ident(s)).collect(),
+                    span: span(),
+                },
+                items: bock_ast::ImportItems::Glob,
+            },
+        )
+    }
+
+    #[test]
+    fn ts_glob_imported_enum_variant_is_imported() {
+        // module models { public enum Category { Electronics Clothing } }
+        let category_enum = node(
+            40,
+            NodeKind::EnumDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Category"),
+                generic_params: vec![],
+                variants: vec![
+                    node(
+                        41,
+                        NodeKind::EnumVariant {
+                            name: ident("Electronics"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                    node(
+                        42,
+                        NodeKind::EnumVariant {
+                            name: ident("Clothing"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                ],
+            },
+        );
+        let models_mod = module_with_path(&["models"], vec![], vec![category_enum]);
+
+        // module main { use models.*  fn main() { let c = Electronics } }
+        let let_c = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "c")),
+                ty: None,
+                value: Box::new(id_node(12, "Electronics")),
+            },
+        );
+        let main_fn = ts_fn_decl(1, "main", vec![], None, block(2, vec![let_c], None));
+        let main_mod =
+            module_with_path(&["main"], vec![import_glob(5, &["models"])], vec![main_fn]);
+
+        let gen = TsGenerator::new();
+        let out = gen
+            .generate_project(&[
+                (&main_mod, std::path::Path::new("src/main.bock")),
+                (&models_mod, std::path::Path::new("src/models.bock")),
+            ])
+            .unwrap();
+        let main_file = out
+            .files
+            .iter()
+            .find(|f| f.path == std::path::Path::new("main.ts"))
+            .expect("main.ts emitted");
+        assert!(
+            main_file.content.contains("Category_Electronics")
+                && main_file.content.contains(r#"from "./models.js""#),
+            "main.ts must import the glob-referenced enum variant \
+             `Category_Electronics` from ./models.js; got:\n{}",
+            main_file.content
+        );
+        // It must be a value import (not `import type`) — the variant is a const.
+        assert!(
+            !main_file
+                .content
+                .contains("import type { Category_Electronics"),
+            "the variant const must be a value import, not `import type`; got:\n{}",
+            main_file.content
         );
     }
 }
