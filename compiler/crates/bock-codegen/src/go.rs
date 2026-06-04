@@ -7921,6 +7921,41 @@ impl GoEmitCtx {
                 if go_match_is_result(arms) {
                     return self.emit_result_match_expr(scrutinee, arms);
                 }
+                // Guards, or-/tuple/list/range patterns, and nested
+                // constructor/record patterns cannot ride the value/type
+                // `switch` IIFE below (its `case <cond>` form has no slot for a
+                // relational/length test or a fall-through guard — they collapse
+                // to a broken `case interface{}:`). Route them to the shared
+                // if/else-if chain, wrapped in a typed IIFE whose arm bodies
+                // `return` the match's value. The statement-position `emit_match`
+                // routes the same set via `match_needs_ifchain`; doing it here
+                // keeps expression-position parity. Optional/Result already
+                // returned above, so this only diverts the previously-broken
+                // value/type-switch cases.
+                if crate::generator::match_needs_ifchain(arms) {
+                    let iife_ret = self.expected_iife_type();
+                    let iife_ty = iife_ret.as_deref().unwrap_or("interface{}");
+                    // Each arm yields the SAME type as the whole match, so a
+                    // nested branchy tail inherits the concrete IIFE type; a
+                    // nested `let` save/restores it. Mirrors the switch path.
+                    let prev_expected = self.current_expected_type.take();
+                    self.current_expected_type =
+                        (iife_ty != "interface{}").then(|| iife_ty.to_string());
+                    let _ = writeln!(self.buf, "func() {iife_ty} {{");
+                    self.indent += 1;
+                    let res =
+                        self.emit_match_ifchain_inner(scrutinee, arms, /*emit_return=*/ true);
+                    self.indent -= 1;
+                    self.current_expected_type = prev_expected;
+                    res?;
+                    // A Bock match is exhaustive, but Go cannot prove the if-chain
+                    // is total, so a trailing `panic` keeps the IIFE well-typed.
+                    self.write_indent();
+                    self.buf.push_str("panic(\"unreachable\")\n");
+                    self.write_indent();
+                    self.buf.push_str("}()");
+                    return Ok(());
+                }
                 // A user-enum match (including a reachable `core.compare.Ordering`
                 // enum) dispatches on the dynamic concrete-variant *type*
                 // (`OrderingGreater`), so the IIFE must be a *type-switch* — the
@@ -8717,10 +8752,24 @@ impl GoEmitCtx {
     /// Unlike the `switch` lowering, a bare `break`/`continue` in an arm body
     /// targets the enclosing `for` directly (there is no switch to escape), so
     /// `switch_label_depth` is deliberately left untouched.
+    ///
+    /// Statement position: arm bodies run as statements (`emit_return = false`).
+    /// The expression-position caller (`func() T { … }()`) passes
+    /// `emit_return = true` so each arm body's tail becomes a `return`, yielding
+    /// the match's value.
     fn emit_match_ifchain(
         &mut self,
         scrutinee: &AIRNode,
         arms: &[AIRNode],
+    ) -> Result<(), CodegenError> {
+        self.emit_match_ifchain_inner(scrutinee, arms, /*emit_return=*/ false)
+    }
+
+    fn emit_match_ifchain_inner(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+        emit_return: bool,
     ) -> Result<(), CodegenError> {
         // Single-evaluation root. A bare identifier is already a stable, typed
         // reference (emit it through the normal expression path so its name
@@ -8802,7 +8851,11 @@ impl GoEmitCtx {
             self.buf.push('\n');
             self.indent += 1;
             self.pattern_binds_go(pattern, &root)?;
-            self.emit_block_body(body)?;
+            if emit_return {
+                self.emit_block_body_return(body)?;
+            } else {
+                self.emit_block_body(body)?;
+            }
             self.indent -= 1;
             self.write_indent();
             self.buf.push('}');
@@ -9085,7 +9138,27 @@ impl GoEmitCtx {
                         "func() bool {{ _, ok := {access}.({variant_ty}); return ok }}()"
                     );
                 }
-                String::new()
+                // A *plain* record (`Point { x: 0, y }`) is already the concrete
+                // struct, so test its field sub-patterns directly off
+                // `access.<Field>` (a literal field constrains the arm; a bind /
+                // wildcard field adds no test). Without these tests every plain-
+                // record arm matched unconditionally, so `Point { x: 0, y: 0 }`
+                // shadowed every later `Point { … }` arm.
+                let mut tests = Vec::new();
+                for f in fields {
+                    if let Some(p) = &f.pattern {
+                        let go_field = to_pascal_case(&f.name.name);
+                        let sub = self.pattern_test_go(p, &format!("{access}.{go_field}"));
+                        if !sub.is_empty() {
+                            tests.push(sub);
+                        }
+                    }
+                }
+                if tests.is_empty() {
+                    String::new()
+                } else {
+                    tests.join(" && ")
+                }
             }
             NodeKind::TuplePat { elems } => {
                 let mut tests = Vec::new();
@@ -9100,6 +9173,34 @@ impl GoEmitCtx {
                 } else {
                     tests.join(" && ")
                 }
+            }
+            NodeKind::ListPat { elems, rest } => {
+                // Bock lists are Go slices (`[]T`). `[a, b]` requires an exact
+                // length; `[a, ..rest]` requires at least len(elems). Element
+                // sub-patterns are tested positionally (`access[i]`); the rest
+                // binds the tail slice and adds no test. Mirrors `pattern_test_js`.
+                let n = elems.len();
+                let len_test = if rest.is_some() {
+                    format!("len({access}) >= {n}")
+                } else {
+                    format!("len({access}) == {n}")
+                };
+                let mut tests = vec![len_test];
+                for (i, e) in elems.iter().enumerate() {
+                    let sub = self.pattern_test_go(e, &format!("{access}[{i}]"));
+                    if !sub.is_empty() {
+                        tests.push(sub);
+                    }
+                }
+                tests.join(" && ")
+            }
+            NodeKind::RangePat { lo, hi, inclusive } => {
+                // `lo..hi` → `access >= lo && access < hi`; `lo..=hi` uses `<=`.
+                // Mirrors `pattern_test_js`.
+                let lo_s = range_bound_to_go(lo);
+                let hi_s = range_bound_to_go(hi);
+                let upper = if *inclusive { "<=" } else { "<" };
+                format!("{access} >= {lo_s} && {access} {upper} {hi_s}")
             }
             NodeKind::OrPat { alternatives } => {
                 let alts: Vec<String> = alternatives
@@ -9172,10 +9273,22 @@ impl GoEmitCtx {
                 }
             }
             NodeKind::RecordPat { path, fields, .. } => {
-                let variant_ty = self.go_variant_struct(path);
+                // A registered enum *variant* record (`Shape::Rect { w, h }`) is a
+                // sealed-interface value, so its fields are read off a concrete
+                // type assertion (`access.(ShapeRect).W`). A *plain* record
+                // (`Point { x, y }`) is already a concrete struct — asserting
+                // `access.(Point)` is invalid Go ("p is not an interface"), so its
+                // fields are read directly (`access.X`). Mirrors the
+                // `user_variant_for_path` gate in `pattern_test_go`.
+                let base = if self.user_variant_for_path(path).is_some() {
+                    let variant_ty = self.go_variant_struct(path);
+                    format!("{access}.({variant_ty})")
+                } else {
+                    access.to_string()
+                };
                 for f in fields {
                     let go_field = to_pascal_case(&f.name.name);
-                    let child = format!("{access}.({variant_ty}).{go_field}");
+                    let child = format!("{base}.{go_field}");
                     match &f.pattern {
                         Some(p) => self.collect_binds_go(p, &child, out),
                         None => {
@@ -9188,6 +9301,20 @@ impl GoEmitCtx {
             NodeKind::TuplePat { elems } => {
                 for (i, e) in elems.iter().enumerate() {
                     self.collect_binds_go(e, &format!("{access}.Field{i}"), out);
+                }
+            }
+            NodeKind::ListPat { elems, rest } => {
+                for (i, e) in elems.iter().enumerate() {
+                    self.collect_binds_go(e, &format!("{access}[{i}]"), out);
+                }
+                // `..rest` binds the remaining elements as a tail slice
+                // (`rest := access[n:]`); a bare `..` (RestPat) or absent rest
+                // binds nothing. Mirrors `pattern_binds_js`.
+                if let Some(r) = rest {
+                    if let NodeKind::BindPat { name, .. } = &r.kind {
+                        let nm = go_value_ident(&name.name);
+                        let _ = write!(out, "{nm} := {access}[{}:]; _ = {nm}; ", elems.len());
+                    }
                 }
             }
             NodeKind::OrPat { alternatives } => {
@@ -10128,6 +10255,19 @@ fn escape_go_string(s: &str) -> String {
 
 /// Render a literal as a Go value expression — used by the if-chain match
 /// lowering to compare a scrutinee against a literal pattern (`<access> == …`).
+/// Render a `RangePat` bound (`lo`/`hi`) as a Go expression. Range bounds are
+/// literals (`1..10`) or a const identifier (`MIN..MAX`); anything else falls
+/// back to the wrapped literal/identifier text, or `0` for an unrecognised node.
+/// Mirrors `range_bound_to_js`.
+fn range_bound_to_go(node: &AIRNode) -> String {
+    match &node.kind {
+        NodeKind::LiteralPat { lit } => go_literal(lit),
+        NodeKind::Literal { lit } => go_literal(lit),
+        NodeKind::Identifier { name } => go_value_ident(&name.name),
+        _ => "0".to_string(),
+    }
+}
+
 fn go_literal(lit: &Literal) -> String {
     match lit {
         Literal::Int(s) | Literal::Float(s) => s.clone(),
@@ -14454,6 +14594,201 @@ mod tests {
         assert!(
             !out.contains("v := f()\n"),
             "propagate must not pass the operand through unchanged, got: {out}"
+        );
+    }
+
+    /// Build a single-param fn whose body is `return match scrutinee { arms }`,
+    /// for exercising the expression-position match lowering.
+    fn return_match_fn(name: &str, param: &str, ty: &str, arms: Vec<AIRNode>) -> AIRNode {
+        let match_node = node(
+            500,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(501, param)),
+                arms,
+            },
+        );
+        let ret = node(
+            502,
+            NodeKind::Return {
+                value: Some(Box::new(match_node)),
+            },
+        );
+        node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![typed_param_node(2, param, ty)],
+                return_type: Some(Box::new(node(
+                    3,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(4, vec![], Some(ret))),
+            },
+        )
+    }
+
+    /// Q-list-range-pattern-shared: a list-pattern `match` in expression position
+    /// (`return match items { [] => …; [only] => …; [first, ..rest] => … }`) must
+    /// route to the if-chain (the shared recogniser now flags `ListPat`), emitting
+    /// a `len(...)` test per arm and positional element / `..rest` slice binds —
+    /// not the broken `switch` whose every arm collapsed to `case interface{}:`.
+    #[test]
+    fn go_list_pattern_expr_match_lowers_to_ifchain_with_binds() {
+        let empty_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::ListPat {
+                        elems: vec![],
+                        rest: None,
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(22, vec![], Some(str_lit(23, "empty")))),
+            },
+        );
+        let single_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    31,
+                    NodeKind::ListPat {
+                        elems: vec![bind_pat(32, "only")],
+                        rest: None,
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(33, vec![], Some(id_node(34, "only")))),
+            },
+        );
+        let head_rest_arm = node(
+            40,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    41,
+                    NodeKind::ListPat {
+                        elems: vec![bind_pat(42, "first")],
+                        rest: Some(Box::new(bind_pat(43, "rest"))),
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(44, vec![], Some(id_node(45, "first")))),
+            },
+        );
+        let else_arm = node(
+            46,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(47, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(block(48, vec![], Some(str_lit(49, "other")))),
+            },
+        );
+        let f = return_match_fn(
+            "DescribeList",
+            "items",
+            "List",
+            vec![empty_arm, single_arm, head_rest_arm, else_arm],
+        );
+        let out = gen(&module(vec![], vec![f]));
+        // No broken `case interface{}:` placeholder.
+        assert!(
+            !out.contains("case interface{}"),
+            "list-pattern match must not emit a broken `case interface{{}}`, got: {out}"
+        );
+        // `[]` → exact length 0.
+        assert!(
+            out.contains("len(items) == 0"),
+            "`[]` arm should test len == 0, got: {out}"
+        );
+        // `[only]` → length 1 and binds `only := items[0]`.
+        assert!(
+            out.contains("len(items) == 1") && out.contains("only := items[0]"),
+            "`[only]` should test len == 1 and bind `only`, got: {out}"
+        );
+        // `[first, ..rest]` → length >= 1, binds first and a rest slice.
+        assert!(
+            out.contains("len(items) >= 1"),
+            "`[first, ..rest]` should test len >= 1, got: {out}"
+        );
+        assert!(
+            out.contains("first := items[0]") && out.contains("rest := items[1:]"),
+            "`[first, ..rest]` should bind `first` and `rest := items[1:]`, got: {out}"
+        );
+        // The arm bodies return their values (expression-position IIFE).
+        assert!(
+            out.contains("return \"empty\""),
+            "arm bodies must return their value, got: {out}"
+        );
+    }
+
+    /// Q-list-range-pattern-shared: a range-pattern `match` in expression position
+    /// must route to the if-chain with a relational bounds test (`>= lo && < hi`
+    /// exclusive, `<=` inclusive) — not a broken `switch`.
+    #[test]
+    fn go_range_pattern_expr_match_lowers_to_ifchain_with_bounds() {
+        let lo_arm = node(
+            20,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    21,
+                    NodeKind::RangePat {
+                        lo: Box::new(int_lit(22, "1")),
+                        hi: Box::new(int_lit(23, "10")),
+                        inclusive: false,
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(24, vec![], Some(str_lit(25, "a")))),
+            },
+        );
+        let hi_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    31,
+                    NodeKind::RangePat {
+                        lo: Box::new(int_lit(32, "10")),
+                        hi: Box::new(int_lit(33, "20")),
+                        inclusive: true,
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(34, vec![], Some(str_lit(35, "b")))),
+            },
+        );
+        let else_arm = node(
+            40,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(41, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(block(42, vec![], Some(str_lit(43, "c")))),
+            },
+        );
+        let f = return_match_fn("ClassifyRange", "n", "Int", vec![lo_arm, hi_arm, else_arm]);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("case interface{}"),
+            "range-pattern match must not emit a broken `case interface{{}}`, got: {out}"
+        );
+        // Exclusive `1..10` → `n >= 1 && n < 10`.
+        assert!(
+            out.contains("n >= 1") && out.contains("n < 10"),
+            "`1..10` should test `n >= 1 && n < 10`, got: {out}"
+        );
+        // Inclusive `10..=20` → `n >= 10 && n <= 20`.
+        assert!(
+            out.contains("n >= 10") && out.contains("n <= 20"),
+            "`10..=20` should test `n >= 10 && n <= 20`, got: {out}"
         );
     }
 }

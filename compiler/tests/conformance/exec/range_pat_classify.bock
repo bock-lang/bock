@@ -1,0 +1,33 @@
+// TEST: range_pat_classify
+// EXPECT: output "lo;mid;hi;edge-in;edge-out"
+//
+// Q-list-range-pattern-shared: a `match` over range patterns must lower to a
+// relational bounds test on EVERY target — `lo..hi` → `x >= lo && x < hi`
+// (half-open, exclusive upper), `lo..=hi` → `<=` (inclusive upper), per
+// spec §"Range (exclusive/inclusive)". The shared recogniser now flags
+// `RangePat` so ts/go route to the if-chain; js/rust/py already handled it.
+// Runs on all five targets. The `edge-in` / `edge-out` cases pin inclusivity:
+// `10..=20` matches 20 (inclusive) while `1..10` excludes 10.
+module main
+
+fn band(n: Int) -> String {
+  match n {
+    1..10 => "lo"
+    10..100 => "mid"
+    _ => "hi"
+  }
+}
+
+fn inclusive_edge(n: Int) -> String {
+  match n {
+    10..=20 => "edge-in"
+    _ => "edge-out"
+  }
+}
+
+fn main() -> Void {
+  // band: 5→lo, 50→mid, 500→hi.
+  // inclusive_edge: 20→edge-in (inclusive upper), 10 (the exclusive upper of
+  // `1..10` in band, but here lands in 10..=20) → edge-in; 21 → edge-out.
+  println("${band(5)};${band(50)};${band(500)};${inclusive_edge(20)};${inclusive_edge(21)}")
+}

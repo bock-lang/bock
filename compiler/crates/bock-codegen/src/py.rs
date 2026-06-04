@@ -5300,6 +5300,32 @@ impl PyEmitCtx {
                 self.buf.push_str("__v == ");
                 self.emit_pattern(pattern)?;
             }
+            NodeKind::ListPat { elems, rest } => {
+                // `[a, b]` requires a list of exactly len(elems); `[a, ..rest]`
+                // requires at least len(elems). Element literal sub-patterns add
+                // positional `__v[i] == <lit>` tests; bind/wildcard elements add
+                // none. Mirrors the js/ts/go list test.
+                let n = elems.len();
+                let len_test = if rest.is_some() {
+                    format!("isinstance(__v, list) and len(__v) >= {n}")
+                } else {
+                    format!("isinstance(__v, list) and len(__v) == {n}")
+                };
+                self.buf.push_str(&len_test);
+                for (i, e) in elems.iter().enumerate() {
+                    if let NodeKind::LiteralPat { .. } = &e.kind {
+                        self.buf.push_str(&format!(" and __v[{i}] == "));
+                        self.emit_pattern(e)?;
+                    }
+                }
+            }
+            NodeKind::RangePat { lo, hi, inclusive } => {
+                // `lo..hi` → `lo <= __v < hi`; `lo..=hi` → `lo <= __v <= hi`.
+                let lo_s = range_bound_to_py(lo);
+                let hi_s = range_bound_to_py(hi);
+                let upper = if *inclusive { "<=" } else { "<" };
+                let _ = write!(self.buf, "{lo_s} <= __v {upper} {hi_s}");
+            }
             // Catch-alls never produce a test (handled as the `else`).
             _ => self.buf.push_str("True"),
         }
@@ -5340,6 +5366,34 @@ impl PyEmitCtx {
                 let _ = write!(self.buf, "(lambda {bind}: ");
                 self.emit_block_as_expr(body)?;
                 self.buf.push_str(")(__v)");
+                Ok(())
+            }
+            // A list pattern binds its elements positionally (`__v[i]`) and a
+            // `..rest` to the tail slice (`__v[n:]`) via an applied lambda, so the
+            // names resolve inside the conditional. Wildcard/literal elements bind
+            // nothing. Without this the `first`/`rest` in `[first, ..rest] => …`
+            // were undefined (a `NameError` at runtime).
+            NodeKind::ListPat { elems, rest } => {
+                let mut params: Vec<String> = Vec::new();
+                let mut argvals: Vec<String> = Vec::new();
+                for (i, e) in elems.iter().enumerate() {
+                    if let NodeKind::BindPat { name, .. } = &e.kind {
+                        params.push(py_value_ident(&name.name));
+                        argvals.push(format!("__v[{i}]"));
+                    }
+                }
+                if let Some(r) = rest {
+                    if let NodeKind::BindPat { name, .. } = &r.kind {
+                        params.push(py_value_ident(&name.name));
+                        argvals.push(format!("__v[{}:]", elems.len()));
+                    }
+                }
+                if params.is_empty() {
+                    return self.emit_block_as_expr(body);
+                }
+                let _ = write!(self.buf, "(lambda {}: ", params.join(", "));
+                self.emit_block_as_expr(body)?;
+                let _ = write!(self.buf, ")({})", argvals.join(", "));
                 Ok(())
             }
             _ => self.emit_block_as_expr(body),
@@ -6257,6 +6311,24 @@ fn py_value_ident(name: &str) -> String {
         &to_snake_case(name),
         crate::generator::KeywordTarget::Python,
     )
+}
+
+/// Render a `RangePat` bound (`lo`/`hi`) as a Python expression. Range bounds
+/// are literals (`1..10`) or a const identifier (`MIN..MAX`); anything else
+/// falls back to `0` for an unrecognised node. Mirrors `range_bound_to_js`.
+fn range_bound_to_py(node: &AIRNode) -> String {
+    let lit = match &node.kind {
+        NodeKind::LiteralPat { lit } | NodeKind::Literal { lit } => Some(lit),
+        NodeKind::Identifier { name } => return py_value_ident(&name.name),
+        _ => None,
+    };
+    match lit {
+        Some(Literal::Int(s)) | Some(Literal::Float(s)) => s.clone(),
+        Some(Literal::Bool(b)) => if *b { "True" } else { "False" }.to_string(),
+        Some(Literal::Char(s)) => format!("'{s}'"),
+        Some(Literal::String(s)) => format!("\"{}\"", escape_py_string(s)),
+        Some(Literal::Unit) | None => "0".to_string(),
+    }
 }
 
 /// Returns true if `name` is the identifier of a Duration or Instant instance
