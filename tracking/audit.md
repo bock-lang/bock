@@ -2158,3 +2158,38 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
     NEXT (operator's call): Q-examples-baseline-ratchet (lock the 59/100 floor) + a per-backend fan-out over the residual
     FOUND codegen bugs (Q-ts-match-narrowing, Q-go-pow-operator, Q-go-list-method-typing, the 4 pattern-match FOUNDs above,
     Q-py-matcharm-lambda-binding) to push pattern-lab/task-api/type-zoo/todo-list toward green on the long-pole targets.
+
+[2026-06-04 21:51 UTC] ✦ RESIDUAL FAN-OUT (#233–#236) + baseline ratchet — 8 FOUND codegen bugs cleared; examples 59→63/100
+  Input: operator "Yes, let's proceed as recommended" (baseline ratchet now + by-backend fan-out over the residual FOUND bugs).
+  DISPATCH: 4 CONCURRENT foreground by-backend sessions — go (5 items: pow/`**`, `.map` element typing, valpos bind-match,
+    nested-Optional, plain-record), ts (match-narrowing), py (matcharm-lambda + plain-record), rust (str-literal match) —
+    each owning ONE emitter; generator.rs/bock-air/bock-types off-limits. Ran the baseline-update audit (UPDATE_BASELINE=1)
+    in parallel in a 5th worktree (file-disjoint: baseline.txt vs the emitters).
+  RESULTS: ts #234 (Extract<> cast — task-api + chat-protocol TSC-ERR→OK), py #235 (match_value_needs_stmt_form, reuses the
+    read-only shared recogniser + adds plain-record py-locally → NO generator.rs edit; pattern-lab+type-zoo build→pass), rust
+    #236 (`match (s).as_str()`, gated against over-broadening; pattern-lab FAIL→PASS), go #233 (all 5; finalized by the
+    orchestrator — see INCIDENT-2).
+  DISCIPLINE: verified file-disjoint (`uniq -d` empty); integration branch merged all 4 + gate + conformance REQUIRE=all (0
+    failed) + examples audit BEFORE push; per-PR CI gated on CLEAN; re-confirmed on merged main. Matrix js 16 · ts 11→12 · py
+    13→14 · rust 10→11 · go 9→10 = 63/100 (49→63 this session). Baseline ratcheted to 63 (this PR).
+  INCIDENT-1 (#235 flaky CI): py PR passed ubuntu-stable but FAILED every other lane (ubuntu-beta, macos×2, windows×2) on the
+    4 new value-position match unit tests ("generated python must parse"). ROOT CAUSE (diagnosed from the failed-lane logs —
+    valid 3.10+ code failing parse on a 3.12 runner ruled out a version theory): `check_py_syntax` wrote every call to a
+    SHARED FIXED temp path (`bock_test_output.py`); the new tests added concurrent callers, so under `cargo test`'s default
+    thread parallelism they raced (one test's py_compile read/removed another's file). The engineers' serial `--test-threads=1`
+    gate masked it. HOTFIX (orchestrator, forward-fix like #214): unique per-call temp path (pid+atomic counter); validated by
+    running bock-codegen tests IN PARALLEL (502/0, ×2); re-pushed → all lanes green. LESSON: a flaky test that only fails under
+    parallelism won't show in a serial gate — and engineer prompts now say to run the gate serially (for the rust-exec race),
+    which HIDES parallel races; the real catch is CI's parallel run. NEW item Q-examples-ts-tsc-gate also surfaced (the ts
+    examples audit uses strip-types, not tsc — type errors pass silently).
+  INCIDENT-2 (go agent stalled): the go session set up a "background waiter"+Monitor on its `cargo test` and returned with 501
+    lines UNCOMMITTED, despite a "foreground, synchronous" instruction (a paraphrase, not the verbatim "no background job"
+    wording). Caught by inspecting the worktree git state (not trusting the report). The work was sound: orchestrator re-ran the
+    full gate (all green incl. conformance REQUIRE=go) and committed it directly (no re-dispatch). Memory
+    [[engineer-subagent-dispatch-discipline]] sharpened: verify worktree state on return regardless of the report; use the
+    verbatim no-background wording.
+  NEW FOUND → queue: Q-examples-ts-tsc-gate (chore), Q-py-valpos-stmt-arms (value-IIFE-with-statements, cross-backend),
+    Q-rust-str-mixed-binding (LOW). check_py_syntax race → fixed in #235 (no separate item).
+  STATE: main 5e4d6c3, 0 open PRs (after this PR), clean, CI green, all worktrees/branches/caches cleaned. **No remaining
+    examples blocker is a shared-architecture gap** — remainder is per-backend residue + LOW Q-propagate-exprpos-shared +
+    Q-conformance-target-race (test-harness isolation). MS-examples-hardening: 63/100, all 5 targets climbing.
