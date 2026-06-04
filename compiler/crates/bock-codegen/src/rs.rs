@@ -4428,6 +4428,11 @@ impl RsEmitCtx {
                     self.buf.push('(');
                     self.emit_expr(scrutinee)?;
                     self.buf.push_str(").as_slice()");
+                } else if Self::scrutinee_matches_str_literal(arms) {
+                    // `String` scrutinee vs `&str` literal arms → `.as_str()`.
+                    self.buf.push('(');
+                    self.emit_expr(scrutinee)?;
+                    self.buf.push_str(").as_str()");
                 } else {
                     self.emit_expr(scrutinee)?;
                 }
@@ -4682,6 +4687,11 @@ impl RsEmitCtx {
             self.buf.push('(');
             self.emit_expr(scrutinee)?;
             self.buf.push_str(").as_slice()");
+        } else if Self::scrutinee_matches_str_literal(arms) {
+            // `String` scrutinee vs `&str` literal arms → match on `.as_str()`.
+            self.buf.push('(');
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str(").as_str()");
         } else {
             self.emit_expr(scrutinee)?;
         }
@@ -4715,6 +4725,79 @@ impl RsEmitCtx {
             NodeKind::GuardPat { pattern, .. } => Self::pattern_is_list(pattern),
             _ => false,
         }
+    }
+
+    /// Whether a match arm's pattern is (or, under `|`/guard, contains) a string
+    /// literal pattern — the signal to match on the scrutinee's `.as_str()`. See
+    /// [`Self::scrutinee_matches_str_literal`].
+    fn arm_matches_str_literal(arm: &AIRNode) -> bool {
+        if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
+            Self::pattern_is_str_literal(pattern)
+        } else {
+            false
+        }
+    }
+
+    /// Whether `pat` is a string-literal pattern (`"foo"`), looking through
+    /// `|`-alternatives and a trailing pattern guard.
+    fn pattern_is_str_literal(pat: &AIRNode) -> bool {
+        match &pat.kind {
+            NodeKind::LiteralPat {
+                lit: Literal::String(_),
+            } => true,
+            NodeKind::OrPat { alternatives } => {
+                alternatives.iter().any(Self::pattern_is_str_literal)
+            }
+            NodeKind::GuardPat { pattern, .. } => Self::pattern_is_str_literal(pattern),
+            _ => false,
+        }
+    }
+
+    /// Whether an arm's pattern binds the whole scrutinee by name at top level
+    /// (`other => …`), looking through `|`-alternatives and a trailing guard. Such
+    /// a binding would change type from owned `String` to `&str` if the scrutinee
+    /// were `.as_str()`-wrapped, so its presence suppresses the wrap (see
+    /// [`Self::scrutinee_matches_str_literal`]).
+    fn arm_binds_scrutinee(arm: &AIRNode) -> bool {
+        if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
+            Self::pattern_binds_scrutinee(pattern)
+        } else {
+            false
+        }
+    }
+
+    /// Whether `pat` is a top-level binding pattern (`other`), looking through
+    /// `|`-alternatives and a trailing pattern guard. A wildcard (`_`) does not
+    /// bind, so it is not counted.
+    fn pattern_binds_scrutinee(pat: &AIRNode) -> bool {
+        match &pat.kind {
+            NodeKind::BindPat { .. } => true,
+            NodeKind::OrPat { alternatives } => {
+                alternatives.iter().any(Self::pattern_binds_scrutinee)
+            }
+            NodeKind::GuardPat { pattern, .. } => Self::pattern_binds_scrutinee(pattern),
+            _ => false,
+        }
+    }
+
+    /// Whether this match should match on `(scrutinee).as_str()` rather than the
+    /// scrutinee directly. Bock's only string type is `String`, which lowers to
+    /// an owned Rust `String`; a string-literal pattern (`"foo"`) has type `&str`,
+    /// so matching a `String` scrutinee against it is `String` vs `&str` (E0308).
+    /// Matching `(s).as_str()` (a `&str`) against the `&str` literals lines the two
+    /// up.
+    ///
+    /// Fires only when (a) some arm carries a string-literal pattern, (b) no arm
+    /// carries a list pattern (those take `.as_slice()`, and string/list arms
+    /// cannot coexist on one scrutinee anyway), and (c) no arm binds the whole
+    /// scrutinee by name (`other => …`) — wrapping would retype such a binding from
+    /// owned `String` to `&str`, so it is left untouched. A scrutinee with only
+    /// bind/wildcard/constructor patterns (no string literal) is likewise left
+    /// alone, preserving an owned-`String` binding's type.
+    fn scrutinee_matches_str_literal(arms: &[AIRNode]) -> bool {
+        arms.iter().any(Self::arm_matches_str_literal)
+            && !arms.iter().any(Self::arm_matches_list)
+            && !arms.iter().any(Self::arm_binds_scrutinee)
     }
 
     fn emit_match_arm(&mut self, arm: &AIRNode) -> Result<(), CodegenError> {
@@ -6258,6 +6341,211 @@ mod tests {
         assert!(out.contains("match color"), "got: {out}");
         assert!(out.contains("Color::Red =>"), "got: {out}");
         assert!(out.contains("_ =>"), "got: {out}");
+    }
+
+    /// Build a `String`-typed param `fn <name>(s: String) -> String { match s { <arms> } }`.
+    fn str_match_fn(name: &str, arms: Vec<AIRNode>) -> AIRNode {
+        let m = node(
+            900,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(901, "s")),
+                arms,
+            },
+        );
+        node(
+            910,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![typed_param_node(911, "s", "String")],
+                return_type: Some(Box::new(node(
+                    913,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(912, vec![m], None)),
+            },
+        )
+    }
+
+    fn str_lit_pat(id: u32, val: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::LiteralPat {
+                lit: Literal::String(val.into()),
+            },
+        )
+    }
+
+    fn arm(id: u32, pattern: AIRNode, body: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::MatchArm {
+                pattern: Box::new(pattern),
+                guard: None,
+                body: Box::new(body),
+            },
+        )
+    }
+
+    /// A `String` scrutinee matched against `&str` literal arms must match on
+    /// `(s).as_str()` so the literal patterns (`"hello"`, type `&str`) line up
+    /// with the scrutinee (E0308 otherwise: `String` vs `&str`).
+    #[test]
+    fn rust_str_literal_match_uses_as_str() {
+        let f = str_match_fn(
+            "classify_string",
+            vec![
+                arm(
+                    20,
+                    str_lit_pat(21, "hello"),
+                    block(22, vec![], Some(str_lit(23, "greeting"))),
+                ),
+                arm(
+                    24,
+                    str_lit_pat(25, "bye"),
+                    block(26, vec![], Some(str_lit(27, "farewell"))),
+                ),
+                arm(
+                    28,
+                    node(29, NodeKind::WildcardPat),
+                    block(30, vec![], Some(str_lit(31, "unknown"))),
+                ),
+            ],
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("match (s).as_str()"), "got: {out}");
+        // And the whole module must compile (no E0308).
+        assert!(
+            check_rs_syntax(&out),
+            "generated rust did not compile: {out}"
+        );
+    }
+
+    /// Guard against over-broadening: a `String` scrutinee with no string-literal
+    /// arms (here a bare binding arm) must NOT be `.as_str()`-wrapped — that would
+    /// rebind the value as `&str` and change its type.
+    #[test]
+    fn rust_str_literal_match_non_literal_unchanged() {
+        let f = str_match_fn(
+            "echo_string",
+            vec![arm(
+                40,
+                bind_pat(41, "other"),
+                block(42, vec![], Some(id_node(43, "other"))),
+            )],
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(!out.contains(".as_str()"), "should not wrap: {out}");
+        assert!(out.contains("match s"), "got: {out}");
+        assert!(
+            check_rs_syntax(&out),
+            "generated rust did not compile: {out}"
+        );
+    }
+
+    /// A `String` match mixing string-literal arms with a top-level *binding* arm
+    /// (`other => other`) must NOT be `.as_str()`-wrapped: wrapping would retype
+    /// `other` from owned `String` to `&str` and break a body that returns it as a
+    /// `String`. The binding arm's presence suppresses the wrap (the literal arm is
+    /// left as-is — a separately-tracked residual, not made worse by this fix).
+    #[test]
+    fn rust_str_literal_match_with_binding_arm_unwrapped() {
+        let f = str_match_fn(
+            "describe_string",
+            vec![
+                arm(
+                    44,
+                    str_lit_pat(45, "hi"),
+                    block(46, vec![], Some(str_lit(47, "greeting"))),
+                ),
+                arm(
+                    48,
+                    bind_pat(49, "other"),
+                    block(70, vec![], Some(id_node(71, "other"))),
+                ),
+            ],
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains(".as_str()"),
+            "binding arm must suppress the wrap: {out}"
+        );
+        assert!(out.contains("match s"), "got: {out}");
+    }
+
+    /// The `.as_str()` wrapping must apply in expression position too (a `match`
+    /// used as the value of an enclosing expression), not only statement position.
+    #[test]
+    fn rust_str_literal_match_expr_position() {
+        // fn label(s: String) -> String { let r: String = match s { "y" => "yes", _ => "no" }; r }
+        let m = node(
+            50,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(51, "s")),
+                arms: vec![
+                    arm(
+                        52,
+                        str_lit_pat(53, "y"),
+                        block(54, vec![], Some(str_lit(55, "yes"))),
+                    ),
+                    arm(
+                        56,
+                        node(57, NodeKind::WildcardPat),
+                        block(58, vec![], Some(str_lit(59, "no"))),
+                    ),
+                ],
+            },
+        );
+        let let_node = node(
+            60,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(61, "r")),
+                ty: Some(Box::new(node(
+                    62,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                ))),
+                value: Box::new(m),
+            },
+        );
+        let f = node(
+            63,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("label"),
+                generic_params: vec![],
+                params: vec![typed_param_node(64, "s", "String")],
+                return_type: Some(Box::new(node(
+                    67,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(65, vec![let_node], Some(id_node(66, "r")))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("match (s).as_str()"), "got: {out}");
+        assert!(
+            check_rs_syntax(&out),
+            "generated rust did not compile: {out}"
+        );
     }
 
     #[test]
