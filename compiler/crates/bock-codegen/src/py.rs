@@ -60,6 +60,14 @@ fn py_module_uses_result(items: &[AIRNode]) -> bool {
     })
 }
 
+/// True if the module uses the `?` propagate operator anywhere, so the
+/// [`PROPAGATE_RUNTIME_PY`] helper (`_bock_try` / `_BockPropagate`) must be
+/// emitted. Mirrors [`py_module_uses_optional`]: a structural scan over the debug
+/// rendering for the `Propagate` AIR node.
+fn py_module_uses_propagate(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| format!("{n:?}").contains("Propagate"))
+}
+
 /// True if the module uses a `List` functional combinator that lowers to one of
 /// the [`LIST_FUNCTIONAL_RUNTIME_PY`] helpers (`reduce`/`fold`/`find`/`for_each`).
 /// Gates emission of that prelude, mirroring [`py_module_uses_optional`]. `map`/
@@ -141,6 +149,33 @@ class _BockErr:
         self._0 = _0
     def __repr__(self):
         return f'Err({self._0!r})'
+";
+
+/// Runtime for the `?` propagate operator in Python. `expr?` lowers to
+/// `_bock_try(expr)`: an `Ok`/`Some` value yields its payload; an `Err`/`None`
+/// value raises the `_BockPropagate` sentinel carrying the original tagged value.
+/// The enclosing function (the one containing the `?`) has its body wrapped in
+/// `try: … except _BockPropagate as __p: return __p.value`, so the `Err`/`None`
+/// is re-returned unchanged — Rust-`?` semantics.
+///
+/// The unwrap test is by **class name** (`type(v).__name__`) rather than
+/// `isinstance`, so the helper is self-contained: it does not hard-reference
+/// `_BockOk`/`_BockSome`, which lets it live in `_bock_runtime` (or be inlined)
+/// even when only one of the Optional/Result preludes is present. Anything that
+/// is not a recognised success tag (including the `_BockNone` singleton) is
+/// treated as the failing case and propagated.
+const PROPAGATE_RUNTIME_PY: &str = "\
+# ── Bock `?` propagate runtime ──
+class _BockPropagate(Exception):
+    __slots__ = ('value',)
+    def __init__(self, value):
+        super().__init__()
+        self.value = value
+
+def _bock_try(v):
+    if type(v).__name__ in ('_BockOk', '_BockSome'):
+        return v._0
+    raise _BockPropagate(v)
 ";
 
 /// The prelude `Ordering` runtime: the three variants of `core.compare.Ordering`
@@ -784,6 +819,27 @@ fn is_raise_expr(node: &AIRNode) -> bool {
     }
 }
 
+/// Whether `node`'s subtree contains a `?` propagate operator that belongs to
+/// *this* function/method — used to decide whether the body must be wrapped in
+/// the `try: … except _BockPropagate: return …` envelope (see
+/// [`PyEmitCtx::emit_fn_body_with_propagate`]). The walk stops at a nested
+/// `FnDecl`/`Lambda`/`ClassDecl` boundary: a `?` inside a nested closure or
+/// method propagates from *that* inner function, so it gets its own wrapper and
+/// must not force one on the enclosing body.
+fn body_contains_propagate(node: &AIRNode) -> bool {
+    if matches!(node.kind, NodeKind::Propagate { .. }) {
+        return true;
+    }
+    // Do not descend into a nested scope: its `?` is the inner function's.
+    if matches!(
+        node.kind,
+        NodeKind::FnDecl { .. } | NodeKind::Lambda { .. } | NodeKind::ClassDecl { .. }
+    ) {
+        return false;
+    }
+    child_nodes(node).iter().any(|c| body_contains_propagate(c))
+}
+
 /// The tail/block value of `node` (for an `if`/`match` arm body), unwrapping a
 /// single-tail `Block`.
 fn unwrap_block_tail(node: &AIRNode) -> &AIRNode {
@@ -1073,6 +1129,7 @@ impl CodeGenerator for PyGenerator {
         let mut runtime_ordering = false;
         let mut runtime_concurrency = false;
         let mut runtime_list_functional = false;
+        let mut runtime_propagate = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let mut ctx = PyEmitCtx::new();
@@ -1097,6 +1154,7 @@ impl CodeGenerator for PyGenerator {
             runtime_ordering |= ctx.needs_runtime_ordering;
             runtime_concurrency |= ctx.needs_runtime_concurrency;
             runtime_list_functional |= ctx.needs_runtime_list_functional;
+            runtime_propagate |= ctx.needs_runtime_propagate;
             let mut content = ctx.finish();
 
             // The entry file gets the `if __name__ == "__main__": main()`
@@ -1133,6 +1191,7 @@ impl CodeGenerator for PyGenerator {
             || runtime_ordering
             || runtime_concurrency
             || runtime_list_functional
+            || runtime_propagate
         {
             let mut content = String::new();
             // Every runtime name is underscore-prefixed, which `from … import *`
@@ -1176,6 +1235,14 @@ impl CodeGenerator for PyGenerator {
                 content.push_str(LIST_FUNCTIONAL_RUNTIME_PY);
                 content.push('\n');
                 all_names.extend(["_bock_reduce", "_bock_fold", "_bock_find", "_bock_for_each"]);
+            }
+            if runtime_propagate {
+                // `_bock_try` tests success tags by class *name*, so it has no
+                // hard reference to `_BockOk`/`_BockSome` and can stand alone even
+                // when only one of the Optional/Result preludes is present.
+                content.push_str(PROPAGATE_RUNTIME_PY);
+                content.push('\n');
+                all_names.extend(["_BockPropagate", "_bock_try"]);
             }
             let all_list = all_names
                 .iter()
@@ -1364,6 +1431,26 @@ impl PyGenerator {
 
 // ─── Emission context ────────────────────────────────────────────────────────
 
+/// One lexical-block frame on [`PyEmitCtx::shadow_scopes`].
+///
+/// Python has function scope, not block scope, for `=`. A Bock `let` that
+/// shadows a name bound in an enclosing block would therefore, if emitted as a
+/// plain `name = …`, permanently stomp the outer binding — code after the nested
+/// block then reads the inner value. Each block frame tracks the Python names
+/// bound *directly within it* (`bound`) and, for any name it shadows from an
+/// enclosing frame, the fresh alias it was renamed to (`renames`). Identifier
+/// emission consults the frame stack innermost-first, so a shadowed name resolves
+/// to its alias inside the nested block and to the original once the block ends.
+#[derive(Default)]
+struct ShadowScope {
+    /// Python names bound directly in this block (so a *same-block* re-bind is a
+    /// plain rebind, never renamed — `let acc = …; let acc = acc + 1`).
+    bound: std::collections::HashSet<String>,
+    /// Original-python-name → alias for names this block shadows from an
+    /// enclosing frame.
+    renames: HashMap<String, String>,
+}
+
 /// Internal state for Python emission.
 struct PyEmitCtx {
     buf: String,
@@ -1421,6 +1508,10 @@ struct PyEmitCtx {
     /// Set once the [`LIST_FUNCTIONAL_RUNTIME_PY`] prelude has been emitted;
     /// deduped exactly as [`Self::optional_runtime_emitted`].
     list_functional_runtime_emitted: bool,
+    /// Set once the [`PROPAGATE_RUNTIME_PY`] prelude (`_bock_try` /
+    /// `_BockPropagate`) has been emitted; deduped exactly as
+    /// [`Self::optional_runtime_emitted`].
+    propagate_runtime_emitted: bool,
     /// Set when an enum decl emits a `Name = Union[...]` alias, so the preamble
     /// imports `Union` from `typing`.
     needs_union_import: bool,
@@ -1472,6 +1563,10 @@ struct PyEmitCtx {
     needs_runtime_ordering: bool,
     needs_runtime_concurrency: bool,
     needs_runtime_list_functional: bool,
+    /// In the per-module path, set when this module uses the `?` propagate
+    /// operator, so it imports `_bock_try` / `_BockPropagate` from the shared
+    /// `RUNTIME_MODULE_PY`. Mirrors [`Self::needs_runtime_optional`].
+    needs_runtime_propagate: bool,
     /// Implicit cross-module imports for the per-module path, as
     /// `(module_path, symbol_name)` pairs — names this module references but
     /// neither declares locally nor imports via an explicit `use` (e.g. a
@@ -1514,6 +1609,20 @@ struct PyEmitCtx {
     /// otherwise disagree, raising `NameError`. See
     /// [`crate::generator::collect_const_names`].
     const_names: std::collections::HashSet<String>,
+    /// Stack of lexical-block frames for nested-block `let`-shadow renaming (see
+    /// [`ShadowScope`]). A frame is pushed on entering a Bock `{ }` block (every
+    /// function/method body, value-block, `if`/`else`/`match`-arm/loop/guard
+    /// body) and popped on leaving it.
+    shadow_scopes: Vec<ShadowScope>,
+    /// Monotonic counter for generating fresh shadow-alias names
+    /// (`{name}__s{N}`), unique per emission context.
+    shadow_counter: usize,
+    /// Names to seed into the *next* shadow frame pushed by
+    /// [`Self::emit_block_body`] — used to put a function/method's parameters in
+    /// the same frame as its body block, so a body-level `let` re-binding a param
+    /// is a plain Python rebind (the idiom) while a *nested*-block `let`
+    /// shadowing the param is renamed. Drained (cleared) on the next push.
+    pending_scope_seed: Vec<String>,
 }
 
 impl PyEmitCtx {
@@ -1538,6 +1647,7 @@ impl PyEmitCtx {
             ordering_runtime_emitted: false,
             concurrency_runtime_emitted: false,
             list_functional_runtime_emitted: false,
+            propagate_runtime_emitted: false,
             needs_union_import: false,
             needs_typing_callable: Cell::new(false),
             needs_typing_any: Cell::new(false),
@@ -1553,11 +1663,15 @@ impl PyEmitCtx {
             needs_runtime_ordering: false,
             needs_runtime_concurrency: false,
             needs_runtime_list_functional: false,
+            needs_runtime_propagate: false,
             implicit_imports: Vec::new(),
             field_method_collisions: std::collections::HashSet::new(),
             const_names: std::collections::HashSet::new(),
             is_entry_module: false,
             loop_value_targets: Vec::new(),
+            shadow_scopes: Vec::new(),
+            shadow_counter: 0,
+            pending_scope_seed: Vec::new(),
         }
     }
 
@@ -1621,7 +1735,8 @@ impl PyEmitCtx {
                 || self.needs_runtime_result
                 || self.needs_runtime_ordering
                 || self.needs_runtime_concurrency
-                || self.needs_runtime_list_functional)
+                || self.needs_runtime_list_functional
+                || self.needs_runtime_propagate)
         {
             let _ = writeln!(preamble, "from {RUNTIME_MODULE_PY} import *");
         }
@@ -3039,6 +3154,9 @@ impl PyEmitCtx {
                         // the Optional prelude must be present alongside it.
                         self.needs_runtime_optional = true;
                     }
+                    if py_module_uses_propagate(items) {
+                        self.needs_runtime_propagate = true;
+                    }
                 } else {
                     // Single-module self-contained emit (`generate_module`, used
                     // by unit tests): the module's runtime preludes are inlined
@@ -3078,6 +3196,11 @@ impl PyEmitCtx {
                         self.buf.push_str(LIST_FUNCTIONAL_RUNTIME_PY);
                         self.buf.push('\n');
                         self.list_functional_runtime_emitted = true;
+                    }
+                    if !self.propagate_runtime_emitted && py_module_uses_propagate(items) {
+                        self.buf.push_str(PROPAGATE_RUNTIME_PY);
+                        self.buf.push('\n');
+                        self.propagate_runtime_emitted = true;
                     }
                 }
                 // Per-module path: emit the module's cross-module imports as
@@ -3721,7 +3844,10 @@ impl PyEmitCtx {
             self.current_handler_vars
                 .insert(ename.clone(), to_snake_case(ename));
         }
-        self.emit_block_body(body)?;
+        // Seed the body's shadow frame with the parameters (so a body-level `let`
+        // re-binding a param is a plain rebind, a nested-block one is renamed).
+        self.pending_scope_seed = Self::param_value_names(params);
+        self.emit_fn_body(body)?;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         Ok(())
@@ -3774,11 +3900,33 @@ impl PyEmitCtx {
                 self.current_handler_vars
                     .insert(ename.clone(), to_snake_case(ename));
             }
-            self.emit_block_body(body)?;
+            // Seed the body frame with `self` + the method params (see
+            // `emit_fn_decl`).
+            let mut seed = vec!["self".to_string()];
+            seed.extend(Self::param_value_names(rest));
+            self.pending_scope_seed = seed;
+            self.emit_fn_body(body)?;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
         }
         Ok(())
+    }
+
+    /// The Python value-names a parameter list binds (simple `BindPat` params
+    /// only). Used to seed the function/method body's shadow frame so a body
+    /// `let` re-binding a param is a plain rebind, while a nested-block `let`
+    /// shadowing the param is renamed.
+    fn param_value_names(params: &[AIRNode]) -> Vec<String> {
+        params
+            .iter()
+            .filter_map(|p| {
+                if let NodeKind::Param { pattern, .. } = &p.kind {
+                    Self::simple_bind_name(pattern)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Collect parameter strings for a `def`/method signature.
@@ -3936,7 +4084,17 @@ impl PyEmitCtx {
             NodeKind::LetBinding {
                 pattern, value, ty, ..
             } => {
-                let binding = self.pattern_to_py_binding(pattern);
+                // Nested-block `let`-shadow handling (simple `BindPat` only): a
+                // binding that shadows an enclosing-scope name is renamed to a
+                // fresh alias so Python's function-scoped `=` doesn't stomp the
+                // outer binding. The rename is *planned* now (so the LHS uses the
+                // alias) but *committed* only after the RHS is emitted — the RHS
+                // reads the prior binding (`let y = y + 10` reads the outer `y`).
+                let raw_name = Self::simple_bind_name(pattern);
+                let (binding, pending) = match &raw_name {
+                    Some(n) => self.plan_shadow_let(n),
+                    None => (self.pattern_to_py_binding(pattern), None),
+                };
                 let type_hint = ty
                     .as_ref()
                     .map(|t| format!(": {}", self.type_to_py(t)))
@@ -3947,6 +4105,9 @@ impl PyEmitCtx {
                 if node.metadata.contains_key(crate::generator::DECL_ONLY_META) {
                     let ind = self.indent_str();
                     let _ = writeln!(self.buf, "{ind}{binding}{type_hint} = None");
+                    if let Some(n) = &raw_name {
+                        self.commit_shadow_let(n, pending);
+                    }
                     return Ok(());
                 }
                 // Expression-position control flow (a value-`loop`, a `match`
@@ -3957,7 +4118,11 @@ impl PyEmitCtx {
                 if value_needs_stmt_form(value) {
                     let ind = self.indent_str();
                     let _ = writeln!(self.buf, "{ind}{binding}{type_hint} = None");
-                    return self.emit_value_binding(&binding, value);
+                    let r = self.emit_value_binding(&binding, value);
+                    if let Some(n) = &raw_name {
+                        self.commit_shadow_let(n, pending);
+                    }
+                    return r;
                 }
                 // `let x = todo()` — the value diverges (a `raise`), so it cannot
                 // sit on the RHS of `=`. Emit the raise bare; the binding is never
@@ -3981,6 +4146,10 @@ impl PyEmitCtx {
                     self.emit_expr(value)?;
                 }
                 self.buf.push('\n');
+                // Commit the rename only now — after the RHS read the prior binding.
+                if let Some(n) = &raw_name {
+                    self.commit_shadow_let(n, pending);
+                }
                 Ok(())
             }
             NodeKind::If {
@@ -4270,7 +4439,11 @@ impl PyEmitCtx {
                     // identically rather than through `identifier_to_py`.
                     self.buf.push_str(&name.name);
                 } else {
-                    self.buf.push_str(&identifier_to_py(&name.name));
+                    // Resolve through the shadow-scope stack so a reference inside
+                    // a nested block reads the (renamed) shadowing binding while
+                    // code outside reads the original (see `ShadowScope`).
+                    let py = identifier_to_py(&name.name);
+                    self.buf.push_str(&self.resolve_shadow_name(&py));
                 }
                 Ok(())
             }
@@ -4501,8 +4674,14 @@ impl PyEmitCtx {
                 Ok(())
             }
             NodeKind::Propagate { expr } => {
-                // Python doesn't have `?`; just emit the expression.
+                // `expr?` → `_bock_try(expr)`: unwrap the `Ok`/`Some` payload, or
+                // raise the `_BockPropagate` sentinel (carrying the `Err`/`None`)
+                // that the enclosing function's `try/except` re-returns. The wrap
+                // is installed by `emit_fn_body_with_propagate` for any function or
+                // method whose body contains a `?` (see `body_contains_propagate`).
+                self.buf.push_str("_bock_try(");
                 self.emit_expr(expr)?;
+                self.buf.push(')');
                 Ok(())
             }
             NodeKind::Range { lo, hi, inclusive } => {
@@ -5440,7 +5619,141 @@ impl PyEmitCtx {
         }
     }
 
+    /// Push a fresh lexical-block frame for nested-block `let`-shadow renaming,
+    /// seeded with any names queued in [`Self::pending_scope_seed`] (a function's
+    /// parameters, so they share the body frame). The seed is drained.
+    fn enter_shadow_scope(&mut self) {
+        let mut frame = ShadowScope::default();
+        for n in self.pending_scope_seed.drain(..) {
+            frame.bound.insert(n);
+        }
+        self.shadow_scopes.push(frame);
+    }
+
+    /// Pop the innermost lexical-block frame pushed by [`Self::enter_shadow_scope`].
+    fn leave_shadow_scope(&mut self) {
+        self.shadow_scopes.pop();
+    }
+
+    /// Whether `py_name` is bound in any *enclosing* frame (every frame except
+    /// the innermost), i.e. binding it again in the current block shadows an
+    /// outer binding and — on Python's function-scoped `=` — would stomp it.
+    fn shadowed_in_outer_scope(&self, py_name: &str) -> bool {
+        let n = self.shadow_scopes.len();
+        if n < 2 {
+            return false;
+        }
+        self.shadow_scopes[..n - 1]
+            .iter()
+            .any(|s| s.bound.contains(py_name) || s.renames.contains_key(py_name))
+    }
+
+    /// Resolve a Python identifier through the shadow-scope stack: the innermost
+    /// frame that renamed `py_name` wins, else the name is unchanged. Used at
+    /// every identifier *use* site so a reference inside a shadowing block reads
+    /// the alias while code outside reads the original.
+    fn resolve_shadow_name(&self, py_name: &str) -> String {
+        for s in self.shadow_scopes.iter().rev() {
+            if let Some(alias) = s.renames.get(py_name) {
+                return alias.clone();
+            }
+            // A frame that *binds* the name directly (without a rename) stops the
+            // search: an inner block's same-name binding is the live one there.
+            if s.bound.contains(py_name) {
+                return py_name.to_string();
+            }
+        }
+        py_name.to_string()
+    }
+
+    /// Plan a `let`-binding's LHS Python name without yet activating it in the
+    /// scope frame. A `let`'s RHS reads the *prior* binding (`let y = y + 10`
+    /// reads the outer `y`), so the rename must take effect only *after* the RHS
+    /// is emitted — [`Self::commit_shadow_let`] does that. Returns the LHS name to
+    /// emit (a fresh alias when the binding shadows an enclosing frame, else the
+    /// name unchanged) paired with the rename to commit (`Some((orig, alias))`
+    /// only for a fresh shadow; `None` for a same-block rebind or first binding).
+    fn plan_shadow_let(&mut self, py_name: &str) -> (String, Option<(String, String)>) {
+        // No active frame (defensive) → emit verbatim, nothing to commit.
+        if self.shadow_scopes.is_empty() {
+            return (py_name.to_string(), None);
+        }
+        // Same-block re-bind: an existing alias or direct binding here is reused
+        // (a plain Python rebind), with nothing new to commit.
+        if let Some(cur) = self.shadow_scopes.last() {
+            if let Some(alias) = cur.renames.get(py_name) {
+                return (alias.clone(), None);
+            }
+            if cur.bound.contains(py_name) {
+                return (py_name.to_string(), None);
+            }
+        }
+        if self.shadowed_in_outer_scope(py_name) {
+            self.shadow_counter += 1;
+            let alias = format!("{py_name}__s{}", self.shadow_counter);
+            return (alias.clone(), Some((py_name.to_string(), alias)));
+        }
+        (py_name.to_string(), None)
+    }
+
+    /// Activate a planned `let` binding in the current frame, after its RHS has
+    /// been emitted. `pending` is the rename returned by [`Self::plan_shadow_let`]
+    /// (`Some` only for a fresh shadow); `py_name` is the original name (used to
+    /// record a non-shadowing first binding so later same-block rebinds and
+    /// nested shadows resolve correctly).
+    fn commit_shadow_let(&mut self, py_name: &str, pending: Option<(String, String)>) {
+        let Some(cur) = self.shadow_scopes.last_mut() else {
+            return;
+        };
+        if let Some((orig, alias)) = pending {
+            cur.renames.insert(orig, alias.clone());
+            cur.bound.insert(alias);
+        } else {
+            cur.bound.insert(py_name.to_string());
+        }
+    }
+
+    /// Emit a **function/method body**, wrapping it in the `?`-propagate
+    /// envelope when the body contains a `?` operator. `expr?` lowers to
+    /// `_bock_try(expr)`, which raises `_BockPropagate` on an `Err`/`None`; the
+    /// envelope catches that and re-returns the carried value, giving Rust-`?`
+    /// early-return semantics:
+    ///
+    /// ```python
+    /// try:
+    ///     <body>
+    /// except _BockPropagate as __bock_p:
+    ///     return __bock_p.value
+    /// ```
+    ///
+    /// A body with no `?` is emitted unchanged (no envelope, no runtime cost).
+    fn emit_fn_body(&mut self, body: &AIRNode) -> Result<(), CodegenError> {
+        if body_contains_propagate(body) {
+            self.writeln("try:");
+            self.indent += 1;
+            self.emit_block_body(body)?;
+            self.indent -= 1;
+            self.writeln("except _BockPropagate as __bock_p:");
+            self.indent += 1;
+            self.writeln("return __bock_p.value");
+            self.indent -= 1;
+            Ok(())
+        } else {
+            self.emit_block_body(body)
+        }
+    }
+
+    /// Emit a block (or bare-body) in statement/`return` position, opening a
+    /// fresh shadow-scope frame so a nested-block `let` that shadows an enclosing
+    /// binding is renamed rather than stomping it (see [`ShadowScope`]).
     fn emit_block_body(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        self.enter_shadow_scope();
+        let r = self.emit_block_body_inner(node);
+        self.leave_shadow_scope();
+        r
+    }
+
+    fn emit_block_body_inner(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         if let NodeKind::Block { stmts, tail } = &node.kind {
             if stmts.is_empty() && tail.is_none() {
                 self.writeln("pass");
@@ -5463,6 +5776,19 @@ impl PyEmitCtx {
                 // A statement tail (`break`/`continue`/`return`/assignment) is
                 // emitted as a statement, never wrapped in `return`.
                 if crate::generator::node_is_statement(t) {
+                    self.emit_node(t)?;
+                    return Ok(());
+                }
+                // A bare `loop`/`while`/`for` in tail position yields no value (it
+                // exits only via `break`/`return`, and a value-`loop` is rewritten
+                // by `emit_value_binding`, not here). Emit it as a Python loop
+                // statement — never `return <loop>`, which `emit_expr` would lower
+                // to the `# unsupported` fallthrough, silently discarding the whole
+                // loop body (the guessing-game `play()` tail-`loop` shape).
+                if matches!(
+                    t.kind,
+                    NodeKind::Loop { .. } | NodeKind::While { .. } | NodeKind::For { .. }
+                ) {
                     self.emit_node(t)?;
                     return Ok(());
                 }
@@ -5496,6 +5822,13 @@ impl PyEmitCtx {
             }
         } else if crate::generator::node_is_statement(node) {
             // A bare statement body (`break`/`continue`/`return`/assignment).
+            self.emit_node(node)?;
+        } else if matches!(
+            node.kind,
+            NodeKind::Loop { .. } | NodeKind::While { .. } | NodeKind::For { .. }
+        ) {
+            // A bare `loop`/`while`/`for` body yields no value — emit the loop
+            // statement, never `return <loop>` (see the tail-position note above).
             self.emit_node(node)?;
         } else if is_raise_expr(node) {
             self.write_indent();
@@ -5611,6 +5944,17 @@ impl PyEmitCtx {
     /// leaves the construct before the binding is read, exactly as in Bock where
     /// such an arm has type `Never` and unifies with the binding's type.
     fn emit_block_body_assigning(
+        &mut self,
+        target: &str,
+        node: &AIRNode,
+    ) -> Result<(), CodegenError> {
+        self.enter_shadow_scope();
+        let r = self.emit_block_body_assigning_inner(target, node);
+        self.leave_shadow_scope();
+        r
+    }
+
+    fn emit_block_body_assigning_inner(
         &mut self,
         target: &str,
         node: &AIRNode,
@@ -5821,6 +6165,17 @@ impl PyEmitCtx {
             }
         }
         self.emit_expr(node)
+    }
+
+    /// The single Python value-name a *simple* `let` pattern binds, if any: only
+    /// a `BindPat` qualifies (tuple/record patterns bind several names or use
+    /// Python-side destructuring that shadow-renaming does not rewrite). Used to
+    /// gate nested-block `let`-shadow renaming to the simple, common case.
+    fn simple_bind_name(pat: &AIRNode) -> Option<String> {
+        match &pat.kind {
+            NodeKind::BindPat { name, .. } => Some(py_value_ident(&name.name)),
+            _ => None,
+        }
     }
 
     fn pattern_to_binding_name(&self, pat: &AIRNode) -> String {
@@ -7443,6 +7798,199 @@ mod tests {
         // match reads (the old dict-with-`value`/`error`-keys shape disagreed).
         assert!(out.contains("_BockOk(42)"), "got: {out}");
         assert!(out.contains("_BockErr(\"failed\")"), "got: {out}");
+    }
+
+    /// A `let`-binding node (immutable, simple bind pattern).
+    fn let_node(id: u32, name: &str, value: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(id + 1, name)),
+                ty: None,
+                value: Box::new(value),
+            },
+        )
+    }
+
+    /// `expr?` — a `Propagate` over `expr`.
+    fn propagate(id: u32, expr: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::Propagate {
+                expr: Box::new(expr),
+            },
+        )
+    }
+
+    /// `fn() -> Result[..]` whose body is `let v = inner?` then a tail `Ok(v)`.
+    /// Exercises the `?` lowering: `_bock_try(..)` + the try/except envelope.
+    #[test]
+    fn propagate_unwraps_and_wraps_body() {
+        let inner_call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "fallible")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let body = block(
+            2,
+            vec![let_node(3, "v", propagate(4, inner_call))],
+            Some(node(
+                6,
+                NodeKind::ResultConstruct {
+                    variant: ResultVariant::Ok,
+                    value: Some(Box::new(id_node(7, "v"))),
+                },
+            )),
+        );
+        let f = fn_decl_body(1, "do_it", body);
+        let out = gen(&module(vec![], vec![f]));
+        // `?` lowers to the unwrap helper, not a bare passthrough.
+        assert!(out.contains("_bock_try(fallible())"), "got: {out}");
+        // The function body is wrapped in the propagate envelope.
+        assert!(out.contains("try:"), "got: {out}");
+        assert!(
+            out.contains("except _BockPropagate as __bock_p:"),
+            "got: {out}"
+        );
+        assert!(out.contains("return __bock_p.value"), "got: {out}");
+        // The propagate runtime prelude is emitted.
+        assert!(out.contains("def _bock_try(v):"), "got: {out}");
+    }
+
+    /// A function with no `?` must NOT gain the try/except envelope or the
+    /// propagate runtime (no needless cost / behavioural change).
+    #[test]
+    fn no_propagate_no_envelope() {
+        let body = block(2, vec![], Some(int_lit(3, "1")));
+        let f = fn_decl_body(1, "plain", body);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(!out.contains("_bock_try"), "got: {out}");
+        assert!(!out.contains("_BockPropagate"), "got: {out}");
+    }
+
+    /// `fn() { let y = 1; let z = { let y = y + 10; y * 2 }; y + z }` — the inner
+    /// block's `let y` shadows the outer `y` and must be renamed so the outer `y`
+    /// is untouched (Python has no block scope for `=`).
+    #[test]
+    fn nested_block_let_shadow_is_renamed() {
+        let add = |id, l: AIRNode, r: AIRNode| {
+            node(
+                id,
+                NodeKind::BinaryOp {
+                    op: BinOp::Add,
+                    left: Box::new(l),
+                    right: Box::new(r),
+                },
+            )
+        };
+        let mul = |id, l: AIRNode, r: AIRNode| {
+            node(
+                id,
+                NodeKind::BinaryOp {
+                    op: BinOp::Mul,
+                    left: Box::new(l),
+                    right: Box::new(r),
+                },
+            )
+        };
+        // inner block: { let y = y + 10; y * 2 }
+        let inner_block = block(
+            20,
+            vec![let_node(
+                21,
+                "y",
+                add(22, id_node(23, "y"), int_lit(24, "10")),
+            )],
+            Some(mul(25, id_node(26, "y"), int_lit(27, "2"))),
+        );
+        let body = block(
+            2,
+            vec![
+                let_node(3, "y", int_lit(4, "1")),
+                let_node(5, "z", inner_block),
+            ],
+            Some(add(8, id_node(9, "y"), id_node(10, "z"))),
+        );
+        let f = fn_decl_body(1, "nested", body);
+        let out = gen(&module(vec![], vec![f]));
+        // The inner `let y` is renamed; the outer `y = 1` and the final `y + z`
+        // read the original `y`.
+        assert!(out.contains("y__s"), "expected a shadow alias, got: {out}");
+        assert!(out.contains("y = 1"), "got: {out}");
+        // The final tail uses the *un*-aliased outer `y` (it appears as `(y + z)`
+        // — the alias name is `y__s1`, which `(y + z)` does not contain).
+        assert!(out.contains("return (y + z)"), "got: {out}");
+    }
+
+    /// A same-block re-bind (`let acc = …; let acc = acc + 1`) is a plain Python
+    /// rebind — no alias, no duplicate.
+    #[test]
+    fn same_block_rebind_is_not_renamed() {
+        let add = |id, l: AIRNode, r: AIRNode| {
+            node(
+                id,
+                NodeKind::BinaryOp {
+                    op: BinOp::Add,
+                    left: Box::new(l),
+                    right: Box::new(r),
+                },
+            )
+        };
+        let body = block(
+            2,
+            vec![
+                let_node(3, "acc", int_lit(4, "1")),
+                let_node(5, "acc", add(6, id_node(7, "acc"), int_lit(8, "2"))),
+            ],
+            Some(id_node(9, "acc")),
+        );
+        let f = fn_decl_body(1, "rebind", body);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(!out.contains("acc__s"), "must not rename, got: {out}");
+        assert!(out.contains("acc = 1"), "got: {out}");
+        assert!(out.contains("acc = (acc + 2)"), "got: {out}");
+    }
+
+    /// A Void function whose tail is a bare `loop { break }` must emit a
+    /// `while True:` statement, never `return # unsupported`.
+    #[test]
+    fn tail_loop_emits_while_not_unsupported() {
+        let loop_body = block(10, vec![node(11, NodeKind::Break { value: None })], None);
+        let tail_loop = node(
+            5,
+            NodeKind::Loop {
+                body: Box::new(loop_body),
+            },
+        );
+        let body = block(2, vec![], Some(tail_loop));
+        let f = fn_decl_body(1, "spin", body);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("while True:"), "got: {out}");
+        assert!(!out.contains("# unsupported"), "got: {out}");
+        assert!(!out.contains("return # unsupported"), "got: {out}");
+    }
+
+    /// Helper: a private `fn <name>()` with an explicit body block.
+    fn fn_decl_body(id: u32, name: &str, body: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
     }
 
     #[test]
