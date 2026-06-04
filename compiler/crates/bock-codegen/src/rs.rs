@@ -101,6 +101,9 @@ impl CodeGenerator for RsGenerator {
     }
 
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
+        // Shared pre-pass: hoist value-position diverging control flow (see
+        // `hoist_value_cf`) into declare-then-assign temp blocks.
+        let module = &crate::generator::hoist_value_cf(module.clone());
         let mut ctx = RsEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
@@ -170,6 +173,15 @@ impl CodeGenerator for RsGenerator {
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
+        // Shared pre-pass: hoist value-position diverging control flow on every
+        // module before registry collection or emission (see `hoist_value_cf`).
+        let hoisted: Vec<(AIRModule, &std::path::Path)> = modules
+            .iter()
+            .map(|(m, p)| (crate::generator::hoist_value_cf((*m).clone()), *p))
+            .collect();
+        let modules: Vec<(&AIRModule, &std::path::Path)> =
+            hoisted.iter().map(|(m, p)| (m, *p)).collect();
+        let modules = modules.as_slice();
         // Emit only modules the entry program actually `use`s (plus the entry
         // itself), dependency-ordered — never the prelude-only stdlib.
         let reachable = crate::generator::reachable_modules(modules);
@@ -3434,6 +3446,20 @@ impl RsEmitCtx {
                 ty,
                 is_mut,
             } => {
+                // Declare-only temp from the shared value-CF hoist: Rust allows a
+                // deferred-init `let mut x;` when every path assigns before use,
+                // which the relocated control flow guarantees. The type is
+                // inferred from the assignment(s).
+                if node.metadata.contains_key(crate::generator::DECL_ONLY_META) {
+                    let binding = self.pattern_to_rs_binding(pattern);
+                    let ind = self.indent_str();
+                    let type_ann = ty
+                        .as_ref()
+                        .map(|t| format!(": {}", self.type_to_rs(t)))
+                        .unwrap_or_default();
+                    let _ = writeln!(self.buf, "{ind}let mut {binding}{type_ann};");
+                    return Ok(());
+                }
                 let binding = self.pattern_to_rs_binding(pattern);
                 let type_ann = ty
                     .as_ref()
@@ -8101,6 +8127,77 @@ mod tests {
                 .contains("use crate::core::option::{get_or};"),
             "main.rs must `use crate::core::option::{{get_or}};`; got:\n{}",
             main_file.content
+        );
+    }
+
+    /// `fn f() { let x = if (c) { 1 } else { return 0 }  x }` — value-position
+    /// `if` with a diverging else. The shared value-CF hoist lowers it to a
+    /// deferred-init `let mut __bock_cf_0;` plus statement-form assignment, never
+    /// `/* unsupported */`.
+    fn diverging_value_if_fn() -> AIRNode {
+        let then_b = block(2, vec![], Some(int_lit(3, "1")));
+        let ret = node(
+            5,
+            NodeKind::Return {
+                value: Some(Box::new(int_lit(6, "0"))),
+            },
+        );
+        let else_b = block(4, vec![], Some(ret));
+        let if_node = node(
+            1,
+            NodeKind::If {
+                let_pattern: None,
+                condition: Box::new(id_node(7, "c")),
+                then_block: Box::new(then_b),
+                else_block: Some(Box::new(else_b)),
+            },
+        );
+        let let_x = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "x")),
+                ty: None,
+                value: Box::new(if_node),
+            },
+        );
+        let body = block(20, vec![let_x], Some(id_node(21, "x")));
+        let f = node(
+            30,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        module(vec![], vec![f])
+    }
+
+    #[test]
+    fn diverging_value_if_hoists_to_stmt_form_no_unsupported() {
+        let out = gen(&diverging_value_if_fn());
+        assert!(
+            !out.contains("/* unsupported */"),
+            "diverging value-if must not emit `/* unsupported */`, got: {out}"
+        );
+        assert!(
+            out.contains("let mut __bock_cf_0"),
+            "must declare a deferred-init temp, got: {out}"
+        );
+        assert!(
+            out.contains("__bock_cf_0 = 1"),
+            "value arm must assign the temp, got: {out}"
+        );
+        assert!(
+            out.contains("return Err") || out.contains("return 0"),
+            "diverging arm must keep its return, got: {out}"
         );
     }
 }

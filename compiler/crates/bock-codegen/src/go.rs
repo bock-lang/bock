@@ -478,6 +478,9 @@ impl CodeGenerator for GoGenerator {
     }
 
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
+        // Shared pre-pass: hoist value-position diverging control flow (see
+        // `hoist_value_cf`) into declare-then-assign temp blocks.
+        let module = &crate::generator::hoist_value_cf(module.clone());
         let mut ctx = GoEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
@@ -543,6 +546,15 @@ impl CodeGenerator for GoGenerator {
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
     ) -> Result<GeneratedCode, CodegenError> {
+        // Shared pre-pass: hoist value-position diverging control flow on every
+        // module before registry collection or emission (see `hoist_value_cf`).
+        let hoisted: Vec<(AIRModule, &std::path::Path)> = modules
+            .iter()
+            .map(|(m, p)| (crate::generator::hoist_value_cf((*m).clone()), *p))
+            .collect();
+        let modules: Vec<(&AIRModule, &std::path::Path)> =
+            hoisted.iter().map(|(m, p)| (m, *p)).collect();
+        let modules = modules.as_slice();
         // Emit only modules the entry program actually `use`s (plus the entry
         // itself), dependency-ordered — never the prelude-only stdlib.
         let reachable = crate::generator::reachable_modules(modules);
@@ -1092,6 +1104,13 @@ struct GoEmitCtx {
     /// lambda emitter recover a concrete return type structurally from the body.
     /// Scoped per function/lambda body and restored on exit.
     var_go_type: HashMap<String, String>,
+    /// Maps a declare-only temp name (from the shared value-CF hoist) → the Go
+    /// type inferred for its `var __bock_cf_N T` declaration. Go has no
+    /// deferred-init `var x` (it needs a type), so a block emitter pre-scans each
+    /// declare-only `let` paired with its following relocated control-flow
+    /// statement, infers the result type structurally, and records it here for
+    /// the `LetBinding` emitter. See [`Self::seed_decl_only_types`].
+    decl_only_types: HashMap<String, String>,
     /// Maps a generic record's name → for each generic param (in declaration
     /// order) the field name whose declared type is exactly that param. Lets a
     /// construction `Box { value: 42 }` emit the explicit instantiation
@@ -1358,6 +1377,7 @@ impl GoEmitCtx {
             const_names: std::collections::HashSet::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             var_go_type: HashMap::new(),
+            decl_only_types: HashMap::new(),
             record_param_fields: HashMap::new(),
             record_field_list_elem: HashMap::new(),
             record_generic_param_names: HashMap::new(),
@@ -2766,6 +2786,101 @@ impl GoEmitCtx {
         subst.get(elem).cloned().unwrap_or_else(|| elem.to_string())
     }
 
+    /// Pre-scan a block's statements for declare-only temps (from the shared
+    /// value-CF hoist) and record the Go type each `var __bock_cf_N T` needs.
+    /// A declare-only `let` is always immediately followed by its relocated
+    /// control-flow statement, whose branch values (`temp = <value>` assignments)
+    /// determine the temp's type; infer it via [`Self::infer_assigned_temp_type`].
+    /// Idempotent — re-records on each block entry, scoped to the temps it sees.
+    fn seed_decl_only_types(&mut self, stmts: &[AIRNode]) {
+        for (i, s) in stmts.iter().enumerate() {
+            let NodeKind::LetBinding { pattern, .. } = &s.kind else {
+                continue;
+            };
+            if !s.metadata.contains_key(crate::generator::DECL_ONLY_META) {
+                continue;
+            }
+            let name = self.pattern_to_go_binding(pattern);
+            // The relocated CF is the next statement; its value arms were
+            // rewritten to `name = <value>` assignments, so infer the temp's Go
+            // type from the assigned values. Falls back to `interface{}` (still
+            // valid Go) when no assignment's value type is determinable.
+            if let Some(next) = stmts.get(i + 1) {
+                if let Some(ty) = self.infer_assigned_temp_type(next, &name) {
+                    self.decl_only_types.insert(name, ty);
+                }
+            }
+        }
+    }
+
+    /// Infer the common Go type assigned to temp `name` anywhere within `node`
+    /// (the relocated control-flow statement of a value-CF hoist). Scans every
+    /// `name = <value>` assignment and unifies their value types; returns `None`
+    /// when they disagree or none is determinable. Does not descend into nested
+    /// functions/lambdas.
+    fn infer_assigned_temp_type(&self, node: &AIRNode, name: &str) -> Option<String> {
+        fn collect<'a>(node: &'a AIRNode, name: &str, out: &mut Vec<&'a AIRNode>) {
+            match &node.kind {
+                NodeKind::Assign { target, value, .. } => {
+                    if matches!(&target.kind, NodeKind::Identifier { name: n } if go_value_ident(&n.name) == name)
+                    {
+                        out.push(value);
+                    }
+                }
+                NodeKind::FnDecl { .. } | NodeKind::Lambda { .. } => {}
+                NodeKind::Block { stmts, tail } => {
+                    for s in stmts {
+                        collect(s, name, out);
+                    }
+                    if let Some(t) = tail {
+                        collect(t, name, out);
+                    }
+                }
+                NodeKind::If {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    collect(then_block, name, out);
+                    if let Some(e) = else_block {
+                        collect(e, name, out);
+                    }
+                }
+                NodeKind::Match { arms, .. } => {
+                    for arm in arms {
+                        if let NodeKind::MatchArm { body, .. } = &arm.kind {
+                            collect(body, name, out);
+                        }
+                    }
+                }
+                NodeKind::Loop { body } | NodeKind::While { body, .. } => {
+                    collect(body, name, out);
+                }
+                _ => {}
+            }
+        }
+        let mut values = Vec::new();
+        collect(node, name, &mut values);
+        // Unify only the values whose Go type is *determinable*. An assignment
+        // whose value can't be typed here (e.g. a pattern-bound `v` not yet in
+        // `var_go_type`) does not constrain — mirroring how `infer_branchy_expr_type`
+        // skips value-less arms. This recovers `int64` from `bockCf0 = (0-1)` even
+        // when a sibling `bockCf0 = v` is opaque, rather than collapsing to the
+        // unassignable `interface{}`. If the determinable ones disagree, give up.
+        let mut common: Option<String> = None;
+        for v in values {
+            let Some(ty) = self.infer_block_tail_type(v) else {
+                continue;
+            };
+            match &common {
+                Some(c) if *c != ty => return None,
+                Some(_) => {}
+                None => common = Some(ty),
+            }
+        }
+        common
+    }
+
     /// Infer the Go value type produced by an `if`/`match` expression by
     /// inferring the type of each branch/arm's *tail* (value) and requiring them
     /// to agree. Used to type an untyped `let m = if (..) { Text } else { Image }`
@@ -2858,6 +2973,12 @@ impl GoEmitCtx {
                 // camelCase — but check the var map first for symmetry).
                 if let Some(t) = self.var_go_type.get(&go_value_ident(&name.name)) {
                     return Some(t.clone());
+                }
+                // Bare `None` lowers to the runtime `__bockOption` (the nullary
+                // Optional constructor); type it so a value-CF arm yielding `None`
+                // unifies with a sibling `Some(x)` arm (both `__bockOption`).
+                if name.name == "None" {
+                    return Some("__bockOption".to_string());
                 }
                 self.user_variant_for_name(&name.name)
                     .map(|info| info.enum_name.clone())
@@ -2956,6 +3077,18 @@ impl GoEmitCtx {
                 let NodeKind::Identifier { name } = &callee.kind else {
                     return None;
                 };
+                // The Optional/Result constructors lower to the runtime tagged
+                // structs `__bockOption` / `__bockResult`, so a value-position
+                // `if`/`match`/`loop` whose arms yield `Some(x)`/`None` (or `Ok`/
+                // `Err`) infers that runtime type — letting the shared value-CF
+                // hoist's `var __bock_cf_N __bockOption` be assignable to an
+                // `Optional[T]`-returning fn (else it falls back to `interface{}`,
+                // which Go rejects assigning into the typed return).
+                match name.name.as_str() {
+                    "Some" | "None" => return Some("__bockOption".to_string()),
+                    "Ok" | "Err" => return Some("__bockResult".to_string()),
+                    _ => {}
+                }
                 // A tuple-payload variant construction (`Circle(10)`) types to its
                 // owning sealed-interface enum (`Shape`), mirroring the unit /
                 // struct-payload variant cases — the variant struct is boxed into
@@ -6266,6 +6399,24 @@ impl GoEmitCtx {
             NodeKind::LetBinding {
                 pattern, value, ty, ..
             } => {
+                // Declare-only temp from the shared value-CF hoist: Go needs a
+                // type for `var x T`. The owning block pre-scanned this temp
+                // against its following control-flow statement and recorded the
+                // inferred Go type in `decl_only_types`; emit `var x T`. A typed
+                // annotation, if present, wins. Falls back to `interface{}` when
+                // the type cannot be inferred (the relocated CF still assigns it).
+                if node.metadata.contains_key(crate::generator::DECL_ONLY_META) {
+                    let binding = self.pattern_to_go_binding(pattern);
+                    let type_str = ty
+                        .as_ref()
+                        .map(|t| self.type_to_go(t))
+                        .or_else(|| self.decl_only_types.get(&binding).cloned())
+                        .unwrap_or_else(|| "interface{}".to_string());
+                    self.var_go_type.insert(binding.clone(), type_str.clone());
+                    let ind = self.indent_str();
+                    let _ = writeln!(self.buf, "{ind}var {binding} {type_str}");
+                    return Ok(());
+                }
                 let binding = self.pattern_to_go_binding(pattern);
                 if let Some(t) = ty {
                     // Record an `Optional[T]` binding's element type so a later
@@ -6664,6 +6815,7 @@ impl GoEmitCtx {
             }
             NodeKind::Match { scrutinee, arms } => self.emit_match(scrutinee, arms),
             NodeKind::Block { stmts, tail } => {
+                self.seed_decl_only_types(stmts);
                 for s in stmts {
                     self.emit_node(s)?;
                 }
@@ -6702,6 +6854,7 @@ impl GoEmitCtx {
                     self.writeln(&format!("_ = {v}"));
                 }
                 if let NodeKind::Block { stmts, tail } = &body.kind {
+                    self.seed_decl_only_types(stmts);
                     for s in stmts {
                         self.emit_node(s)?;
                     }
@@ -9156,6 +9309,8 @@ impl GoEmitCtx {
                 self.writeln("// empty");
                 return Ok(());
             }
+            // Type the declare-only temps this block introduces (value-CF hoist).
+            self.seed_decl_only_types(stmts);
             for (i, s) in stmts.iter().enumerate() {
                 self.emit_node(s)?;
                 // Go rejects a `let`-bound local never read (`declared and not
@@ -13540,6 +13695,80 @@ mod tests {
         assert!(
             by_name("core/option.go").is_none(),
             "go must NOT emit a subdirectory package file"
+        );
+    }
+
+    /// `fn f() { let x = if (c) { 1 } else { return 0 }  x }` — value-position
+    /// `if` with a diverging else. The shared value-CF hoist lowers it to a
+    /// `var __bockCf0 T` (type inferred from the assigned arm values) plus
+    /// statement-form assignment, never `/* unsupported */` or an IIFE that
+    /// captures the `return`.
+    fn diverging_value_if_fn() -> AIRNode {
+        let then_b = block(2, vec![], Some(int_lit(3, "1")));
+        let ret = node(
+            5,
+            NodeKind::Return {
+                value: Some(Box::new(int_lit(6, "0"))),
+            },
+        );
+        let else_b = block(4, vec![], Some(ret));
+        let if_node = node(
+            1,
+            NodeKind::If {
+                let_pattern: None,
+                condition: Box::new(id_node(7, "c")),
+                then_block: Box::new(then_b),
+                else_block: Some(Box::new(else_b)),
+            },
+        );
+        let let_x = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "x")),
+                ty: None,
+                value: Box::new(if_node),
+            },
+        );
+        let body = block(20, vec![let_x], Some(id_node(21, "x")));
+        let f = node(
+            30,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        module(vec![], vec![f])
+    }
+
+    #[test]
+    fn diverging_value_if_hoists_to_stmt_form_no_unsupported() {
+        let out = gen(&diverging_value_if_fn());
+        assert!(
+            !out.contains("/* unsupported */"),
+            "diverging value-if must not emit `/* unsupported */`, got: {out}"
+        );
+        // The temp is declared with an inferred Go type (`int64` from the arms).
+        // Go's `go_value_ident` strips the leading `__`, so the name is `bockCf0`.
+        assert!(
+            out.contains("var bockCf0 int64"),
+            "must declare a typed temp `var bockCf0 int64`, got: {out}"
+        );
+        assert!(
+            out.contains("bockCf0 = 1"),
+            "value arm must assign the temp, got: {out}"
+        );
+        assert!(
+            out.contains("return 0"),
+            "diverging arm must keep its return, got: {out}"
         );
     }
 }

@@ -1798,6 +1798,920 @@ fn field_is_structured(pat: &AIRNode) -> bool {
     !matches!(&pat.kind, NodeKind::WildcardPat | NodeKind::BindPat { .. })
 }
 
+// ─── Shared temp-hoist desugar for value-position diverging control flow ───────
+//
+// A control-flow expression used in *value position* (a `let` initialiser, a
+// `return` value, a call argument, an assignment RHS) whose arms **diverge** —
+// one arm yields a value while another exits via `return`/`break`/`continue`/a
+// diverging intrinsic (`todo()`/`unreachable()`) — has no clean per-backend
+// expression form. A ternary / value-IIFE cannot host a `return` arm (the IIFE
+// would capture it), and every backend's value emitter previously fell through
+// to `/* unsupported */` (rust/js/go) or `# unsupported` (py) for the diverging
+// tail. The chat-protocol example is the canonical case:
+//
+//     let msg_type = if (raw.starts_with("TEXT|")) { Text }
+//                    else { … else { return Err("unknown") } }
+//
+// [`hoist_value_cf`] rewrites each such value position into a self-contained
+// block that every backend already emits correctly through its existing
+// statement / `let` / assignment / IIFE machinery:
+//
+//     {
+//       let mut __bock_cf_N            // declared, no initialiser (DeclOnly)
+//       <CF in statement position>    // value tails → `__bock_cf_N = v`,
+//                                      // diverging tails kept verbatim
+//       __bock_cf_N                    // block tail: read the temp
+//     }
+//
+// The control-flow node is kept intact (only relocated to statement position
+// with assignment tails), so a backend's structural type inference — e.g. Go's
+// `infer_branchy_expr_type` — still fires on it to type the `var` declaration.
+
+/// Metadata key marking a synthesised temp [`NodeKind::LetBinding`] as
+/// *declare-only*: it introduces the binding with no initialiser. The shared
+/// [`hoist_value_cf`] desugar emits these; every backend's `let` emitter checks
+/// this key and emits the bare declaration (`let x;` / `var x T` / Rust deferred
+/// `let mut x;`) rather than a `= <value>` initialiser. The carried
+/// [`bock_air::stubs::Value::Bool`] is always `true`.
+pub const DECL_ONLY_META: &str = "bock_decl_only";
+
+/// Internal metadata key marking a synthesised `{ temp = v; break }` block (from
+/// a value-`loop` `break <v>` rewrite) as *splice-flattenable*: the enclosing
+/// statement list inlines its statements rather than nesting it, so no `{ … }`
+/// block remains in statement position (which a backend would treat as a
+/// value-IIFE). Never emitted — consumed entirely within [`hoist_value_cf`].
+const SPLICE_BLOCK_META: &str = "bock_splice_block";
+
+/// True when a value-position node is a control-flow construct whose branches
+/// **diverge** — at least one branch yields a value AND at least one branch
+/// exits via `return`/`break`/`continue`/a diverging intrinsic. These are the
+/// nodes [`hoist_value_cf`] rewrites; a construct where *every* branch yields a
+/// value already lowers fine via the existing expression paths and is left
+/// untouched (so value `if`/`match`/`loop` codegen does not regress).
+#[must_use]
+pub fn value_cf_diverges(node: &AIRNode) -> bool {
+    match &node.kind {
+        // A `loop` delivers a value only through a `break <v>`. Hoist it only
+        // when it carries at least one value-bearing `break` — a value-less loop
+        // (whose result is unit / discarded) has a clean statement form already
+        // and must NOT be hoisted (that would leave the temp uninitialised).
+        NodeKind::Loop { body } => loop_has_value_break(body),
+        NodeKind::If {
+            then_block,
+            else_block,
+            let_pattern: None,
+            ..
+        } => {
+            let branches = [Some(then_block.as_ref()), else_block.as_deref()];
+            let any_diverges = branches
+                .iter()
+                .flatten()
+                .any(|b| branch_diverges_or_nested(b));
+            let any_value = branches.iter().flatten().any(|b| branch_yields_value(b));
+            any_diverges && any_value
+        }
+        NodeKind::Match { arms, .. } => {
+            let bodies: Vec<&AIRNode> = arms
+                .iter()
+                .filter_map(|a| match &a.kind {
+                    NodeKind::MatchArm { body, .. } => Some(body.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            let any_diverges = bodies.iter().any(|b| branch_diverges_or_nested(b));
+            let any_value = bodies.iter().any(|b| branch_yields_value(b));
+            any_diverges && any_value
+        }
+        NodeKind::Block { tail, .. } => tail.as_deref().is_some_and(value_cf_diverges),
+        _ => false,
+    }
+}
+
+/// True when a branch / arm body used in value position diverges at its tail
+/// (a `return`/`break`/`continue`/diverging-intrinsic), or is itself a nested
+/// diverging value-CF (an `if`/`match`/`loop` chain whose own branches diverge).
+fn branch_diverges_or_nested(node: &AIRNode) -> bool {
+    branch_tail_diverges(node) || value_cf_diverges(node)
+}
+
+/// True when the *value tail* of `node` diverges — it produces no usable value
+/// on any path. That is: a `return`/`break`/`continue` node, a diverging
+/// intrinsic call (`todo()`/`unreachable()`), the `Unreachable` node, a block
+/// whose tail/last-statement diverges, **or** an `if`/`match` *every* one of
+/// whose branches diverges (e.g. `match s { Ok => return …; Err => return … }` —
+/// no arm yields a value, so the construct yields none and must not be treated
+/// as a value-bearing arm of an enclosing hoist).
+fn branch_tail_diverges(node: &AIRNode) -> bool {
+    match &node.kind {
+        NodeKind::Return { .. } | NodeKind::Break { .. } | NodeKind::Continue => true,
+        NodeKind::Unreachable => true,
+        NodeKind::Call { .. } => call_is_diverging_intrinsic(node),
+        NodeKind::Block { stmts, tail } => match tail {
+            Some(t) => branch_tail_diverges(t),
+            None => stmts.last().is_some_and(branch_tail_diverges),
+        },
+        // An `if` with no `else` can fall through (yields a value path), so it
+        // does not fully diverge; with an `else`, it diverges iff both branches
+        // do.
+        NodeKind::If {
+            then_block,
+            else_block: Some(else_b),
+            ..
+        } => branch_tail_diverges(then_block) && branch_tail_diverges(else_b),
+        NodeKind::Match { arms, .. } => {
+            let bodies: Vec<&AIRNode> = arms
+                .iter()
+                .filter_map(|a| match &a.kind {
+                    NodeKind::MatchArm { body, .. } => Some(body.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            !bodies.is_empty() && bodies.iter().all(|b| branch_tail_diverges(b))
+        }
+        _ => false,
+    }
+}
+
+/// True when a branch / arm body used in value position yields a usable value —
+/// its tail is neither a diverging statement nor (recursively) a diverging
+/// nested CF on *every* path. A branch that is itself a diverging value-CF still
+/// yields a value (its value arm does), so this returns `true` for it.
+fn branch_yields_value(node: &AIRNode) -> bool {
+    if value_cf_diverges(node) {
+        return true;
+    }
+    !branch_tail_diverges(node)
+}
+
+/// True when a `loop` body contains a value-carrying `break <v>` (so the loop
+/// produces a value and, in value position, needs the temp-hoist). Does not
+/// descend into nested loops — their `break`s target themselves — or into
+/// functions/lambdas.
+fn loop_has_value_break(body: &AIRNode) -> bool {
+    match &body.kind {
+        NodeKind::Break { value } => value.is_some(),
+        NodeKind::Loop { .. }
+        | NodeKind::While { .. }
+        | NodeKind::For { .. }
+        | NodeKind::FnDecl { .. }
+        | NodeKind::Lambda { .. } => false,
+        NodeKind::Block { stmts, tail } => {
+            stmts.iter().any(loop_has_value_break)
+                || tail.as_deref().is_some_and(loop_has_value_break)
+        }
+        NodeKind::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            loop_has_value_break(then_block)
+                || else_block.as_deref().is_some_and(loop_has_value_break)
+        }
+        NodeKind::Match { arms, .. } => arms.iter().any(
+            |a| matches!(&a.kind, NodeKind::MatchArm { body, .. } if loop_has_value_break(body)),
+        ),
+        NodeKind::Guard { else_block, .. } => loop_has_value_break(else_block),
+        _ => false,
+    }
+}
+
+/// True when `node` is a call to a diverging intrinsic (`todo()` /
+/// `unreachable()`), matched by callee identifier name. Mirrors the per-backend
+/// `call_is_diverging` recognisers so the shared desugar agrees with them.
+fn call_is_diverging_intrinsic(node: &AIRNode) -> bool {
+    let NodeKind::Call { callee, .. } = &node.kind else {
+        return false;
+    };
+    matches!(
+        &callee.kind,
+        NodeKind::Identifier { name } if name.name == "todo" || name.name == "unreachable"
+    )
+}
+
+/// Run the shared temp-hoist desugar over a fully-lowered, type-checked AIR
+/// module, returning the rewritten module. Idempotent on trees with no
+/// value-position diverging control flow (returns an equivalent tree).
+///
+/// This is a **codegen pre-pass**: it runs after type-checking and the
+/// ownership/effect/capability analyses (so they never see the synthesised
+/// declare-only bindings) and before every backend emits, making the rewrite
+/// shared once across all five targets. It deliberately lives here rather than
+/// in `bock-air`'s S-AIR lowering because the synthesised temp's type is only
+/// derivable at codegen (e.g. Go infers it structurally from the relocated
+/// control-flow node), and to keep the interpreter and semantic analyses out of
+/// the blast radius.
+#[must_use]
+pub fn hoist_value_cf(module: AIRNode) -> AIRNode {
+    let mut hoister = ValueCfHoister {
+        next_id: max_node_id(&module) + 1,
+        counter: 0,
+        prelude: Vec::new(),
+    };
+    hoister.rewrite(module)
+}
+
+/// Largest [`bock_air::NodeId`] anywhere in `node`. The pre-pass mints fresh
+/// ids above this so synthesised nodes never collide with existing ones.
+fn max_node_id(node: &AIRNode) -> bock_air::NodeId {
+    struct MaxId(bock_air::NodeId);
+    impl bock_air::visitor::Visitor for MaxId {
+        fn visit_node(&mut self, node: &AIRNode) {
+            self.0 = self.0.max(node.id);
+            bock_air::visitor::walk_node(self, node);
+        }
+    }
+    let mut m = MaxId(0);
+    use bock_air::visitor::Visitor;
+    m.visit_node(node);
+    m.0
+}
+
+struct ValueCfHoister {
+    next_id: bock_air::NodeId,
+    counter: u32,
+    /// Statements to splice **before** the statement currently being rewritten.
+    /// A value-position diverging CF pushes its `[temp decl, CF-as-stmt]` here
+    /// and yields a temp-read; the enclosing block drains this per statement so
+    /// the prelude lands in the right scope (never an IIFE — see [`hoist`]).
+    prelude: Vec<AIRNode>,
+}
+
+impl ValueCfHoister {
+    fn fresh_id(&mut self) -> bock_air::NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn fresh_temp_name(&mut self) -> String {
+        let n = self.counter;
+        self.counter += 1;
+        format!("__bock_cf_{n}")
+    }
+
+    fn node(&mut self, span: bock_errors::Span, kind: NodeKind) -> AIRNode {
+        AIRNode::new(self.fresh_id(), span, kind)
+    }
+
+    /// Recursively rewrite a node, hoisting any value-position diverging CF it
+    /// contains. Walks the whole tree so nested value positions are covered.
+    fn rewrite(&mut self, mut node: AIRNode) -> AIRNode {
+        node.kind = self.rewrite_kind(node.kind, node.span);
+        node
+    }
+
+    fn rewrite_box(&mut self, node: Box<AIRNode>) -> Box<AIRNode> {
+        Box::new(self.rewrite(*node))
+    }
+
+    /// Rewrite a node used in **value position**: if it is a diverging value-CF,
+    /// hoist it into prelude statements (a declare-only temp + the CF in
+    /// statement form) and return a read of the temp; otherwise recurse.
+    fn rewrite_value(&mut self, node: AIRNode) -> AIRNode {
+        if value_cf_diverges(&node) {
+            self.hoist(node)
+        } else {
+            self.rewrite(node)
+        }
+    }
+
+    fn rewrite_value_box(&mut self, node: Box<AIRNode>) -> Box<AIRNode> {
+        Box::new(self.rewrite_value(*node))
+    }
+
+    /// Hoist a diverging value-CF `cf`: push `let mut __bock_cf_N` and the CF in
+    /// statement form (value tails → `__bock_cf_N = v`, diverging tails kept)
+    /// onto the prelude buffer, and return a read of `__bock_cf_N`. The prelude
+    /// is later spliced into the enclosing statement list by [`rewrite_stmts`],
+    /// so the diverging arms stay in the *enclosing* function/loop scope rather
+    /// than being captured by an IIFE.
+    fn hoist(&mut self, cf: AIRNode) -> AIRNode {
+        let span = cf.span;
+        let temp = self.fresh_temp_name();
+
+        // `let mut __bock_cf_N` — declare-only (no initialiser). The value slot
+        // carries a placeholder `Unreachable` that backends never emit because
+        // the DECL_ONLY_META marker routes them to the bare declaration.
+        let decl_pat = self.node(
+            span,
+            NodeKind::BindPat {
+                name: bock_ast::Ident {
+                    name: temp.clone(),
+                    span,
+                },
+                is_mut: true,
+            },
+        );
+        let placeholder = self.node(span, NodeKind::Unreachable);
+        let mut decl = self.node(
+            span,
+            NodeKind::LetBinding {
+                is_mut: true,
+                pattern: Box::new(decl_pat),
+                ty: None,
+                value: Box::new(placeholder),
+            },
+        );
+        decl.metadata.insert(
+            DECL_ONLY_META.to_string(),
+            bock_air::stubs::Value::Bool(true),
+        );
+
+        // The CF relocated to statement position, value tails → `temp = v`.
+        let stmt_cf = self.rewrite_to_assign(cf, &temp);
+
+        self.prelude.push(decl);
+        self.prelude.push(stmt_cf);
+
+        self.node(
+            span,
+            NodeKind::Identifier {
+                name: bock_ast::Ident {
+                    name: temp.clone(),
+                    span,
+                },
+            },
+        )
+    }
+
+    /// Rewrite a list of block statements, splicing each statement's hoist
+    /// prelude (if any) immediately before it. Saves/restores the prelude buffer
+    /// so a hoist inside one statement never leaks into a sibling.
+    fn rewrite_stmts(&mut self, stmts: Vec<AIRNode>) -> Vec<AIRNode> {
+        let mut out = Vec::with_capacity(stmts.len());
+        for stmt in stmts {
+            let saved = std::mem::take(&mut self.prelude);
+            let rewritten = self.rewrite(stmt);
+            let prelude = std::mem::replace(&mut self.prelude, saved);
+            out.extend(prelude);
+            out.push(rewritten);
+        }
+        out
+    }
+
+    /// Rewrite a function/lambda body whose **block tail is a value position**
+    /// (the function's implicit return value). Unlike a bare statement block
+    /// (see the `Block` arm of [`Self::rewrite_kind`]), the tail here is hoisted
+    /// when it is a diverging value-CF — a function ending in `if c { v } else {
+    /// return }` returns the `if`'s value, so it must become a temp. The hoist
+    /// prelude is spliced into the body's statement list before the temp-read
+    /// tail. Non-block bodies (a bare-expression lambda) are value-hoisted whole.
+    fn rewrite_body(&mut self, body: Box<AIRNode>) -> Box<AIRNode> {
+        let body = *body;
+        let NodeKind::Block { stmts, tail } = body.kind else {
+            return Box::new(self.rewrite_value(body));
+        };
+        let mut out_stmts = self.rewrite_stmts(stmts);
+        let new_tail = match tail {
+            Some(t) => {
+                let saved = std::mem::take(&mut self.prelude);
+                let rewritten = self.rewrite_value(*t);
+                let prelude = std::mem::replace(&mut self.prelude, saved);
+                out_stmts.extend(prelude);
+                Some(Box::new(rewritten))
+            }
+            None => None,
+        };
+        Box::new(AIRNode::new(
+            body.id,
+            body.span,
+            NodeKind::Block {
+                stmts: out_stmts,
+                tail: new_tail,
+            },
+        ))
+    }
+
+    /// Rewrite a (now statement-position) control-flow node so each value-
+    /// yielding tail becomes `temp = <value>` and each diverging tail is kept.
+    /// Recurses through nested `if`/`match`/`block`; a `loop`'s value arrives via
+    /// `break <v>`, rewritten to `temp = <v>; break`.
+    fn rewrite_to_assign(&mut self, node: AIRNode, temp: &str) -> AIRNode {
+        let span = node.span;
+        match node.kind {
+            NodeKind::Block { stmts, tail } => {
+                let mut stmts = self.rewrite_stmts(stmts);
+                // The tail becomes `temp = <value>`; any prelude its value hoists
+                // must land before that assignment, inside this block.
+                if let Some(t) = tail {
+                    let saved = std::mem::take(&mut self.prelude);
+                    let assigned = self.rewrite_to_assign(*t, temp);
+                    let prelude = std::mem::replace(&mut self.prelude, saved);
+                    stmts.extend(prelude);
+                    stmts.push(assigned);
+                }
+                AIRNode::new(node.id, span, NodeKind::Block { stmts, tail: None })
+            }
+            NodeKind::If {
+                let_pattern,
+                condition,
+                then_block,
+                else_block,
+            } => {
+                let condition = self.rewrite_box(condition);
+                let then_block = Box::new(self.rewrite_to_assign(*then_block, temp));
+                let else_block = else_block.map(|e| Box::new(self.rewrite_to_assign(*e, temp)));
+                AIRNode::new(
+                    node.id,
+                    span,
+                    NodeKind::If {
+                        let_pattern,
+                        condition,
+                        then_block,
+                        else_block,
+                    },
+                )
+            }
+            NodeKind::Match { scrutinee, arms } => {
+                let scrutinee = self.rewrite_box(scrutinee);
+                let arms = arms
+                    .into_iter()
+                    .map(|arm| match arm.kind {
+                        NodeKind::MatchArm {
+                            pattern,
+                            guard,
+                            body,
+                        } => {
+                            let body = Box::new(self.rewrite_to_assign(*body, temp));
+                            AIRNode::new(
+                                arm.id,
+                                arm.span,
+                                NodeKind::MatchArm {
+                                    pattern,
+                                    guard,
+                                    body,
+                                },
+                            )
+                        }
+                        other => AIRNode::new(arm.id, arm.span, other),
+                    })
+                    .collect();
+                AIRNode::new(node.id, span, NodeKind::Match { scrutinee, arms })
+            }
+            NodeKind::Loop { body } => {
+                // The loop value arrives via `break <v>`; rewrite those to
+                // `temp = <v>; break`. Nested loops own their own `break`s, so
+                // the rewrite does not cross into them.
+                let body = Box::new(self.rewrite_breaks_to_assign(*body, temp));
+                AIRNode::new(node.id, span, NodeKind::Loop { body })
+            }
+            // A diverging tail (`return`/`break`/`continue`/diverging call): keep
+            // verbatim (rewriting its sub-expressions for any nested hoists).
+            _ if branch_tail_diverges(&AIRNode::new(node.id, span, node.kind.clone())) => {
+                AIRNode::new(node.id, span, self.rewrite_kind(node.kind, span))
+            }
+            // A plain value tail: `temp = <value>`. A bare-expression arm body
+            // (not a block) whose value itself hoists must keep that prelude with
+            // the assignment, so wrap them in a block when a prelude was produced.
+            _ => {
+                let saved = std::mem::take(&mut self.prelude);
+                let value = self.rewrite_value(AIRNode::new(node.id, span, node.kind));
+                let prelude = std::mem::replace(&mut self.prelude, saved);
+                let assign = self.assign_temp(temp, value, span);
+                if prelude.is_empty() {
+                    assign
+                } else {
+                    let mut stmts = prelude;
+                    stmts.push(assign);
+                    self.node(span, NodeKind::Block { stmts, tail: None })
+                }
+            }
+        }
+    }
+
+    /// Within a value-`loop` body, rewrite `break <v>` → `{ temp = v; break }`.
+    /// Does not descend into nested loops (their `break`s target themselves) or
+    /// into functions/lambdas.
+    fn rewrite_breaks_to_assign(&mut self, node: AIRNode, temp: &str) -> AIRNode {
+        let span = node.span;
+        match node.kind {
+            NodeKind::Break { value: Some(v) } => {
+                // `break <v>` → a flattenable splice block `{ temp = v; break }`.
+                // The enclosing Block arm splices its statements inline so no
+                // nested `{ … }` (which a backend treats as a value-IIFE) remains.
+                let value = self.rewrite_value(*v);
+                let assign = self.assign_temp(temp, value, span);
+                let brk = self.node(span, NodeKind::Break { value: None });
+                let mut blk = self.node(
+                    span,
+                    NodeKind::Block {
+                        stmts: vec![assign, brk],
+                        tail: None,
+                    },
+                );
+                blk.metadata.insert(
+                    SPLICE_BLOCK_META.to_string(),
+                    bock_air::stubs::Value::Bool(true),
+                );
+                blk
+            }
+            NodeKind::Loop { .. }
+            | NodeKind::While { .. }
+            | NodeKind::For { .. }
+            | NodeKind::FnDecl { .. }
+            | NodeKind::Lambda { .. } => self.rewrite(AIRNode::new(node.id, span, node.kind)),
+            NodeKind::Block { stmts, tail } => {
+                let mut out: Vec<AIRNode> = Vec::with_capacity(stmts.len());
+                for s in stmts {
+                    let r = self.rewrite_breaks_to_assign(s, temp);
+                    Self::splice_or_push(&mut out, r);
+                }
+                // A loop-body block's tail that contains a `break` is a diverging
+                // statement (not a value), so the rewritten tail moves into the
+                // statement list — keeping it out of value position (an IIFE).
+                let new_tail = tail.and_then(|t| {
+                    let rewritten = self.rewrite_breaks_to_assign(*t, temp);
+                    Self::splice_or_push(&mut out, rewritten);
+                    None
+                });
+                AIRNode::new(
+                    node.id,
+                    span,
+                    NodeKind::Block {
+                        stmts: out,
+                        tail: new_tail,
+                    },
+                )
+            }
+            NodeKind::If {
+                let_pattern,
+                condition,
+                then_block,
+                else_block,
+            } => {
+                let condition = self.rewrite_box(condition);
+                let then_block = Box::new(self.rewrite_breaks_to_assign(*then_block, temp));
+                let else_block =
+                    else_block.map(|e| Box::new(self.rewrite_breaks_to_assign(*e, temp)));
+                AIRNode::new(
+                    node.id,
+                    span,
+                    NodeKind::If {
+                        let_pattern,
+                        condition,
+                        then_block,
+                        else_block,
+                    },
+                )
+            }
+            NodeKind::Match { scrutinee, arms } => {
+                let scrutinee = self.rewrite_box(scrutinee);
+                let arms = arms
+                    .into_iter()
+                    .map(|arm| match arm.kind {
+                        NodeKind::MatchArm {
+                            pattern,
+                            guard,
+                            body,
+                        } => {
+                            let body = Box::new(self.rewrite_breaks_to_assign(*body, temp));
+                            AIRNode::new(
+                                arm.id,
+                                arm.span,
+                                NodeKind::MatchArm {
+                                    pattern,
+                                    guard,
+                                    body,
+                                },
+                            )
+                        }
+                        other => AIRNode::new(arm.id, arm.span, other),
+                    })
+                    .collect();
+                AIRNode::new(node.id, span, NodeKind::Match { scrutinee, arms })
+            }
+            other => self.rewrite(AIRNode::new(node.id, span, other)),
+        }
+    }
+
+    /// Push `node` onto `out`, flattening a splice-flattenable block (from a
+    /// `break <v>` rewrite) so its `{ temp = v; break }` statements land inline.
+    fn splice_or_push(out: &mut Vec<AIRNode>, node: AIRNode) {
+        if node.metadata.contains_key(SPLICE_BLOCK_META) {
+            if let NodeKind::Block { stmts, tail } = node.kind {
+                out.extend(stmts);
+                if let Some(t) = tail {
+                    out.push(*t);
+                }
+                return;
+            }
+        }
+        out.push(node);
+    }
+
+    /// `temp = <value>` as an `Assign` node.
+    fn assign_temp(&mut self, temp: &str, value: AIRNode, span: bock_errors::Span) -> AIRNode {
+        let target = self.node(
+            span,
+            NodeKind::Identifier {
+                name: bock_ast::Ident {
+                    name: temp.to_string(),
+                    span,
+                },
+            },
+        );
+        self.node(
+            span,
+            NodeKind::Assign {
+                op: bock_ast::AssignOp::Assign,
+                target: Box::new(target),
+                value: Box::new(value),
+            },
+        )
+    }
+
+    /// Rewrite the children of a node kind, hoisting value-position children.
+    fn rewrite_kind(&mut self, kind: NodeKind, _span: bock_errors::Span) -> NodeKind {
+        match kind {
+            NodeKind::Module {
+                path,
+                annotations,
+                imports,
+                items,
+            } => NodeKind::Module {
+                path,
+                annotations,
+                imports: imports.into_iter().map(|n| self.rewrite(n)).collect(),
+                items: items.into_iter().map(|n| self.rewrite(n)).collect(),
+            },
+            NodeKind::FnDecl {
+                annotations,
+                visibility,
+                is_async,
+                name,
+                generic_params,
+                params,
+                return_type,
+                effect_clause,
+                where_clause,
+                body,
+            } => NodeKind::FnDecl {
+                annotations,
+                visibility,
+                is_async,
+                name,
+                generic_params,
+                params: params.into_iter().map(|p| self.rewrite(p)).collect(),
+                return_type,
+                effect_clause,
+                where_clause,
+                body: self.rewrite_body(body),
+            },
+            NodeKind::ClassDecl {
+                annotations,
+                visibility,
+                name,
+                generic_params,
+                base,
+                traits,
+                fields,
+                methods,
+            } => NodeKind::ClassDecl {
+                annotations,
+                visibility,
+                name,
+                generic_params,
+                base,
+                traits,
+                fields,
+                methods: methods.into_iter().map(|m| self.rewrite(m)).collect(),
+            },
+            NodeKind::TraitDecl {
+                annotations,
+                visibility,
+                is_platform,
+                name,
+                generic_params,
+                associated_types,
+                methods,
+            } => NodeKind::TraitDecl {
+                annotations,
+                visibility,
+                is_platform,
+                name,
+                generic_params,
+                associated_types,
+                methods: methods.into_iter().map(|m| self.rewrite(m)).collect(),
+            },
+            NodeKind::ImplBlock {
+                annotations,
+                generic_params,
+                trait_path,
+                trait_args,
+                target,
+                where_clause,
+                methods,
+            } => NodeKind::ImplBlock {
+                annotations,
+                generic_params,
+                trait_path,
+                trait_args,
+                target,
+                where_clause,
+                methods: methods.into_iter().map(|m| self.rewrite(m)).collect(),
+            },
+            NodeKind::EffectDecl {
+                annotations,
+                visibility,
+                name,
+                generic_params,
+                components,
+                operations,
+            } => NodeKind::EffectDecl {
+                annotations,
+                visibility,
+                name,
+                generic_params,
+                components,
+                operations: operations.into_iter().map(|o| self.rewrite(o)).collect(),
+            },
+            NodeKind::ConstDecl {
+                annotations,
+                visibility,
+                name,
+                ty,
+                value,
+            } => NodeKind::ConstDecl {
+                annotations,
+                visibility,
+                name,
+                ty,
+                value: self.rewrite_value_box(value),
+            },
+            NodeKind::PropertyTest {
+                name,
+                bindings,
+                body,
+            } => NodeKind::PropertyTest {
+                name,
+                bindings,
+                body: self.rewrite_box(body),
+            },
+            NodeKind::LetBinding {
+                is_mut,
+                pattern,
+                ty,
+                value,
+            } => NodeKind::LetBinding {
+                is_mut,
+                pattern,
+                ty,
+                value: self.rewrite_value_box(value),
+            },
+            NodeKind::Assign { op, target, value } => NodeKind::Assign {
+                op,
+                target,
+                value: self.rewrite_value_box(value),
+            },
+            NodeKind::Return { value } => NodeKind::Return {
+                value: value.map(|v| self.rewrite_value_box(v)),
+            },
+            NodeKind::Break { value } => NodeKind::Break {
+                value: value.map(|v| self.rewrite_value_box(v)),
+            },
+            NodeKind::Call {
+                callee,
+                args,
+                type_args,
+            } => NodeKind::Call {
+                callee: self.rewrite_box(callee),
+                args: args.into_iter().map(|a| self.rewrite_arg(a)).collect(),
+                type_args,
+            },
+            NodeKind::MethodCall {
+                receiver,
+                method,
+                type_args,
+                args,
+            } => NodeKind::MethodCall {
+                receiver: self.rewrite_box(receiver),
+                method,
+                type_args,
+                args: args.into_iter().map(|a| self.rewrite_arg(a)).collect(),
+            },
+            NodeKind::Block { stmts, tail } => {
+                // A block's tail is hoisted only when the block *itself* is in a
+                // value position — which the enclosing value consumer detects via
+                // `value_cf_diverges` (it recurses into the block tail) and then
+                // routes through `hoist`/`rewrite_to_assign`. Here (a bare /
+                // statement-position block) the tail is just recursed into, never
+                // hoisted: a `match`/`if` whose *result is discarded* (e.g. a
+                // statement-position `match s { … => return …, _ => {} }`) must
+                // not be turned into a temp it never assigns.
+                let out_stmts = self.rewrite_stmts(stmts);
+                let tail = tail.map(|t| self.rewrite_box(t));
+                NodeKind::Block {
+                    stmts: out_stmts,
+                    tail,
+                }
+            }
+            NodeKind::If {
+                let_pattern,
+                condition,
+                then_block,
+                else_block,
+            } => NodeKind::If {
+                let_pattern,
+                condition: self.rewrite_box(condition),
+                then_block: self.rewrite_box(then_block),
+                else_block: else_block.map(|e| self.rewrite_box(e)),
+            },
+            NodeKind::Match { scrutinee, arms } => NodeKind::Match {
+                scrutinee: self.rewrite_box(scrutinee),
+                arms: arms.into_iter().map(|a| self.rewrite(a)).collect(),
+            },
+            NodeKind::MatchArm {
+                pattern,
+                guard,
+                body,
+            } => NodeKind::MatchArm {
+                pattern,
+                guard,
+                body: self.rewrite_box(body),
+            },
+            NodeKind::For {
+                pattern,
+                iterable,
+                body,
+            } => NodeKind::For {
+                pattern,
+                iterable: self.rewrite_box(iterable),
+                body: self.rewrite_box(body),
+            },
+            NodeKind::While { condition, body } => NodeKind::While {
+                condition: self.rewrite_box(condition),
+                body: self.rewrite_box(body),
+            },
+            NodeKind::Loop { body } => NodeKind::Loop {
+                body: self.rewrite_box(body),
+            },
+            NodeKind::Guard {
+                let_pattern,
+                condition,
+                else_block,
+            } => NodeKind::Guard {
+                let_pattern,
+                condition: self.rewrite_box(condition),
+                else_block: self.rewrite_box(else_block),
+            },
+            NodeKind::HandlingBlock { handlers, body } => NodeKind::HandlingBlock {
+                handlers,
+                body: self.rewrite_box(body),
+            },
+            NodeKind::Lambda { params, body } => NodeKind::Lambda {
+                params,
+                body: self.rewrite_body(body),
+            },
+            NodeKind::BinaryOp { op, left, right } => NodeKind::BinaryOp {
+                op,
+                left: self.rewrite_box(left),
+                right: self.rewrite_box(right),
+            },
+            NodeKind::UnaryOp { op, operand } => NodeKind::UnaryOp {
+                op,
+                operand: self.rewrite_box(operand),
+            },
+            NodeKind::FieldAccess { object, field } => NodeKind::FieldAccess {
+                object: self.rewrite_box(object),
+                field,
+            },
+            NodeKind::Index { object, index } => NodeKind::Index {
+                object: self.rewrite_box(object),
+                index: self.rewrite_box(index),
+            },
+            NodeKind::Propagate { expr } => NodeKind::Propagate {
+                expr: self.rewrite_box(expr),
+            },
+            NodeKind::Await { expr } => NodeKind::Await {
+                expr: self.rewrite_box(expr),
+            },
+            NodeKind::Move { expr } => NodeKind::Move {
+                expr: self.rewrite_box(expr),
+            },
+            NodeKind::Borrow { expr } => NodeKind::Borrow {
+                expr: self.rewrite_box(expr),
+            },
+            NodeKind::MutableBorrow { expr } => NodeKind::MutableBorrow {
+                expr: self.rewrite_box(expr),
+            },
+            // Leaf nodes and node kinds with no value-position children: kept
+            // verbatim. (Type expressions, literals, identifiers, patterns,
+            // collection literals — collection element/record-field hoisting is
+            // out of scope; the diverging-CF shapes never appear there in the
+            // exercised examples, and hoisting them would change evaluation
+            // order.)
+            other => other,
+        }
+    }
+
+    fn rewrite_arg(&mut self, arg: AirArg) -> AirArg {
+        AirArg {
+            label: arg.label,
+            value: self.rewrite_value(arg.value),
+        }
+    }
+}
+
 /// Decide whether a loop must be given a target label so that a `break`/
 /// `continue` inside a statement-arm `match` reaches the loop rather than the
 /// `switch` the `match` lowers to.
@@ -5340,5 +6254,314 @@ mod tests {
         let names = collect_exported_type_names(&[(&m, p)]);
         assert!(names.contains("Key"));
         assert!(!names.contains("Hidden"));
+    }
+
+    // ── Value-position diverging-CF temp-hoist desugar ───────────────────────
+
+    /// A `return <int>` statement node.
+    fn return_int(id: u32) -> AIRNode {
+        n(
+            id,
+            NodeKind::Return {
+                value: Some(Box::new(int_lit(id + 1))),
+            },
+        )
+    }
+
+    #[test]
+    fn value_cf_diverges_detects_if_with_return_branch() {
+        // `if (c) { 1 } else { return 0 }` — one value arm, one diverging arm.
+        let node = if_node(
+            1,
+            block_with_tail(2, int_lit(3)),
+            Some(block_with_tail(4, return_int(5))),
+        );
+        assert!(value_cf_diverges(&node));
+    }
+
+    #[test]
+    fn value_cf_diverges_skips_plain_value_if() {
+        // `if (c) { 1 } else { 2 }` — both arms yield a value; not diverging.
+        let node = if_node(
+            1,
+            block_with_tail(2, int_lit(3)),
+            Some(block_with_tail(4, int_lit(5))),
+        );
+        assert!(!value_cf_diverges(&node));
+    }
+
+    #[test]
+    fn value_cf_diverges_detects_nested_else_if_chain() {
+        // `if (a) { 1 } else { if (b) { 2 } else { return 0 } }` — chat-protocol
+        // shape: the diverging `return` is buried in a nested else-if.
+        let inner = if_node(
+            10,
+            block_with_tail(11, int_lit(12)),
+            Some(block_with_tail(13, return_int(14))),
+        );
+        let outer = if_node(1, block_with_tail(2, int_lit(3)), Some(inner));
+        assert!(value_cf_diverges(&outer));
+    }
+
+    #[test]
+    fn value_cf_diverges_hoists_value_loop_only() {
+        // A `loop` that yields a value via `break <v>` needs statement-form
+        // delivery in value position.
+        let value_loop = n(
+            1,
+            NodeKind::Loop {
+                body: Box::new(block_with_tail(
+                    2,
+                    n(
+                        3,
+                        NodeKind::Break {
+                            value: Some(Box::new(int_lit(4))),
+                        },
+                    ),
+                )),
+            },
+        );
+        assert!(value_cf_diverges(&value_loop));
+
+        // A value-less `loop` (bare `break`, result discarded) has a clean
+        // statement form already and must NOT be hoisted (else the temp would be
+        // left uninitialised).
+        let unit_loop = n(
+            10,
+            NodeKind::Loop {
+                body: Box::new(block_with_tail(11, n(12, NodeKind::Break { value: None }))),
+            },
+        );
+        assert!(!value_cf_diverges(&unit_loop));
+    }
+
+    #[test]
+    fn value_cf_diverges_detects_match_with_return_arm() {
+        // `match s { _ => 1, _ => return }` — one value arm, one diverging.
+        let arms = vec![
+            match_arm(10, int_lit(12)),
+            match_arm(20, n(22, NodeKind::Return { value: None })),
+        ];
+        let m = n(
+            1,
+            NodeKind::Match {
+                scrutinee: Box::new(n(2, NodeKind::Placeholder)),
+                arms,
+            },
+        );
+        assert!(value_cf_diverges(&m));
+    }
+
+    /// Extract the single `FnDecl` body block from a hoisted module wrapper.
+    fn hoisted_let_block(value: AIRNode) -> AIRNode {
+        // fn f() { let x = <value> }
+        let let_pat = n(
+            900,
+            NodeKind::BindPat {
+                name: ident("x"),
+                is_mut: false,
+            },
+        );
+        let let_binding = n(
+            901,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(let_pat),
+                ty: None,
+                value: Box::new(value),
+            },
+        );
+        let body = n(
+            902,
+            NodeKind::Block {
+                stmts: vec![let_binding],
+                tail: None,
+            },
+        );
+        let fn_decl = n(
+            903,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        module_named("main", &[], vec![fn_decl])
+    }
+
+    /// Return the statement list of the hoisted module's `fn f` body block.
+    fn fn_body_stmts(module: &AIRNode) -> &[AIRNode] {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            panic!("module");
+        };
+        let NodeKind::FnDecl { body, .. } = &items[0].kind else {
+            panic!("fn");
+        };
+        let NodeKind::Block { stmts, .. } = &body.kind else {
+            panic!("body block");
+        };
+        stmts
+    }
+
+    /// The `let x = …` binding among a statement list.
+    fn find_let_x(stmts: &[AIRNode]) -> &AIRNode {
+        stmts
+            .iter()
+            .find(|s| {
+                matches!(&s.kind, NodeKind::LetBinding { pattern, .. }
+                    if matches!(&pattern.kind, NodeKind::BindPat { name, .. } if name.name == "x"))
+            })
+            .expect("let x binding")
+    }
+
+    #[test]
+    fn hoist_rewrites_diverging_let_into_prelude_and_temp_read() {
+        // `let x = if (c) { 1 } else { return 0 }` splices, in the enclosing
+        // block, before the `let`:
+        //   let mut __bock_cf_0
+        //   if (c) { __bock_cf_0 = 1 } else { return 0 }
+        //   let x = __bock_cf_0
+        let value = if_node(
+            1,
+            block_with_tail(2, int_lit(3)),
+            Some(block_with_tail(4, return_int(5))),
+        );
+        let module = hoist_value_cf(hoisted_let_block(value));
+        let stmts = fn_body_stmts(&module);
+        assert_eq!(stmts.len(), 3, "decl + CF-stmt + let; got {}", stmts.len());
+        // stmts[0]: declare-only temp.
+        assert!(
+            matches!(&stmts[0].kind, NodeKind::LetBinding { is_mut: true, .. }),
+            "first stmt must be the mut temp decl, got {:?}",
+            stmts[0].kind
+        );
+        assert_eq!(
+            stmts[0].metadata.get(DECL_ONLY_META),
+            Some(&bock_air::stubs::Value::Bool(true)),
+            "temp decl must carry the declare-only marker"
+        );
+        // stmts[1]: relocated `if`, value arm → Assign, diverging arm kept.
+        let NodeKind::If {
+            then_block,
+            else_block,
+            ..
+        } = &stmts[1].kind
+        else {
+            panic!("expected relocated If, got {:?}", stmts[1].kind);
+        };
+        // The value arm's block now ends in an `Assign` statement (the tail was
+        // moved into `stmts` as `temp = 1`).
+        let NodeKind::Block {
+            stmts: then_stmts,
+            tail: then_tail,
+        } = &then_block.kind
+        else {
+            panic!("then block");
+        };
+        let then_last = then_tail
+            .as_deref()
+            .or_else(|| then_stmts.last())
+            .map(|t| &t.kind);
+        assert!(
+            matches!(then_last, Some(NodeKind::Assign { .. })),
+            "value arm must end in an Assign, got {then_last:?}"
+        );
+        // The diverging arm keeps its `return` (as tail or last statement).
+        let NodeKind::Block {
+            stmts: else_stmts,
+            tail: else_tail,
+        } = &else_block.as_ref().unwrap().kind
+        else {
+            panic!("else block");
+        };
+        let else_last = else_tail
+            .as_deref()
+            .or_else(|| else_stmts.last())
+            .map(|t| &t.kind);
+        assert!(
+            matches!(else_last, Some(NodeKind::Return { .. })),
+            "diverging arm must keep its return, got {else_last:?}"
+        );
+        // stmts[2]: `let x = __bock_cf_0` (a temp read, not a Block/IIFE).
+        let NodeKind::LetBinding { value, .. } = &find_let_x(stmts).kind else {
+            panic!("let x");
+        };
+        assert!(
+            matches!(&value.kind, NodeKind::Identifier { name } if name.name.starts_with("__bock_cf_")),
+            "let value must read the temp identifier, got {:?}",
+            value.kind
+        );
+    }
+
+    #[test]
+    fn hoist_leaves_plain_value_let_untouched() {
+        // `let x = if (c) { 1 } else { 2 }` must NOT be hoisted (no divergence).
+        let value = if_node(
+            1,
+            block_with_tail(2, int_lit(3)),
+            Some(block_with_tail(4, int_lit(5))),
+        );
+        let module = hoist_value_cf(hoisted_let_block(value));
+        let stmts = fn_body_stmts(&module);
+        assert_eq!(stmts.len(), 1, "no prelude for a plain value if");
+        let NodeKind::LetBinding { value, .. } = &stmts[0].kind else {
+            panic!("let");
+        };
+        assert!(
+            matches!(&value.kind, NodeKind::If { .. }),
+            "plain value if must stay the let's If value, got {:?}",
+            value.kind
+        );
+    }
+
+    #[test]
+    fn hoist_rewrites_loop_break_value() {
+        // `let x = loop { break 1 }` splices a value-loop whose `break 1` becomes
+        // `{ __bock_cf_0 = 1; break }`, then `let x = __bock_cf_0`.
+        let loop_value = n(
+            1,
+            NodeKind::Loop {
+                body: Box::new(n(
+                    2,
+                    NodeKind::Block {
+                        stmts: vec![n(
+                            3,
+                            NodeKind::Break {
+                                value: Some(Box::new(int_lit(4))),
+                            },
+                        )],
+                        tail: None,
+                    },
+                )),
+            },
+        );
+        let module = hoist_value_cf(hoisted_let_block(loop_value));
+        let stmts = fn_body_stmts(&module);
+        assert_eq!(stmts.len(), 3);
+        assert!(matches!(&stmts[1].kind, NodeKind::Loop { .. }));
+        // The loop now contains a bare `break` (value hoisted into an Assign).
+        let mut found_bare_break = false;
+        struct BreakFinder<'a>(&'a mut bool);
+        impl bock_air::visitor::Visitor for BreakFinder<'_> {
+            fn visit_node(&mut self, node: &AIRNode) {
+                if matches!(&node.kind, NodeKind::Break { value: None }) {
+                    *self.0 = true;
+                }
+                bock_air::visitor::walk_node(self, node);
+            }
+        }
+        use bock_air::visitor::Visitor;
+        BreakFinder(&mut found_bare_break).visit_node(&stmts[1]);
+        assert!(
+            found_bare_break,
+            "break value must be hoisted into an Assign, leaving a bare break"
+        );
     }
 }

@@ -27,9 +27,10 @@ pub use error::CodegenError;
 pub use gaps::{detect_gaps, CapabilityGap};
 pub use generator::{
     arm_body_is_statement, classify_assertion, collect_test_fns, desugared_self_call, fn_is_test,
-    js_ts_generate_tests, loop_needs_break_label, match_has_statement_arm, node_is_statement,
-    param_binds_self, CodeGenerator, GeneratedCode, JsTsExprEmitter, OutputFile, SourceInfo,
-    SourceMap, SourceMapEntry, SourceMapping, TestArtifacts, TestAssertion,
+    hoist_value_cf, js_ts_generate_tests, loop_needs_break_label, match_has_statement_arm,
+    node_is_statement, param_binds_self, value_cf_diverges, CodeGenerator, GeneratedCode,
+    JsTsExprEmitter, OutputFile, SourceInfo, SourceMap, SourceMapEntry, SourceMapping,
+    TestArtifacts, TestAssertion, DECL_ONLY_META,
 };
 pub use go::GoGenerator;
 pub use js::JsGenerator;
