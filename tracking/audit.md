@@ -2135,3 +2135,26 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
   STATE: main fdb16d9, 0 open PRs (after this tracking PR), clean, CI green. All worktrees/branches/caches cleaned.
     NEXT (operator's call): Q-list-range-pattern-shared (sequential, shared recogniser) + Q-examples-baseline-ratchet (lock
     the 57/100 floor à la #221). The shared-lowering phase is now essentially complete bar the list/range recogniser.
+
+[2026-06-04 19:32 UTC] ✦ #231 Q-list-range-pattern-shared — ★★ SHARED-LOWERING PHASE COMPLETE ★★
+  Input: operator "Let's go on to Q-list-range-pattern-shared."
+  DISPATCH: one focused SEQUENTIAL engineer session (held out of the #226–#229 fan-out precisely because it has a shared
+    generator.rs component). Prompt flagged the key risk: extending the shared `match_needs_ifchain` recogniser CHANGES
+    ROUTING for every backend that consults it → must verify all 5.
+  RESULT (#231, 99f21ae): `pattern_needs_ifchain` now true for ListPat/RangePat. Engineer correctly scoped the blast radius —
+    only ts+go consult `match_needs_ifchain` (rust uses native slice/range match, py native case, js was already `A||A`), so
+    rust/py/js can't regress from the routing change; verified by grep + conformance REQUIRE=all (0 failed). ts/go
+    `emit_match_ifchain` gained list/range binding; go expr-position match re-routed through a typed-IIFE if-chain (was a
+    broken `switch` IIFE). py value-position ternary path fixed directly. Companions the routing surfaced: ts self-binding
+    skip (TS2448), go plain-record field access.
+  VERIFY (orchestrator re-ran serially): fmt/clippy/test/doc/conformance REQUIRE=all (3/0)/mdbook all exit 0. CI all green
+    incl. windows. Merged gated on `mergeStateStatus=CLEAN` + 0 failed. Matrix from the PR's examples-exec CI job: js 16 ·
+    ts 9→11 · py 13 · rust 10 · go 9 / 20 = 59/100 (pattern-lab ts FAIL→PASS + a 2nd ts example via the companions). 0 regress.
+  FOUND → queue (all orthogonal to list/range, block pattern-lab's full py/rust/go exec): Q-plainrecord-valpos-match (py/go),
+    Q-go-valpos-bind-match, Q-go-nested-optional-match, Q-rust-str-literal-match.
+  ★ MILESTONE: SHARED-LOWERING PHASE COMPLETE — #224 exprpos temp-hoist + #226–#229 guard-let/let-shadow/propagate-`?` +
+    #231 list/range. Examples 49→59/100 this session (8 PRs #224–#231, all gate-clean + CI-green, 0 net regressions).
+  STATE: main 99f21ae, 0 open PRs (after this tracking PR), clean, CI green, all worktrees/branches/caches cleaned.
+    NEXT (operator's call): Q-examples-baseline-ratchet (lock the 59/100 floor) + a per-backend fan-out over the residual
+    FOUND codegen bugs (Q-ts-match-narrowing, Q-go-pow-operator, Q-go-list-method-typing, the 4 pattern-match FOUNDs above,
+    Q-py-matcharm-lambda-binding) to push pattern-lab/task-api/type-zoo/todo-list toward green on the long-pole targets.
