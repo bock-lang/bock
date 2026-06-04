@@ -1,0 +1,67 @@
+// TEST: js_propagate_operator
+// EXPECT: output "ok=2;err=division by zero;stmt=done;chain=10"
+// EXPECT: targets js
+//
+// (chained_divide(8,2)=8/2/2=2; chained_divide(8,0) early-returns the Err from
+//  the first `?`; do_save(true)="done"; nested(10)=10/2/1+5=10.)
+//
+// JS exec guard for the `?` propagation operator (Q-propagate-operator-noop).
+// Before the fix `expr?` lowered to a no-op on js: it neither unwrapped the
+// payload nor early-returned the error, so a `Result[T,E]` flowed where a `T`
+// was expected and downstream arithmetic/printing saw the wrapped tagged
+// object instead of the value. The js lowering now desugars each `?` to a
+// pre-statement temp + early-return:
+//   const __tryN = <expr>;
+//   if (__tryN._tag === "Err" || __tryN._tag === "None") return __tryN;
+//   ... __tryN._0 ...
+// covering the let-RHS position (`chained_divide`), the statement position
+// (`do_save`), and a nested `?` (`g(f(x)?)?` shape in `nested`).
+// Targeted at js because the other backends are lowered by concurrent sessions.
+module main
+
+fn safe_divide(a: Int, b: Int) -> Result[Int, String] {
+  if (b == 0) { Err("division by zero") } else { Ok(a / b) }
+}
+
+fn chained_divide(x: Int, d: Int) -> Result[Int, String] {
+  let half = safe_divide(x, d)?
+  let quarter = safe_divide(half, 2)?
+  Ok(quarter)
+}
+
+fn do_save(ok: Bool) -> Result[String, String] {
+  let _ = guard_ok(ok)?
+  Ok("done")
+}
+
+fn guard_ok(ok: Bool) -> Result[Int, String] {
+  if (ok) { Ok(1) } else { Err("save failed") }
+}
+
+// Nested `?`: the inner `safe_divide(...)?` must be hoisted before the outer.
+fn nested(x: Int) -> Result[Int, String] {
+  let v = safe_divide(safe_divide(x, 2)?, 1)?
+  Ok(v + 5)
+}
+
+fn show_int(r: Result[Int, String]) -> String {
+  match r {
+    Ok(v) => "${v}"
+    Err(e) => e
+  }
+}
+
+fn show_str(r: Result[String, String]) -> String {
+  match r {
+    Ok(v) => v
+    Err(e) => e
+  }
+}
+
+fn main() -> Void {
+  let ok = show_int(chained_divide(8, 2))
+  let err = show_int(chained_divide(8, 0))
+  let stmt = show_str(do_save(true))
+  let chain = show_int(nested(10))
+  println("ok=${ok};err=${err};stmt=${stmt};chain=${chain}")
+}

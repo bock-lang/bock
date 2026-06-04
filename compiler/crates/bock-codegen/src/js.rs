@@ -554,6 +554,16 @@ struct EmitCtx {
     /// every subsequent binding of the same name emits a plain assignment
     /// (`x = …`) rather than a redeclaration. See [`LetScope`].
     let_scopes: Vec<LetScope>,
+    /// Monotonic counter for unique `?`-propagation temporaries (`__try0`,
+    /// `__try1`, …). See [`EmitCtx::hoist_propagates`].
+    propagate_temp_counter: usize,
+    /// Maps a `Propagate` node (keyed by its `&AIRNode` address) to the JS temp
+    /// that [`EmitCtx::hoist_propagates`] bound its unwrapped payload into. The
+    /// `Propagate` arm of [`EmitCtx::emit_expr`] reads this to emit `<temp>._0`
+    /// in place of the wrapped value. The address is stable across the
+    /// pre-statement hoist walk and the subsequent expression emission because
+    /// both traverse the *same* borrowed AIR node tree.
+    propagate_temps: HashMap<usize, String>,
 }
 
 /// One JS lexical block's `let`/`const` binding state — see
@@ -600,6 +610,8 @@ impl EmitCtx {
             export_names: Vec::new(),
             field_method_collisions: HashSet::new(),
             let_scopes: Vec::new(),
+            propagate_temp_counter: 0,
+            propagate_temps: HashMap::new(),
         }
     }
 
@@ -2455,6 +2467,16 @@ impl EmitCtx {
             | NodeKind::Assign { .. } => self.emit_stmt(node),
             // Expression nodes that appear as statements:
             _ => {
+                // A `?` in this statement-position expression (e.g. a bare
+                // `save(x)?`) hoists to a pre-statement temp + early-return.
+                let only_propagate = self.hoist_propagates(node)?
+                    && matches!(&node.kind, NodeKind::Propagate { .. });
+                // A bare `expr?` statement's whole value is the hoisted temp's
+                // payload; once hoisted (and the success path falls through),
+                // there is nothing left to emit as its own statement.
+                if only_propagate {
+                    return Ok(());
+                }
                 self.write_indent();
                 self.emit_expr(node)?;
                 self.buf.push_str(";\n");
@@ -2685,6 +2707,10 @@ impl EmitCtx {
 
     fn emit_stmt(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         self.mark_span(node.span);
+        // Hoist any `?` in this statement's value into pre-statement temps +
+        // early-returns (see `hoist_propagates`). The value-carrying statement
+        // arms (`let`/assign/return/expr-stmt) all funnel through here.
+        self.hoist_propagates(node)?;
         match &node.kind {
             NodeKind::LetBinding {
                 is_mut,
@@ -3286,10 +3312,20 @@ impl EmitCtx {
                 Ok(())
             }
             NodeKind::Propagate { expr } => {
-                // `expr?` → JS doesn't have this; just emit the expression.
-                // In a real compiler this would emit try/catch. For now, passthrough.
-                self.emit_expr(expr)?;
-                Ok(())
+                // `expr?` is desugared by the pre-statement `hoist_propagates`
+                // pass into `const __tryN = <expr>; if (__tryN is failure) return
+                // __tryN;`, which records `__tryN` for this node. Here the
+                // operator evaluates to the unwrapped payload `__tryN._0`. If no
+                // temp was recorded (a `?` in an un-hoisted position, e.g. inside
+                // a short-circuited `&&` operand), fall back to evaluating the
+                // inner expression — preserving the prior pass-through behavior
+                // rather than emitting an undefined temp reference.
+                if let Some(tmp) = self.propagate_temps.get(&(node as *const AIRNode as usize)) {
+                    let _ = write!(self.buf, "{tmp}._0");
+                    Ok(())
+                } else {
+                    self.emit_expr(expr)
+                }
             }
             NodeKind::Range { lo, hi, inclusive } => {
                 // No native range in JS; emit a helper call.
@@ -4286,6 +4322,57 @@ impl EmitCtx {
         r
     }
 
+    /// Lower every `?` (`Propagate`) reachable in `stmt`'s own evaluation into a
+    /// pre-statement hoist, then record the unwrapped-payload temp so the
+    /// `Propagate` arm of [`Self::emit_expr`] substitutes `<temp>._0` in place.
+    ///
+    /// `expr?` is a value-position operator that, on the failure tag (`Err` /
+    /// `None`), must **early-return** the wrapped value from the enclosing
+    /// function — which JS cannot express inside an arbitrary sub-expression (an
+    /// IIFE's `return` would only exit the IIFE). So for each `?` we emit, before
+    /// the consuming statement:
+    /// ```js
+    /// const __tryN = <inner>;
+    /// if (__tryN._tag === "Err" || __tryN._tag === "None") return __tryN;
+    /// ```
+    /// and the operator itself then evaluates to `__tryN._0`. The failure-tag
+    /// test (`Err`/`None`) covers both `Result` and `Optional`, which share the
+    /// `{ _tag, _0 }` tagged-object representation; the `Propagate` node carries
+    /// no type annotation to distinguish them, so the test keys off the failure
+    /// tags rather than the success tag.
+    ///
+    /// The walk visits in evaluation (innermost-first) order and stops at scope
+    /// boundaries — `lambda`/`block` bodies and the branch bodies of
+    /// `if`/`match`/`loop` — because a `?` inside those belongs to that nested
+    /// statement scope and is hoisted when *it* is emitted. It also does not
+    /// descend the short-circuited operand of `&&`/`||` (whose evaluation is
+    /// conditional). Returns whether any `?` was hoisted.
+    fn hoist_propagates(&mut self, stmt: &AIRNode) -> Result<bool, CodegenError> {
+        let mut found: Vec<&AIRNode> = Vec::new();
+        collect_propagates_in_expr(stmt, &mut found);
+        let any = !found.is_empty();
+        for prop in found {
+            if let NodeKind::Propagate { expr } = &prop.kind {
+                let n = self.propagate_temp_counter;
+                self.propagate_temp_counter += 1;
+                let tmp = format!("__try{n}");
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}const {tmp} = ");
+                // `expr` may itself contain `?` already hoisted above (nested
+                // `g(f(x)?)?`); those temps are registered, so emit substitutes.
+                self.emit_expr(expr)?;
+                self.buf.push_str(";\n");
+                let _ = writeln!(
+                    self.buf,
+                    "{ind}if ({tmp}._tag === \"Err\" || {tmp}._tag === \"None\") return {tmp};"
+                );
+                self.propagate_temps
+                    .insert(prop as *const AIRNode as usize, tmp);
+            }
+        }
+        Ok(any)
+    }
+
     /// Emit a function/method body whose top-level `let` scope is pre-seeded with
     /// the function's `params` as already-declared names. A Bock `let x = …` that
     /// shadows a parameter `x` is the same block scope as the JS parameter, so it
@@ -4326,6 +4413,16 @@ impl EmitCtx {
                     self.emit_node(t)?;
                     return Ok(());
                 }
+                // A loop / while / for / guard / handling-block in tail position
+                // has no JS expression form (its value, if any, was already
+                // hoisted into a preceding temp by the shared value-CF pre-pass,
+                // leaving a value-less construct here). Emit it as a statement —
+                // `return while (…)` / `return /* unsupported */` is what the
+                // fall-through `return <expr>` would otherwise produce.
+                if tail_is_statement_form(t) {
+                    self.emit_node(t)?;
+                    return Ok(());
+                }
                 // A `match` with statement arms yields no value: emit it as a
                 // statement `switch`, not as an IIFE.
                 if let NodeKind::Match { scrutinee, arms } = &t.kind {
@@ -4334,17 +4431,34 @@ impl EmitCtx {
                         return Ok(());
                     }
                 }
+                // A diverging-intrinsic tail (`todo()`/`unreachable()`) lowers to
+                // a bare `throw` statement; `return throw …` is invalid JS, so
+                // emit it as a statement.
+                if js_call_is_diverging(t) {
+                    self.write_indent();
+                    self.emit_expr(t)?;
+                    self.buf.push_str(";\n");
+                    return Ok(());
+                }
+                // A `?` in the tail value (e.g. body tail `find_task(id)?`)
+                // hoists to a pre-`return` temp + early-return.
+                self.hoist_propagates(t)?;
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}return ");
                 self.emit_expr(t)?;
                 self.buf.push_str(";\n");
             }
-        } else if crate::generator::node_is_statement(node) {
+        } else if crate::generator::node_is_statement(node) || tail_is_statement_form(node) {
             self.emit_node(node)?;
+        } else if js_call_is_diverging(node) {
+            self.write_indent();
+            self.emit_expr(node)?;
+            self.buf.push_str(";\n");
         } else if let NodeKind::Match { scrutinee, arms } = &node.kind {
             if crate::generator::match_has_statement_arm(arms) {
                 self.emit_match(scrutinee, arms)?;
             } else {
+                self.hoist_propagates(node)?;
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}return ");
                 self.emit_expr(node)?;
@@ -4352,6 +4466,7 @@ impl EmitCtx {
             }
         } else {
             // Single expression as body.
+            self.hoist_propagates(node)?;
             let ind = self.indent_str();
             let _ = write!(self.buf, "{ind}return ");
             self.emit_expr(node)?;
@@ -4442,6 +4557,136 @@ fn is_time_method_name(name: &str) -> bool {
 /// set so a binding named e.g. `default` emits `default_` rather than the
 /// illegal bare keyword. Apply at every value declaration and reference site so
 /// the escaped name is used uniformly; member/method names use bare
+/// True when a value-position node lowers to a JS **statement-form** construct
+/// that has no expression form — a `loop`/`while`/`for`, a `guard`, a nested
+/// `block`, or a `handling` block. In tail position such a node must be emitted
+/// as a statement (via [`EmitCtx::emit_node`]), never wrapped in `return <expr>`
+/// (which would yield invalid JS such as `return while (…)` or, for a value-less
+/// loop the expression lowering can't represent, `return /* unsupported */`).
+///
+/// Value-*bearing* loops/ifs/matches are rewritten upstream by the shared
+/// value-CF pre-pass ([`crate::generator::hoist_value_cf`]) into a declare-then-
+/// assign temp, so any such construct still present in tail position is
+/// value-less and is safe to emit as a bare statement.
+fn tail_is_statement_form(node: &AIRNode) -> bool {
+    matches!(
+        node.kind,
+        NodeKind::Loop { .. }
+            | NodeKind::While { .. }
+            | NodeKind::For { .. }
+            | NodeKind::Guard { .. }
+            | NodeKind::HandlingBlock { .. }
+    )
+}
+
+/// Collect every `?` (`Propagate`) node reachable in `node`'s **own evaluation**
+/// into `out`, in evaluation (innermost-first) order — see
+/// [`EmitCtx::hoist_propagates`].
+///
+/// The walk follows only sub-expressions that are unconditionally evaluated as
+/// part of the enclosing statement: a call's callee + args, a method call's
+/// receiver + args, both operands of a non-short-circuiting binary op, a unary
+/// operand, field/index access, `await`, a record/list/tuple/set element, a
+/// pipe/compose operand, an interpolation hole, an assignment RHS, and a
+/// `let`/`Propagate`/`Return` payload. It deliberately does **not** descend
+/// into nested scopes (`Block`/`Lambda`) or the conditional/branch sub-trees of
+/// `If`/`Match`/`Loop`/`While`/`For`/`Guard` (whose own `?`s are hoisted when
+/// that nested statement is emitted), nor into the short-circuited operand of
+/// `&&`/`||`.
+fn collect_propagates_in_expr<'a>(node: &'a AIRNode, out: &mut Vec<&'a AIRNode>) {
+    match &node.kind {
+        NodeKind::Propagate { expr } => {
+            // Inner `?` first (nested `f(x)?` → hoist `f(x)`'s `?` before this).
+            collect_propagates_in_expr(expr, out);
+            out.push(node);
+        }
+        NodeKind::Call { callee, args, .. } => {
+            collect_propagates_in_expr(callee, out);
+            for a in args {
+                collect_propagates_in_expr(&a.value, out);
+            }
+        }
+        NodeKind::MethodCall { receiver, args, .. } => {
+            collect_propagates_in_expr(receiver, out);
+            for a in args {
+                collect_propagates_in_expr(&a.value, out);
+            }
+        }
+        NodeKind::BinaryOp { op, left, right } => {
+            collect_propagates_in_expr(left, out);
+            // `&&` / `||` short-circuit: the right operand is only sometimes
+            // evaluated, so a `?` there cannot be unconditionally hoisted.
+            if !matches!(op, BinOp::And | BinOp::Or) {
+                collect_propagates_in_expr(right, out);
+            }
+        }
+        NodeKind::UnaryOp { operand, .. } => collect_propagates_in_expr(operand, out),
+        NodeKind::FieldAccess { object, .. } => collect_propagates_in_expr(object, out),
+        NodeKind::Index { object, index } => {
+            collect_propagates_in_expr(object, out);
+            collect_propagates_in_expr(index, out);
+        }
+        NodeKind::Await { expr } => collect_propagates_in_expr(expr, out),
+        NodeKind::Pipe { left, right } | NodeKind::Compose { left, right } => {
+            collect_propagates_in_expr(left, out);
+            collect_propagates_in_expr(right, out);
+        }
+        NodeKind::Range { lo, hi, .. } => {
+            collect_propagates_in_expr(lo, out);
+            collect_propagates_in_expr(hi, out);
+        }
+        NodeKind::RecordConstruct { fields, spread, .. } => {
+            for f in fields {
+                if let Some(v) = &f.value {
+                    collect_propagates_in_expr(v, out);
+                }
+            }
+            if let Some(s) = spread {
+                collect_propagates_in_expr(s, out);
+            }
+        }
+        NodeKind::ListLiteral { elems }
+        | NodeKind::SetLiteral { elems }
+        | NodeKind::TupleLiteral { elems } => {
+            for e in elems {
+                collect_propagates_in_expr(e, out);
+            }
+        }
+        NodeKind::MapLiteral { entries } => {
+            for e in entries {
+                collect_propagates_in_expr(&e.key, out);
+                collect_propagates_in_expr(&e.value, out);
+            }
+        }
+        NodeKind::Interpolation { parts } => {
+            for p in parts {
+                if let AirInterpolationPart::Expr(e) = p {
+                    collect_propagates_in_expr(e, out);
+                }
+            }
+        }
+        NodeKind::Assign { value, .. } => collect_propagates_in_expr(value, out),
+        NodeKind::LetBinding { value, .. } => collect_propagates_in_expr(value, out),
+        NodeKind::Return { value: Some(v) } => collect_propagates_in_expr(v, out),
+        // Leaf, nested-scope, and conditional-control-flow nodes are not
+        // descended: their `?`s (if any) belong to a different statement scope.
+        _ => {}
+    }
+}
+
+/// True when `node` is a call to a diverging intrinsic (`todo()` /
+/// `unreachable()`), which lowers to a bare `throw new Error(...)` *statement* —
+/// it never produces a value. In value-tail position the throw must be emitted
+/// as its own statement: `return throw …` is a JS `SyntaxError`.
+fn js_call_is_diverging(node: &AIRNode) -> bool {
+    if let NodeKind::Call { callee, .. } = &node.kind {
+        if let NodeKind::Identifier { name } = &callee.kind {
+            return matches!(name.name.as_str(), "todo" | "unreachable");
+        }
+    }
+    false
+}
+
 /// [`to_camel_case`] (a keyword is legal as a member name). See
 /// [`crate::generator::escape_target_keyword`].
 ///
@@ -8042,6 +8287,190 @@ mod tests {
         assert!(
             out.contains("return 0"),
             "diverging arm must keep its return (not wrapped in an IIFE), got: {out}"
+        );
+    }
+
+    // ── `?` propagation (Q-propagate-operator-noop) ──────────────────────────
+
+    fn call_node(id: u32, callee: &str, args: Vec<AIRNode>) -> AIRNode {
+        node(
+            id,
+            NodeKind::Call {
+                callee: Box::new(id_node(id + 1, callee)),
+                type_args: vec![],
+                args: args
+                    .into_iter()
+                    .map(|value| AirArg { label: None, value })
+                    .collect(),
+            },
+        )
+    }
+
+    fn propagate(id: u32, expr: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::Propagate {
+                expr: Box::new(expr),
+            },
+        )
+    }
+
+    fn ctor_call(id: u32, name: &str, arg: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::Call {
+                callee: Box::new(id_node(id + 1, name)),
+                type_args: vec![],
+                args: vec![AirArg {
+                    label: None,
+                    value: arg,
+                }],
+            },
+        )
+    }
+
+    #[test]
+    fn propagate_in_let_rhs_unwraps_and_early_returns() {
+        // fn f(x) { let v = g(x)?  Ok(v) }
+        let let_v = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "v")),
+                ty: None,
+                value: Box::new(propagate(12, call_node(13, "g", vec![id_node(15, "x")]))),
+            },
+        );
+        let tail = ctor_call(20, "Ok", id_node(22, "v"));
+        let body = block(1, vec![let_v], Some(tail));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(2, "f", vec![param_node(3, "x")], body)],
+        ));
+        // The `?` must hoist into a temp, early-return on the failure tag, and
+        // bind the unwrapped payload — never pass the wrapped value through.
+        assert!(
+            out.contains("g(x)"),
+            "the propagated expr must be evaluated, got: {out}"
+        );
+        assert!(
+            out.contains("_tag === \"Err\"") || out.contains("_tag === \"None\""),
+            "`?` must early-return on the failure tag, got: {out}"
+        );
+        assert!(
+            out.contains("return __try"),
+            "`?` must early-return the wrapped failure value, got: {out}"
+        );
+        assert!(
+            out.contains("const v = __try0._0") || out.contains("const v = __try1._0"),
+            "`?` must bind the unwrapped payload (`._0`), got: {out}"
+        );
+    }
+
+    #[test]
+    fn propagate_in_statement_position_early_returns() {
+        // fn f(x) { save(x)?  Ok(0) }
+        let stmt = propagate(10, call_node(11, "save", vec![id_node(13, "x")]));
+        let tail = ctor_call(20, "Ok", int_lit(22, "0"));
+        let body = block(1, vec![stmt], Some(tail));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(2, "f", vec![param_node(3, "x")], body)],
+        ));
+        assert!(
+            out.contains("save(x)"),
+            "the propagated call must be evaluated, got: {out}"
+        );
+        assert!(
+            out.contains("_tag === \"Err\"") || out.contains("_tag === \"None\""),
+            "statement-position `?` must early-return on the failure tag, got: {out}"
+        );
+        assert!(
+            !out.contains("/* unsupported */"),
+            "statement-position `?` must not emit `/* unsupported */`, got: {out}"
+        );
+    }
+
+    // ── Tail-position value-less control flow (guessing-game `loop`) ──────────
+
+    #[test]
+    fn tail_position_loop_emits_as_statement_not_unsupported() {
+        // fn f() { loop { break } }  — a value-less loop in tail position must
+        // lower to a `while (true) { … }` statement, never `return /* … */`.
+        let brk = node(40, NodeKind::Break { value: None });
+        let loop_body = block(41, vec![brk], None);
+        let lp = node(
+            42,
+            NodeKind::Loop {
+                body: Box::new(loop_body),
+            },
+        );
+        let body = block(1, vec![], Some(lp));
+        let out = gen(&module(vec![], vec![fn_decl(2, "f", vec![], body)]));
+        assert!(
+            !out.contains("/* unsupported */"),
+            "a tail-position value-less loop must not emit `/* unsupported */`, got: {out}"
+        );
+        assert!(
+            out.contains("while (true)"),
+            "a tail-position loop must lower to `while (true)`, got: {out}"
+        );
+        assert!(
+            !out.contains("return while"),
+            "a loop must not be wrapped in `return`, got: {out}"
+        );
+    }
+
+    #[test]
+    fn tail_position_guard_emits_as_statement() {
+        // fn f(s) { guard (let Ok(v) = parse(s)) else { return } }
+        // (guard as the block tail) must emit as a statement, not `return …`.
+        let guard = node(
+            10,
+            NodeKind::Guard {
+                let_pattern: Some(Box::new(node(
+                    11,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Ok"]),
+                        fields: vec![bind_pat(12, "v")],
+                    },
+                ))),
+                condition: Box::new(call_node(13, "parse", vec![id_node(16, "s")])),
+                else_block: Box::new(block(
+                    17,
+                    vec![node(18, NodeKind::Return { value: None })],
+                    None,
+                )),
+            },
+        );
+        let body = block(1, vec![], Some(guard));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(2, "f", vec![param_node(3, "s")], body)],
+        ));
+        assert!(
+            !out.contains("/* unsupported */"),
+            "a tail-position guard must not emit `/* unsupported */`, got: {out}"
+        );
+        assert!(
+            out.contains("._tag === \"Ok\""),
+            "the guard's pattern test must survive, got: {out}"
+        );
+    }
+
+    #[test]
+    fn diverging_intrinsic_tail_is_a_bare_statement_not_return_throw() {
+        // fn f() -> Int { todo() }  — `todo()` lowers to a bare `throw`; emitting
+        // `return throw …` is a JS SyntaxError, so the tail must be a statement.
+        let body = block(1, vec![], Some(call_node(10, "todo", vec![])));
+        let out = gen(&module(vec![], vec![fn_decl(2, "f", vec![], body)]));
+        assert!(
+            out.contains("throw new Error(\"not implemented\")"),
+            "`todo()` must lower to a throw, got: {out}"
+        );
+        assert!(
+            !out.contains("return throw"),
+            "`return throw …` is invalid JS; the throw must be a bare statement, got: {out}"
         );
     }
 }
