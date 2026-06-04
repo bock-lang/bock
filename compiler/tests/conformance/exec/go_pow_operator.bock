@@ -1,0 +1,34 @@
+// TEST: exec_go_pow_operator
+// EXPECT: output "a=1024;b=27;c=8"
+// EXPECT: targets js, python, go
+//
+// The `**` power operator on the Go backend. Go has no `**` and the backend
+// previously emitted `(a /* pow */ b)`, a `go build` syntax error
+// (`unexpected literal`). An `Int ** Int` now lowers to a `__bockIntPow`
+// runtime helper (exact `int64` fast-exponentiation-by-squaring); a
+// `Float ** Float` lowers to `math.Pow`. Asserted so the numeric result (not
+// just clean compilation) is checked. This is the type-zoo `2 ** 10` shape.
+//
+// Restricted to js/python/go: the rust backend has a separate, pre-existing
+// `**` lowering defect (`2_i64.pow(10_u32)` — the exponent must be `u32`, and
+// float pow mis-routes) that is out of this Go session's scope, and Float
+// display differs across targets (Python renders `8.0`). The integer cases are
+// asserted on all three; the float case via an int-valued exact power.
+module main
+
+fn cube(n: Int) -> Int {
+  n ** 3
+}
+
+fn float_pow() -> Int {
+  let b: Float = 2.0
+  let p = b ** 3.0
+  p.to_int()
+}
+
+fn main() -> Void {
+  let a = 2 ** 10
+  let b = cube(3)
+  let c = float_pow()
+  println("a=${a};b=${b};c=${c}")
+}
