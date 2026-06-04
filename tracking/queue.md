@@ -12,7 +12,17 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-04 19:32 — main 99f21ae, 0 open PRs (after this tracking PR), clean, CI green.** ★★ SHARED-LOWERING
+_**Last reconciled 2026-06-04 21:51 — main 5e4d6c3 (+ this PR), 0 open PRs, clean, CI green.** ★ RESIDUAL PER-BACKEND
+FAN-OUT LANDED (#233 go · #234 ts · #235 py · #236 rust) — **8 FOUND codegen bugs cleared** across the long-pole targets
+(go `**`/pow, `.map` element typing, value-position bind/plain-record/nested-Optional match; ts match-narrowing; py
+matcharm-lambda + plain-record; rust str-literal match). 4 file-disjoint sessions, combined-state verified (conformance
+REQUIRE=all, 0 failed) + per-PR CI gated. **Examples matrix js 16 · ts 11→12 · py 13→14 · rust 10→11 · go 9→10 / 20 — 59→63
+runtime-working (49→63 across this session).** Baseline ratcheted to 63 (this PR). INCIDENT: #235 flaked every CI lane but
+ubuntu-stable — a shared fixed temp path in `check_py_syntax` raced under parallel `cargo test`; hotfixed (unique per-call
+path) → all lanes green. NEW FOUND→queue: Q-examples-ts-tsc-gate (audit strip-types ≠ `tsc`), Q-py-valpos-stmt-arms,
+Q-rust-str-mixed-binding (LOW). **No remaining examples blocker is a shared-architecture gap** — what's left is per-backend
+residue + LOW Q-propagate-exprpos-shared + Q-conformance-target-race (test harness). ↓ —
+PRIOR: Last reconciled 2026-06-04 19:32 — main 99f21ae. ★★ SHARED-LOWERING
 PHASE COMPLETE ★★ #231 landed **Q-list-range-pattern-shared** (the last shared item) — `pattern_needs_ifchain` recognizes
 `ListPat`/`RangePat`; ts/go gained list/range binding; pattern-lab ts FAIL→PASS. **Examples matrix now js 16 · ts 9→11 · py
 13 · rust 10 · go 9 / 20 — 57→59 runtime-working (49→59 across this whole session).** This completes the shared-lowering
@@ -138,7 +148,7 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   statements assigning the temp, replace the expression with the temp) in the AIR/lowering layer so ALL backends emit valid
   code uniformly. The per-backend sessions each did the easy cases + reported this as the shared blocker. Do as ONE focused
   session (conflicts with all backend emitters → not parallelizable). Unblocks the last go/ts/chat-protocol barriers.
-- **[Q-examples-baseline-ratchet] Ratchet examples-exec baseline after the #224 gains** — chore · ready ·
+- **[Q-examples-baseline-ratchet] Ratchet examples-exec baseline after the #224 gains** — chore · **DONE (this PR — 63/100)** ·
   `tools/examples-exec-baseline.txt` · — · links #221, #224 · note: FOUND 2026-06-04. #224 raised runtime-working js 14→16,
   rust 9→10, go 7→8 (chat-protocol js+go). Re-run `BOCK_EXAMPLES_UPDATE_BASELINE=1 tools/scripts/examples-exec-audit.sh` and
   commit the refreshed baseline (à la #221) to lock the gains as the regression floor; also drops the stale
@@ -177,18 +187,18 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   fixes the routing surfaced: ts self-binding skip (TS2448), go plain-record field access. pattern-lab ts FAIL→PASS (+1 other
   ts example via the companions: ts 9→11); list/range output verified correct on all 5 via new `list_pat_*`/`range_pat_*`
   fixtures; conformance REQUIRE=all 0 failed. ★ SHARED-LOWERING PHASE COMPLETE.** ORIG: FOUND 2026-06-03 (fan-out).
-- **[Q-plainrecord-valpos-match] Plain-record value-position `match` arm doesn't route to the if-chain (py/go)** — bug ·
-  ready · `compiler/crates/bock-codegen/` (py/go) · — · links #231, Q-match-exprpos, MS-examples-hardening · note: FOUND
+- **[Q-plainrecord-valpos-match] Plain-record value-position `match` arm doesn't route to the if-chain (py/go)** — bug · **DONE (#233 go · #235 py)** ·
+  `compiler/crates/bock-codegen/` (py/go) · — · links #231, Q-match-exprpos, MS-examples-hardening · note: FOUND
   2026-06-04 (#231). A bare-bind record arm (`Point { x, .. } => …`) in value position doesn't take the if-chain path → py
   `get_x` NameError; go `GetX` emits `case interface{}` / undefined `x`. Blocks pattern-lab on py+go. (rust/ts unaffected.)
-- **[Q-go-valpos-bind-match] Go value-position bind / string-literal `match` → `case interface{}`** — bug · ready ·
+- **[Q-go-valpos-bind-match] Go value-position bind / string-literal `match` → `case interface{}`** — bug · **DONE (#233)** ·
   `compiler/crates/bock-codegen/src/go.rs` · — · links #231, MS-examples-hardening · note: FOUND 2026-06-04 (#231). Go
   value-position `match` on a bare bind (`EchoBinding`) or string literal (`classify_string`) emits `case interface{}` /
   undefined bind. Distinct from the list/range path (those now route correctly). Blocks pattern-lab on go.
-- **[Q-go-nested-optional-match] Go nested-Optional value-position `match` drops nested payload binds** — bug · ready ·
+- **[Q-go-nested-optional-match] Go nested-Optional value-position `match` drops nested payload binds** — bug · **DONE (#233)** ·
   `compiler/crates/bock-codegen/src/go.rs` · — · links #231, MS-examples-hardening · note: FOUND 2026-06-04 (#231).
   `match opt { Some(Ok(n)) => … }` — `emit_optional_match_expr` drops the nested payload bind. Blocks pattern-lab on go.
-- **[Q-rust-str-literal-match] Rust `String`-vs-`&str` literal `match` → E0308** — bug · ready ·
+- **[Q-rust-str-literal-match] Rust `String`-vs-`&str` literal `match` → E0308** — bug · **DONE (#236)** ·
   `compiler/crates/bock-codegen/src/rs.rs` · — · links #231, MS-examples-hardening · note: FOUND 2026-06-04 (#231). Matching
   a `String` scrutinee against `&str` literals (`classify_string`) emits an E0308 mismatch (needs `.as_str()` / deref).
   Blocks pattern-lab on rust.
@@ -212,23 +222,40 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `e?`, tail); a `?` nested inside a larger expression (`f(g()?)`, `Ok(f()? + 1)`) has no expression-form early-return, so
   it's left un-hoisted. Same shape as Q-exprpos-shared-desugar → a shared pre-pass that hoists the `?` to a statement before
   the consumer. **No current v1 example hits it** (LOW priority; do when the exprpos-shared machinery is next touched).
-- **[Q-ts-match-narrowing] TS `match` over Result/Optional doesn't narrow the payload binding** — bug · ready ·
+- **[Q-ts-match-narrowing] TS `match` over Result/Optional doesn't narrow the payload binding** — bug · **DONE (#234)** ·
   `compiler/crates/bock-codegen/src/ts.rs` · — · links #227, MS-examples-hardening · note: FOUND 2026-06-04 (#227). In a
   statement-position `match` switch-lowering, the payload bind `const x = scrutinee._0` is typed `T | E` inside `case "Ok"`
   (no narrowing) → `TS2345` (e.g. `formatTask(task)`). Sole remaining ts blocker for task-api. Narrow the binding per arm
   (cast/guard) in `emit_match`.
-- **[Q-go-pow-operator] Go `**` power operator not lowered** — bug · ready · `compiler/crates/bock-codegen/src/go.rs` · — ·
+- **[Q-go-pow-operator] Go `**` power operator not lowered** — bug · **DONE (#233)** · `compiler/crates/bock-codegen/src/go.rs` · — ·
   links #229, MS-examples-hardening · note: FOUND 2026-06-04 (#229). `a ** b` emits `(a /* pow */ b)` → go `syntax error:
   unexpected literal`. Lower to `math.Pow` (float) / an int-pow helper. Blocks type-zoo on go.
-- **[Q-go-list-method-typing] Go `.map`/lambda element typing uses `interface{}`** — bug · ready ·
+- **[Q-go-list-method-typing] Go `.map`/lambda element typing uses `interface{}`** — bug · **DONE (#233)** ·
   `compiler/crates/bock-codegen/src/go.rs` · — · links #229, Q-list-method-codegen, MS-examples-hardening · note: FOUND
   2026-06-04 (#229). `.map`-with-closure emits `func(t interface{})` + `[]interface{}` where concrete `Todo`/`[]Todo` are
   required (`t.Done undefined`, `cannot use …[]interface{} as []Todo`). Blocks todo-list on go; likely related to the older
   Q-list-method-codegen cluster. Thread the element type through the lambda + result slice.
-- **[Q-py-matcharm-lambda-binding] Python match-arm lambda doesn't bind the pattern payload** — bug · ready ·
+- **[Q-py-matcharm-lambda-binding] Python match-arm lambda doesn't bind the pattern payload** — bug · **DONE (#235)** ·
   `compiler/crates/bock-codegen/src/py.rs` · — · links #228, Q-match-exprpos, MS-examples-hardening · note: FOUND 2026-06-04
   (#228). A match arm whose body is a lambda mis-binds the pattern payload — `(lambda __v: f"x={x}")(p)` raises `NameError:
   name 'x'`. Match-arm pattern-binding/scope defect in the value-position match lowering. Blocks pattern-lab on py.
+- **[Q-examples-ts-tsc-gate] examples-exec ts audit uses strip-types (no type-check) — add `tsc`** — chore · ready ·
+  `tools/scripts/examples-exec-audit.sh` · — · links #234, MS-examples-hardening · note: FOUND 2026-06-04 (#234). The ts row
+  of the examples audit runs `node --experimental-strip-types main.ts`, which does NOT type-check — so `tsc`-rejecting output
+  (e.g. the TS2345 #234 fixed) passes the audit silently, and the ts "ran" count can overstate type-safety. The real gate is
+  `tsc` (the conformance harness + `bock build -t ts` use it). Add a `tsc --noEmit` step to the ts audit path so the matrix
+  reflects type-safety. (Same "syntax-check ≠ correct" trap as the broader conformance-vs-examples gap.)
+- **[Q-py-valpos-stmt-arms] Python value-position `match` with statement arms below tail drops leading statements** — bug ·
+  ready · `compiler/crates/bock-codegen/src/py.rs` · — · links #235, Q-exprpos-shared-desugar, MS-examples-hardening · note:
+  FOUND 2026-06-04 (#235). A value-position `match` whose arm is a block of statements (nested below tail position) still
+  uses the lambda/ternary chain and drops the leading statements — e.g. microservice `handle_delete_user`'s `Ok(result) => {
+  log(...); Response {...} }` drops the `log`. Program runs correctly; same value-IIFE-with-statements class the shared
+  `hoist_value_cf` desugar targets — best fixed cross-backend, not py-only.
+- **[Q-rust-str-mixed-binding] Rust `String` `match` mixing `&str` literal + whole-scrutinee binding arm** — bug · ready ·
+  **LOW (no v1 example)** · `compiler/crates/bock-codegen/src/rs.rs` · — · links #236 · note: FOUND 2026-06-04 (#236). `match s
+  { "hi" => …, other => other }` on a `String` — #236 deliberately leaves the `.as_str()` wrap off when a binding arm is
+  present (so the `String` binding keeps its type), so the literal arm still E0308s. A full fix re-binds the `&str` slice to
+  `String` (`.to_string()`) in arms that need it (body-type analysis). No example hits it (pattern-lab uses `_`).
 - **[Q-stdlib-fmtcheck] Enable `fmt --check` on stdlib `.bock`** — chore · ready ·
   `.github/workflows/`, `stdlib/` · — · links #119 · note: now that `bock fmt`
   emits valid Bock (#119), the stdlib `.bock` files (hand-authored to avoid the old
