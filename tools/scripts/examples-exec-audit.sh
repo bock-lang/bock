@@ -25,7 +25,12 @@
 #
 # RUN COMMANDS (per target, cwd = build/<target>/)
 #   js     -> node main.js
-#   ts     -> node --experimental-strip-types main.ts   (Node >= 22 strips types natively)
+#   ts     -> tsc --noEmit -p tsconfig.json  THEN  node --experimental-strip-types main.ts
+#             `node --experimental-strip-types` only *strips* types — it never
+#             type-checks — so tsc-rejecting output would otherwise "run" clean and
+#             overstate type-safety. We gate on `tsc --noEmit` (the same checker the
+#             conformance harness and `bock build -t ts` use) FIRST: a ts example
+#             counts as PASS only if it both type-checks under tsc AND runs.
 #   python -> python3 main.py
 #   rust   -> cargo run -q
 #   go     -> go run .
@@ -114,7 +119,10 @@ echo
 have() { command -v "$1" >/dev/null 2>&1; }
 declare -A RUNTIME_OK
 RUNTIME_OK[js]=$( have node && echo 1 || echo 0 )
-RUNTIME_OK[ts]=$( have node && echo 1 || echo 0 )
+# ts needs BOTH a `tsc` to type-check the emitted project AND a `node` to run it.
+# If either is missing the type-check gate can't be applied, so the row falls back
+# to BUILD-ONLY rather than passing on a (type-unchecked) strip-only run.
+RUNTIME_OK[ts]=$( have tsc && have node && echo 1 || echo 0 )
 RUNTIME_OK[python]=$( { have python3 || have python; } && echo 1 || echo 0 )
 RUNTIME_OK[rust]=$( have cargo && echo 1 || echo 0 )
 RUNTIME_OK[go]=$( have go && echo 1 || echo 0 )
@@ -171,7 +179,13 @@ run_target() {
   local dir="$1" tg="$2"
   case "$tg" in
     js)     ( cd "$dir" && node main.js >/dev/null 2>&1 ) ;;
-    ts)     ( cd "$dir" && node --experimental-strip-types main.ts >/dev/null 2>&1 ) ;;
+    ts)     # Gate on `tsc --noEmit` FIRST: `node --experimental-strip-types` only
+            # strips types (never checks them), so tsc-rejecting output would
+            # otherwise count as a clean run. Type-check the whole emitted project
+            # via its tsconfig, then run. Both must succeed.
+            ( cd "$dir" \
+                && tsc --noEmit -p tsconfig.json >/dev/null 2>&1 \
+                && node --experimental-strip-types main.ts >/dev/null 2>&1 ) ;;
     python) ( cd "$dir" && "$PY" main.py >/dev/null 2>&1 ) ;;
     rust)   ( cd "$dir" && cargo run -q >/dev/null 2>&1 ) ;;
     go)     ( cd "$dir" && go run . >/dev/null 2>&1 ) ;;
