@@ -396,13 +396,6 @@ const (
 	Greater
 )
 
-// __bockOrdered is the Go constraint a `[T: Comparable]` sealed-core bound lowers
-// to (GAP-C): the ordered primitive type-set, so a generic fn's `a.compare(b)`
-// can use `<`/`==`. Self-contained (no `cmp` import), matching __bockCompare's set.
-type __bockOrdered interface {
-	~int64 | ~float64 | ~string | ~rune | ~int | ~uint64 | ~float32
-}
-
 func __bockCompare[T int64 | float64 | string | rune | int | uint64 | float32](a, b T) __bockOrdering {
 	if a < b {
 		return Less
@@ -411,6 +404,20 @@ func __bockCompare[T int64 | float64 | string | rune | int | uint64 | float32](a
 		return Equal
 	}
 	return Greater
+}
+";
+
+/// The `__bockOrdered` constraint a `[T: Comparable]` sealed-core bound lowers to
+/// (GAP-C): the ordered primitive type-set, so a generic fn's `a.compare(b)` /
+/// `a > b` can use `<`/`==`/`>`. Self-contained (no `cmp` import), matching
+/// `__bockCompare`'s set. Emitted independently of the rest of the Ordering
+/// runtime: a `[T: Comparable]`-bounded fn (`max_of[T: Comparable]`) needs the
+/// constraint even when the module never references `Ordering`/`compare` (which
+/// is what gates [`ORDERING_RUNTIME_GO`]). Deduped against that block so the type
+/// is never defined twice.
+const ORDERED_CONSTRAINT_GO: &str = "// ── Bock ordered constraint ──
+type __bockOrdered interface {
+	~int64 | ~float64 | ~string | ~rune | ~int | ~uint64 | ~float32
 }
 ";
 
@@ -882,12 +889,19 @@ impl GoGenerator {
             .is_some_and(|info| info.enum_name == "Ordering");
 
         let emit_ordering = uses_ordering && !ordering_enum_reachable;
+        // A `[T: Comparable]`-bounded generic fn lowers `T` to `T __bockOrdered`
+        // (GAP-C). That constraint type must be defined even when the program
+        // never references `Ordering`/`compare` (which gates the rest of the
+        // Ordering runtime). `fn_sealed_bound` is populated on the template's
+        // program-wide pre-scan.
+        let emit_ordered_constraint = !template.fn_sealed_bound.is_empty();
         if !(uses_concurrency
             || uses_optional
             || uses_result
             || uses_range
             || uses_int_pow
-            || emit_ordering)
+            || emit_ordering
+            || emit_ordered_constraint)
         {
             return None;
         }
@@ -911,6 +925,14 @@ impl GoGenerator {
         }
         if emit_ordering {
             content.push_str(ORDERING_RUNTIME_GO);
+            content.push('\n');
+        }
+        // The `__bockOrdered` constraint: needed by a sealed-bound generic fn,
+        // and (since it was split out of the Ordering block) also whenever the
+        // Ordering runtime itself is emitted, so a `compare`-using generic still
+        // resolves it. Emitted once — `emit_ordering` no longer carries it.
+        if emit_ordered_constraint || emit_ordering {
+            content.push_str(ORDERED_CONSTRAINT_GO);
             content.push('\n');
         }
         if uses_range {
@@ -1052,6 +1074,24 @@ struct GoEmitCtx {
     /// absent) on a name clash with disagreeing args, as
     /// [`Self::method_optional_ret_elem`].
     method_ret_record_args: HashMap<String, (String, Vec<String>)>,
+    /// Maps a method name → its declared return type rendered as Go (`stock_value
+    /// → "float64"`). Lets `infer_go_expr_type` resolve a `recv.method()` call's
+    /// type so a `.map((p) => p.stock_value())` combinator sizes its result slice
+    /// as `[]float64` (not the erased `[]interface{}` whose elements a later
+    /// `fold`'s `acc + v` can't add). Keyed by method name only; poisoned (left
+    /// absent) on a name clash with disagreeing Go return types — mirrors
+    /// [`Self::method_optional_ret_elem`]. A return type still naming an in-scope
+    /// generic param is skipped (it is the generic signature, not concrete).
+    method_return_go_types: HashMap<String, String>,
+    /// Maps an in-scope variable name bound to a lambda → that lambda's inferred
+    /// Go return type (`clip_fn → "[]float64"` for `let clip_fn = (d) => clip(d,
+    /// ..)`). Lets a compose desugar `normalize >> clip_fn` (lowered to
+    /// `(__compose_x) => clip_fn(normalize(__compose_x))`) resolve its own return
+    /// type from the outer local lambda `clip_fn`, so the emitted closure is
+    /// `func(x []float64) []float64` rather than `func(x []float64) interface{}`
+    /// (the latter not assignable to a `Fn(List[Float]) -> List[Float]` callee).
+    /// Function-scoped, restored on body exit alongside `var_go_type`.
+    var_lambda_ret: HashMap<String, String>,
     /// Maps an in-scope variable name → its concrete generic record
     /// instantiation `(base record name, concrete Go type-args)` — e.g. a `let
     /// c: ListIter[Int]` binding or a `c: Counter[Int]` parameter maps to
@@ -1116,6 +1156,10 @@ struct GoEmitCtx {
     /// Set once the [`ORDERING_RUNTIME_GO`] prelude has been emitted; deduped
     /// exactly as [`Self::optional_runtime_emitted`].
     ordering_runtime_emitted: bool,
+    /// Set once [`ORDERED_CONSTRAINT_GO`] (`__bockOrdered`) has been emitted in
+    /// the single-file inline path; deduped exactly as
+    /// [`Self::ordering_runtime_emitted`].
+    ordered_constraint_emitted: bool,
     /// Set once the [`RANGE_RUNTIME_GO`] helper has been emitted; deduped exactly
     /// as [`Self::optional_runtime_emitted`] (a duplicate `func __bockRange`
     /// would not compile).
@@ -1208,6 +1252,15 @@ struct GoEmitCtx {
     /// receiver), not `[]interface{}` (which a `[]T` argument does not satisfy).
     /// Only `List`-typed fields are recorded. Pre-scanned across the reached modules.
     record_field_list_elem: HashMap<String, HashMap<String, String>>,
+    /// Maps a record name → (field name → the Go `(key, value)` types of that
+    /// field's `Map[K, V]` declared type). The `Map` analogue of
+    /// [`Self::record_field_list_elem`]: lets a built-in map method on a
+    /// `record.field` receiver (`report.by_category.get(k)` for `by_category:
+    /// Map[String, Float]`) type its inline closure's `map[K]V`/`K`/`V`
+    /// parameters from the field's declared key/value types rather than the
+    /// erased `map[interface{}]interface{}` Go rejects against the concrete
+    /// struct field. Only `Map`-typed fields are recorded. Pre-scanned.
+    record_field_map_kv: HashMap<String, HashMap<String, (String, String)>>,
     /// Maps a record name → its generic-param names in declaration order
     /// (`"SortedSet" → ["T"]`). Lets a construction site substitute a field's
     /// declared list-element type (`record SortedSet[T] { items: List[T] }` →
@@ -1454,6 +1507,8 @@ impl GoEmitCtx {
             var_optional_elem: HashMap::new(),
             method_optional_ret_elem: HashMap::new(),
             method_ret_record_args: HashMap::new(),
+            method_return_go_types: HashMap::new(),
+            var_lambda_ret: HashMap::new(),
             var_record_type_args: HashMap::new(),
             var_list_elem: HashMap::new(),
             var_map_kv: HashMap::new(),
@@ -1465,6 +1520,7 @@ impl GoEmitCtx {
             result_runtime_emitted: false,
             numeric_runtime_emitted: false,
             ordering_runtime_emitted: false,
+            ordered_constraint_emitted: false,
             range_runtime_emitted: false,
             int_pow_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
@@ -1477,6 +1533,7 @@ impl GoEmitCtx {
             decl_only_types: HashMap::new(),
             record_param_fields: HashMap::new(),
             record_field_list_elem: HashMap::new(),
+            record_field_map_kv: HashMap::new(),
             record_generic_param_names: HashMap::new(),
             current_self_record: None,
             trait_decls: crate::generator::TraitDeclRegistry::new(),
@@ -1520,6 +1577,7 @@ impl GoEmitCtx {
         c.result_runtime_emitted = false;
         c.numeric_runtime_emitted = false;
         c.ordering_runtime_emitted = false;
+        c.ordered_constraint_emitted = false;
         c.range_runtime_emitted = false;
         c.int_pow_runtime_emitted = false;
         c.per_module = false;
@@ -1770,6 +1828,25 @@ impl GoEmitCtx {
                 self.record_field_list_elem
                     .insert(name.name.clone(), list_fields);
             }
+            // Record each `Map[K, V]`-typed field's Go key/value types, keyed by
+            // field name — used to type a `record.field.get(k)` map-method
+            // receiver's inline closure (`map[K]V` / `K` / `V`) from the field's
+            // declared types rather than the erased `map[interface{}]interface{}`.
+            let map_fields: HashMap<String, (String, String)> = fields
+                .iter()
+                .filter_map(|f| {
+                    Self::map_field_kv_type(&f.ty).map(|(k, v)| {
+                        (
+                            f.name.name.clone(),
+                            (self.ast_type_to_go(k), self.ast_type_to_go(v)),
+                        )
+                    })
+                })
+                .collect();
+            if !map_fields.is_empty() {
+                self.record_field_map_kv
+                    .insert(name.name.clone(), map_fields);
+            }
             if generic_params.is_empty() {
                 continue;
             }
@@ -1800,6 +1877,21 @@ impl GoEmitCtx {
                 if args.len() == 1 && path.segments.last().is_some_and(|s| s.name == "List") =>
             {
                 args.first()
+            }
+            _ => None,
+        }
+    }
+
+    /// The `(key, value)` type expressions of a `Map[K, V]`-typed field, or
+    /// `None` for any other type. The `Map` analogue of
+    /// [`Self::list_field_elem_type`]; used to populate
+    /// [`Self::record_field_map_kv`].
+    fn map_field_kv_type(ty: &TypeExpr) -> Option<(&TypeExpr, &TypeExpr)> {
+        match ty {
+            TypeExpr::Named { path, args, .. }
+                if args.len() == 2 && path.segments.last().is_some_and(|s| s.name == "Map") =>
+            {
+                Some((args.first()?, args.get(1)?))
             }
             _ => None,
         }
@@ -2162,6 +2254,7 @@ impl GoEmitCtx {
         // track them here so the final map omits them entirely.
         let mut poisoned: HashSet<String> = HashSet::new();
         let mut poisoned_record: HashSet<String> = HashSet::new();
+        let mut poisoned_go: HashSet<String> = HashSet::new();
         if let NodeKind::Module { items, .. } = &module.kind {
             for item in items {
                 // The item's in-scope generic-param names: an impl's own plus
@@ -2241,6 +2334,23 @@ impl GoEmitCtx {
                                 }
                             }
                         }
+                        // Record the method's concrete Go return type, so
+                        // `infer_go_expr_type` can type a `recv.method()` call
+                        // (chiefly a `.map`/`.filter` closure body). A return
+                        // type that still names an in-scope generic param is
+                        // skipped — it is the generic signature, not concrete, and
+                        // the calling site (a different fn) has no such `T`.
+                        if !Self::type_mentions_params(rt, &item_params) {
+                            let go_ty = self.type_to_go(rt);
+                            match self.method_return_go_types.get(&name.name) {
+                                Some(existing) if *existing != go_ty => {
+                                    poisoned_go.insert(name.name.clone());
+                                }
+                                _ => {
+                                    self.method_return_go_types.insert(name.name.clone(), go_ty);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2250,6 +2360,9 @@ impl GoEmitCtx {
         }
         for name in &poisoned_record {
             self.method_ret_record_args.remove(name);
+        }
+        for name in &poisoned_go {
+            self.method_return_go_types.remove(name);
         }
     }
 
@@ -2364,6 +2477,50 @@ impl GoEmitCtx {
     /// identifier (via [`Self::var_map_kv`]) or a homogeneously-typed map
     /// literal. `None` ⇒ the caller falls back to `interface{}` (never a wrong
     /// type).
+    /// The Go type of a compose-desugar lambda's sole parameter.
+    ///
+    /// `f >> g` lowers (in shared AIR) to `(__compose_x) => g(f(__compose_x))`
+    /// with an *untyped* `__compose_x`. The composed value's input type is the
+    /// input type of the inner function `f`, so recover `f`'s first declared
+    /// parameter type (via [`Self::fn_param_types`]) and render it as Go. Returns
+    /// `None` for any non-compose lambda, or when `f`'s param type can't be
+    /// resolved (then the param stays `interface{}`, never a wrong type).
+    fn compose_lambda_param_go_type(&self, params: &[AIRNode], body: &AIRNode) -> Option<String> {
+        // Exactly one param, a `BindPat` (the synthetic `__compose_x`).
+        let [param] = params else {
+            return None;
+        };
+        let NodeKind::Param {
+            pattern, ty: None, ..
+        } = &param.kind
+        else {
+            return None;
+        };
+        let NodeKind::BindPat { name, .. } = &pattern.kind else {
+            return None;
+        };
+        if name.name != "__compose_x" {
+            return None;
+        }
+        // Body is `g(f(__compose_x))`; reach the inner call `f(__compose_x)`.
+        let NodeKind::Call {
+            args: outer_args, ..
+        } = &body.kind
+        else {
+            return None;
+        };
+        let inner = &outer_args.first()?.value;
+        let NodeKind::Call { callee: f, .. } = &inner.kind else {
+            return None;
+        };
+        let NodeKind::Identifier { name: f_name } = &f.kind else {
+            return None;
+        };
+        // `f`'s first declared parameter's Go type is the composed input type.
+        let first_param = self.fn_param_types.get(&f_name.name)?.first()?.as_ref()?;
+        Some(self.type_to_go(first_param))
+    }
+
     fn map_receiver_kv_go_types(&self, recv: &AIRNode) -> Option<(String, String)> {
         match &recv.kind {
             NodeKind::Identifier { name } => {
@@ -2379,6 +2536,34 @@ impl GoEmitCtx {
                     (Some(k), Some(v)) => Some((k, v)),
                     _ => None,
                 }
+            }
+            // A `self.field` map receiver inside an impl method: the field's
+            // `Map[K, V]` types are recorded per record (mirrors the `List`
+            // case in `list_receiver_elem_go_type`).
+            NodeKind::FieldAccess { object, field } if matches!(&object.kind, NodeKind::Identifier { name } if name.name == "self") =>
+            {
+                let record = self.current_self_record.as_ref()?;
+                self.record_field_map_kv
+                    .get(record)
+                    .and_then(|m| m.get(&field.name))
+                    .cloned()
+            }
+            // A `value.field` map receiver where `value` is a variable of a known
+            // record type (`report.by_category.get(k)` for `report: Report`,
+            // `record Report { by_category: Map[String, Float] }`). The variable's
+            // Go type names the record; the field's recorded `Map[K, V]` types
+            // give the closure's `map[K]V` rather than the erased
+            // `map[interface{}]interface{}` Go rejects against the concrete field.
+            NodeKind::FieldAccess { object, field } => {
+                let NodeKind::Identifier { name } = &object.kind else {
+                    return None;
+                };
+                let obj_go_ty = self.var_go_type.get(&go_value_ident(&name.name))?;
+                let record = Self::go_type_record_head(obj_go_ty);
+                self.record_field_map_kv
+                    .get(record)
+                    .and_then(|m| m.get(&field.name))
+                    .cloned()
             }
             _ => None,
         }
@@ -2700,6 +2885,36 @@ impl GoEmitCtx {
     /// recorded Go type when resolving a `value.field` list receiver.
     fn go_type_record_head(go_ty: &str) -> &str {
         go_ty.split('[').next().unwrap_or(go_ty).trim()
+    }
+
+    /// Parse the per-field Go types out of a tuple struct rendering
+    /// (`struct{ Field0 int64; Field1 string }` → `["int64", "string"]`). The
+    /// inverse of `type_to_go`'s `TypeTuple` arm. Returns an empty vec for any
+    /// non-tuple-struct string. Used to pin a tuple literal's field types from a
+    /// declared tuple return/binding type when element inference falls short.
+    fn parse_tuple_struct_field_types(go_ty: &str) -> Vec<String> {
+        let inner = match go_ty
+            .trim()
+            .strip_prefix("struct{")
+            .and_then(|s| s.strip_suffix('}'))
+        {
+            Some(s) => s.trim(),
+            None => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for field in inner.split(';') {
+            let field = field.trim();
+            if field.is_empty() {
+                continue;
+            }
+            // Each field is `Field<N> <ty>`; the type is everything after the
+            // first whitespace-separated token.
+            match field.split_once(char::is_whitespace) {
+                Some((name, ty)) if name.starts_with("Field") => out.push(ty.trim().to_string()),
+                _ => return Vec::new(),
+            }
+        }
+        out
     }
 
     /// True when `node` is (or contains, in operand position) an identifier
@@ -3279,8 +3494,21 @@ impl GoEmitCtx {
             // (`ListIterator[int64]`), so a downstream call (`filter(it, ..)`)
             // can in turn bind its own params and specialise its lambda arg.
             NodeKind::Call { callee, args, .. } => {
-                let NodeKind::Identifier { name } = &callee.kind else {
-                    return None;
+                let name = match &callee.kind {
+                    NodeKind::Identifier { name } => name,
+                    // A method call `recv.method(...)` lowers to a `Call` whose
+                    // callee is a `FieldAccess`. Resolve it to the method's
+                    // recorded Go return type (keyed by method name; the pre-scan
+                    // omits names shared by methods with disagreeing returns, so a
+                    // present entry is unambiguous). This types a
+                    // `.map((p) => p.stock_value())` closure body to `float64`,
+                    // sizing the result slice as `[]float64` rather than the
+                    // erased `[]interface{}` whose elements a later `fold`'s
+                    // `acc + v` cannot add.
+                    NodeKind::FieldAccess { field, .. } => {
+                        return self.method_return_go_types.get(&field.name).cloned();
+                    }
+                    _ => return None,
                 };
                 // The Optional/Result constructors lower to the runtime tagged
                 // structs `__bockOption` / `__bockResult`, so a value-position
@@ -3293,6 +3521,11 @@ impl GoEmitCtx {
                     "Some" | "None" => return Some("__bockOption".to_string()),
                     "Ok" | "Err" => return Some("__bockResult".to_string()),
                     _ => {}
+                }
+                // A call to a local variable bound to a lambda (`clip_fn(x)`)
+                // resolves to that lambda's recorded return type.
+                if let Some(r) = self.var_lambda_ret.get(&go_value_ident(&name.name)) {
+                    return Some(r.clone());
                 }
                 // A tuple-payload variant construction (`Circle(10)`) types to its
                 // owning sealed-interface enum (`Shape`), mirroring the unit /
@@ -3323,6 +3556,16 @@ impl GoEmitCtx {
                     return None;
                 }
                 Some(rendered)
+            }
+            // A `recv.method()` call resolves to the method's recorded Go return
+            // type. Keyed by method name only; the pre-scan poisons (omits) any
+            // name shared by methods with disagreeing return types, so a present
+            // entry is unambiguous. Lets a `.map((p) => p.stock_value())` closure
+            // body type to `float64`, sizing the result slice as `[]float64`.
+            // A `MethodCall` node (the non-desugared method-call form) resolves
+            // the same way as the `Call`-with-`FieldAccess` form above.
+            NodeKind::MethodCall { method, .. } => {
+                self.method_return_go_types.get(&method.name).cloned()
             }
             _ => None,
         }
@@ -3932,6 +4175,33 @@ impl GoEmitCtx {
                     || Self::type_mentions_container(ret)
             }
             NodeKind::TypeTuple { elems } => elems.iter().any(Self::type_mentions_container),
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if the AIR type node mentions any of the named generic
+    /// params (a bare `T`, or `T` nested inside `List[T]` / `Optional[T]` /
+    /// `(T, U)` / a function type). Used to skip recording a method's Go return
+    /// type when it is still generic (the concrete caller has no such `T`).
+    fn type_mentions_params(node: &AIRNode, params: &[String]) -> bool {
+        match &node.kind {
+            NodeKind::TypeNamed { path, args } => {
+                let names_param = path
+                    .segments
+                    .last()
+                    .is_some_and(|s| params.iter().any(|p| p == &s.name));
+                names_param || args.iter().any(|a| Self::type_mentions_params(a, params))
+            }
+            NodeKind::TypeOptional { inner } => Self::type_mentions_params(inner, params),
+            NodeKind::TypeFunction {
+                params: ps, ret, ..
+            } => {
+                ps.iter().any(|p| Self::type_mentions_params(p, params))
+                    || Self::type_mentions_params(ret, params)
+            }
+            NodeKind::TypeTuple { elems } => {
+                elems.iter().any(|e| Self::type_mentions_params(e, params))
+            }
             _ => false,
         }
     }
@@ -5680,13 +5950,24 @@ impl GoEmitCtx {
                 // sealed-interface structs `OrderingLess{}`, and `compare`
                 // returns it), so the int runtime would be dead and its `Less`
                 // constants would shadow nothing the program uses.
-                if !self.ordering_runtime_emitted
+                let emit_ordering = !self.ordering_runtime_emitted
                     && go_module_uses_ordering(items)
-                    && !self.ordering_enum_reachable()
-                {
+                    && !self.ordering_enum_reachable();
+                if emit_ordering {
                     self.buf.push_str(ORDERING_RUNTIME_GO);
                     self.buf.push('\n');
                     self.ordering_runtime_emitted = true;
+                }
+                // The `__bockOrdered` constraint: needed by a `[T: Comparable]`
+                // sealed-bound generic fn, or whenever the Ordering runtime above
+                // is emitted (the constraint was split out of that block). Deduped
+                // with its own flag so it is defined at most once.
+                if !self.ordered_constraint_emitted
+                    && (emit_ordering || !self.fn_sealed_bound.is_empty())
+                {
+                    self.buf.push_str(ORDERED_CONSTRAINT_GO);
+                    self.buf.push('\n');
+                    self.ordered_constraint_emitted = true;
                 }
                 if !self.range_runtime_emitted && go_module_uses_range(items) {
                     self.buf.push_str(RANGE_RUNTIME_GO);
@@ -6264,6 +6545,7 @@ impl GoEmitCtx {
                 .insert(ename.clone(), to_camel_case(ename));
         }
         let saved_record_args = self.var_record_type_args.clone();
+        let saved_lambda_ret = self.var_lambda_ret.clone();
         let (
             saved_opt_scope,
             saved_list_scope,
@@ -6300,6 +6582,7 @@ impl GoEmitCtx {
         self.var_set_elem = saved_set_scope;
         self.var_go_type = saved_go_types;
         self.var_record_type_args = saved_record_args;
+        self.var_lambda_ret = saved_lambda_ret;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         self.writeln("}");
@@ -6890,6 +7173,18 @@ impl GoEmitCtx {
                         self.var_list_elem.insert(name.clone(), elem.clone());
                         self.var_go_type.insert(name, format!("[]{elem}"));
                     }
+                    // Record an untyped binding to a lambda → the lambda's inferred
+                    // Go return type, so a later compose `f >> binding` can resolve
+                    // its own output type from `binding` (the outer local lambda).
+                    if let NodeKind::Lambda { params, body } = &value.kind {
+                        let saved = self.enter_param_go_types_with_expected(params, None);
+                        let ret = self.infer_block_tail_type(body);
+                        self.var_go_type = saved;
+                        if let Some(r) = ret {
+                            self.var_lambda_ret
+                                .insert(self.pattern_to_binding_name(pattern), r);
+                        }
+                    }
                     // An untyped `let m = if (..) { Text } else { Image }` lowers
                     // its value to an expression IIFE. Without an expected type the
                     // IIFE falls back to the enclosing fn's return type
@@ -7008,10 +7303,27 @@ impl GoEmitCtx {
                 iterable,
                 body,
             } => {
-                let binding = self.pattern_to_go_binding(pattern);
+                let mut binding = self.pattern_to_go_binding(pattern);
+                // Go rejects a `range` loop variable that is never read
+                // (`declared and not used`), which Bock permits (`for x in data {
+                // count = count + 1 }`). When the bound name is a plain
+                // identifier not referenced in the body, emit `_` instead.
+                if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                    let go_name = go_value_ident(&name.name);
+                    if go_name == binding && !collect_used_idents(body).contains(&name.name) {
+                        binding = "_".to_string();
+                    }
+                }
                 self.emit_loop_label_prefix(body);
                 let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}for _, {binding} := range ");
+                // `for _, _ := range x` is invalid Go ("no new variables on left
+                // side of :="); when the value var is discarded too, drop the
+                // assignment entirely (`for range x`).
+                if binding == "_" {
+                    let _ = write!(self.buf, "{ind}for range ");
+                } else {
+                    let _ = write!(self.buf, "{ind}for _, {binding} := range ");
+                }
                 self.emit_expr(iterable)?;
                 self.buf.push_str(" {\n");
                 self.indent += 1;
@@ -7091,7 +7403,10 @@ impl GoEmitCtx {
                     // adopts the function's return type for its args (see
                     // `emit_block_body_inner`'s tail-return arm).
                     let prev_expected_type = self.current_expected_type.take();
-                    if matches!(val.kind, NodeKind::RecordConstruct { .. }) {
+                    if matches!(
+                        val.kind,
+                        NodeKind::RecordConstruct { .. } | NodeKind::TupleLiteral { .. }
+                    ) {
                         self.current_expected_type = self.current_fn_ret_type.clone();
                     }
                     self.emit_expr(val)?;
@@ -7651,6 +7966,7 @@ impl GoEmitCtx {
                         self.buf.push_str(", ");
                     }
                     let prev_lambda = self.expected_lambda_param_types.take();
+                    let prev_coll = self.expected_collection_elem.take();
                     if matches!(arg.value.kind, NodeKind::Lambda { .. }) {
                         if let Some((gp, ptys, binds)) = &lambda_bindings {
                             if let Some(pty) = ptys.get(i).and_then(|p| p.as_ref()) {
@@ -7658,9 +7974,32 @@ impl GoEmitCtx {
                                     self.specialise_lambda_param_types(pty, gp, binds);
                             }
                         }
+                    } else if matches!(
+                        arg.value.kind,
+                        NodeKind::ListLiteral { .. }
+                            | NodeKind::MapLiteral { .. }
+                            | NodeKind::SetLiteral { .. }
+                    ) {
+                        // A collection literal argument (most importantly an empty
+                        // `[]` / `{}` whose own elements can't infer a type) adopts
+                        // the callee's declared parameter element type, so it emits
+                        // `[]int64{}` against a `List[Int]` param rather than the
+                        // erased `[]interface{}{}` Go rejects. The param type comes
+                        // from the non-generic `fn_param_types` record.
+                        if let NodeKind::Identifier { name } = &callee.kind {
+                            if let Some(pty) = self
+                                .fn_param_types
+                                .get(&name.name)
+                                .and_then(|ptys| ptys.get(i))
+                                .and_then(|p| p.as_ref())
+                            {
+                                self.expected_collection_elem = self.collection_elem_go_types(pty);
+                            }
+                        }
                     }
                     self.emit_expr(&arg.value)?;
                     self.expected_lambda_param_types = prev_lambda;
+                    self.expected_collection_elem = prev_coll;
                 }
                 if let Some(ea) = effects_args {
                     if !args.is_empty() {
@@ -7717,9 +8056,23 @@ impl GoEmitCtx {
                 // the typed callee parameter. Consume the hint so it never
                 // leaks to a nested lambda in the body.
                 let expected_params = self.expected_lambda_param_types.take();
-                let param_strs = match &expected_params {
-                    Some(tys) if tys.len() == params.len() => {
+                // A `f >> g` compose desugars (in shared AIR) to `(__compose_x) =>
+                // g(f(__compose_x))` with an *untyped* `__compose_x`. Recover its
+                // Go type from `f`'s first declared parameter type so the emitted
+                // closure is `func(x []float64) ...` rather than `func(x
+                // interface{}) ...` — the latter is not assignable to a typed
+                // `Fn(List[Float]) -> List[Float]` callee parameter.
+                let compose_param = if expected_params.is_none() {
+                    self.compose_lambda_param_go_type(params, body)
+                } else {
+                    None
+                };
+                let param_strs = match (&expected_params, &compose_param) {
+                    (Some(tys), _) if tys.len() == params.len() => {
                         self.collect_param_strs_with_types(params, tys)
+                    }
+                    (None, Some(ty)) => {
+                        self.collect_param_strs_with_types(params, std::slice::from_ref(ty))
                     }
                     _ => self.collect_param_strs(params),
                 };
@@ -7727,8 +8080,11 @@ impl GoEmitCtx {
                 // be inferred structurally. Without a concrete return type Go
                 // infers `interface{}`, which fails to satisfy a typed
                 // `func(int64) int64` parameter at the use site.
+                let scope_expected = expected_params
+                    .as_deref()
+                    .or(compose_param.as_ref().map(std::slice::from_ref));
                 let saved_go_types =
-                    self.enter_param_go_types_with_expected(params, expected_params.as_deref());
+                    self.enter_param_go_types_with_expected(params, scope_expected);
                 // A predicate combinator pins the return type to `bool` (consumed
                 // here so it never leaks to a nested lambda); otherwise infer it.
                 // Use the block-tail inference so a lambda whose body is a block /
@@ -7971,10 +8327,26 @@ impl GoEmitCtx {
                 // failed `go build`. Build the matching struct literal instead,
                 // inferring each field's element type (falling back to
                 // `interface{}` when it can't be inferred).
+                // A declared tuple return / binding type (`-> (Int, Int)` →
+                // `struct{ Field0 int64; Field1 int64 }`) pins each field's Go
+                // type, so a `return (count, total)` whose elements only infer to
+                // `interface{}` (an untyped `let` binding) still emits the
+                // concrete struct the declared return type demands. Per field:
+                // the expected field type wins, else structural inference, else
+                // `interface{}`.
+                let expected_fields = self
+                    .current_expected_type
+                    .as_deref()
+                    .map(Self::parse_tuple_struct_field_types)
+                    .unwrap_or_default();
                 let field_types: Vec<String> = elems
                     .iter()
-                    .map(|e| {
-                        self.infer_go_expr_type(e)
+                    .enumerate()
+                    .map(|(i, e)| {
+                        expected_fields
+                            .get(i)
+                            .cloned()
+                            .or_else(|| self.infer_go_expr_type(e))
                             .unwrap_or_else(|| "interface{}".to_string())
                     })
                     .collect();
@@ -9927,6 +10299,11 @@ impl GoEmitCtx {
             "Float" => "float64".into(),
             "Bool" => "bool".into(),
             "String" => "string".into(),
+            // Bock `Char` is a Unicode scalar; Go's `rune` (`int32`). A char
+            // literal `'A'` already emits a Go rune literal (`go_literal`), so a
+            // `let c: Char` annotation must render `rune`, not the undefined
+            // identifier `Char`.
+            "Char" => "rune".into(),
             "Void" | "Unit" => "struct{}".into(),
             "List" => "[]interface{}".into(),
             "Map" => "map[string]interface{}".into(),
@@ -10193,8 +10570,10 @@ impl GoEmitCtx {
                 // requires explicit type args on a generic struct literal).
                 let prev_expected_type = self.current_expected_type.take();
                 if should_return
-                    && (matches!(t.kind, NodeKind::RecordConstruct { .. })
-                        || Self::is_expr_optional_or_result_match(t))
+                    && (matches!(
+                        t.kind,
+                        NodeKind::RecordConstruct { .. } | NodeKind::TupleLiteral { .. }
+                    ) || Self::is_expr_optional_or_result_match(t))
                 {
                     self.current_expected_type = self.current_fn_ret_type.clone();
                 }
@@ -10241,8 +10620,10 @@ impl GoEmitCtx {
             // is assignable to the declared return type.
             let prev_expected_type = self.current_expected_type.take();
             if should_return
-                && (matches!(node.kind, NodeKind::RecordConstruct { .. })
-                    || Self::is_expr_optional_or_result_match(node))
+                && (matches!(
+                    node.kind,
+                    NodeKind::RecordConstruct { .. } | NodeKind::TupleLiteral { .. }
+                ) || Self::is_expr_optional_or_result_match(node))
             {
                 self.current_expected_type = self.current_fn_ret_type.clone();
             }
@@ -11517,6 +11898,25 @@ mod tests {
 
     #[test]
     fn for_loop() {
+        // The loop variable is *referenced* in the body, so it keeps its name.
+        let stmt = node(
+            1,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(2, "item")),
+                iterable: Box::new(id_node(3, "items")),
+                body: Box::new(block(4, vec![id_node(5, "item")], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![stmt]));
+        assert!(out.contains("for _, item := range items {"), "got: {out}");
+    }
+
+    #[test]
+    fn for_loop_unused_var_drops_to_for_range() {
+        // An unused loop variable would make Go reject `for _, item := range`
+        // ("declared and not used"); `for _, _ := range` is itself invalid ("no
+        // new variables on left side of :="). The emitter drops both to the bare
+        // `for range items` form.
         let stmt = node(
             1,
             NodeKind::For {
@@ -11526,7 +11926,8 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![stmt]));
-        assert!(out.contains("for _, item := range items {"), "got: {out}");
+        assert!(out.contains("for range items {"), "got: {out}");
+        assert!(!out.contains("for _, item"), "got: {out}");
     }
 
     #[test]
@@ -12850,8 +13251,27 @@ mod tests {
         assert_eq!(ctx.map_type_name("Float"), "float64");
         assert_eq!(ctx.map_type_name("Bool"), "bool");
         assert_eq!(ctx.map_type_name("String"), "string");
+        assert_eq!(ctx.map_type_name("Char"), "rune");
         assert_eq!(ctx.map_type_name("Void"), "struct{}");
         assert_eq!(ctx.map_type_name("Any"), "interface{}");
+    }
+
+    #[test]
+    fn parse_tuple_struct_field_types_round_trips_type_to_go() {
+        // Inverse of `type_to_go`'s `TypeTuple` arm: parse the per-field Go types
+        // back out of the rendered `struct{ Field0 T0; Field1 T1 }`.
+        assert_eq!(
+            GoEmitCtx::parse_tuple_struct_field_types("struct{ Field0 int64; Field1 int64 }"),
+            vec!["int64".to_string(), "int64".to_string()]
+        );
+        assert_eq!(
+            GoEmitCtx::parse_tuple_struct_field_types("struct{ Field0 int64; Field1 string }"),
+            vec!["int64".to_string(), "string".to_string()]
+        );
+        // A non-tuple-struct string yields no fields (callers fall back to
+        // element inference).
+        assert!(GoEmitCtx::parse_tuple_struct_field_types("[]int64").is_empty());
+        assert!(GoEmitCtx::parse_tuple_struct_field_types("int64").is_empty());
     }
 
     /// Build a `TypeNamed { path: [name], args }` AIR node.
