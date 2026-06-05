@@ -12,7 +12,24 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-05 07:34 — main e2200f5 (+#250 +this PR), 0 open PRs after merge, clean, CI green.** ★ EXAMPLES-
+_**Last reconciled 2026-06-05 18:45 — main e096253, 0 open PRs, clean, CI green.** ★ DQ27/DQ28 SHIPPED + EXAMPLES 84→92/100.
+The operator relayed Design's DQ27/DQ28 rulings (handoff folded into the hub); a file-disjoint fan-out landed both rulings +
+the non-blocking lane in two waves — **6 PRs**: #255 ts-tsc-gate · #256 **DQ28** go free-fn method-generics + chained-combinator
++ compose(go) · #257 nested-compose js/ts · #258 **DQ27** single-method-namespace (checker **E4012** + react-components fix +
+spec §6.4/6.5/6.7 + changelog) · #259 chat-protocol py · #260 chat-protocol ts + bock-build per-project `tsc` flip.
+**react-components now runs on all 5** (the last all-red example); type-zoo/go method-generics + data-pipeline/ml-data-prep
+compose green ×js/ts/go; chat-protocol green ×5 (**rust was already fixed at base — that residual was stale**). Honest audit
+re-recorded (`tools/examples-exec-baseline.txt`): **js 19 · ts 18 · py 18 · rust 19 · go 18 = 92/100** (was 84). **HONESTY
+NOTE:** #259 fixed a python statement-`match`→early-`return` bug that had silently TRUNCATED examples (exit 0 = false 'pass');
+chat-protocol py is now a true pass, but **type-zoo py honestly flipped pass→run-FAIL** on a separate builtin-shadow bug
+(de-masking, not a regression). Remaining **8 reds: 5 are guessing-game** (its own `todo()` stubs — not codegen) + 3 real
+codegen reds → newly filed Q-calculator-ts-eval, Q-py-collections-builtin-shadow, Q-systems-allocator-go-build (+ the type-zoo/go
+residual Q-checker-method-generic-call-infer). INCIDENT: a cross-session `git stash` race (#257 popped #258's stash — sibling
+worktrees share one `.git`); recovered, #258 finished by the orchestrator, gate re-verified (conformance REQUIRE=all 0 failed);
+dispatch prompts now forbid `git stash` ([[parallel-worktree-git-stash-hazard]]). DECIDED: DQ27 + DQ28 (design-questions.md;
+escalation resolved) + Design's Tier A–D prioritization folded in — **DQ23 (Int/Int division cross-target divergence) + DQ20
+(`?` propagation) are next-highest leverage.** ↓ —
+PRIOR: Last reconciled 2026-06-05 07:34 — main e2200f5 (+#250 +this PR), 0 open PRs after merge, clean, CI green.** ★ EXAMPLES-
 GREENING + CLASS-CODEGEN PUSH (#238–#252 + perf-gate #248) — a sustained parallel fan-out drove examples **63→84/100
 runtime-working** (js 18 · ts 13 · py 18 · rust 19 · go 16; **49→84 across the whole session**). Waves: (a) per-target
 build-error fan-out #238–#242 (go/rust/ts/py emitters + the **Q-conformance-target-race** harness fix) → 74; (b) loop-tail-
@@ -109,6 +126,22 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ## Ready
 
+- **[Q-py-collections-builtin-shadow] type-zoo python locals named `list`/`map`/`set` shadow builtins** — bug · ready ·
+  `examples/spec-exercisers/type-zoo/` + `compiler/crates/bock-codegen/src/py.rs` · — · links #259 · note: FOUND 2026-06-05,
+  surfaced (not caused) by #259 — the py statement-`match` fix de-masked type-zoo py, which then hits `keys = list(map.keys())`
+  → `TypeError: 'list' object is not callable` because the example binds locals `list`/`map`/`set`. Rename in the example, or
+  guard builtin-shadowing in py codegen for collection lowering. Blocks type-zoo py (run-FAIL).
+- **[Q-checker-method-generic-call-infer] checker can't infer a method's own type param at a call (`b.map(dbl)` for `Box[T].map[U]`)** — bug · ready ·
+  `compiler/crates/bock-types/` · — · links #256, DQ28 · note: FOUND 2026-06-05 (#256). With DQ28's go free-fn lowering landed,
+  the remaining type-zoo/go gap is that a *call* `b.map(dbl)` fails inference of `U` at check time on ALL targets (which is why
+  type-zoo only *declares* `Box.map`, never calls it). Infer method-level type params from the argument types.
+- **[Q-calculator-ts-eval] calculator ts emits `TS1215: Invalid use of 'eval'`** — bug · ready · LOW ·
+  `compiler/crates/bock-codegen/src/ts.rs` · — · links #260 · note: FOUND 2026-06-05 (honest audit). Pre-existing (not a
+  regression): `calculator` fails `bock build -t ts` with TS1215. Blocks calculator ts (build FAIL). Low (one example/target).
+- **[Q-systems-allocator-go-build] systems-allocator go build error** — bug · ready ·
+  `compiler/crates/bock-codegen/src/go.rs` · — · links examples-exec · note: FOUND 2026-06-05 (honest audit). systems-allocator
+  fails `bock build -t go` (build FAIL) while passing js/ts/py/rust. Investigate + fix the go codegen gap. Blocks
+  systems-allocator go.
 - **[Q-import-reject] Reject bare module-qualified import** — bug · ready ·
   `compiler/crates/bock-parser|bock-types/` · — · links DQ8 · note: a `use` of a
   module path with neither a brace-list nor a wildcard (bare `use core.error`) is
@@ -180,36 +213,36 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `tools/perf-baseline.txt` records the floor, `perf-gate.yml` is informational (`continue-on-error`), ratchet-to-blocking
   documented (mirrors examples-exec.yml). FOLLOW-UP: a criterion micro-benchmark corpus on hot compiler paths (needs a benches
   crate = manifest change) for stable per-op numbers — deferred.**
-- **[Q-class-codegen] `class` construction + method dispatch across backends** — impl · **PARTIALLY DONE (#249–#252); js/ts run blocked by DQ27** ·
+- **[Q-class-codegen] `class` construction + method dispatch across backends** — impl · **DONE (#249–#252 + #258 — react-components runs on all 5)** ·
   `compiler/crates/bock-codegen/` · blocked-by: Q-method-collision-inherent-trait (js/ts) · links #249, #250, #251, #252,
   react-components · note: **DONE 2026-06-05 — js/ts class literals now `new T(positional)` (#249, js/ts-local `class_fields`
   map, not the shared record set); py attaches class impl/trait methods + base-before-subclass ordering (#250); go exports
   method names (no self-recursive forwarder) + `Fn()->Void`→`func()` (#251); rust capturing-`Fn` alias→`impl Fn` + move clone
   (#252). react-components now passes py/rust/go.** REMAINING: js/ts run-FAIL on the inherent-vs-trait method collision →
   Q-method-collision-inherent-trait (DQ27).
-- **[Q-method-collision-inherent-trait] Inherent + same-named trait method → infinite recursion (js/ts; interpreter too)** — design · **blocked (DQ27)** ·
+- **[Q-method-collision-inherent-trait] Inherent + same-named trait method → infinite recursion (js/ts; interpreter too)** — design · **DONE (#258 — single-method-namespace; the delegating impl is now an E4012 duplicate)** ·
   `compiler/crates/bock-codegen/` (js/ts) + spec §6.4/traits · blocked-by: DQ27 · links #249, react-components, DQ27,
   escalations 2026-06-05 · note: FOUND 2026-06-05 (#249). `impl Component for Button { fn render = self.render() }` + inherent
   `render` collide on one name on overload-less targets → infinite recursion (reference interpreter also stack-overflows).
   AWAITING Design ruling (recommend: inherent auto-satisfies a same-signature trait requirement). Blocks react-components js/ts.
-- **[Q-go-method-generics] Go forbids type params on methods (`Box[T].map[U]`)** — design · **blocked (DQ28)** ·
+- **[Q-go-method-generics] Go forbids type params on methods (`Box[T].map[U]`)** — design · **DONE (#256 — go free-fn lowering; residual Q-checker-method-generic-call-infer)** ·
   `compiler/crates/bock-codegen/src/go.rs` · blocked-by: DQ28 · links #220, #246, type-zoo, DQ28, escalations 2026-06-05 ·
   note: FOUND 2026-06-03, confirmed 2026-06-05 the last type-zoo/go blocker. Needs monomorphization or free-fn lowering — a
   design/architecture call. AWAITING Design.
-- **[Q-go-chained-combinator-typing] Go `.filter(..).map(..)` chained-combinator element typing** — bug · ready ·
+- **[Q-go-chained-combinator-typing] Go `.filter(..).map(..)` chained-combinator element typing** — bug · **DONE (#256)** ·
   `compiler/crates/bock-codegen/src/go.rs` · — · links #246, #251 · note: FOUND 2026-06-05. A `.map` over a `.filter(..)`
   *call* receiver keeps `func(n interface{})` (doesn't recover `[]int64`). The second remaining type-zoo/go blocker
   alongside method-generics. Combinator-receiver element inference.
-- **[Q-nested-compose-jstsgo] Nested compose `f >> g >> h` mis-lowers on js/ts/go** — bug · ready ·
+- **[Q-nested-compose-jstsgo] Nested compose `f >> g >> h` mis-lowers on js/ts/go** — bug · **DONE (#256 go · #257 js/ts — callee-parenthesization)** ·
   `compiler/crates/bock-codegen/` (js/ts/go) + maybe bock-air/lower.rs · — · links #247 · note: FOUND 2026-06-05 (#247 rust
   session). A nested `>>` compose: js emits the closure source as a string; ts produces no output; go uses `interface{}`
   typing in the compose closures. py/rust handle it (py via `emit_callee` parens; rust via `emit_callee_rs`). Shared-desugar
   (lower.rs) × per-backend interaction; mirror the py/rust callee-parenthesization per backend.
-- **[Q-interp-method-collision] Reference interpreter stack-overflows on inherent+trait same-name method** — bug · ready · LOW ·
+- **[Q-interp-method-collision] Reference interpreter stack-overflows on inherent+trait same-name method** — bug · **DONE-by-rejection (#258 — the duplicate is now an E4012 check error, unreachable pre-exec; standalone interp hardening optional)** · LOW ·
   `compiler/crates/bock-interp/` · — · links DQ27, react-components · note: FOUND 2026-06-05 (#249). Independent of the
   codegen DQ27 question — the interpreter itself infinite-recurses on `self.render()` when inherent + trait `render` collide.
   Fix the interpreter's method resolution regardless of the DQ27 ruling.
-- **[Q-chat-protocol-residual] chat-protocol still fails ts/python/rust at runtime (unrelated to exprpos)** — bug · ready ·
+- **[Q-chat-protocol-residual] chat-protocol still fails ts/python/rust at runtime (unrelated to exprpos)** — bug · **DONE (py #259 stmt-match-return · ts #260 toolchain `.ts`-specifier; rust already-fixed at base — stale)** ·
   `compiler/crates/bock-codegen/` (rust/py/ts) · — · links #224 · note: FOUND 2026-06-04 (#224). After the exprpos desugar
   chat-protocol runs on js+go but still fails the other three for distinct reasons: **rust** `@concurrent`→tokio wiring + an
   `E0507` move in `serialize`; **python** forward-reference ordering (`Serializable` used before defined); **ts**
@@ -289,7 +322,7 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `compiler/crates/bock-codegen/src/py.rs` · — · links #228, Q-match-exprpos, MS-examples-hardening · note: FOUND 2026-06-04
   (#228). A match arm whose body is a lambda mis-binds the pattern payload — `(lambda __v: f"x={x}")(p)` raises `NameError:
   name 'x'`. Match-arm pattern-binding/scope defect in the value-position match lowering. Blocks pattern-lab on py.
-- **[Q-examples-ts-tsc-gate] examples-exec ts audit uses strip-types (no type-check) — add `tsc`** — chore · ready ·
+- **[Q-examples-ts-tsc-gate] examples-exec ts audit uses strip-types (no type-check) — add `tsc`** — chore · **DONE (#255)** ·
   `tools/scripts/examples-exec-audit.sh` · — · links #234, MS-examples-hardening · note: FOUND 2026-06-04 (#234). The ts row
   of the examples audit runs `node --experimental-strip-types main.ts`, which does NOT type-check — so `tsc`-rejecting output
   (e.g. the TS2345 #234 fixed) passes the audit silently, and the ts "ran" count can overstate type-safety. The real gate is

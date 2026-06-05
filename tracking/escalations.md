@@ -373,4 +373,13 @@ codegen bugs but genuine semantics questions that the implementation should not 
 **Recommendation:** non-blocking — keep both OPEN for a Design ruling; the rest of examples-hardening can proceed. I did
 NOT change spec or the examples. The js/ts react-components and type-zoo/go reds are parked on these.
 **Awaiting:** owner/Design ruling on DQ27 (method/trait resolution) and DQ28 (go method generics).
-**Status:** pending
+**Status:** resolved
+
+**Response (2026-06-05, owner via Design handoff `spec/changelogs/20260605-1445-...` — now folded into the hub):** Both
+decided. **DQ27** = the **single-method-namespace rule** (option a; an inherent method satisfies a same-signature trait
+requirement, and a duplicate same-name definition is an **E4012** coherence error). **DQ28** = keep the language surface; the
+Go backend lowers method-level type params via **free-function lowering**. Reconciled in **#258** (DQ27: checker E4012 +
+react-components fixed to an empty `impl Component for Button {}` + spec §6.4/6.5/6.7 + changelog) and **#256** (DQ28: go.rs
+free-fn lowering). **react-components now runs on all 5**; type-zoo/go's method-generics blocker cleared. Residual filed:
+**Q-checker-method-generic-call-infer** (checker can't infer `U` for a `b.map(dbl)` call). Design also handed a Tier A–D
+prioritization for the rest of the open queue (folded into design-questions.md; **DQ23** + **DQ20** are next-highest leverage).
