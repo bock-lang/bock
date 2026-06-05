@@ -300,17 +300,12 @@ impl CodeGenerator for TsGenerator {
             } else {
                 own_path.clone()
             };
+            // The shared collector now matches a glob-imported (`use models.*`)
+            // enum variant by its bare source name as well as its emitted
+            // `Enum_Variant` value-name, so the cross-module variant import is
+            // produced here for js and ts alike (no TS-local recovery needed).
             ctx.implicit_imports =
                 crate::generator::implicit_esm_imports_for(module, &public_symbols, &own_path);
-            // The shared scan keys on each symbol's emitted name; an enum variant
-            // is referenced in AIR by its *bare* source name, so a glob-imported
-            // (`use models.*`) variant is missed. Recover those variant imports
-            // (TS-local; see `extra_variant_imports_for`).
-            ctx.implicit_imports.extend(ctx.extra_variant_imports_for(
-                module,
-                &public_symbols,
-                &own_path,
-            ));
             ctx.public_symbols = public_symbols.clone();
             ctx.enum_variant_exports = crate::generator::enum_variant_value_names(module);
             ctx.emit_node(module)?;
@@ -992,76 +987,6 @@ impl TsEmitCtx {
             ));
         }
         Ok(())
-    }
-
-    /// Additional implicit cross-module imports for **enum variants** referenced
-    /// in `module` by their bare source spelling.
-    ///
-    /// The shared [`crate::generator::implicit_esm_imports_for`] scans the
-    /// module's debug rendering for each public symbol's *key* as a quoted token.
-    /// An enum variant's public-symbol key is its emitted value-name
-    /// (`Category_Electronics`), but the AIR references the variant by its bare
-    /// source name (`Identifier { name: "Electronics" }`) — the `{Enum}_{Variant}`
-    /// joining happens only at emit time (see the `Identifier` arm of
-    /// [`Self::emit_expr`]). So the shared scan never matches a glob-imported
-    /// (`use models.*`) variant, and `main.ts` omits the
-    /// `import { Category_Electronics } from "./models.js"` it needs — a
-    /// `ReferenceError`/TS2304 at every use site.
-    ///
-    /// This recovers those imports the same conservative way the shared scan
-    /// works: for each registered variant whose **bare** name appears as a quoted
-    /// token in the module's debug render, resolve its emitted value-name and add
-    /// the cross-module import when that value-name is a public `EnumVariant` of
-    /// another module not already declared/imported here.
-    ///
-    /// Note: the JS backend shares the same shared-scan gap (verified: its
-    /// `main.js` also omits the variant import and `ReferenceError`s at runtime).
-    /// The proper fix is in the shared collector; this TS-local recovery unblocks
-    /// the TS target without touching shared code. Tracked as an `OPEN`.
-    fn extra_variant_imports_for(
-        &self,
-        module: &AIRModule,
-        public_symbols: &HashMap<String, crate::generator::EsmSymbol>,
-        own_path: &str,
-    ) -> Vec<crate::generator::ImplicitEsmImport> {
-        let local = crate::generator::locally_declared_names(module);
-        let explicit = crate::generator::explicitly_imported_names(module);
-        let rendered = format!("{module:?}");
-        let mut out: Vec<crate::generator::ImplicitEsmImport> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        for (variant_src, info) in &self.enum_variants {
-            // Built-in Optional/Result variants lower inline — never imported.
-            if matches!(info.enum_name.as_str(), "Optional" | "Result") {
-                continue;
-            }
-            // Conservative reference check: the bare variant name as a quoted
-            // token in the module's debug rendering.
-            if !rendered.contains(&format!("\"{variant_src}\"")) {
-                continue;
-            }
-            let value_name = format!("{}_{}", info.enum_name, variant_src);
-            // Skip names the module already provides or imports explicitly.
-            if local.contains(&value_name) || explicit.contains(&value_name) {
-                continue;
-            }
-            let Some(sym) = public_symbols.get(&value_name) else {
-                continue;
-            };
-            // Only a *cross-module* enum-variant value needs importing.
-            if sym.module_path == own_path
-                || !matches!(sym.kind, crate::generator::EsmDeclKind::EnumVariant)
-            {
-                continue;
-            }
-            if seen.insert(value_name.clone()) {
-                out.push(crate::generator::ImplicitEsmImport {
-                    module_path: sym.module_path.clone(),
-                    name: value_name,
-                    kind: sym.kind,
-                });
-            }
-        }
-        out
     }
 
     /// Emit the trailing `export { … }` for this module's public enum-variant
@@ -9254,9 +9179,10 @@ mod tests {
     // `module main` does `use models.*` and references a bare enum variant
     // (`Electronics`) declared in `module models`. The variant emits as the
     // value-const `Category_Electronics`, which must be imported from
-    // `./models.js`; the shared import scan keys on the value-name but the AIR
-    // references the bare source name, so the import was omitted (TS2304 /
-    // ReferenceError). `extra_variant_imports_for` recovers it.
+    // `./models.js`. The shared import scan keys on the value-name but the AIR
+    // references the bare source name; the shared collector
+    // (`generator::implicit_esm_imports_for`) now probes the variant's bare
+    // source name too, so the import is produced for js and ts alike.
 
     /// A glob `use <path>.*` import AIR node.
     fn import_glob(id: u32, path: &[&str]) -> AIRNode {

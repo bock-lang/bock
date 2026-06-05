@@ -1,0 +1,56 @@
+// TEST: globimport_enum_variant
+// EXPECT: output "Electronics/Food"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression fixture (Q-glob-import-enum-variant): a `module main` that does a
+// GLOB import (`use models.*`) and then references an enum variant of
+// `models.Category` by its BARE source name (`Electronics`, `Food`) — both as a
+// direct value (passed to a function) and via a record field. The variant emits
+// as the value `Category_Electronics` in js/ts, but the AIR carries only the
+// bare source name, so the shared cross-module import collector
+// (`generator::implicit_esm_imports_for`) used to MISS it: `main.js`/`main.ts`
+// referenced `Category_Electronics` without importing it from `./models.js`,
+// crashing with `ReferenceError` (js) / `TS2304` (ts) at run time.
+//
+// The fix probes the variant's bare source name in the import scan so the
+// `import { Category_Electronics } from "./models.js"` the per-module file needs
+// is produced for js and ts alike. py/rust/go resolve the variant through their
+// own (already-correct) module mechanisms and are exercised here as a guard.
+//
+// This is a MULTI-FILE fixture — the `// FILE:` marker declares the imported
+// `models` module. `main` is intentionally NOT `public`.
+module main
+
+use models.*
+
+fn main() -> Void {
+  // Bare variant `Electronics` passed directly to a cross-module function.
+  let a = category_name(Electronics)
+  // Bare variant `Food` used as a record-construction field, then read back
+  // out through the same naming function.
+  let item = Item { label: "rice", category: Food }
+  let b = category_name(item.category)
+  println("${a}/${b}")
+}
+
+// FILE: models.bock
+module models
+
+public enum Category {
+  Electronics
+  Food
+  Other
+}
+
+public record Item {
+  label: String
+  category: Category
+}
+
+public fn category_name(cat: Category) -> String {
+  match cat {
+    Electronics => "Electronics"
+    Food => "Food"
+    Other => "Other"
+  }
+}

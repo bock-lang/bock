@@ -811,6 +811,17 @@ pub struct EsmSymbol {
     pub module_path: String,
     /// The declaration kind.
     pub kind: EsmDeclKind,
+    /// For an [`EsmDeclKind::EnumVariant`], the variant's **bare source name**
+    /// (`Electronics`) — distinct from the map key, which is the *emitted*
+    /// value-name (`Category_Electronics`). `None` for every other kind.
+    ///
+    /// A glob-imported (`use models.*`) variant is referenced in AIR by its bare
+    /// source name, not its emitted `Enum_Variant` name, so the implicit-import
+    /// reference scan must also try the bare spelling — see
+    /// [`implicit_esm_imports_for`]. Keeping the import's emitted *name* as the
+    /// map key (and only matching on the bare name) means the backends still
+    /// import the identifier they actually emit (`Category_Electronics`).
+    pub variant_bare_name: Option<String>,
 }
 
 impl EsmSymbol {
@@ -853,11 +864,12 @@ pub fn collect_public_symbols_for_esm(
             continue;
         };
         for item in items {
-            let mut record = |name: &str, kind: EsmDeclKind| {
+            let mut record = |name: &str, kind: EsmDeclKind, variant_bare_name: Option<String>| {
                 if !ESM_RUNTIME_PRELUDE_NAMES.contains(&name) {
                     map.entry(name.to_string()).or_insert_with(|| EsmSymbol {
                         module_path: module_path.clone(),
                         kind,
+                        variant_bare_name,
                     });
                 }
             };
@@ -866,49 +878,49 @@ pub fn collect_public_symbols_for_esm(
                     visibility, name, ..
                 } => {
                     if matches!(visibility, bock_ast::Visibility::Public) {
-                        record(&name.name, EsmDeclKind::Function);
+                        record(&name.name, EsmDeclKind::Function, None);
                     }
                 }
                 NodeKind::RecordDecl {
                     visibility, name, ..
                 } => {
                     if matches!(visibility, bock_ast::Visibility::Public) {
-                        record(&name.name, EsmDeclKind::Record);
+                        record(&name.name, EsmDeclKind::Record, None);
                     }
                 }
                 NodeKind::ClassDecl {
                     visibility, name, ..
                 } => {
                     if matches!(visibility, bock_ast::Visibility::Public) {
-                        record(&name.name, EsmDeclKind::Class);
+                        record(&name.name, EsmDeclKind::Class, None);
                     }
                 }
                 NodeKind::TraitDecl {
                     visibility, name, ..
                 } => {
                     if matches!(visibility, bock_ast::Visibility::Public) {
-                        record(&name.name, EsmDeclKind::Trait);
+                        record(&name.name, EsmDeclKind::Trait, None);
                     }
                 }
                 NodeKind::EffectDecl {
                     visibility, name, ..
                 } => {
                     if matches!(visibility, bock_ast::Visibility::Public) {
-                        record(&name.name, EsmDeclKind::Effect);
+                        record(&name.name, EsmDeclKind::Effect, None);
                     }
                 }
                 NodeKind::TypeAlias {
                     visibility, name, ..
                 } => {
                     if matches!(visibility, bock_ast::Visibility::Public) {
-                        record(&name.name, EsmDeclKind::TypeAlias);
+                        record(&name.name, EsmDeclKind::TypeAlias, None);
                     }
                 }
                 NodeKind::ConstDecl {
                     visibility, name, ..
                 } => {
                     if matches!(visibility, bock_ast::Visibility::Public) {
-                        record(&name.name, EsmDeclKind::Const);
+                        record(&name.name, EsmDeclKind::Const, None);
                     }
                 }
                 NodeKind::EnumDecl {
@@ -918,12 +930,17 @@ pub fn collect_public_symbols_for_esm(
                     ..
                 } => {
                     if matches!(visibility, bock_ast::Visibility::Public) {
-                        record(&name.name, EsmDeclKind::EnumType);
+                        record(&name.name, EsmDeclKind::EnumType, None);
                         for v in variants {
                             if let NodeKind::EnumVariant { name: vname, .. } = &v.kind {
+                                // Key on the emitted value-name (`Category_Electronics`)
+                                // so the import binds the identifier the backends emit,
+                                // but carry the bare source name (`Electronics`) so the
+                                // reference scan can match a glob-imported use site.
                                 record(
                                     &format!("{}_{}", name.name, vname.name),
                                     EsmDeclKind::EnumVariant,
+                                    Some(vname.name.clone()),
                                 );
                             }
                         }
@@ -1150,6 +1167,16 @@ impl ImplicitEsmImport {
 /// *over*-import a name the program does not really use (a harmless dead
 /// import), never *under*-import — so it cannot reintroduce the unresolved
 /// reference it exists to fix.
+///
+/// An **enum variant** needs a second probe. Its map key is the *emitted*
+/// value-name (`Category_Electronics`), but a glob-imported (`use models.*`)
+/// variant is referenced in AIR by its *bare* source name
+/// (`Identifier { name: "Electronics" }`) — the `Enum_Variant` joining happens
+/// only at emit time. So for a variant we also scan for the bare source name
+/// ([`EsmSymbol::variant_bare_name`]) and, on a match, import the symbol under
+/// its emitted key (the identifier the backends actually emit and need bound).
+/// Without this the per-module JS/TS file omits the variant import and
+/// `ReferenceError`s / TS2304s at every bare-variant use site.
 #[must_use]
 pub fn implicit_esm_imports_for(
     module: &AIRModule,
@@ -1164,7 +1191,15 @@ pub fn implicit_esm_imports_for(
         if sym.module_path == own_path || local.contains(name) || explicit.contains(name) {
             continue;
         }
-        if rendered.contains(&format!("\"{name}\"")) {
+        // A reference is the emitted name as a quoted token, or — for an enum
+        // variant — its bare source name (the spelling a glob-imported use site
+        // carries). Either way the symbol is imported under its emitted key.
+        let referenced = rendered.contains(&format!("\"{name}\""))
+            || sym
+                .variant_bare_name
+                .as_ref()
+                .is_some_and(|bare| rendered.contains(&format!("\"{bare}\"")));
+        if referenced {
             out.push(ImplicitEsmImport {
                 module_path: sym.module_path.clone(),
                 name: name.clone(),
@@ -6079,6 +6114,89 @@ mod tests {
         let p = std::path::Path::new("x.bock");
         let reg = collect_enum_variants(&[(&lib, p), (&main_m, p)]);
         assert_eq!(reg.get("Red").map(|i| i.enum_name.as_str()), Some("Color"));
+    }
+
+    /// A `fn <name>() { <stmts> }` declaration carrying the given body
+    /// statements — used to plant a bare-variant reference in a use site.
+    fn fn_decl_with_body(name: &str, stmts: Vec<AIRNode>) -> AIRNode {
+        let body = AIRNode::new(900, dummy_span(), NodeKind::Block { stmts, tail: None });
+        AIRNode::new(
+            0,
+            dummy_span(),
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
+    }
+
+    #[test]
+    fn implicit_esm_imports_glob_imported_enum_variant_by_bare_name() {
+        // `module models` declares `public enum Category { Electronics Clothing }`.
+        // `module main` does `use models.*` (a glob import — `module_named` emits
+        // ImportItems::Glob) and references the bare variant `Electronics`. The
+        // shared collector must produce an implicit import keyed on the *emitted*
+        // value-name `Category_Electronics`, even though the AIR only ever spells
+        // the bare source name. Without it `main.js`/`main.ts` omit the import and
+        // ReferenceError/TS2304 at the use site (inventory-system regression).
+        let category = enum_decl(
+            "Category",
+            vec![
+                enum_variant("Electronics", EnumVariantPayload::Unit),
+                enum_variant("Clothing", EnumVariantPayload::Unit),
+            ],
+        );
+        let models = module_named("models", &[], vec![category]);
+        // `fn use_it() { let _ = Electronics }` — bare-variant reference.
+        let use_electronics = AIRNode::new(
+            901,
+            dummy_span(),
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(AIRNode::new(
+                    902,
+                    dummy_span(),
+                    NodeKind::BindPat {
+                        name: ident("_"),
+                        is_mut: false,
+                    },
+                )),
+                ty: None,
+                value: Box::new(identifier(903, "Electronics")),
+            },
+        );
+        let main_m = module_named(
+            "main",
+            &["models"],
+            vec![fn_decl_with_body("use_it", vec![use_electronics])],
+        );
+        let p = std::path::Path::new("x.bock");
+
+        let public_symbols = collect_public_symbols_for_esm(&[(&models, p), (&main_m, p)]);
+        let imports = implicit_esm_imports_for(&main_m, &public_symbols, "main");
+
+        let variant_import = imports
+            .iter()
+            .find(|i| i.name == "Category_Electronics")
+            .expect(
+                "glob-imported bare variant `Electronics` must import as `Category_Electronics`",
+            );
+        assert_eq!(variant_import.module_path, "models");
+        assert_eq!(variant_import.kind, EsmDeclKind::EnumVariant);
+        // The unreferenced sibling variant must NOT be over-imported (the scan is
+        // by bare name and `Clothing` never appears at a use site).
+        assert!(
+            !imports.iter().any(|i| i.name == "Category_Clothing"),
+            "unreferenced variant `Clothing` must not be imported; got: {imports:?}"
+        );
     }
 
     #[test]
