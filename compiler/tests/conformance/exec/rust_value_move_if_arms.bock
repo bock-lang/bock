@@ -1,0 +1,38 @@
+// TEST: exec_rust_value_move_if_arms
+// EXPECT: output "A|fallback|fallback;fallback|A|fallback"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Move-out-of-`if`-arm-value regression (Rust by-value reuse, react-components
+// `update_field` blocker). A non-`Copy` parameter used as the bare *value* of
+// several sibling `if`/`else` arms is moved by the first arm-tail, so a later
+// arm-tail is a use-after-move (E0382):
+//
+//   fn pick(key, value) {
+//     let a = if (key == "a") { value } else { "fallback" }
+//     let b = if (key == "b") { value } else { "fallback" }   // <- E0382 in Rust
+//     ...
+//   }
+//
+// `value: String` is moved by the first `{ value }` arm-tail; Rust then rejects
+// the second `{ value }`. The Rust backend now clones a move-reused, non-`Copy`,
+// *concrete*-typed parameter when it appears as a bare value/block-tail
+// (`{ value.clone() }`) — mirroring the clone it already applies at a by-value
+// call argument. A generic `T` value (no `Clone` bound) is excluded.
+//
+// All five targets must agree; only Rust's lowering changed (clone insertion).
+module main
+
+@managed
+fn pick(key: String, value: String) -> String {
+  let a = if (key == "a") { value } else { "fallback" }
+  let b = if (key == "b") { value } else { "fallback" }
+  let c = if (key == "c") { value } else { "fallback" }
+  "${a}|${b}|${c}"
+}
+
+@managed
+fn main() {
+  let line1 = pick("a", "A")
+  let line2 = pick("b", "A")
+  println("${line1};${line2}")
+}
