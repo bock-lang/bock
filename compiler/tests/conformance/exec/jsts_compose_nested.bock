@@ -1,0 +1,42 @@
+// TEST: exec_jsts_compose_nested
+// EXPECT: output "14"
+// EXPECT: targets js, ts
+//
+// Nested function composition `f >> g >> h` on the js/ts backends
+// (data-pipeline `build_report_pipeline`, ml-data-prep `normalize >> square`;
+// Q-nested-compose-jstsgo js+ts portions). The AIR compose desugar lowers
+// `f >> g` to `(__compose_x) => g(f(__compose_x))`; when `>>` chains, the inner
+// compose becomes a `Lambda` that appears as the *callee* `f` in
+// `f(__compose_x)`. The js/ts backends emitted that arrow callee unparenthesised:
+//
+//   (x) => outer((x) => inner(base(x))(x))   // call binds to the body, not the arrow
+//
+// which is `(x) => inner(base(x))` applied to `(x)` — the trailing `(x)` binds to
+// the arrow's body rather than invoking the arrow. The backends now parenthesise
+// an arrow callee (`((x) => …)(x)`) via `emit_callee`, mirroring the python
+// (`emit_callee`) and rust (`emit_callee_rs`) backends, so the chain runs
+// left-to-right: add_one(5)=6, double(6)=12, add_two(12)=14.
+module main
+
+fn add_one(n: Int) -> Int {
+  n + 1
+}
+
+fn double(n: Int) -> Int {
+  n * 2
+}
+
+fn add_two(n: Int) -> Int {
+  n + 2
+}
+
+// Three-way composition: ((n+1) then *2) then +2.
+fn build() -> Fn(Int) -> Int {
+  add_one >> double >> add_two
+}
+
+fn main() -> Void {
+  let pipeline = build()
+  // (5 + 1) * 2 + 2 = 14
+  println("${pipeline(5)}")
+}

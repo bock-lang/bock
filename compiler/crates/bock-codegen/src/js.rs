@@ -3262,7 +3262,7 @@ impl EmitCtx {
                 } else {
                     None
                 };
-                self.emit_expr(callee)?;
+                self.emit_callee(callee)?;
                 self.buf.push('(');
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -3345,11 +3345,17 @@ impl EmitCtx {
                 self.emit_pipe(left, right)
             }
             NodeKind::Compose { left, right } => {
-                // `f >> g` → `(x) => g(f(x))`
+                // `f >> g` → `((x) => g(f(x)))`. A composed callee (`left`/`right`)
+                // that is itself a `Compose`/`Lambda` must be parenthesized: a bare
+                // arrow `(x) => …` followed by `(x)` parses as `(x) => (…(x))`,
+                // binding the call to the arrow's body rather than invoking the
+                // arrow. `emit_callee` wraps those forms. In practice the AIR lowers
+                // `>>` to a `Lambda` before codegen (so chained `>>` reaches the
+                // `Call` arm, not here), making this a defensive fall-through.
                 let _ = write!(self.buf, "((x) => ");
-                self.emit_expr(right)?;
+                self.emit_callee(right)?;
                 self.buf.push('(');
-                self.emit_expr(left)?;
+                self.emit_callee(left)?;
                 self.buf.push_str("(x)))");
                 Ok(())
             }
@@ -4324,12 +4330,39 @@ impl EmitCtx {
                 return Ok(());
             }
         }
-        // Simple case: `right(left)`
-        self.emit_expr(right)?;
+        // Simple case: `right(left)`. `right` is a callee, so parenthesize it
+        // when it is a bare arrow (`Lambda`/`Compose`) — otherwise the trailing
+        // `(left)` binds to the arrow body instead of invoking it.
+        self.emit_callee(right)?;
         self.buf.push('(');
         self.emit_expr(left)?;
         self.buf.push(')');
         Ok(())
+    }
+
+    /// Emit an expression in **callee** position, parenthesizing it when its
+    /// surface syntax would otherwise swallow the trailing argument list.
+    ///
+    /// The case that matters is a bare arrow callee: `(x) => body` followed by
+    /// `(arg)` parses in JS as `(x) => (body(arg))` — the call binds to the body,
+    /// never invoking the arrow. Wrapping it as `((x) => body)(arg)` makes the
+    /// call apply to the arrow itself. This arises when the AIR compose desugar
+    /// (`f >> g` → `(__compose_x) => g(f(__compose_x))`) **nests**: a chained
+    /// `>>` lowers the inner compose to a `Lambda` (or a `Compose` still awaiting
+    /// lowering), which then appears as the callee `f`/`g` inside the call.
+    /// Mirrors the python (`emit_callee`) and rust (`emit_callee_rs`) backends.
+    fn emit_callee(&mut self, callee: &AIRNode) -> Result<(), CodegenError> {
+        if matches!(
+            callee.kind,
+            NodeKind::Lambda { .. } | NodeKind::Compose { .. }
+        ) {
+            self.buf.push('(');
+            self.emit_expr(callee)?;
+            self.buf.push(')');
+            Ok(())
+        } else {
+            self.emit_expr(callee)
+        }
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
