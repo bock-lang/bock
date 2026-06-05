@@ -655,7 +655,10 @@ impl JsScaffolder {
             _ => vec![("vitest", "^2.0.0")],
         };
         if self.is_ts() {
-            dev_deps.push(("typescript", "^5.0.0"));
+            // ≥ 5.7 for `rewriteRelativeImportExtensions` (see `tsconfig_json`):
+            // the emitted tree imports via `.ts` specifiers, which that flag both
+            // accepts and rewrites to `.js` on emit.
+            dev_deps.push(("typescript", "^5.7.0"));
         }
         if js_prettier_enabled(ctx.config) {
             dev_deps.push(("prettier", "^3.0.0"));
@@ -685,16 +688,40 @@ impl JsScaffolder {
         s
     }
 
-    /// The `tsconfig.json` for the TS target: modern ESM output matching the
-    /// `tsc main.ts` → `node main.js` run plan (NodeNext module resolution,
-    /// strict). Passing files explicitly to `tsc` ignores this file, so it does
-    /// not affect the harness run — it is for the user's editor/`tsc -p .`.
+    /// The `tsconfig.json` for the TS target: modern ESM output (NodeNext module
+    /// resolution, strict). The emitted `.ts` source tree imports sibling modules
+    /// and the shared runtime via explicit `.ts` specifiers, which serves both run
+    /// plans:
+    ///
+    /// * `node --experimental-strip-types main.ts` resolves the `.ts` specifiers
+    ///   verbatim (the type-stripping loader never rewrites `.js`→`.ts`, so a
+    ///   `.js` specifier would `ERR_MODULE_NOT_FOUND` — see the examples-exec
+    ///   audit and `ts.rs::emit_esm_imports`);
+    /// * `tsc -p .` accepts the `.ts` specifiers via `rewriteRelativeImportExtensions`,
+    ///   which also rewrites them to `.js` in the *emitted* JS so the conformance
+    ///   harness's `tsc -p .` → `node main.js` plan still runs (see
+    ///   `bock-build::toolchain`). `tsc --noEmit -p .` likewise type-checks clean.
+    ///
+    /// `rewriteRelativeImportExtensions` requires TypeScript ≥ 5.7 (pinned in the
+    /// emitted `package.json`).
+    ///
+    /// The transpiled test file (`bock.test.ts`, S7) is `exclude`d from this
+    /// config's compile scope: it `import`s the test framework (`vitest`), which
+    /// is only present after `npm install`, so a build-time `tsc --noEmit -p .`
+    /// (project-mode validation, see `bock-build::toolchain`) would otherwise fail
+    /// with `TS2307: Cannot find module 'vitest'`. The test file is exercised by
+    /// the framework (`npm test` → Vitest), which installs `vitest` first and
+    /// discovers test files via its own glob — Vitest does not rely on this
+    /// `include`/`exclude` to find them, so excluding it from `tsc`'s scope does
+    /// not affect the test run. This mirrors the per-file validation loop, which
+    /// skips the transpiled test files (`bock-cli::build::is_transpiled_test_file`).
     fn tsconfig_json() -> String {
         "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \
          \"module\": \"NodeNext\",\n    \"moduleResolution\": \"NodeNext\",\n    \
+         \"rewriteRelativeImportExtensions\": true,\n    \
          \"strict\": true,\n    \"esModuleInterop\": true,\n    \
          \"skipLibCheck\": true,\n    \"forceConsistentCasingInFileNames\": true\n  },\n  \
-         \"include\": [\"**/*.ts\"]\n}\n"
+         \"include\": [\"**/*.ts\"],\n  \"exclude\": [\"bock.test.ts\"]\n}\n"
             .to_string()
     }
 
@@ -734,7 +761,12 @@ impl JsScaffolder {
             _ => "npm test",
         };
         let run_cmd = if self.is_ts() {
-            "tsc main.ts && node main.js"
+            // Build by project (`tsc -p .`) so the scaffolded `tsconfig.json`
+            // applies — `rewriteRelativeImportExtensions` rewrites the `.ts`
+            // import specifiers to `.js` on emit, so `node main.js` runs the
+            // emitted tree. (For a no-build run, `node --experimental-strip-types
+            // main.ts` executes the `.ts` source directly.)
+            "tsc -p . && node main.js"
         } else {
             "node main.js"
         };
@@ -1536,12 +1568,24 @@ formatter = "prettier"
         let files = run_scaffolder("ts", &cfg, &[], Some("app")).unwrap();
         let pkg = file(&files, "package.json");
         assert!(pkg.content.contains("\"typescript\""));
+        // ≥ 5.7 is required for `rewriteRelativeImportExtensions`.
+        assert!(pkg.content.contains("\"typescript\": \"^5.7.0\""));
         let ts = file(&files, "tsconfig.json");
         assert!(ts.content.contains("\"module\": \"NodeNext\""));
         assert!(ts.content.contains("\"strict\": true"));
+        // The emitted tree imports via `.ts` specifiers (so node strip-types runs
+        // it verbatim); `rewriteRelativeImportExtensions` lets `tsc` both accept
+        // them and rewrite to `.js` on emit, keeping `tsc -p .` → `node main.js`.
+        assert!(ts
+            .content
+            .contains("\"rewriteRelativeImportExtensions\": true"));
+        // The transpiled test file imports `vitest` (only present after
+        // `npm install`), so it is excluded from the build-time `tsc --noEmit
+        // -p .` scope; the framework (Vitest) discovers and runs it separately.
+        assert!(ts.content.contains("\"exclude\": [\"bock.test.ts\"]"));
         assert!(file(&files, "README.md")
             .content
-            .contains("tsc main.ts && node main.js"));
+            .contains("tsc -p . && node main.js"));
     }
 
     #[test]

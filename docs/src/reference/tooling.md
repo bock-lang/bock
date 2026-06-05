@@ -53,16 +53,21 @@ See §20.6.1.
 >   shared `_bock_runtime.py` for the Optional/Result/Ordering/concurrency
 >   runtimes. Runs as `python3 main.py` from the build root, where `core`
 >   resolves as a namespace package.
-> - **JS / TS** — ES-module imports (`import { … } from "./core/option.js"`;
->   relative specifiers carry the `.js` extension Node requires), public
->   declarations `export`ed, plus a shared `_bock_runtime.{js,ts}` for the
->   concurrency/range helpers (and, for TS, the Optional/Result runtime
->   types). A `package.json` (`{"type":"module"}` + test script + the
+> - **JS / TS** — ES-module imports, public declarations `export`ed, plus a
+>   shared `_bock_runtime.{js,ts}` for the concurrency/range helpers (and, for
+>   TS, the Optional/Result runtime types). The relative import specifier
+>   differs by target: **JS** references the emitted `.js`
+>   (`import { … } from "./core/option.js"`), while **TS** references the
+>   emitted `.ts` source directly (`import { … } from "./core/option.ts"`) so
+>   the tree runs verbatim under `node --experimental-strip-types main.ts`
+>   (whose loader resolves specifiers as written and never rewrites
+>   `.js`→`.ts`). A `package.json` (`{"type":"module"}` + test script + the
 >   selected test-framework dev-dependency) is emitted at the
->   `build/<target>/` root so Node treats the tree as ES modules; TS also
->   gets a `tsconfig.json`. JS runs as `node main.js`; TS compiles the
->   project with `tsc -p .` (honoring the scaffolded `tsconfig.json`) then
->   runs `node main.js`.
+>   `build/<target>/` root so Node treats the tree as ES modules; TS also gets
+>   a `tsconfig.json` with `rewriteRelativeImportExtensions` (TypeScript ≥ 5.7),
+>   which lets `tsc` accept the `.ts` specifiers and rewrite them to `.js` on
+>   emit. JS runs as `node main.js`; TS compiles the project with `tsc -p .`
+>   (honoring the scaffolded `tsconfig.json`) then runs `node main.js`.
 > - **Rust** — a real Cargo crate: a `Cargo.toml` (`[package]` + a
 >   `[[bin]]`, plus an empty `[workspace]` table so the crate is its own
 >   workspace root and builds even when the output lands inside a parent

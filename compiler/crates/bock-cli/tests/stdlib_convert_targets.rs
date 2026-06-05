@@ -115,9 +115,11 @@ fn module_file_path(build_dir: &Path, target: &str, module: &str, ext: &str) -> 
 
 /// Assert the entry file wires to the per-module `module` file (dotted path) the
 /// way `target` emits cross-module references: python `from <module> import …`;
-/// js/ts ESM `import … from "./<path>.js"`; rust `use crate::<m::path>::…;`; go
-/// shares one `package main`, so there is no import — the separate module file
-/// (asserted by the caller) is the per-module evidence.
+/// js ESM `import … from "./<path>.js"`; ts ESM `import … from "./<path>.ts"`
+/// (the emitted `.ts` tree imports siblings via `.ts` specifiers — see
+/// `bock-codegen::ts`); rust `use crate::<m::path>::…;`; go shares one
+/// `package main`, so there is no import — the separate module file (asserted by
+/// the caller) is the per-module evidence.
 fn assert_entry_imports_module(entry: &str, target: &str, module: &str) {
     match target {
         "python" => assert!(
@@ -125,7 +127,10 @@ fn assert_entry_imports_module(entry: &str, target: &str, module: &str) {
             "target {target}: entry must import from the {module} module file",
         ),
         "js" | "ts" => {
-            let rel = format!("./{}.js", module.replace('.', "/"));
+            // js specifiers reference the emitted `.js`; ts references the
+            // emitted `.ts` source directly (see `bock-codegen::ts`).
+            let spec_ext = if target == "ts" { "ts" } else { "js" };
+            let rel = format!("./{}.{spec_ext}", module.replace('.', "/"));
             assert!(
                 entry.contains("import ") && entry.contains(&rel),
                 "target {target}: entry must `import … from \"{rel}\""

@@ -1,0 +1,47 @@
+// TEST: exec_ts_cross_module_value_specifier
+// EXPECT: output "sum=30;label=hi:30"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression lock for the TS module-import *specifier* extension (the
+// `.ts`-specifier fix in `bock-codegen::ts::emit_esm_imports` +
+// `scaffold.rs::tsconfig_json` + `bock-build::toolchain` per-project `tsc`).
+//
+// The emitted TS tree imports sibling modules via explicit `.ts` specifiers
+// (e.g. `import { add, label } from "./util.ts"`), NOT `.js`. This matters for
+// **value** imports specifically: project mode runs the entry under
+// `node --experimental-strip-types main.ts`, whose loader resolves specifiers
+// verbatim against files on disk and never rewrites `.js`→`.ts`. A `.js`
+// specifier therefore `ERR_MODULE_NOT_FOUND`s on a value import (type-only
+// imports were erased by the strip pass, so they masked the bug). `tsc` accepts
+// the `.ts` specifier via `rewriteRelativeImportExtensions` (scaffolded
+// `tsconfig.json`) and the project-mode `tsc --noEmit -p .` validation
+// type-checks the whole tree clean.
+//
+// This fixture forces the value-import path: `main` `use`s and *calls* two
+// `public` functions from a sibling user module `util`, so the import must be a
+// runtime `import { add, label }` (not an erased `import type`). It runs on all
+// five targets and they must agree on output.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale); `util`'s functions ARE `public` — cross-module `use`
+// only resolves exported items.
+module main
+
+use util.{add, label}
+
+fn main() -> Void {
+  let total: Int = add(12, 18)
+  let tag: String = label("hi", total)
+  println("sum=${total};label=${tag}")
+}
+
+// FILE: util.bock
+module util
+
+public fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+public fn label(name: String, n: Int) -> String {
+  "${name}:${n}"
+}

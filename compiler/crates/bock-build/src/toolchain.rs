@@ -500,15 +500,23 @@ fn builtin_typescript_spec() -> ToolchainSpec {
         binary_name: "tsc".to_string(),
         version_args: vec!["--version".to_string()],
         compile_command: "tsc".to_string(),
-        compile_args: vec!["--noEmit".to_string()],
-        validate_per_project: false,
+        // Validate the whole project via its `tsconfig.json` (`tsc --noEmit -p .`)
+        // rather than per file. The emitted tree imports sibling modules via `.ts`
+        // specifiers (so it runs under `node --experimental-strip-types`); a
+        // single-file `tsc --noEmit <file>` ignores the tsconfig, so it would
+        // reject the `.ts` specifier (TS5097). `validate_per_project` runs `tsc`
+        // once in `build/ts/`, where `rewriteRelativeImportExtensions` (from the
+        // scaffolded `tsconfig.json`) accepts the `.ts` extension.
+        compile_args: vec!["--noEmit".to_string(), "-p".to_string(), ".".to_string()],
+        validate_per_project: true,
         // Compile the whole project via its `tsconfig.json` (`tsc -p .`), then
         // run the emitted ESM entry with Node. Project mode (§20.6.2) always
         // scaffolds a `tsconfig.json`; with it present in the run workdir, the
         // old single-file `tsc main.ts` fails (TS5112: "tsconfig.json is present
         // but will not be loaded if files are specified on commandline").
         // Building by project resolves the config *and* compiles the whole
-        // per-module `.ts` tree (S6b).
+        // per-module `.ts` tree (S6b). `rewriteRelativeImportExtensions` rewrites
+        // the `.ts` import specifiers to `.js` on emit so `node main.js` runs.
         run_plan: RunPlan {
             steps: vec![
                 RunStep::new("tsc", &["-p", "."]),
