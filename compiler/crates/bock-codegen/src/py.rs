@@ -9208,7 +9208,13 @@ mod tests {
             .arg(code)
             .output()
             .expect("failed to run python3");
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
+        // Normalize CRLF→LF: on Windows python writes `\r\n` line endings, which
+        // would fail exact-match assertions against `\n`-terminated expectations.
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .replace("\r\n", "\n")
+            .trim()
+            .to_string()
     }
 
     #[test]
