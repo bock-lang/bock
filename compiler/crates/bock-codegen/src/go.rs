@@ -1001,6 +1001,18 @@ struct GoEmitCtx {
     /// desugared method-call sites to pick PascalCase (public) vs camelCase
     /// (private) so the call matches the method definition's Go casing.
     public_methods: HashSet<String>,
+    /// `(target type name, method name)` pairs that have an *inherent* (`impl
+    /// Type { ... }`, no `trait_path`) or *class* method definition. A trait
+    /// impl (`impl Trait for Type`) whose method merely forwards to the
+    /// same-named inherent method (`fn render(self) { self.render() }`) is a
+    /// redundant self-recursive forwarder in Go once the inherent method is
+    /// exported to satisfy the interface directly — both would emit the same
+    /// PascalCase Go name on the receiver, and the forwarder body's
+    /// `self.render()` would resolve back to itself. Such a trait-impl method is
+    /// skipped when an inherent definition already covers it. Keyed on the
+    /// PascalCased Go method name (the trait-side casing) so a private inherent
+    /// method exported via `public_methods` still matches.
+    inherent_methods: HashSet<(String, String)>,
     /// PascalCased names of every record/class field declared in the program.
     /// Go forbids a struct having a field and a method with the same name, so a
     /// public method whose PascalCased Go name collides with a field name
@@ -1522,6 +1534,7 @@ impl GoEmitCtx {
             void_effect_ops: HashSet::new(),
             async_fns: HashSet::new(),
             public_methods: HashSet::new(),
+            inherent_methods: HashSet::new(),
             record_field_names: HashSet::new(),
             loop_labels: Vec::new(),
             switch_label_depth: 0,
@@ -2115,14 +2128,29 @@ impl GoEmitCtx {
             ));
         if let NodeKind::Module { items, .. } = &module.kind {
             for item in items {
-                let (methods, always_export) = match &item.kind {
+                // `inherent_target` is `Some(type name)` for an inherent (`impl
+                // Type`, no trait) or class block — used to record
+                // `(type, method)` so a redundant same-named trait-impl forwarder
+                // can be skipped. A trait impl (`impl Trait for Type`) is not an
+                // inherent definition (it is the forwarder we may skip).
+                let (methods, always_export, inherent_target) = match &item.kind {
                     NodeKind::ImplBlock {
                         methods,
                         trait_path,
+                        target,
                         ..
-                    } => (methods, trait_path.is_some()),
-                    NodeKind::TraitDecl { methods, .. } => (methods, true),
-                    NodeKind::ClassDecl { methods, .. } => (methods, false),
+                    } => {
+                        let inherent = if trait_path.is_none() {
+                            Some(self.type_expr_to_string(target))
+                        } else {
+                            None
+                        };
+                        (methods, trait_path.is_some(), inherent)
+                    }
+                    NodeKind::TraitDecl { methods, .. } => (methods, true, None),
+                    NodeKind::ClassDecl { methods, name, .. } => {
+                        (methods, false, Some(name.name.clone()))
+                    }
                     _ => continue,
                 };
                 for m in methods {
@@ -2132,6 +2160,16 @@ impl GoEmitCtx {
                     {
                         if always_export || matches!(visibility, Visibility::Public) {
                             self.public_methods.insert(name.name.clone());
+                        }
+                        if let Some(ty) = &inherent_target {
+                            // Key on the PascalCased Go method name: a trait
+                            // declares its methods exported (PascalCase), so a
+                            // skip check from the trait-impl side compares against
+                            // that casing. The inherent method itself is exported
+                            // to the same Go name when its name is in
+                            // `public_methods` (see `emit_method_body`).
+                            self.inherent_methods
+                                .insert((ty.clone(), to_pascal_case(&name.name)));
                         }
                     }
                 }
@@ -4370,6 +4408,20 @@ impl GoEmitCtx {
         false
     }
 
+    /// Returns `true` if the AST `TypeExpr` represents `Void` or `Unit` (the
+    /// `TypeExpr` analogue of [`Self::is_void_type`]). Used by `ast_type_to_go`
+    /// to render a `Fn(...) -> Void` as a Go `func(...)` with no result type.
+    fn ast_type_is_void(ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Named { path, args, .. } if args.is_empty() => path
+                .segments
+                .last()
+                .is_some_and(|s| s.name == "Void" || s.name == "Unit"),
+            TypeExpr::Tuple { elems, .. } => elems.is_empty(),
+            _ => false,
+        }
+    }
+
     /// Returns the emitted body and import flags without building the preamble.
     fn into_parts(self) -> (String, GoImportNeeds) {
         (
@@ -6379,11 +6431,35 @@ impl GoEmitCtx {
                         crate::generator::inherited_default_methods(&self.trait_decls, tp, methods)
                     })
                     .unwrap_or_default();
-                for (i, method) in methods.iter().chain(default_methods.iter()).enumerate() {
-                    if i > 0 {
+                let mut emitted_any = false;
+                for method in methods.iter().chain(default_methods.iter()) {
+                    // Skip a trait-impl method that duplicates an inherent
+                    // (`impl Type`) / class method of the same Go name. The
+                    // inherent method is the real implementation and — being in
+                    // `public_methods` because the trait declares it — is now
+                    // exported to the same PascalCase Go name, so it satisfies the
+                    // interface directly. Emitting the trait-impl method too would
+                    // be a duplicate-method Go error, and a forwarder body
+                    // (`fn render(self) { self.render() }`) would resolve back to
+                    // itself (`Render() { return self.Render() }`) — infinite
+                    // recursion. Default methods (synthesized, real bodies) and
+                    // non-duplicated trait methods are unaffected.
+                    if trait_path.is_some() {
+                        if let NodeKind::FnDecl { name, .. } = &method.kind {
+                            let go_name = to_pascal_case(&name.name);
+                            if self
+                                .inherent_methods
+                                .contains(&(target_name.clone(), go_name))
+                            {
+                                continue;
+                            }
+                        }
+                    }
+                    if emitted_any {
                         self.buf.push('\n');
                     }
                     self.emit_method(&target_name, &target_generics, method, use_value_receiver)?;
+                    emitted_any = true;
                 }
                 Ok(())
             }
@@ -6882,11 +6958,18 @@ impl GoEmitCtx {
             // exported (the `TraitDecl` emission PascalCases them), so the
             // receiver method and the call site must match. A `private` trait
             // default method (e.g. `not_equals`) would otherwise be camelCased
-            // here while the interface declares it PascalCased. Inherent (`impl
-            // Type`) methods keep the public/private casing rule.
+            // here while the interface declares it PascalCased. An inherent
+            // method whose name a trait *also* declares (so it is in
+            // `public_methods`) is exported too: it is the real implementation
+            // that satisfies the interface (`impl Button { fn render }` →
+            // `Render`), and every call site already PascalCases a
+            // `public_methods` name — declaration and dispatch must agree.
+            // Otherwise inherent methods keep the public/private casing rule.
             let method_name = self.go_method_name(
                 &name.name,
-                use_value_receiver || matches!(visibility, Visibility::Public),
+                use_value_receiver
+                    || matches!(visibility, Visibility::Public)
+                    || self.public_methods.contains(&name.name),
             );
             // The AIR keeps `self` as a leading `Param` and method bodies refer
             // to `self.Field`. Name the Go receiver `self` and drop the leading
@@ -7385,6 +7468,27 @@ impl GoEmitCtx {
                         let name = self.pattern_to_binding_name(pattern);
                         self.var_list_elem.insert(name.clone(), elem.clone());
                         self.var_go_type.insert(name, format!("[]{elem}"));
+                    }
+                    // Record an untyped binding to a record-returning value (`let
+                    // form = create_form()` → `FormState`), so a later built-in
+                    // collection method on one of its fields (`form.fields.keys()`,
+                    // `form.fields.get(k)`) resolves the field's declared `Map[K,
+                    // V]` / `List[T]` types through `map_receiver_kv_go_types` /
+                    // the list analogue rather than erasing to the
+                    // `map[interface{}]interface{}` / `[]interface{}` Go rejects
+                    // against the concretely-typed struct field. Scoped to records
+                    // that actually have such a field (the only consumers), so this
+                    // never over-records a binding's Go type.
+                    if !matches!(value.kind, NodeKind::Lambda { .. }) {
+                        if let Some(go_ty) = self.infer_go_expr_type(value) {
+                            let head = Self::go_type_record_head(&go_ty);
+                            if self.record_field_map_kv.contains_key(head)
+                                || self.record_field_list_elem.contains_key(head)
+                            {
+                                self.var_go_type
+                                    .insert(self.pattern_to_binding_name(pattern), go_ty);
+                            }
+                        }
                     }
                     // Record an untyped binding to a lambda → the lambda's inferred
                     // Go return type, so a later compose `f >> binding` can resolve
@@ -8179,12 +8283,30 @@ impl GoEmitCtx {
                         self.buf.push_str(", ");
                     }
                     let prev_lambda = self.expected_lambda_param_types.take();
+                    let prev_forced_ret = self.forced_lambda_ret.take();
                     let prev_coll = self.expected_collection_elem.take();
                     if matches!(arg.value.kind, NodeKind::Lambda { .. }) {
                         if let Some((gp, ptys, binds)) = &lambda_bindings {
                             if let Some(pty) = ptys.get(i).and_then(|p| p.as_ref()) {
                                 self.expected_lambda_param_types =
                                     self.specialise_lambda_param_types(pty, gp, binds);
+                                // A `Fn(...) -> Void` callee parameter pins the
+                                // lambda's return to the Void marker so the closure
+                                // emits `func(...) { <stmts> }` (no result, no
+                                // `return`). Without this, a `() => println(...)`
+                                // call argument would emit `func() interface{} {
+                                // return fmt.Println(...) }` — both a type mismatch
+                                // against the `func()` parameter and a Go arity
+                                // error (`fmt.Println` returns `(int, error)`). The
+                                // parameter may name a `type Handler = Fn() -> Void`
+                                // alias (react-components' `EventHandler`), so peel
+                                // one alias layer first.
+                                let resolved = self.resolve_type_alias(pty).unwrap_or(pty);
+                                if let NodeKind::TypeFunction { ret, .. } = &resolved.kind {
+                                    if Self::is_void_type(ret) {
+                                        self.forced_lambda_ret = Some("struct{}".to_string());
+                                    }
+                                }
                             }
                         }
                     } else if matches!(
@@ -8212,6 +8334,7 @@ impl GoEmitCtx {
                     }
                     self.emit_expr(&arg.value)?;
                     self.expected_lambda_param_types = prev_lambda;
+                    self.forced_lambda_ret = prev_forced_ret;
                     self.expected_collection_elem = prev_coll;
                 }
                 if let Some(ea) = effects_args {
@@ -8307,6 +8430,46 @@ impl GoEmitCtx {
                 // list-combinator emitter derives from the same inference, or
                 // `append(__out, __f(__x))` mismatches `[]Todo` vs `interface{}`.
                 let forced_ret = self.forced_lambda_ret.take();
+                // A `Fn(...) -> Void` callee pins `forced_ret` to the Void value
+                // type `struct{}` (and the *type* now renders `func(...)` with no
+                // result, see `type_to_go`'s `TypeFunction` arm). Such a lambda is
+                // void: its closure must be `func(...) { <stmts> }` — no result
+                // type, no `return`. Emitting `func() struct{} { return <body> }`
+                // is doubly wrong: it does not match the `func()` parameter type,
+                // and a void-call body (`println(...)` → Go's `fmt.Println`, which
+                // returns `(int, error)`) makes `return fmt.Println(...)` a Go
+                // arity error. When `forced_ret` is unset, a lambda whose body tail
+                // is a void call (a bare `() => println(...)`) is likewise void.
+                let body_tail = match &body.kind {
+                    NodeKind::Block { tail: Some(t), .. } => t.as_ref(),
+                    NodeKind::Block { tail: None, .. } => body,
+                    _ => body,
+                };
+                let is_void_lambda = forced_ret.as_deref() == Some("struct{}")
+                    || (forced_ret.is_none()
+                        && expected_params.is_none()
+                        && compose_param.is_none()
+                        && self.is_void_call(body_tail));
+                if is_void_lambda {
+                    // Statement-style void closure: `func(params) { <stmts> }`. The
+                    // body's effective tail void call is emitted as a statement
+                    // (never `return`d). Mirrors the function-body void path.
+                    let _ = write!(self.buf, "func({}) {{ ", param_strs.join(", "));
+                    let prev_ret = self.current_fn_ret_type.take();
+                    let prev_expected = self.current_expected_type.take();
+                    if let NodeKind::Block { stmts, .. } = &body.kind {
+                        for s in stmts {
+                            self.emit_node(s)?;
+                            self.buf.push_str("; ");
+                        }
+                    }
+                    self.emit_expr(body_tail)?;
+                    self.current_fn_ret_type = prev_ret;
+                    self.current_expected_type = prev_expected;
+                    self.buf.push_str(" }");
+                    self.var_go_type = saved_go_types;
+                    return Ok(());
+                }
                 let ret_ty = forced_ret.unwrap_or_else(|| {
                     self.infer_block_tail_type(body)
                         .unwrap_or_else(|| "interface{}".to_string())
@@ -10660,7 +10823,16 @@ impl GoEmitCtx {
             }
             NodeKind::TypeFunction { params, ret, .. } => {
                 let param_strs: Vec<String> = params.iter().map(|p| self.type_to_go(p)).collect();
-                format!("func({}) {}", param_strs.join(", "), self.type_to_go(ret))
+                // A `Fn(...) -> Void` lowers to a Go `func(...)` with NO result
+                // type. Rendering the Void return as `struct{}` (its value type)
+                // would make `func() struct{}`, which is a function that must
+                // `return struct{}{}` — but a Void-returning closure body emits
+                // no return, so the signatures would not match. Drop the result.
+                if Self::is_void_type(ret) {
+                    format!("func({})", param_strs.join(", "))
+                } else {
+                    format!("func({}) {}", param_strs.join(", "), self.type_to_go(ret))
+                }
             }
             NodeKind::TypeOptional { inner } => {
                 // `T?` lowers to the tagged Optional runtime struct, not a Go
@@ -10746,11 +10918,17 @@ impl GoEmitCtx {
             TypeExpr::Function { params, ret, .. } => {
                 let param_strs: Vec<String> =
                     params.iter().map(|p| self.ast_type_to_go(p)).collect();
-                format!(
-                    "func({}) {}",
-                    param_strs.join(", "),
-                    self.ast_type_to_go(ret)
-                )
+                // `Fn(...) -> Void` → Go `func(...)` (no result type). See the
+                // AIR `TypeFunction` arm in `type_to_go` for the rationale.
+                if Self::ast_type_is_void(ret) {
+                    format!("func({})", param_strs.join(", "))
+                } else {
+                    format!(
+                        "func({}) {}",
+                        param_strs.join(", "),
+                        self.ast_type_to_go(ret)
+                    )
+                }
             }
             TypeExpr::Optional { inner, .. } => {
                 let _ = inner;
@@ -16255,6 +16433,192 @@ mod tests {
         assert!(
             out.contains("x := p.X"),
             "the plain-record field must be bound as `x := p.X`, got: {out}"
+        );
+    }
+
+    /// A `Fn(...) -> Void` *parameter* type lowers to a Go `func(...)` with NO
+    /// result type — `func() struct{}` (the Void *value* type as a result) is a
+    /// function that must `return struct{}{}`, which a void closure body never
+    /// does, so the closure would not satisfy the parameter. Guards Item 1's
+    /// type-lowering fix (`type_to_go`'s `TypeFunction` arm).
+    #[test]
+    fn fn_void_param_type_lowers_to_bare_func() {
+        // fn on_click(handler: Fn() -> Void) -> Void { handler() }
+        let fn_void_ty = node(
+            2,
+            NodeKind::TypeFunction {
+                params: vec![],
+                ret: Box::new(type_named_node(3, "Void")),
+                effects: vec![],
+            },
+        );
+        let handler_param = node(
+            4,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(5, "handler")),
+                ty: Some(Box::new(fn_void_ty)),
+                default: None,
+            },
+        );
+        let call = node(
+            6,
+            NodeKind::Call {
+                callee: Box::new(id_node(7, "handler")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("on_click"),
+                generic_params: vec![],
+                params: vec![handler_param],
+                return_type: Some(Box::new(type_named_node(8, "Void"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(9, vec![call], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("handler func()"),
+            "`Fn() -> Void` param should lower to `func()`, got: {out}"
+        );
+        assert!(
+            !out.contains("func() struct{}"),
+            "`Fn() -> Void` must NOT emit `func() struct{{}}`, got: {out}"
+        );
+    }
+
+    /// An inherent (`impl Type`) method whose name a `trait` the type implements
+    /// also declares is exported (`Render`, not `render`) so it satisfies the Go
+    /// interface directly, AND the redundant same-named `impl Trait for Type`
+    /// forwarder (`fn render(self) { self.render() }`) is skipped — emitting it
+    /// would produce `func (T) Render() { return self.Render() }`, infinite
+    /// recursion. Guards Item 2 (method-name casing + no self-recursive
+    /// forwarder).
+    #[test]
+    fn inherent_method_exported_for_trait_and_no_recursive_forwarder() {
+        // trait Component { fn render(self) -> String }
+        let trait_method = node(
+            10,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("render"),
+                generic_params: vec![],
+                params: vec![param_node(11, "self")],
+                return_type: Some(Box::new(type_named_node(12, "String"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(13, vec![], None)),
+            },
+        );
+        let trait_decl = node(
+            14,
+            NodeKind::TraitDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_platform: false,
+                name: ident("Component"),
+                generic_params: vec![],
+                associated_types: vec![],
+                methods: vec![trait_method],
+            },
+        );
+        // impl Button { fn render(self) -> String { "x" } }  (private, inherent)
+        let inherent_method = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("render"),
+                generic_params: vec![],
+                params: vec![param_node(21, "self")],
+                return_type: Some(Box::new(type_named_node(22, "String"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(23, vec![], Some(str_lit(24, "x")))),
+            },
+        );
+        let inherent_impl = node(
+            25,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(type_named_node(26, "Button")),
+                where_clause: vec![],
+                methods: vec![inherent_method],
+            },
+        );
+        // impl Component for Button { fn render(self) -> String { self.render() } }
+        let forwarder_method = node(
+            30,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("render"),
+                generic_params: vec![],
+                params: vec![param_node(31, "self")],
+                return_type: Some(Box::new(type_named_node(32, "String"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    33,
+                    vec![],
+                    Some(node(
+                        34,
+                        NodeKind::MethodCall {
+                            receiver: Box::new(id_node(35, "self")),
+                            method: ident("render"),
+                            type_args: vec![],
+                            args: vec![],
+                        },
+                    )),
+                )),
+            },
+        );
+        let trait_impl = node(
+            36,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: Some(type_path(&["Component"])),
+                trait_args: vec![],
+                target: Box::new(type_named_node(37, "Button")),
+                where_clause: vec![],
+                methods: vec![forwarder_method],
+            },
+        );
+        let out = gen(&module(vec![], vec![trait_decl, inherent_impl, trait_impl]));
+        // The inherent method is exported to `Render`.
+        assert!(
+            out.contains("Button) Render() string"),
+            "inherent method should be exported `Render`, got: {out}"
+        );
+        // The lowercase inherent name must not survive.
+        assert!(
+            !out.contains("Button) render() string"),
+            "inherent method must not stay lowercase `render`, got: {out}"
+        );
+        // The self-recursive forwarder must be skipped (only ONE `Render` body).
+        assert_eq!(
+            out.matches("Button) Render()").count(),
+            1,
+            "exactly one `Render` method should be emitted on Button, got: {out}"
+        );
+        assert!(
+            !out.contains("return self.Render()"),
+            "the self-recursive forwarder must be eliminated, got: {out}"
         );
     }
 }

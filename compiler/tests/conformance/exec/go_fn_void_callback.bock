@@ -1,0 +1,56 @@
+// TEST: exec_go_fn_void_callback
+// EXPECT: output "a;wrap-before;run;wrap-after;field;"
+// EXPECT: targets go
+//
+// Go `Fn() -> Void` callback lowering. A `Fn() -> Void` type must lower to a Go
+// `func()` (no result type), and a void-returning closure body must NOT `return`
+// its tail — a `print(...)` tail lowers to Go's `fmt.Print`, which returns
+// `(int, error)`, so `return fmt.Print(...)` is a `go build` arity error
+// ("too many return values"), and a `func() struct{}` signature does not match
+// a `func()` parameter. Before the fix, `Fn() -> Void` emitted `func() struct{}`
+// and every void closure wrapped its body in `func() interface{} { return ... }`.
+//
+// Exercises all three call shapes that set the lambda's expected type:
+//   * a `Fn() -> Void` *struct field* invoked through the receiver (`Box.run`),
+//   * a void lambda passed as a *call argument* to a `Fn() -> Void` parameter
+//     (`invoke`), including via a `type` *alias* (`Handler`), and
+//   * a void lambda *returned* from a function (`wrap`, a multi-statement body).
+// `print` (no trailing newline) keeps the program's stdout a single line so the
+// ordered side effects compare exactly. js/ts/python/rust model void callbacks
+// natively; this proves Go now agrees.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale).
+module main
+
+type Handler = Fn() -> Void
+
+class Box {
+  on_run: Fn() -> Void
+}
+
+impl Box {
+  fn run(self) -> Void {
+    let h = self.on_run
+    h()
+  }
+}
+
+fn invoke(h: Handler) -> Void {
+  h()
+}
+
+fn wrap(inner: Handler) -> Handler {
+  () => {
+    print("wrap-before;")
+    inner()
+    print("wrap-after;")
+  }
+}
+
+fn main() -> Void {
+  print("a;")
+  let wrapped = wrap(() => print("run;"))
+  invoke(wrapped)
+  let b = Box { on_run: () => print("field;") }
+  b.run()
+}
