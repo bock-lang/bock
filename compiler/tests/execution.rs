@@ -45,6 +45,66 @@ use std::sync::OnceLock;
 use bock_build::toolchain::{ToolchainError, ToolchainRegistry};
 use bock_test_harness::{discover_tests, Expectation, TestCase};
 
+/// A process-private cargo target directory for the rust execution fixtures.
+///
+/// # The race this isolates
+///
+/// Every rust fixture this harness builds is a Cargo crate whose `[package]`
+/// and `[[bin]]` are *both* named `bock_app` (a fixed, project-independent name;
+/// see the rust scaffolder). The build→run path for a rust fixture runs `cargo`
+/// twice over that crate: `bock build -t rust` validates it with `cargo check`,
+/// then [`ToolchainRegistry::run`] executes it with `cargo run --quiet`. Both
+/// `cargo` invocations resolve their output directory from the **process
+/// environment's `CARGO_TARGET_DIR`**, which the test process inherits (CI and
+/// the worktree session both export it so workspace crates share build
+/// artifacts).
+///
+/// Under `cargo test --workspace`, the per-binary test processes run in
+/// parallel, and several of them (`bock-test-harness`'s `execution`,
+/// `bock-cli`'s `build_command`) shell out to `cargo` against the **same**
+/// shared `CARGO_TARGET_DIR`. Because the crate/bin name is the constant
+/// `bock_app`, those concurrent builds all write the **same**
+/// `<CARGO_TARGET_DIR>/debug/bock_app` artifact. One process's compile can
+/// clobber the `bock_app` binary in between this harness's `cargo check` and the
+/// `cargo run` that executes it — so a fixture runs *another fixture's* program
+/// and we see cross-fixture stdout contamination (e.g. `exec_map_literal`
+/// printing `exec_list_first_last_concat`'s output). A per-`config.toml`
+/// `build.target-dir` cannot fix this: the `CARGO_TARGET_DIR` **env var takes
+/// precedence** over `.cargo/config.toml`, so as long as it is set in the
+/// environment it wins.
+///
+/// # The fix
+///
+/// Point every `cargo` invocation on the rust execution path at a target
+/// directory **private to this test process**, so its `bock_app` artifact can
+/// never be observed or overwritten by another process's build. The directory
+/// is created once and reused across fixtures: the execution test runs its rust
+/// fixtures sequentially (a single `#[test]` looping the fixtures), so they
+/// never collide *with each other* in this one dir, and warm cargo caches keep
+/// the repeated builds fast. We set it both on the process environment (so the
+/// `cargo run` step, which [`ToolchainRegistry::run`] spawns with the inherited
+/// environment, picks it up) and explicitly on the `bock build` command (so the
+/// in-build `cargo check` validation uses it too). The env var is assigned
+/// exactly once via [`OnceLock`] and never toggled, so it does not race the
+/// other tests in this binary (the diagnostic tests drive `bock check`, which
+/// never shells out to `cargo`).
+fn rust_target_dir() -> &'static Path {
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let td = tempfile::Builder::new()
+            .prefix("bock-exec-rust-target-")
+            .tempdir()
+            .expect("create private cargo target dir for rust execution fixtures");
+        // Make the inherited-environment `cargo run` step (spawned by
+        // `ToolchainRegistry::run`) use this private dir as well. Edition 2021,
+        // so `set_var` is safe; assigned once here and never changed, with no
+        // concurrent reader of `CARGO_TARGET_DIR` elsewhere in this binary.
+        std::env::set_var("CARGO_TARGET_DIR", td.path());
+        td
+    });
+    dir.path()
+}
+
 /// Map a target id to the emitted entrypoint file extension.
 ///
 /// Mirrors `bock build`, which writes the entry module as `main.<ext>` under
@@ -210,11 +270,17 @@ fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
     // toolchain is present before calling here (skip-if-absent), so the
     // in-build toolchain validation (`cargo check` / `go build` / `node --check`
     // / `tsc --noEmit` / `py_compile`) runs and must succeed.
-    let output = Command::new(bock_binary())
-        .current_dir(project_dir)
-        .args(["build", "-t", target])
-        .output()
-        .expect("failed to spawn bock build");
+    let mut cmd = Command::new(bock_binary());
+    cmd.current_dir(project_dir).args(["build", "-t", target]);
+    // Rust's in-build `cargo check` validation shares `CARGO_TARGET_DIR` with
+    // every other workspace `cargo` invocation; point it at this process's
+    // private rust target dir so the constant-named `bock_app` artifact is never
+    // clobbered by a concurrent build (see `rust_target_dir`). Other targets do
+    // not use cargo, so they are left untouched.
+    if target == "rust" {
+        cmd.env("CARGO_TARGET_DIR", rust_target_dir());
+    }
+    let output = cmd.output().expect("failed to spawn bock build");
 
     assert!(
         output.status.success(),
