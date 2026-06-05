@@ -1,0 +1,27 @@
+// TEST: exec_go_predicate_alias_lambda
+// EXPECT: output "evens=2;positives=2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go lambda argument typed through a function-type *alias* parameter (type-zoo's
+// `count_matching(items, pred: Predicate)` where `type Predicate = Fn(Int) ->
+// Bool`). A callee parameter declared via a `type` alias to a function type is a
+// `TypeNamed`, so the lambda-argument param-type specialiser — which only matched
+// a bare `TypeFunction` — left the argument lambda untyped (`func(x interface{})
+// bool`), and the inner `x % 2` (interface arithmetic) plus the
+// `func(int64) bool` parameter assignment failed `go build`. The fix sees through
+// the alias to the underlying function type, so the lambda emits
+// `func(x int64) bool`. Asserted on all five targets so the computed counts, not
+// just a clean Go compile, are checked.
+module main
+
+public type Predicate = Fn(Int) -> Bool
+
+public fn count_matching(items: List[Int], pred: Predicate) -> Int {
+  items.filter(pred).len()
+}
+
+fn main() -> Void {
+  let evens = count_matching([1, 2, 3, 4, 5], (x) => x % 2 == 0)
+  let positives = count_matching([-1, 0, 2, 4, -3], (x) => x > 0)
+  println("evens=${evens};positives=${positives}")
+}
