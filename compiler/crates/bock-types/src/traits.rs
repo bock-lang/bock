@@ -41,6 +41,17 @@ const E_SEALED_PRIMITIVE_IMPL: DiagnosticCode = DiagnosticCode {
     number: 4011,
 };
 
+/// `E4012` — the single-method-namespace rule (DQ27) is violated: a method name
+/// is defined more than once for one type, across any combination of inherent
+/// `impl T {}`, `class T {}` body, and `impl Trait for T {}` blocks. A type has
+/// exactly one method namespace keyed by method name; a trait requirement is
+/// satisfied by a name+signature match *anywhere* in that namespace, so the
+/// same name cannot be defined twice. See spec §6.4/§6.5/§6.7.
+const E_DUPLICATE_METHOD: DiagnosticCode = DiagnosticCode {
+    prefix: 'E',
+    number: 4012,
+};
+
 // ─── Core types ───────────────────────────────────────────────────────────────
 
 /// Unique identifier for a registered impl block.
@@ -179,6 +190,30 @@ pub struct ImplTable {
     next_id: u32,
     /// Diagnostics emitted during construction (coherence errors use `E4010`).
     pub diags: DiagnosticBag,
+    /// Per-type record of every method *definition* seen while building the
+    /// table, keyed by the target type key. Each entry captures the method's
+    /// name, a structural signature key, its span, and the block it came from.
+    /// Used after the visit pass to enforce the single-method-namespace rule
+    /// (DQ27): defining a method name more than once for one type is an
+    /// `E4012` coherence error, regardless of which blocks the definitions
+    /// appear in. Drained into [`Self::diags`] by [`Self::check_method_namespace`].
+    method_defs: HashMap<String, Vec<MethodDef>>,
+}
+
+/// A single method definition seen during [`ImplTable::build_from`], retained
+/// only long enough to run the single-method-namespace coherence check.
+struct MethodDef {
+    /// The method's name (the namespace key within a type).
+    name: String,
+    /// A structural key for the method's signature (param + return shape),
+    /// used to distinguish a true duplicate (matching signature) from two
+    /// genuinely-conflicting requirements (differing signatures).
+    sig_key: String,
+    /// Span of the method's `fn` declaration, for the diagnostic.
+    span: bock_errors::Span,
+    /// Human-readable description of the block the method was declared in,
+    /// e.g. `"inherent impl"`, `"class body"`, or `"impl Component for ..."`.
+    origin: String,
 }
 
 impl ImplTable {
@@ -194,6 +229,7 @@ impl ImplTable {
             assoc_types: HashMap::new(),
             next_id: 0,
             diags: DiagnosticBag::new(),
+            method_defs: HashMap::new(),
         }
     }
 
@@ -211,12 +247,110 @@ impl ImplTable {
                 table.visit_item(item);
             }
         }
+        // Single-method-namespace coherence (DQ27): every method that applies
+        // to a type — inherent, class-body, or trait-impl — shares one
+        // namespace keyed by name. Defining a name twice for one type is an
+        // `E4012` error. Run after all items are visited so the check sees the
+        // type's whole namespace.
+        table.check_method_namespace();
         // Second pass: synthesize blanket `Into[U] for T` from each explicit
         // `From[T] for U`. Runs after all explicit impls so an explicit
         // `Into` always wins (the synthesized entry is skipped if its slot
         // is occupied — see `synthesize_blanket_into`).
         table.synthesize_blanket_into();
         table
+    }
+
+    /// Enforce the single-method-namespace rule (DQ27) across every block that
+    /// contributes methods to a type.
+    ///
+    /// A type — `record` or `class` — has exactly one method namespace keyed by
+    /// method name. Methods declared in an inherent `impl T {}`, a `class T {}`
+    /// body, or any `impl Trait for T {}` block all share that namespace. A
+    /// trait requirement is satisfied by a name+signature match *anywhere* in
+    /// the namespace (so an empty `impl Trait for T {}` is well-formed when an
+    /// inherent/class-body method already provides the required method), which
+    /// in turn means a name cannot be defined twice for one type:
+    ///
+    /// - Two definitions with **matching signatures** are a redundant
+    ///   duplicate (e.g. an inherent `render` plus a trait-impl `render`
+    ///   forwarder) — the classic react-components collision.
+    /// - Two definitions with **differing signatures** (e.g. two traits that
+    ///   both require a `foo` with incompatible signatures) are genuinely
+    ///   unsatisfiable on the v1 targets, which have one method slot per name.
+    ///
+    /// Both are reported as `E4012`. The message distinguishes the two cases so
+    /// the user knows whether to delete a redundant definition or rename.
+    fn check_method_namespace(&mut self) {
+        // Stable ordering for deterministic diagnostics across runs.
+        let mut type_keys: Vec<&String> = self.method_defs.keys().collect();
+        type_keys.sort();
+        let type_keys: Vec<String> = type_keys.into_iter().cloned().collect();
+
+        for type_key in type_keys {
+            let defs = &self.method_defs[&type_key];
+            // Group definition indices by method name, preserving declaration
+            // order so the *first* definition is treated as canonical and
+            // later ones are flagged.
+            let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+            for (idx, def) in defs.iter().enumerate() {
+                by_name.entry(def.name.as_str()).or_default().push(idx);
+            }
+            let mut names: Vec<&str> = by_name.keys().copied().collect();
+            names.sort();
+
+            for name in names {
+                let indices = &by_name[name];
+                if indices.len() < 2 {
+                    continue;
+                }
+                let first = &defs[indices[0]];
+                for &dup_idx in &indices[1..] {
+                    let dup = &defs[dup_idx];
+                    let same_sig = dup.sig_key == first.sig_key;
+                    let detail = if same_sig {
+                        format!(
+                            "a method named `{name}` is already defined for type `{type_key}` \
+                             in the {}; a type has one method namespace, so the same method \
+                             may not be defined twice",
+                            first.origin,
+                        )
+                    } else {
+                        format!(
+                            "method `{name}` is defined for type `{type_key}` with conflicting \
+                             signatures (in the {} and the {}); a type has one method slot per \
+                             name and cannot satisfy two requirements with incompatible signatures",
+                            first.origin, dup.origin,
+                        )
+                    };
+                    self.diags
+                        .error(E_DUPLICATE_METHOD, detail, dup.span)
+                        .note(format!(
+                            "a trait requirement is satisfied by a matching method anywhere in \
+                             the type's namespace; if `{name}` should satisfy a trait, define it \
+                             once (as an inherent/class-body method or inside the trait impl) and \
+                             leave the other block empty",
+                        ));
+                }
+            }
+        }
+    }
+
+    /// Record a method definition against its target type for the
+    /// single-method-namespace check. Called from [`Self::visit_item`] for
+    /// inherent/trait `impl` blocks and `class` bodies.
+    fn record_method_def(&mut self, type_key: &str, method: &AIRNode, origin: &str) {
+        if let NodeKind::FnDecl { name, .. } = &method.kind {
+            self.method_defs
+                .entry(type_key.to_owned())
+                .or_default()
+                .push(MethodDef {
+                    name: name.name.clone(),
+                    sig_key: method_sig_key(method),
+                    span: method.span,
+                    origin: origin.to_owned(),
+                });
+        }
     }
 
     /// For every explicit `impl From[T] for U`, synthesize the blanket reverse
@@ -354,12 +488,35 @@ impl ImplTable {
 
                 let id = self.alloc_id();
 
+                // Human-readable origin used by the single-method-namespace
+                // check's diagnostics (DQ27): inherent vs `impl Trait for T`.
+                let origin = match &trait_ref {
+                    Some(tr) => format!("`impl {} for {}` block", tr.name, type_key),
+                    None => format!("inherent `impl {type_key}` block"),
+                };
+
+                // The single-method-namespace check (DQ27) governs methods that
+                // are dispatched by name (`x.foo()`). It excludes:
+                //   * parameterized trait impls (`From[Int]`, `From[String]`,
+                //     `Into[U]`): each instantiation legitimately carries the
+                //     same method name (`from`/`into`) and is selected by the
+                //     trait argument through the parameterized index, never as a
+                //     bare `x.from()` collision; and
+                //   * generic/blanket impls (`impl[T] Foo[T]`), which are also
+                //     exempt from the `E4010` exact-overlap check.
+                let trait_is_parameterized =
+                    trait_ref.as_ref().is_some_and(|tr| !tr.args.is_empty());
+                let track_namespace = !is_generic && !trait_is_parameterized;
+
                 // Collect method names, and register any associated type aliases.
                 let mut method_names = Vec::new();
                 for m in methods {
                     match &m.kind {
                         NodeKind::FnDecl { name, .. } => {
                             method_names.push(name.name.clone());
+                            if track_namespace {
+                                self.record_method_def(&type_key, m, &origin);
+                            }
                         }
                         NodeKind::TypeAlias { name, ty, .. } => {
                             // Associated type binding: `type Assoc = ConcreteType`.
@@ -418,6 +575,22 @@ impl ImplTable {
                             let supertrait = trait_name_from_path(bound);
                             self.register_supertrait(name.name.clone(), supertrait);
                         }
+                    }
+                }
+            }
+
+            NodeKind::ClassDecl { name, methods, .. } => {
+                // Class-body methods share the type's single method namespace
+                // (DQ27), so they participate in the duplicate-method check
+                // alongside inherent and trait-impl methods. (Class bodies are
+                // not registered into the impl indices here — method dispatch
+                // for class bodies is handled in the checker — but they must be
+                // visible to the namespace coherence check.)
+                let class_key = name.name.clone();
+                let origin = format!("`class {class_key}` body");
+                for m in methods {
+                    if matches!(m.kind, NodeKind::FnDecl { .. }) {
+                        self.record_method_def(&class_key, m, &origin);
                     }
                 }
             }
@@ -754,6 +927,52 @@ pub fn type_key(ty: &Type) -> String {
 #[must_use]
 pub fn trait_arg_key(args: &[Type]) -> String {
     args.iter().map(type_key).collect::<Vec<_>>().join(", ")
+}
+
+/// Produce a structural signature key for a method (`NodeKind::FnDecl`) used by
+/// the single-method-namespace coherence check (DQ27).
+///
+/// The key encodes the parameter shape and the return type, *not* the method
+/// name. An unannotated receiver (`self`) and an explicit `Self` type both
+/// normalize the same way so an inherent `render(self) -> String` and a
+/// trait-impl `render(self) -> String` produce identical keys (a true
+/// duplicate), while `foo(self) -> Int` and `foo(self) -> String` differ (a
+/// genuine signature conflict). The key is deterministic and intended only for
+/// equality comparison, not display.
+fn method_sig_key(method: &AIRNode) -> String {
+    let NodeKind::FnDecl {
+        params,
+        return_type,
+        ..
+    } = &method.kind
+    else {
+        return String::new();
+    };
+    let param_keys: Vec<String> = params
+        .iter()
+        .map(|p| match &p.kind {
+            NodeKind::Param {
+                pattern, ty: None, ..
+            } => {
+                // Unannotated param — keyed by its bound name. The receiver
+                // `self` thus normalizes to `"self"` regardless of which block
+                // declared the method.
+                if let NodeKind::BindPat { name, .. } = &pattern.kind {
+                    format!("@{}", name.name)
+                } else {
+                    "@_".to_owned()
+                }
+            }
+            NodeKind::Param {
+                ty: Some(ty_node), ..
+            } => type_key_from_node(ty_node),
+            _ => "?".to_owned(),
+        })
+        .collect();
+    let ret_key = return_type
+        .as_deref()
+        .map_or_else(|| "Void".to_owned(), type_key_from_node);
+    format!("({}) -> {}", param_keys.join(", "), ret_key)
 }
 
 /// Extract a canonical trait name string from a [`TypePath`].
@@ -1102,6 +1321,13 @@ mod tests {
     }
 
     fn make_fn_decl(name: &str) -> AIRNode {
+        make_fn_decl_ret(name, None)
+    }
+
+    /// Like [`make_fn_decl`] but with an explicit return-type name, so the
+    /// single-method-namespace check can distinguish matching vs conflicting
+    /// signatures.
+    fn make_fn_decl_ret(name: &str, ret: Option<&str>) -> AIRNode {
         use bock_ast::{Ident, Visibility};
         let body = make_air_node(NodeKind::Block {
             stmts: vec![],
@@ -1117,10 +1343,29 @@ mod tests {
             },
             generic_params: vec![],
             params: vec![],
-            return_type: None,
+            return_type: ret.map(|r| Box::new(make_type_named(r))),
             effect_clause: vec![],
             where_clause: vec![],
             body: Box::new(body),
+        })
+    }
+
+    /// Build `class Name { methods }` (fields omitted — irrelevant to the
+    /// method-namespace check).
+    fn make_class_decl(name: &str, methods: Vec<AIRNode>) -> AIRNode {
+        use bock_ast::{Ident, Visibility};
+        make_air_node(NodeKind::ClassDecl {
+            annotations: vec![],
+            visibility: Visibility::Private,
+            name: Ident {
+                name: name.to_owned(),
+                span: dummy_span(),
+            },
+            generic_params: vec![],
+            base: None,
+            traits: vec![],
+            fields: vec![],
+            methods,
         })
     }
 
@@ -1403,6 +1648,123 @@ mod tests {
         let table = ImplTable::build_from(&module);
 
         assert!(!table.diags.has_errors());
+    }
+
+    // ── DQ27 single-method-namespace coherence (E4012) ─────────────────────────
+
+    /// Helper: count diagnostics carrying the `E4012` duplicate-method code.
+    fn count_e4012(table: &ImplTable) -> usize {
+        table
+            .diags
+            .iter()
+            .filter(|d| d.code == E_DUPLICATE_METHOD)
+            .count()
+    }
+
+    #[test]
+    fn namespace_rejects_inherent_and_trait_same_method() {
+        // The react-components collision: an inherent `render` plus a trait-impl
+        // `render` for the same type defines `render` twice in one namespace.
+        let inherent = make_impl_block(
+            None,
+            "Button",
+            vec![make_fn_decl_ret("render", Some("String"))],
+        );
+        let trait_impl = make_impl_block(
+            Some("Component"),
+            "Button",
+            vec![make_fn_decl_ret("render", Some("String"))],
+        );
+        let module = make_module(vec![inherent, trait_impl]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(table.diags.has_errors());
+        assert_eq!(count_e4012(&table), 1);
+    }
+
+    #[test]
+    fn namespace_allows_empty_trait_impl_satisfied_by_inherent() {
+        // An inherent `render` plus an EMPTY `impl Component for Button {}` is
+        // well-formed: the inherent method satisfies the requirement, and
+        // `render` is defined exactly once.
+        let inherent = make_impl_block(
+            None,
+            "Button",
+            vec![make_fn_decl_ret("render", Some("String"))],
+        );
+        let trait_impl = make_impl_block(Some("Component"), "Button", vec![]);
+        let module = make_module(vec![inherent, trait_impl]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(!table.diags.has_errors());
+        assert_eq!(count_e4012(&table), 0);
+    }
+
+    #[test]
+    fn namespace_allows_distinct_method_names() {
+        // Inherent `click` + trait-impl `render` are distinct names — no clash.
+        let inherent = make_impl_block(None, "Button", vec![make_fn_decl("click")]);
+        let trait_impl = make_impl_block(
+            Some("Component"),
+            "Button",
+            vec![make_fn_decl_ret("render", Some("String"))],
+        );
+        let module = make_module(vec![inherent, trait_impl]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(!table.diags.has_errors());
+        assert_eq!(count_e4012(&table), 0);
+    }
+
+    #[test]
+    fn namespace_rejects_conflicting_signatures_across_traits() {
+        // Two traits both requiring `foo` for the same type, with incompatible
+        // return types, are unsatisfiable on v1 targets (one slot per name).
+        let impl_a = make_impl_block(
+            Some("TraitA"),
+            "Widget",
+            vec![make_fn_decl_ret("foo", Some("Int"))],
+        );
+        let impl_b = make_impl_block(
+            Some("TraitB"),
+            "Widget",
+            vec![make_fn_decl_ret("foo", Some("String"))],
+        );
+        let module = make_module(vec![impl_a, impl_b]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(table.diags.has_errors());
+        assert_eq!(count_e4012(&table), 1);
+    }
+
+    #[test]
+    fn namespace_rejects_class_body_and_trait_same_method() {
+        // A class-body `render` plus a trait-impl `render` is also a duplicate:
+        // class-body methods share the type's single namespace.
+        let class = make_class_decl("Button", vec![make_fn_decl_ret("render", Some("String"))]);
+        let trait_impl = make_impl_block(
+            Some("Component"),
+            "Button",
+            vec![make_fn_decl_ret("render", Some("String"))],
+        );
+        let module = make_module(vec![class, trait_impl]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(table.diags.has_errors());
+        assert_eq!(count_e4012(&table), 1);
+    }
+
+    #[test]
+    fn namespace_allows_class_body_satisfying_trait() {
+        // A class-body `render` plus an EMPTY `impl Component for Button {}` is
+        // well-formed (mirrors §6.4's `class Button : Component { fn render }`).
+        let class = make_class_decl("Button", vec![make_fn_decl_ret("render", Some("String"))]);
+        let trait_impl = make_impl_block(Some("Component"), "Button", vec![]);
+        let module = make_module(vec![class, trait_impl]);
+        let table = ImplTable::build_from(&module);
+
+        assert!(!table.diags.has_errors());
+        assert_eq!(count_e4012(&table), 0);
     }
 
     #[test]
