@@ -1,0 +1,52 @@
+// TEST: exec_py_stmt_match_no_early_return
+// EXPECT: output "A;B;C;done"
+// EXPECT: targets python
+//
+// A statement-position `match` — one sitting mid-block as a side-effecting
+// statement, not the function/value tail nor a value-binding RHS — whose arms
+// are *bare expression* bodies (`print(...)`) must NOT abort the enclosing
+// function. The Python backend's shared `emit_block_body` lowered a match arm's
+// tail expression as a function-body `return`, so a statement match emitted
+// `case _BockOk(m): return print(...)` — the `return` aborts the function after
+// the matched arm runs. In the chat-protocol example this truncated `main`:
+// `match decoded { Ok(m) => println(..) … }` returned out of `main` after the
+// first arm, so every section after the decode round-trip was skipped (the run
+// still exited 0, hiding it from an exit-code-only view).
+//
+// The py fix sets a statement-position discard flag (`in_stmt_match_arm`) around
+// a statement match's arm emission, so each bare-expression arm body lowers to a
+// bare statement (`print(...)`), not `return print(...)`. Two consecutive
+// statement matches with print arms plus the trailing `print("done")` pin the
+// fall-through: the full line prints only if control flows past BOTH matches.
+//
+// PYTHON-ONLY: this pins the Python statement-match lowering specifically; the
+// other backends already fall through correctly (the spurious `return` lived in
+// py.rs alone). A `py_*` fixture name keeps it from claiming cross-backend
+// coverage it does not assert. Sibling of py_loop_tail_println_all_iterations,
+// which pins the same `emit_block_body` truncation for loop-body tails.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Tag {
+  First
+  Second
+}
+
+fn report(t: Tag) -> Void {
+  match t {
+    First => print("A;")
+    Second => print("Z;")
+  }
+  print("B;")
+  match t {
+    First => print("C;")
+    Second => print("Z;")
+  }
+  print("done")
+}
+
+fn main() -> Void {
+  report(First)
+}
