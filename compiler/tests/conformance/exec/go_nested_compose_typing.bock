@@ -1,0 +1,44 @@
+// TEST: exec_go_nested_compose_typing
+// EXPECT: output "chain=-22;mixed=ok"
+// EXPECT: targets python, rust, go
+//
+// Q-nested-compose-jstsgo (Go portion) — nested function composition typing.
+//
+// Scoped to python, rust, go: py and rust already lower nested compose
+// correctly, and this fixture adds go to that set. The js/ts portions of
+// Q-nested-compose-jstsgo are tracked separately (those backends still emit
+// `NaN` / un-applied compose closures here); their fixture targets are added
+// when that work lands. Restricting the directive keeps this fixture green and
+// the suite blocking-clean for the Go fix this change delivers.
+//
+// A nested compose `f >> g >> h` desugars to `(__compose_x) => h(g(f(
+// __compose_x)))`, whose innermost callee `f` is itself a compose lambda. The Go
+// backend recovered the param type only from a NAMED inner callee, so the OUTER
+// compose lambda's `__compose_x` fell back to `interface{}` — passing it into the
+// concretely-typed inner closure then needed a type assertion Go rejected. The
+// param type is now recovered recursively through a nested compose callee
+// (mirroring py's `emit_callee` / rust's `emit_callee_rs` parenthesization),
+// so `f >> g >> h` composes with concrete types. Exercised by data-pipeline's
+// `normalize >> compute_summary >> format_summary` and ml-data-prep's pipelines.
+module main
+
+public fn inc(x: Int) -> Int { x + 1 }
+public fn dbl(x: Int) -> Int { x * 2 }
+public fn neg(x: Int) -> Int { 0 - x }
+
+// Compose across a type CHANGE too (Int -> String), so the typed input flows
+// through a heterogeneous pipeline.
+public fn to_label(n: Int) -> String { if (n > 0) { "ok" } else { "neg" } }
+
+fn main() -> Void {
+  // Three-stage compose over named Int->Int functions: neg(dbl(inc(10))) ->
+  // neg(dbl(11)) -> neg(22) -> -22. The outermost compose param must be typed
+  // `int64` on Go (was `interface{}`).
+  let chain = inc >> dbl >> neg
+  let chained = chain(10)
+
+  // Compose ending in an Int->String stage.
+  let described = (inc >> to_label)(5)
+
+  println("chain=${chained};mixed=${described}")
+}

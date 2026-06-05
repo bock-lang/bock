@@ -1,0 +1,59 @@
+// TEST: exec_go_method_generics_freefn_lowering
+// EXPECT: output "boxed=7;swapped=one,1"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ28 — method-level type parameters on the Go backend (Q-go-method-generics).
+//
+// Go forbids type parameters on methods (`func (b Box[T]) Map[U](..)` is a Go
+// syntax error). Per Design's ruling the language keeps the surface
+// (`Box[T].map[U]`) and the Go backend lowers such a method to a FREE FUNCTION
+// `func Box_Map[T, U](self Box[T], f func(T) U) Box[U]` — receiver-first, the
+// receiver's `T` and the method's `U` combined on the free function (Go supports
+// multiple free-function type params). Before the fix the *declaration alone*
+// failed to compile on Go (`undefined: U`), blocking type-zoo on go.
+//
+// This fixture exercises the declaration of a generic method (`map[U]`) — which
+// must compile on every target including Go — alongside a non-generic generic
+// method (`swap`) and a generic-record `get`, so the program runs end-to-end and
+// the computed result is verified on all five targets, not just a clean compile.
+module main
+
+public record Box[T] {
+  value: T
+}
+
+impl Box {
+  // Method WITH its own type parameter `U` — the DQ28 case. On Go this lowers
+  // to the free function `Box_Map[T, U]`; on the other four targets it is a
+  // native generic method.
+  public fn map[U](self, f: Fn(T) -> U) -> Box[U] {
+    Box { value: f(self.value) }
+  }
+
+  // Plain generic method (no method-level type param) — stays an ordinary Go
+  // receiver method, confirming non-generic methods are untouched.
+  public fn get(self) -> T {
+    self.value
+  }
+}
+
+public record Pair[A, B] {
+  first: A
+  second: B
+}
+
+impl Pair {
+  public fn swap(self) -> Pair[B, A] {
+    Pair { first: self.second, second: self.first }
+  }
+}
+
+fn main() -> Void {
+  let b = Box { value: 7 }
+  let boxed = b.get()
+
+  let pair = Pair { first: 1, second: "one" }
+  let swapped = pair.swap()
+
+  println("boxed=${boxed};swapped=${swapped.first},${swapped.second}")
+}
