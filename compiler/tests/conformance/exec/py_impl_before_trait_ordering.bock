@@ -1,0 +1,43 @@
+// TEST: exec_py_impl_before_trait_ordering
+// EXPECT: output "[note] hello"
+// EXPECT: targets python
+//
+// Q-py-impl-before-trait (py slice): the Python backend emits a trait as an ABC
+// `class Serializable:` and folds `impl Serializable for Note` into the record's
+// own class body as `class Note(Serializable):`. Python evaluates a class
+// statement's base list EAGERLY, so `Serializable` must already be defined when
+// `class Note(...)` runs. In source order the trait is declared AFTER the record
+// it serves (as in real-world/chat-protocol's `Serializable`), so naive
+// source-order emission produced `class Note(Serializable):` BEFORE
+// `Serializable` existed → `NameError: name 'Serializable' is not defined` the
+// instant the module loaded.
+//
+// The fix topologically orders the module's type declarations so every
+// base/trait precedes the types that subclass it. python-only because the
+// NameError was python-specific (the other backends don't gate a base on
+// declaration order the same way); a concurrent rust session also drove this on
+// py via its self-field fixture.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+// Record declared BEFORE the trait it implements.
+record Note {
+  body: String
+}
+
+impl Serializable for Note {
+  fn serialize(self) -> String {
+    "[note] ${self.body}"
+  }
+}
+
+// Trait declared AFTER the record + its impl — the ordering hazard.
+trait Serializable {
+  fn serialize(self) -> String
+}
+
+fn main() -> Void {
+  let n: Note = Note { body: "hello" }
+  println(n.serialize())
+}

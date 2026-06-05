@@ -1,0 +1,48 @@
+// TEST: exec_py_class_impl_methods
+// EXPECT: output "<widget:ok>|described:ok"
+// EXPECT: targets python
+//
+// Q-class-codegen (py slice): a `class T` with an inherent `impl T` and a trait
+// `impl Trait for T` must route BOTH impls' methods INTO the Python class body —
+// the same path records already use — and subclass the trait ABC. Before the
+// fix the Python backend emitted `class T:` carrying only `__init__`, silently
+// DROPPING every impl/trait method, so a direct `w.render()` raised
+// `AttributeError: 'Widget' object has no attribute 'render'`.
+//
+// This is python-only (`targets python`): the JS/TS `class`-with-impl-methods
+// path has its own separate gap (a concurrent backend session owns js.rs/ts.rs),
+// so the all-five harness would couple this regression to unrelated backends.
+// The records-with-impl-methods path this mirrors is already exercised on all
+// five elsewhere; here we pin the class slice on the backend that was broken.
+//
+// `Widget.render` (trait `Render`) delegates to the inherent `Widget.describe`,
+// so the fixture also proves the two impl blocks share one class namespace and
+// dispatch correctly.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+class Widget {
+  name: String
+}
+
+impl Widget {
+  fn describe(self) -> String {
+    "described:${self.name}"
+  }
+}
+
+trait Render {
+  fn render(self) -> String
+}
+
+impl Render for Widget {
+  fn render(self) -> String {
+    "<widget:${self.name}>"
+  }
+}
+
+fn main() -> Void {
+  let w: Widget = Widget { name: "ok" }
+  println("${w.render()}|${w.describe()}")
+}

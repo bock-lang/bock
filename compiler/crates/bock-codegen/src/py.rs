@@ -3350,7 +3350,19 @@ impl PyEmitCtx {
                         }
                     }
                 }
-                for (i, item) in items.iter().enumerate() {
+                // A trait/base class becomes a Python base class of every type
+                // that subclasses it (`class Sub(Base):`). Python evaluates the
+                // base list at `class` statement time, so the base MUST already be
+                // defined — else `NameError: name 'Base' is not defined`. Source
+                // order does not guarantee this: a `trait` may be declared after
+                // the record/class that impls it (chat-protocol's `Serializable`),
+                // and a `record`+inlined-impl is emitted at the record's source
+                // position, which can precede the trait. Reorder the *type
+                // declarations* so each base precedes its subclasses, keeping the
+                // emission otherwise stable (Q-py-impl-before-trait, py slice).
+                let order = type_decl_emission_order(items, &self.impls_by_target);
+                for (idx, &i) in order.iter().enumerate() {
+                    let item = &items[i];
                     if consumed_impls.contains(&item.id) {
                         continue;
                     }
@@ -3362,7 +3374,7 @@ impl PyEmitCtx {
                     if crate::generator::fn_is_test(item) {
                         continue;
                     }
-                    if i > 0 && !self.buf.is_empty() && !self.buf.ends_with("\n\n") {
+                    if idx > 0 && !self.buf.is_empty() && !self.buf.ends_with("\n\n") {
                         self.buf.push('\n');
                     }
                     self.emit_node(item)?;
@@ -3499,13 +3511,9 @@ impl PyEmitCtx {
                         let type_hint = self.ast_type_to_py(&f.ty);
                         self.writeln(&format!("{}: {type_hint}", to_snake_case(&f.name.name)));
                     }
-                    for im in &impls {
-                        if let NodeKind::ImplBlock { methods, .. } = &im.kind {
-                            for method in methods {
-                                self.buf.push('\n');
-                                self.emit_class_method(method)?;
-                            }
-                        }
+                    for method in Self::dedup_impl_methods(&impls) {
+                        self.buf.push('\n');
+                        self.emit_class_method(method)?;
                     }
                 }
                 self.indent -= 1;
@@ -3559,12 +3567,57 @@ impl PyEmitCtx {
                 fields,
                 methods,
                 generic_params,
+                base,
+                traits,
                 ..
             } => {
                 // A generic `class C[T]` needs `T = TypeVar("T")` + a
                 // `Generic[T, …]` base so `T`-typed members resolve (DV12).
                 self.emit_typevars(generic_params);
-                let bases = self.generic_base(generic_params);
+                // Pull any `impl T { … }` / `impl Trait for T { … }` blocks
+                // collected up front (Module pre-scan) so their methods become
+                // part of THIS class body — the same path records already use.
+                // Without this the inherent/trait methods were silently dropped:
+                // the emitted class had only `__init__`, so `t.render()` raised
+                // `AttributeError` at runtime (Q-class-codegen, py slice).
+                let impls = self.impls_by_target.remove(&name.name).unwrap_or_default();
+                // Bases: the declared `base` class, then every implemented trait
+                // (both the class-decl `traits` list and any `impl Trait for T`
+                // trait paths), then `Generic[..]` for generic params. Dedup so a
+                // trait named both on the class header and via an impl block isn't
+                // listed twice.
+                let mut bases: Vec<String> = Vec::new();
+                if let Some(b) = base {
+                    bases.push(
+                        b.segments
+                            .last()
+                            .map(|s| s.name.clone())
+                            .unwrap_or_default(),
+                    );
+                }
+                for tp in traits {
+                    if let Some(seg) = tp.segments.last() {
+                        bases.push(seg.name.clone());
+                    }
+                }
+                for im in &impls {
+                    if let NodeKind::ImplBlock {
+                        trait_path: Some(tp),
+                        ..
+                    } = &im.kind
+                    {
+                        if let Some(seg) = tp.segments.last() {
+                            bases.push(seg.name.clone());
+                        }
+                    }
+                }
+                // Order-preserving dedup: a trait named on both the class header
+                // and an `impl` block would otherwise repeat in the base list
+                // (which Python rejects — duplicate bases are a `TypeError`).
+                let mut seen_bases: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                bases.retain(|b| seen_bases.insert(b.clone()));
+                bases.extend(self.generic_base(generic_params));
                 let base_list = if bases.is_empty() {
                     String::new()
                 } else {
@@ -3590,12 +3643,34 @@ impl PyEmitCtx {
                     }
                     self.indent -= 1;
                 }
-                // Methods
+                // Names already taken by an inline `class T { fn … }` method
+                // (rare in surface Bock, which puts methods in `impl` blocks, but
+                // kept for completeness) — so a same-named impl method does not
+                // re-emit and shadow them.
+                let mut inline_names: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for method in methods {
+                    if let NodeKind::FnDecl { name, .. } = &method.kind {
+                        inline_names.insert(name.name.clone());
+                    }
                     self.buf.push('\n');
                     self.emit_class_method(method)?;
                 }
-                if fields.is_empty() && methods.is_empty() {
+                // Methods pulled in from inherent + trait impl blocks, deduped by
+                // name (inherent precedence) so a delegating trait method never
+                // overwrites and self-recurses the inherent one.
+                let impl_methods: Vec<&AIRNode> = Self::dedup_impl_methods(&impls)
+                    .into_iter()
+                    .filter(|m| {
+                        !matches!(&m.kind, NodeKind::FnDecl { name, .. } if inline_names.contains(&name.name))
+                    })
+                    .collect();
+                let has_impl_methods = !impl_methods.is_empty();
+                for method in impl_methods {
+                    self.buf.push('\n');
+                    self.emit_class_method(method)?;
+                }
+                if fields.is_empty() && methods.is_empty() && !has_impl_methods {
                     self.writeln("pass");
                 }
                 self.indent -= 1;
@@ -4005,6 +4080,59 @@ impl PyEmitCtx {
             self.indent -= 1;
         }
         Ok(())
+    }
+
+    /// Flatten the methods of a type's impl blocks into the emission order for a
+    /// single Python class body, **deduplicating by method name** so the same
+    /// `def` is never emitted twice into one class.
+    ///
+    /// A type can have both an inherent impl (`impl T { fn render }`) and a trait
+    /// impl (`impl Trait for T { fn render }`) whose methods share a name. In
+    /// Bock those are distinct (the trait method typically delegates to the
+    /// inherent one via `self.render()`), but Python has a single per-class
+    /// method namespace: emitting both means the second `def render` silently
+    /// overwrites the first, and a delegating trait body (`return self.render()`)
+    /// then calls *itself* — unbounded recursion (`RecursionError`, seen on
+    /// react-components' `Button`). The **inherent** method is the concrete
+    /// implementation and the one a direct `btn.render()` call resolves to, so it
+    /// wins; a colliding trait method (which would only shadow it and recurse) is
+    /// dropped. Method order is otherwise preserved (inherent impls, then trait
+    /// impls, in source order).
+    fn dedup_impl_methods<'a>(impls: &'a [AIRNode]) -> Vec<&'a AIRNode> {
+        // Inherent impls (no trait_path) take precedence, so visit them first;
+        // within each group, source order is preserved.
+        let mut out: Vec<&'a AIRNode> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let inherent_first = impls.iter().filter(|im| {
+            matches!(
+                &im.kind,
+                NodeKind::ImplBlock {
+                    trait_path: None,
+                    ..
+                }
+            )
+        });
+        let trait_after = impls.iter().filter(|im| {
+            matches!(
+                &im.kind,
+                NodeKind::ImplBlock {
+                    trait_path: Some(_),
+                    ..
+                }
+            )
+        });
+        for im in inherent_first.chain(trait_after) {
+            if let NodeKind::ImplBlock { methods, .. } = &im.kind {
+                for method in methods {
+                    if let NodeKind::FnDecl { name, .. } = &method.kind {
+                        if seen.insert(name.name.clone()) {
+                            out.push(method);
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The Python value-names a parameter list binds (simple `BindPat` params
@@ -6616,6 +6744,119 @@ fn ast_type_name(node: &AIRNode) -> Option<String> {
     }
 }
 
+/// Compute a stable emission order over a module's top-level `items` such that a
+/// type declaration (`trait` / `record` / `class`) that becomes a Python base
+/// class of another (its supertype) is always emitted *before* the subtype.
+///
+/// Python evaluates a `class Sub(Base):` statement's base list eagerly, so
+/// `Base` must already be a bound name when `Sub` is defined; emitting them in
+/// source order risks `NameError` when a trait is declared after the type that
+/// impls it, or when an inlined-impl record precedes its trait
+/// (Q-py-impl-before-trait).
+///
+/// The reorder is a **stable topological sort**: items are emitted in original
+/// order except that any type decl is delayed until all the type decls it
+/// depends on (its declared `base`, declared `traits`, and the trait paths of
+/// the impl blocks targeting it in `impls_by_target`) have been emitted. Only
+/// dependencies on types *declared in this same module* create edges; references
+/// to imported/prelude bases never block (they resolve via imports). A
+/// dependency cycle (which Python could not represent anyway) degrades
+/// gracefully to source order for the involved nodes rather than dropping them.
+fn type_decl_emission_order(
+    items: &[AIRNode],
+    impls_by_target: &HashMap<String, Vec<AIRNode>>,
+) -> Vec<usize> {
+    use std::collections::HashMap as Map;
+
+    // name → index for every type decl declared in this module. Effects are
+    // included because the Python backend also emits an `effect` as an ABC class
+    // that an `impl Effect for T` makes a *base* of `T` (`class StubChannel(
+    // Channel)`), so an effect declared after its impl is the same base-ordering
+    // hazard as a trait.
+    let mut decl_index: Map<String, usize> = Map::new();
+    for (i, item) in items.iter().enumerate() {
+        match &item.kind {
+            NodeKind::TraitDecl { name, .. }
+            | NodeKind::RecordDecl { name, .. }
+            | NodeKind::ClassDecl { name, .. }
+            | NodeKind::EffectDecl { name, .. } => {
+                decl_index.entry(name.name.clone()).or_insert(i);
+            }
+            _ => {}
+        }
+    }
+
+    // deps[i] = set of item indices that item i must follow (its in-module
+    // base/trait supertypes). Non-type items have no deps.
+    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); items.len()];
+    let add_dep = |deps: &mut Vec<Vec<usize>>, i: usize, dep_name: &str| {
+        if let Some(&j) = decl_index.get(dep_name) {
+            if j != i && !deps[i].contains(&j) {
+                deps[i].push(j);
+            }
+        }
+    };
+    for (i, item) in items.iter().enumerate() {
+        let (name, declared_base, declared_traits) = match &item.kind {
+            NodeKind::ClassDecl {
+                name, base, traits, ..
+            } => (Some(name), base.as_ref(), traits.as_slice()),
+            NodeKind::RecordDecl { name, .. } | NodeKind::TraitDecl { name, .. } => {
+                (Some(name), None, [].as_slice())
+            }
+            _ => (None, None, [].as_slice()),
+        };
+        let Some(name) = name else { continue };
+        if let Some(b) = declared_base {
+            if let Some(seg) = b.segments.last() {
+                add_dep(&mut deps, i, &seg.name);
+            }
+        }
+        for tp in declared_traits {
+            if let Some(seg) = tp.segments.last() {
+                add_dep(&mut deps, i, &seg.name);
+            }
+        }
+        // Trait paths from the impl blocks that fold into this type's body.
+        if let Some(impls) = impls_by_target.get(&name.name) {
+            for im in impls {
+                if let NodeKind::ImplBlock {
+                    trait_path: Some(tp),
+                    ..
+                } = &im.kind
+                {
+                    if let Some(seg) = tp.segments.last() {
+                        add_dep(&mut deps, i, &seg.name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Stable topological emit: repeatedly take the earliest not-yet-emitted item
+    // whose deps are all emitted. If none qualifies (a cycle), take the earliest
+    // remaining item to make progress (graceful degradation).
+    let n = items.len();
+    let mut emitted = vec![false; n];
+    let mut order = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut pick = None;
+        for i in 0..n {
+            if emitted[i] {
+                continue;
+            }
+            if deps[i].iter().all(|&d| emitted[d]) {
+                pick = Some(i);
+                break;
+            }
+        }
+        let i = pick.unwrap_or_else(|| (0..n).find(|&i| !emitted[i]).unwrap_or(0));
+        emitted[i] = true;
+        order.push(i);
+    }
+    order
+}
+
 /// Emit a Bock identifier as a Python identifier. PascalCase names are
 /// preserved — they denote classes, ABC traits, or enum variant constructors,
 /// all of which stay PascalCase in Python by convention.
@@ -8232,6 +8473,371 @@ mod tests {
         assert!(out.contains("def greet(self):"), "got: {out}");
     }
 
+    /// A self-method `fn <name>(self) -> String { "<lit>" }`, for class/impl
+    /// fixtures.
+    fn self_method_returning(id: u32, name: &str, lit: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident(name),
+                generic_params: vec![],
+                params: vec![param_node(id + 1, "self")],
+                return_type: Some(Box::new(node(
+                    id + 2,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(id + 3, vec![], Some(str_lit(id + 4, lit)))),
+            },
+        )
+    }
+
+    /// An `impl <trait?> for <target>` block carrying `methods`.
+    fn impl_block_node(
+        id: u32,
+        target: &str,
+        trait_name: Option<&str>,
+        methods: Vec<AIRNode>,
+    ) -> AIRNode {
+        node(
+            id,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                target: Box::new(node(
+                    id + 1,
+                    NodeKind::TypeNamed {
+                        path: type_path(&[target]),
+                        args: vec![],
+                    },
+                )),
+                trait_path: trait_name.map(|t| type_path(&[t])),
+                trait_args: vec![],
+                generic_params: vec![],
+                where_clause: vec![],
+                methods,
+            },
+        )
+    }
+
+    /// A `trait <name> { fn <m>(self) -> String }` declaration (ABC stub).
+    fn trait_node(id: u32, name: &str, method: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::TraitDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_platform: false,
+                name: ident(name),
+                generic_params: vec![],
+                associated_types: vec![],
+                methods: vec![self_method_returning(id + 50, method, "")],
+            },
+        )
+    }
+
+    /// A `class <name> { <field>: String }` with no inline methods.
+    fn class_with_field(id: u32, name: &str, field: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::ClassDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident(name),
+                generic_params: vec![],
+                base: None,
+                traits: vec![],
+                fields: vec![named_field(field, "String")],
+                methods: vec![],
+            },
+        )
+    }
+
+    /// Q-class-codegen (py): a `class T` with an inherent `impl T` and a trait
+    /// `impl Trait for T` must route BOTH impls' methods into the class body —
+    /// the same path records already use — and subclass the trait ABC. Before
+    /// the fix the Python backend emitted `class T:` with only `__init__`,
+    /// silently DROPPING every impl/trait method.
+    #[test]
+    fn py_class_attaches_inherent_and_trait_impl_methods() {
+        let cls = class_with_field(1, "Widget", "name");
+        let inherent = impl_block_node(
+            10,
+            "Widget",
+            None,
+            vec![self_method_returning(11, "describe", "a widget")],
+        );
+        let trait_decl = trait_node(20, "Render", "render");
+        let trait_impl = impl_block_node(
+            30,
+            "Widget",
+            Some("Render"),
+            vec![self_method_returning(31, "render", "<widget/>")],
+        );
+        let out = gen(&module(vec![], vec![trait_decl, cls, inherent, trait_impl]));
+        // The inherent-impl method is attached to the class body.
+        assert!(
+            out.contains("def describe(self)"),
+            "inherent-impl method must be attached to the class, got:\n{out}"
+        );
+        // The trait-impl method is attached to the class body.
+        assert!(
+            out.contains("def render(self)"),
+            "trait-impl method must be attached to the class, got:\n{out}"
+        );
+        // The class subclasses the trait ABC for real dispatch.
+        assert!(
+            out.contains("class Widget(Render):"),
+            "class must subclass the implemented trait, got:\n{out}"
+        );
+        // No orphan module-level `# impl` functions left behind.
+        assert!(
+            !out.contains("\ndef describe("),
+            "impl method must not leak as a module-level function, got:\n{out}"
+        );
+    }
+
+    /// Q-class-codegen behavioral check: a generated class actually dispatches
+    /// its inherent and trait methods at runtime.
+    #[test]
+    fn py_class_methods_dispatch_at_runtime() {
+        if !has_python3() {
+            return;
+        }
+        let cls = class_with_field(1, "Widget", "name");
+        let inherent = impl_block_node(
+            10,
+            "Widget",
+            None,
+            vec![self_method_returning(11, "describe", "a widget")],
+        );
+        let trait_decl = trait_node(20, "Render", "render");
+        let trait_impl = impl_block_node(
+            30,
+            "Widget",
+            Some("Render"),
+            vec![self_method_returning(31, "render", "<widget/>")],
+        );
+        let out = gen(&module(vec![], vec![trait_decl, cls, inherent, trait_impl]));
+        let program =
+            format!("{out}\nw = Widget(name=\"x\")\nprint(w.describe())\nprint(w.render())\n");
+        let got = run_py(&program);
+        assert_eq!(got, "a widget\n<widget/>", "got:\n{got}\nfrom:\n{out}");
+    }
+
+    /// Q-py-impl-before-trait (ordering): a class/record that subclasses a trait
+    /// ABC must be emitted AFTER the trait is defined. Here the trait `Render`
+    /// is declared textually AFTER the record `Widget` that impls it; naive
+    /// source-order emission produced `class Widget(Render):` before `Render`
+    /// existed → `NameError`. The fix topologically orders type decls so a base
+    /// precedes every subclass.
+    #[test]
+    fn py_trait_emitted_before_subclassing_record() {
+        // record Widget { name: String } — declared FIRST.
+        let rec = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Widget"),
+                generic_params: vec![],
+                fields: vec![named_field("name", "String")],
+            },
+        );
+        let trait_impl = impl_block_node(
+            10,
+            "Widget",
+            Some("Render"),
+            vec![self_method_returning(11, "render", "<w/>")],
+        );
+        // trait Render — declared LAST, after the record + its impl.
+        let trait_decl = trait_node(20, "Render", "render");
+        let out = gen(&module(vec![], vec![rec, trait_impl, trait_decl]));
+        let widget_pos = out
+            .find("class Widget(Render):")
+            .unwrap_or_else(|| panic!("expected `class Widget(Render):`, got:\n{out}"));
+        let render_pos = out
+            .find("class Render:")
+            .unwrap_or_else(|| panic!("expected `class Render:`, got:\n{out}"));
+        assert!(
+            render_pos < widget_pos,
+            "trait ABC `Render` must be emitted before subclass `Widget`, got:\n{out}"
+        );
+        // And it must actually import/parse + run without NameError.
+        if has_python3() {
+            assert!(
+                check_py_syntax(&out),
+                "ordered output must parse, got:\n{out}"
+            );
+            let program = format!("{out}\nw = Widget(name=\"x\")\nprint(w.render())\n");
+            assert_eq!(run_py(&program), "<w/>", "got from:\n{out}");
+        }
+    }
+
+    /// Q-class-codegen recursion guard: when an inherent `impl T { fn render }`
+    /// and a trait `impl Trait for T { fn render }` share a method name, Python's
+    /// single per-class namespace must keep exactly ONE `def render` — the
+    /// inherent (concrete) one. Emitting both made the delegating trait body
+    /// (`self.render()`) overwrite and call itself → `RecursionError`
+    /// (react-components' `Button`).
+    #[test]
+    fn py_inherent_method_wins_over_colliding_trait_method() {
+        let cls = class_with_field(1, "Button", "label");
+        // inherent: concrete body.
+        let inherent = impl_block_node(
+            10,
+            "Button",
+            None,
+            vec![self_method_returning(11, "render", "<button/>")],
+        );
+        let trait_decl = trait_node(20, "Component", "render");
+        // trait impl: delegates to the inherent method (`self.render()`).
+        let trait_render = node(
+            31,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("render"),
+                generic_params: vec![],
+                params: vec![param_node(32, "self")],
+                return_type: Some(Box::new(node(
+                    33,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["String"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    34,
+                    vec![],
+                    Some(node(
+                        35,
+                        NodeKind::Call {
+                            callee: Box::new(node(
+                                36,
+                                NodeKind::FieldAccess {
+                                    object: Box::new(id_node(37, "self")),
+                                    field: ident("render"),
+                                },
+                            )),
+                            type_args: vec![],
+                            args: vec![],
+                        },
+                    )),
+                )),
+            },
+        );
+        let trait_impl = impl_block_node(30, "Button", Some("Component"), vec![trait_render]);
+        let out = gen(&module(vec![], vec![trait_decl, cls, inherent, trait_impl]));
+        // Exactly one `def render` in the Button class — count occurrences.
+        let count = out.matches("def render(self)").count();
+        assert_eq!(
+            count,
+            2, // one in the `Component` ABC stub, one in `Button`
+            "expected one `render` in Button + one in the ABC, got {count}:\n{out}"
+        );
+        // The kept Button method is the inherent (concrete) one, not the
+        // self-delegating trait one.
+        assert!(
+            out.contains("return \"<button/>\""),
+            "Button.render must be the concrete inherent body, got:\n{out}"
+        );
+        if has_python3() {
+            let program = format!("{out}\nb = Button(label=\"x\")\nprint(b.render())\n");
+            assert_eq!(run_py(&program), "<button/>", "got from:\n{out}");
+        }
+    }
+
+    /// A class declared with an inline `base` (another class) must be emitted
+    /// after that base class, even when source order puts the subclass first.
+    #[test]
+    fn py_base_class_emitted_before_subclass() {
+        // class Sub (base = Base) — declared FIRST.
+        let sub = node(
+            1,
+            NodeKind::ClassDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Sub"),
+                generic_params: vec![],
+                base: Some(type_path(&["Base"])),
+                traits: vec![],
+                fields: vec![named_field("name", "String")],
+                methods: vec![],
+            },
+        );
+        // class Base — declared LAST.
+        let base = class_with_field(10, "Base", "id");
+        let out = gen(&module(vec![], vec![sub, base]));
+        let base_pos = out
+            .find("class Base:")
+            .unwrap_or_else(|| panic!("expected `class Base:`, got:\n{out}"));
+        let sub_pos = out
+            .find("class Sub(Base):")
+            .unwrap_or_else(|| panic!("expected `class Sub(Base):`, got:\n{out}"));
+        assert!(
+            base_pos < sub_pos,
+            "base class must be emitted before subclass, got:\n{out}"
+        );
+    }
+
+    /// An `effect` is emitted as an `(ABC)` base class that an `impl Effect for
+    /// T` makes a base of `T` (`class StubChannel(Channel):`). An effect declared
+    /// AFTER its impl must still be emitted before the implementing record, else
+    /// the base list `(Channel)` raises `NameError` (chat-protocol's `Channel`).
+    #[test]
+    fn py_effect_emitted_before_subclassing_record() {
+        // record StubChannel {} — declared FIRST, impls the effect.
+        let rec = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("StubChannel"),
+                generic_params: vec![],
+                fields: vec![named_field("tag", "String")],
+            },
+        );
+        let chan_impl = impl_block_node(
+            10,
+            "StubChannel",
+            Some("Channel"),
+            vec![self_method_returning(11, "send", "sent")],
+        );
+        // effect Channel { fn send(self) -> String } — declared LAST.
+        let effect = node(
+            20,
+            NodeKind::EffectDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Channel"),
+                generic_params: vec![],
+                components: vec![],
+                operations: vec![self_method_returning(21, "send", "")],
+            },
+        );
+        let out = gen(&module(vec![], vec![rec, chan_impl, effect]));
+        let chan_pos = out
+            .find("class Channel(ABC):")
+            .unwrap_or_else(|| panic!("expected `class Channel(ABC):`, got:\n{out}"));
+        let stub_pos = out
+            .find("class StubChannel(Channel):")
+            .unwrap_or_else(|| panic!("expected `class StubChannel(Channel):`, got:\n{out}"));
+        assert!(
+            chan_pos < stub_pos,
+            "effect ABC `Channel` must precede the record that impls it, got:\n{out}"
+        );
+    }
+
     #[test]
     fn boolean_operators() {
         let expr = node(
@@ -8602,7 +9208,13 @@ mod tests {
             .arg(code)
             .output()
             .expect("failed to run python3");
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
+        // Normalize CRLF→LF: on Windows python writes `\r\n` line endings, which
+        // would fail exact-match assertions against `\n`-terminated expectations.
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .replace("\r\n", "\n")
+            .trim()
+            .to_string()
     }
 
     #[test]
