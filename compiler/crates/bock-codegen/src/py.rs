@@ -1706,6 +1706,21 @@ struct PyEmitCtx {
     /// `break v` value still flows through the separate `loop_value_targets`
     /// stack, not this flag.
     in_loop_body_tail: bool,
+    /// `true` while emitting the arm bodies of a **statement-position** `match`
+    /// (one that sits mid-block as a side-effecting statement, not as the
+    /// block/function tail nor a value-binding RHS — set by [`Self::emit_stmt`]'s
+    /// `Match` arm). Like [`Self::in_loop_body_tail`], such a match evaluates to
+    /// Unit: each arm's tail expression is *discarded*, so
+    /// [`Self::emit_block_body_inner`] must emit it as a bare expression statement
+    /// (`<value>`) rather than a function-body `return <value>`. Emitting `return`
+    /// here aborts the enclosing function after the matched arm runs — the
+    /// chat-protocol truncation, where `match decoded { Ok(m) => println(..) … }`
+    /// returned out of `main` after the first arm instead of falling through to
+    /// the rest of the body. Saved/restored around the arm bodies and cleared
+    /// while emitting any *nested* value context (a nested `fn`/method body, a
+    /// value-binding hoist), so the discard applies only to the statement-match's
+    /// own arm tails and never leaks into a value position.
+    in_stmt_match_arm: bool,
 }
 
 impl PyEmitCtx {
@@ -1756,6 +1771,7 @@ impl PyEmitCtx {
             shadow_counter: 0,
             pending_scope_seed: Vec::new(),
             in_loop_body_tail: false,
+            in_stmt_match_arm: false,
         }
     }
 
@@ -4007,11 +4023,13 @@ impl PyEmitCtx {
         // re-binding a param is a plain rebind, a nested-block one is renamed).
         self.pending_scope_seed = Self::param_value_names(params);
         // A function-body tail is the function's return value, even for a `fn`
-        // *nested inside a loop body*: clear any enclosing loop-body discard flag
-        // so this body returns its tail rather than dropping it.
+        // *nested inside a loop body or a statement-match arm*: clear the discard
+        // flags so this body returns its tail rather than dropping it.
         let prev_discard = std::mem::replace(&mut self.in_loop_body_tail, false);
+        let prev_match = std::mem::replace(&mut self.in_stmt_match_arm, false);
         let body_res = self.emit_fn_body(body);
         self.in_loop_body_tail = prev_discard;
+        self.in_stmt_match_arm = prev_match;
         body_res?;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
@@ -4071,10 +4089,13 @@ impl PyEmitCtx {
             seed.extend(Self::param_value_names(rest));
             self.pending_scope_seed = seed;
             // A method body's tail is its return value — clear any enclosing
-            // loop-body discard flag so it returns rather than dropping its tail.
+            // discard flags (loop-body or statement-match arm) so it returns
+            // rather than dropping its tail.
             let prev_discard = std::mem::replace(&mut self.in_loop_body_tail, false);
+            let prev_match = std::mem::replace(&mut self.in_stmt_match_arm, false);
             let body_res = self.emit_fn_body(body);
             self.in_loop_body_tail = prev_discard;
+            self.in_stmt_match_arm = prev_match;
             body_res?;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
@@ -4541,7 +4562,21 @@ impl PyEmitCtx {
                 self.indent -= 1;
                 Ok(())
             }
-            NodeKind::Match { scrutinee, arms } => self.emit_match(scrutinee, arms),
+            NodeKind::Match { scrutinee, arms } => {
+                // Statement position: a mid-block `match` is a Unit statement, so
+                // each arm's tail expression is discarded (emitted as a bare
+                // expression statement) rather than `return`ed. Without this, an
+                // arm whose body is a bare expression (`Ok(m) => println(..)`)
+                // emits `return println(..)`, aborting the enclosing function
+                // after the matched arm — the chat-protocol truncation. The flag
+                // is saved/restored and cleared inside any nested value context
+                // (a nested fn/method body, a value-binding hoist), so it scopes
+                // only to this match's own arm tails.
+                let prev = std::mem::replace(&mut self.in_stmt_match_arm, true);
+                let r = self.emit_match(scrutinee, arms);
+                self.in_stmt_match_arm = prev;
+                r
+            }
             NodeKind::Block { stmts, tail } => {
                 for s in stmts {
                     self.emit_node(s)?;
@@ -6242,10 +6277,14 @@ impl PyEmitCtx {
     /// *statement* position — a Bock loop evaluates to Unit, so the value is
     /// discarded — and a `return` would abort the enclosing function after the
     /// first iteration (the fizzbuzz one-line / inventory single-product
-    /// truncation). There it is emitted as a bare expression statement.
+    /// truncation). There it is emitted as a bare expression statement. The arm
+    /// body of a statement-position `match` ([`Self::in_stmt_match_arm`], set by
+    /// [`Self::emit_stmt`]'s `Match` arm) is discarded for the same reason — a
+    /// mid-block `match` is a Unit statement, and a `return` there aborts the
+    /// enclosing function after the matched arm (the chat-protocol truncation).
     fn emit_tail_value_or_discard(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         let ind = self.indent_str();
-        if self.in_loop_body_tail {
+        if self.in_loop_body_tail || self.in_stmt_match_arm {
             self.buf.push_str(&ind);
         } else {
             let _ = write!(self.buf, "{ind}return ");
@@ -6344,15 +6383,18 @@ impl PyEmitCtx {
         node: &AIRNode,
     ) -> Result<(), CodegenError> {
         // A value-binding RHS is a *value* context: its tail is assigned to
-        // `target`, never discarded. Clear any active loop-body-tail discard
-        // flag (set by an enclosing `emit_loop_body`) so it doesn't leak into
-        // this value position; a nested loop inside the RHS re-sets it via
-        // `emit_loop_body`. Restored after.
+        // `target`, never discarded. Clear any active discard flag (a loop-body
+        // tail set by an enclosing `emit_loop_body`, or a statement-match arm set
+        // by `emit_stmt`) so it doesn't leak into this value position; a nested
+        // loop/statement-match inside the RHS re-sets the relevant flag. Restored
+        // after.
         let prev_discard = std::mem::replace(&mut self.in_loop_body_tail, false);
+        let prev_match = std::mem::replace(&mut self.in_stmt_match_arm, false);
         self.enter_shadow_scope();
         let r = self.emit_block_body_assigning_inner(target, node);
         self.leave_shadow_scope();
         self.in_loop_body_tail = prev_discard;
+        self.in_stmt_match_arm = prev_match;
         r
     }
 
