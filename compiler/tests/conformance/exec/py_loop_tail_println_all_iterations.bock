@@ -1,0 +1,30 @@
+// TEST: exec_py_loop_tail_println_all_iterations
+// EXPECT: output "1;2;3;4;5;done"
+// EXPECT: targets python
+//
+// A `for`-loop body whose TAIL is a side-effecting call (`print(...)`) must run
+// on EVERY iteration. The Python backend's shared `emit_block_body` had treated
+// a block tail as a function-body `return`, so the loop body lowered to
+// `for i in …: return print(...)` — the `return` aborts `main` after the FIRST
+// iteration. fizzbuzz printed one line; inventory-system listed one product;
+// both still exited 0, so the exec audit's exit-code-only view hid it.
+//
+// The py fix routes loop bodies through `emit_loop_body`, which sets a
+// statement-position discard flag so a loop-body tail expression is emitted as a
+// bare statement (`print(...)`) — not `return print(...)`. The trailing
+// `print("done")` after the loop proves control did NOT leave `main` early.
+//
+// PYTHON-ONLY: this fixture pins the Python loop-tail lowering specifically
+// (the JS/TS truncation is fixed separately, #240 for TS). A separate `py_*`
+// fixture name keeps it from claiming cross-backend coverage it does not assert.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  for i in 1..=5 {
+    print("${i};")
+  }
+  print("done")
+}

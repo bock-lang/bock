@@ -1693,6 +1693,19 @@ struct PyEmitCtx {
     /// is a plain Python rebind (the idiom) while a *nested*-block `let`
     /// shadowing the param is renamed. Drained (cleared) on the next push.
     pending_scope_seed: Vec<String>,
+    /// `true` while emitting the **immediate** body of a `for`/`while`/`loop`
+    /// (set by [`Self::emit_loop_body`]). A loop body is statement position: its
+    /// tail expression is *discarded* (a Bock loop evaluates to Unit), so
+    /// [`Self::emit_block_body_inner`] must emit the tail as a bare expression
+    /// statement (`<value>`) rather than a function-body `return <value>` — a
+    /// `return` inside a loop aborts the enclosing function after one iteration
+    /// (the fizzbuzz / inventory-system truncation). Saved/restored around the
+    /// loop body and cleared while emitting any *nested* value context (a
+    /// value-binding hoist, a value-`if`/`match` arm), so the discard applies
+    /// only to the loop's own tail and never leaks into a value position. A
+    /// `break v` value still flows through the separate `loop_value_targets`
+    /// stack, not this flag.
+    in_loop_body_tail: bool,
 }
 
 impl PyEmitCtx {
@@ -1742,6 +1755,7 @@ impl PyEmitCtx {
             shadow_scopes: Vec::new(),
             shadow_counter: 0,
             pending_scope_seed: Vec::new(),
+            in_loop_body_tail: false,
         }
     }
 
@@ -3917,7 +3931,13 @@ impl PyEmitCtx {
         // Seed the body's shadow frame with the parameters (so a body-level `let`
         // re-binding a param is a plain rebind, a nested-block one is renamed).
         self.pending_scope_seed = Self::param_value_names(params);
-        self.emit_fn_body(body)?;
+        // A function-body tail is the function's return value, even for a `fn`
+        // *nested inside a loop body*: clear any enclosing loop-body discard flag
+        // so this body returns its tail rather than dropping it.
+        let prev_discard = std::mem::replace(&mut self.in_loop_body_tail, false);
+        let body_res = self.emit_fn_body(body);
+        self.in_loop_body_tail = prev_discard;
+        body_res?;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         Ok(())
@@ -3975,7 +3995,12 @@ impl PyEmitCtx {
             let mut seed = vec!["self".to_string()];
             seed.extend(Self::param_value_names(rest));
             self.pending_scope_seed = seed;
-            self.emit_fn_body(body)?;
+            // A method body's tail is its return value — clear any enclosing
+            // loop-body discard flag so it returns rather than dropping its tail.
+            let prev_discard = std::mem::replace(&mut self.in_loop_body_tail, false);
+            let body_res = self.emit_fn_body(body);
+            self.in_loop_body_tail = prev_discard;
+            body_res?;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
         }
@@ -4273,7 +4298,9 @@ impl PyEmitCtx {
                 self.buf.push_str(":\n");
                 self.indent += 1;
                 self.loop_value_targets.push(None);
-                self.emit_block_body(body)?;
+                // Loop body is statement position: a tail expression is
+                // discarded, not `return`ed (see `emit_loop_body`).
+                self.emit_loop_body(body)?;
                 self.loop_value_targets.pop();
                 self.indent -= 1;
                 Ok(())
@@ -4285,7 +4312,9 @@ impl PyEmitCtx {
                 self.buf.push_str(":\n");
                 self.indent += 1;
                 self.loop_value_targets.push(None);
-                self.emit_block_body(body)?;
+                // Loop body is statement position: a tail expression is
+                // discarded, not `return`ed (see `emit_loop_body`).
+                self.emit_loop_body(body)?;
                 self.loop_value_targets.pop();
                 self.indent -= 1;
                 Ok(())
@@ -4297,7 +4326,9 @@ impl PyEmitCtx {
                 // a bare `break` inside stays a bare `break` (and isn't mistaken
                 // for an enclosing value-loop's break).
                 self.loop_value_targets.push(None);
-                self.emit_block_body(body)?;
+                // Loop body is statement position: a tail expression is
+                // discarded, not `return`ed (see `emit_loop_body`).
+                self.emit_loop_body(body)?;
                 self.loop_value_targets.pop();
                 self.indent -= 1;
                 Ok(())
@@ -5928,6 +5959,24 @@ impl PyEmitCtx {
         r
     }
 
+    /// Emit the **body of a `for`/`while`/`loop`** — statement position, so its
+    /// tail expression is *discarded* (a Bock loop evaluates to Unit). Sets
+    /// [`Self::in_loop_body_tail`] for the body's duration so
+    /// [`Self::emit_block_body_inner`] emits the tail as a bare expression
+    /// statement (`<value>`) instead of a function-body `return <value>` — a
+    /// `return` inside a loop aborts the enclosing function after one iteration
+    /// (the fizzbuzz / inventory-system one-line truncation). The flag is
+    /// saved/restored so it never leaks past the loop, and any nested value
+    /// context (a value-binding hoist, a value-`if`/`match` arm) clears it — see
+    /// [`Self::emit_block_body_inner`]. A `break v` value flows through the
+    /// separate `loop_value_targets` stack, not this flag.
+    fn emit_loop_body(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        let prev = std::mem::replace(&mut self.in_loop_body_tail, true);
+        let r = self.emit_block_body(node);
+        self.in_loop_body_tail = prev;
+        r
+    }
+
     fn emit_block_body_inner(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         if let NodeKind::Block { stmts, tail } = &node.kind {
             if stmts.is_empty() && tail.is_none() {
@@ -6010,10 +6059,12 @@ impl PyEmitCtx {
                 if if_value_needs_stmt_form(t) {
                     return self.emit_tail_control_flow(t);
                 }
-                let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}return ");
-                self.emit_expr(t)?;
-                self.buf.push('\n');
+                // Plain value-expression tail. In a loop body this is statement
+                // position — the value is discarded — so emit a bare expression
+                // statement, not `return <value>` (a `return` in a loop aborts
+                // the function after one iteration: the fizzbuzz / inventory
+                // truncation). Elsewhere this is the function-body tail: `return`.
+                self.emit_tail_value_or_discard(t)?;
             }
         } else if crate::generator::node_is_statement(node) {
             // A bare statement body (`break`/`continue`/`return`/assignment).
@@ -6041,10 +6092,7 @@ impl PyEmitCtx {
             {
                 self.emit_match(scrutinee, arms)?;
             } else {
-                let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}return ");
-                self.emit_expr(node)?;
-                self.buf.push('\n');
+                self.emit_tail_value_or_discard(node)?;
             }
         } else if if_value_needs_stmt_form(node) {
             // See the tail-position note above: a value `if` whose branch block
@@ -6053,11 +6101,29 @@ impl PyEmitCtx {
             return self.emit_tail_control_flow(node);
         } else {
             // Single expression as body.
-            let ind = self.indent_str();
-            let _ = write!(self.buf, "{ind}return ");
-            self.emit_expr(node)?;
-            self.buf.push('\n');
+            self.emit_tail_value_or_discard(node)?;
         }
+        Ok(())
+    }
+
+    /// Emit a block/body **tail value expression** in the correct position.
+    ///
+    /// In a function/method body (the default) the tail is the body's value, so
+    /// it is `return <value>`. Inside the body of a `for`/`while`/`loop`
+    /// ([`Self::in_loop_body_tail`] set by [`Self::emit_loop_body`]) the tail is
+    /// *statement* position — a Bock loop evaluates to Unit, so the value is
+    /// discarded — and a `return` would abort the enclosing function after the
+    /// first iteration (the fizzbuzz one-line / inventory single-product
+    /// truncation). There it is emitted as a bare expression statement.
+    fn emit_tail_value_or_discard(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        let ind = self.indent_str();
+        if self.in_loop_body_tail {
+            self.buf.push_str(&ind);
+        } else {
+            let _ = write!(self.buf, "{ind}return ");
+        }
+        self.emit_expr(node)?;
+        self.buf.push('\n');
         Ok(())
     }
 
@@ -6097,14 +6163,9 @@ impl PyEmitCtx {
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => self.emit_match(scrutinee, arms),
-            // Not a control-flow node — fall back to a plain `return`.
-            _ => {
-                let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}return ");
-                self.emit_expr(node)?;
-                self.buf.push('\n');
-                Ok(())
-            }
+            // Not a control-flow node — fall back to a plain tail value (or a
+            // bare statement inside a loop body; see `emit_tail_value_or_discard`).
+            _ => self.emit_tail_value_or_discard(node),
         }
     }
 
@@ -6154,9 +6215,16 @@ impl PyEmitCtx {
         target: &str,
         node: &AIRNode,
     ) -> Result<(), CodegenError> {
+        // A value-binding RHS is a *value* context: its tail is assigned to
+        // `target`, never discarded. Clear any active loop-body-tail discard
+        // flag (set by an enclosing `emit_loop_body`) so it doesn't leak into
+        // this value position; a nested loop inside the RHS re-sets it via
+        // `emit_loop_body`. Restored after.
+        let prev_discard = std::mem::replace(&mut self.in_loop_body_tail, false);
         self.enter_shadow_scope();
         let r = self.emit_block_body_assigning_inner(target, node);
         self.leave_shadow_scope();
+        self.in_loop_body_tail = prev_discard;
         r
     }
 
@@ -6264,7 +6332,10 @@ impl PyEmitCtx {
                 self.writeln("while True:");
                 self.indent += 1;
                 self.loop_value_targets.push(Some(target.to_string()));
-                self.emit_block_body(body)?;
+                // The loop's value arrives via `break v` (recorded in
+                // `loop_value_targets`), not the body's tail; the body is
+                // statement position, so a tail expr is discarded.
+                self.emit_loop_body(body)?;
                 self.loop_value_targets.pop();
                 self.indent -= 1;
                 Ok(())
@@ -6276,7 +6347,10 @@ impl PyEmitCtx {
                 self.buf.push_str(":\n");
                 self.indent += 1;
                 self.loop_value_targets.push(Some(target.to_string()));
-                self.emit_block_body(body)?;
+                // The loop's value arrives via `break v` (recorded in
+                // `loop_value_targets`), not the body's tail; the body is
+                // statement position, so a tail expr is discarded.
+                self.emit_loop_body(body)?;
                 self.loop_value_targets.pop();
                 self.indent -= 1;
                 Ok(())
@@ -7855,6 +7929,123 @@ mod tests {
         assert!(out.contains("for x in items:"), "got: {out}");
         assert!(out.contains("while True:"), "got: {out}");
         assert!(out.contains("break"), "got: {out}");
+    }
+
+    // ── Statement-position loop tails must NOT be `return`ed ─────────────────
+    //
+    // A loop body's final expression is a *statement* in Bock — the loop
+    // evaluates to Unit, the body's value is discarded. The Python backend's
+    // shared `emit_block_body` had emitted a tail expression as a function-body
+    // `return`, so e.g. `for i in 1..=3 { println(i) }` lowered to
+    // `for i in …: return print(i)` — the `return` exits `main` on the FIRST
+    // iteration (the loop runs once, then the function returns). fizzbuzz
+    // printed one line, inventory-system listed one product. These tests pin
+    // the bare-statement discard for each loop kind.
+
+    /// Build a `println(<arg>)` call node.
+    fn py_println_call(id: u32, arg: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::Call {
+                callee: Box::new(id_node(id + 1, "println")),
+                args: vec![AirArg {
+                    label: None,
+                    value: arg,
+                }],
+                type_args: vec![],
+            },
+        )
+    }
+
+    #[test]
+    fn py_for_loop_body_tail_call_is_statement_not_returned() {
+        // fn main() { for i in 1..=3 { println(i) } }
+        let range = node(
+            20,
+            NodeKind::Range {
+                lo: Box::new(int_lit(21, "1")),
+                hi: Box::new(int_lit(22, "3")),
+                inclusive: true,
+            },
+        );
+        let loop_body = block(30, vec![], Some(py_println_call(31, id_node(33, "i"))));
+        let for_loop = node(
+            10,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(11, "i")),
+                iterable: Box::new(range),
+                body: Box::new(loop_body),
+            },
+        );
+        let f = fn_decl_body(0, "main", block(2, vec![for_loop], None));
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("return print(i)"),
+            "for-loop body tail must be a bare statement, not `return` (would abort \
+             main after one iteration); got:\n{out}"
+        );
+        assert!(
+            out.contains("print(i)"),
+            "for-loop body tail call must still be emitted; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn py_while_loop_body_tail_call_is_statement_not_returned() {
+        // fn main() { while cond { println(i) } }
+        let loop_body = block(30, vec![], Some(py_println_call(31, id_node(33, "i"))));
+        let while_loop = node(
+            10,
+            NodeKind::While {
+                condition: Box::new(bool_lit(12, true)),
+                body: Box::new(loop_body),
+            },
+        );
+        let f = fn_decl_body(0, "main", block(2, vec![while_loop], None));
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("return print(i)"),
+            "while-loop body tail must be a bare statement, not `return`; got:\n{out}"
+        );
+        assert!(
+            out.contains("print(i)"),
+            "while-loop body tail call must still be emitted; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn py_infinite_loop_body_tail_call_is_statement_not_returned() {
+        // fn main() { loop { println(i) } }
+        let loop_body = block(30, vec![], Some(py_println_call(31, id_node(33, "i"))));
+        let inf_loop = node(
+            10,
+            NodeKind::Loop {
+                body: Box::new(loop_body),
+            },
+        );
+        let f = fn_decl_body(0, "main", block(2, vec![inf_loop], None));
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("return print(i)"),
+            "loop body tail must be a bare statement, not `return`; got:\n{out}"
+        );
+        assert!(
+            out.contains("print(i)"),
+            "loop body tail call must still be emitted; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn py_function_body_tail_call_still_returned() {
+        // Guard against over-correction: a *function* body tail must still
+        // `return` its value (this is NOT statement position).
+        // fn answer() { 42 }
+        let f = fn_decl_body(0, "answer", block(2, vec![], Some(int_lit(3, "42"))));
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("return 42"),
+            "function-body tail must still be returned; got:\n{out}"
+        );
     }
 
     #[test]
