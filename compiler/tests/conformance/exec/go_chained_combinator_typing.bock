@@ -1,0 +1,51 @@
+// TEST: exec_go_chained_combinator_typing
+// EXPECT: output "doubled=24;evens=3;sensors=2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-go-chained-combinator-typing — element-type recovery through a chained
+// combinator receiver on the Go backend.
+//
+// A `.map` whose RECEIVER is itself a `.filter(..)` call kept
+// `func(n interface{})` and a `[]interface{}` result instead of recovering the
+// concrete element type (`int64`), so `n * 2` and the result slice did not
+// compile on Go. The element type is now threaded through chained combinator
+// receivers (`filter`/`find` preserve it; `map`/`flat_map` derive it from the
+// closure return). A second shape exercises a typed *lambda parameter* receiver:
+// a `(data) => data.filter(..)` returned from a `Fn(List[T]) -> List[T]`
+// function, whose `data` param's `[]T` Go type previously erased to
+// `interface{}` (the data-pipeline `filter_category` case).
+module main
+
+public record Point {
+  x: Int
+  category: String
+}
+
+// Higher-order function returning a closure over a typed `List[Point]` param —
+// the closure's `.filter` receiver must keep its `[]Point` element type.
+public fn by_category(cat: String) -> Fn(List[Point]) -> List[Point] {
+  (data) => data.filter((p) => p.category == cat)
+}
+
+fn main() -> Void {
+  let numbers = [1, 2, 3, 4, 5, 6]
+
+  // Chained `.filter(..).map(..)`: the outer `.map` receiver is the `.filter`
+  // call; its `int64` element must flow through so `n * 2` type-checks on Go.
+  let doubled_sum = numbers
+    .filter((n) => n % 2 == 0)
+    .map((n) => n * 2)
+    .fold(0, (acc, n) => acc + n)
+
+  let evens = numbers.filter((n) => n % 2 == 0).len()
+
+  let points = [
+    Point { x: 10, category: "sensor" },
+    Point { x: 20, category: "manual" },
+    Point { x: 30, category: "sensor" }
+  ]
+  let sensor_filter = by_category("sensor")
+  let sensors = sensor_filter(points).len()
+
+  println("doubled=${doubled_sum};evens=${evens};sensors=${sensors}")
+}

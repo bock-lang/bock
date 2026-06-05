@@ -1230,6 +1230,20 @@ struct GoEmitCtx {
     /// receiver) and a construction emits `Box[int64]{...}`. Pre-scanned across
     /// the reached modules (mirrors [`Self::enum_variants`]).
     generic_decls: crate::generator::GenericDeclRegistry,
+    /// Method-level type-parameter lowering registry (DQ28). Go forbids type
+    /// parameters on methods (`func (b Box[T]) Map[U](..)` is a syntax error),
+    /// but Bock keeps the surface (`Box[T].map[U]`); the Go backend lowers such a
+    /// method to a *free function* `func Box_Map[T, U](self Box[T], ..) ..`,
+    /// keyed `<TypeName>_<MethodGoName>` for collision-free naming (free
+    /// functions support multiple type params natively — no monomorphization).
+    /// This map records, per Bock *method name*, the owning Go type name, so a
+    /// call site `box.map(f)` can be rewritten to `Box_Map(box, f)`. Keyed by
+    /// method name only (codegen sees the AIR, not the checker's per-type method
+    /// table); if two distinct types declare a generic method of the same name
+    /// the entry is *poisoned* (removed) — the call site then falls back to the
+    /// ordinary method-dispatch form, which is at worst un-lowered, never wrong
+    /// for the unambiguous types. Pre-scanned across the reached modules.
+    method_freefn_lowered: HashMap<String, String>,
     /// Maps an in-scope variable name → its Go type, used to infer a lambda's
     /// return type. Go infers a bare `func(...) interface{}` for every lambda;
     /// when such a closure is passed to a typed `func(int64) int64` parameter
@@ -1568,6 +1582,7 @@ impl GoEmitCtx {
             type_aliases: HashMap::new(),
             const_names: std::collections::HashSet::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
+            method_freefn_lowered: HashMap::new(),
             var_go_type: HashMap::new(),
             go_declared_scopes: Vec::new(),
             pending_scope_seed: None,
@@ -2155,7 +2170,10 @@ impl GoEmitCtx {
                 };
                 for m in methods {
                     if let NodeKind::FnDecl {
-                        visibility, name, ..
+                        visibility,
+                        name,
+                        generic_params,
+                        ..
                     } = &m.kind
                     {
                         if always_export || matches!(visibility, Visibility::Public) {
@@ -2170,6 +2188,30 @@ impl GoEmitCtx {
                             // `public_methods` (see `emit_method_body`).
                             self.inherent_methods
                                 .insert((ty.clone(), to_pascal_case(&name.name)));
+                            // DQ28: an inherent/class method that declares its own
+                            // type parameters (`Box[T].map[U]`) cannot be a Go
+                            // method (Go forbids method type params). Record it for
+                            // free-function lowering, keyed by the Bock method
+                            // name → owning type. Poison the entry if a second type
+                            // declares a generic method of the same name (ambiguous
+                            // at the by-name call site): set the value to a sentinel
+                            // so the lookup treats it as absent.
+                            if !generic_params.is_empty() {
+                                use std::collections::hash_map::Entry;
+                                match self.method_freefn_lowered.entry(name.name.clone()) {
+                                    Entry::Vacant(e) => {
+                                        e.insert(ty.clone());
+                                    }
+                                    Entry::Occupied(mut e) => {
+                                        if e.get() != ty {
+                                            // Ambiguous: two types, same generic
+                                            // method name. Poison with a sentinel
+                                            // that names no real type.
+                                            e.insert(String::new());
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2199,6 +2241,32 @@ impl GoEmitCtx {
         } else {
             to_camel_case(name)
         }
+    }
+
+    /// The owning Go type name of a method that is *free-function-lowered* for
+    /// DQ28 (a method with its own type parameters, e.g. `Box[T].map[U]`), or
+    /// `None` when the method name is not lowered or is ambiguous (the poison
+    /// sentinel — an empty type name — reads as absent). When `Some(ty)`, a call
+    /// site `recv.method(args)` lowers to `<FreeFnName>(recv, args)` and the
+    /// declaration emits a free function instead of a Go method.
+    fn freefn_lowered_type(&self, method_name: &str) -> Option<&str> {
+        self.method_freefn_lowered
+            .get(method_name)
+            .map(String::as_str)
+            .filter(|ty| !ty.is_empty())
+    }
+
+    /// The Go free-function name a DQ28-lowered method lowers to:
+    /// `<TypeName>_<MethodGoName>` (`Box` + `Map` → `Box_Map`). The method name
+    /// is PascalCased via [`Self::go_method_name`] (a public method matches its
+    /// every call site; a private one camelCases) so the declaration and call
+    /// site always agree. The `<Type>_` prefix guarantees collision-free naming
+    /// across types that share a method name.
+    fn freefn_lowered_name(&self, type_name: &str, method_name: &str, is_public: bool) -> String {
+        format!(
+            "{type_name}_{}",
+            self.go_method_name(method_name, is_public)
+        )
     }
 
     /// Pre-scan top-level functions whose declared return type is `Optional[T]`,
@@ -2676,12 +2744,34 @@ impl GoEmitCtx {
         let NodeKind::Call { callee: f, .. } = &inner.kind else {
             return None;
         };
-        let NodeKind::Identifier { name: f_name } = &f.kind else {
-            return None;
-        };
-        // `f`'s first declared parameter's Go type is the composed input type.
-        let first_param = self.fn_param_types.get(&f_name.name)?.first()?.as_ref()?;
-        Some(self.type_to_go(first_param))
+        self.compose_input_go_type(f)
+    }
+
+    /// The Go type of the *input* a composed callee `f` accepts — used to type a
+    /// `>>`-compose lambda's synthetic `__compose_x` parameter.
+    ///
+    /// A named function (`Identifier`) yields its first declared parameter type.
+    /// A *nested* compose (chained `f >> g >> h` desugars to a `(__compose_x) =>
+    /// h(g(f(__compose_x)))` whose innermost callee `f` is itself a compose
+    /// lambda) recurses through that lambda's own desugared shape to the
+    /// innermost named function. Without the recursion an `f >> g >> h` chain's
+    /// *outer* compose param fell back to `interface{}` on Go (only the innermost
+    /// compose's param was typed), so passing `composeX` into the typed inner
+    /// closure needed a type assertion Go rejected (Q-nested-compose-jstsgo, Go
+    /// portion). Mirrors py's `emit_callee`/rust's `emit_callee_rs` parens
+    /// strategy at the *typing* level.
+    fn compose_input_go_type(&self, callee: &AIRNode) -> Option<String> {
+        match &callee.kind {
+            NodeKind::Identifier { name } => {
+                let first_param = self.fn_param_types.get(&name.name)?.first()?.as_ref()?;
+                Some(self.type_to_go(first_param))
+            }
+            // A nested compose lambda (`(__compose_x) => g(f(__compose_x))`): its
+            // own input type is whatever its innermost composed callee `f`
+            // accepts. Recurse through the same desugared shape.
+            NodeKind::Lambda { params, body } => self.compose_lambda_param_go_type(params, body),
+            _ => None,
+        }
     }
 
     fn map_receiver_kv_go_types(&self, recv: &AIRNode) -> Option<(String, String)> {
@@ -3002,9 +3092,42 @@ impl GoEmitCtx {
     fn list_receiver_elem_go_type(&self, recv: &AIRNode) -> Option<String> {
         match &recv.kind {
             NodeKind::Identifier { name } => {
-                self.var_list_elem.get(&go_value_ident(&name.name)).cloned()
+                let key = go_value_ident(&name.name);
+                // A `List[T]` binding records its element type directly. Fall back
+                // to the variable's full Go type (`var_go_type`) when the
+                // dedicated list-element map has no entry — a typed *lambda
+                // parameter* (`(data) => data.filter(..)` for a `Fn(List[T]) ->
+                // ..` return type) is recorded only there as `[]T`, so peeling the
+                // `[]` prefix recovers the element. Without this the chained
+                // `.filter`/`.map` closure stayed `func(x interface{})` and its
+                // `[]interface{}` result did not satisfy the typed `Fn` return.
+                self.var_list_elem.get(&key).cloned().or_else(|| {
+                    self.var_go_type
+                        .get(&key)
+                        .and_then(|t| t.strip_prefix("[]"))
+                        .map(str::to_string)
+                })
             }
             NodeKind::ListLiteral { elems } => self.infer_homogeneous_elem_type(elems),
+            // A *chained* combinator whose receiver is itself a closure-taking
+            // list method (`numbers.filter(..).map(..)`): the outer method's
+            // receiver is the desugared `Call(FieldAccess(numbers, "filter"),
+            // [numbers, cb])`. `filter`/`find` preserve the element type, so the
+            // element is recoverable from the inner receiver without inferring a
+            // closure return type (which would need `&mut self`). This keeps a
+            // `.filter(..).map(..)` chain's outer `.map` closure typed
+            // `func(n int64)` and its result `[]int64` rather than the erased
+            // `interface{}`/`[]interface{}` that Go rejects. `map`/`flat_map`
+            // receivers (whose element is the closure's return type) are recovered
+            // by the `&mut self` fallback in `try_emit_list_functional_method`.
+            NodeKind::Call { callee, args, .. } => {
+                let (inner_recv, method, _) =
+                    crate::generator::desugared_list_functional_method(recv, callee, args)?;
+                match method {
+                    "filter" | "find" => self.list_receiver_elem_go_type(inner_recv),
+                    _ => None,
+                }
+            }
             // A `self.field` list receiver inside an impl method (`self.xs.get(i)`
             // in `record ListIter[T] { xs: List[T] }`): the field's `List[...]`
             // element type is recorded per record. `T` is in scope on the
@@ -5040,8 +5163,18 @@ impl GoEmitCtx {
             return Ok(false);
         };
         let recv_str = self.expr_to_string(recv)?;
+        // Recover the receiver's element type. `list_receiver_elem_go_type`
+        // handles direct bindings/literals and the element-preserving chained
+        // combinators (`filter`/`find`). A chained `map`/`flat_map` receiver's
+        // element is the *closure's return type*, which needs the `&mut self`
+        // block-tail inference in `value_list_elem_go_type` — so fall back to it
+        // when the cheap `&self` resolver yields nothing. This is the
+        // `.filter(..).map(..).map(..)` (Q-go-chained-combinator-typing) case:
+        // the outermost `.map`'s `interface{}` element flips to the concrete
+        // element threaded through the whole chain.
         let elem = self
             .list_receiver_elem_go_type(recv)
+            .or_else(|| self.value_list_elem_go_type(recv))
             .unwrap_or_else(|| "interface{}".to_string());
         let slice = format!("[]{elem}");
         let code = match method {
@@ -6946,6 +7079,7 @@ impl GoEmitCtx {
         if let NodeKind::FnDecl {
             visibility,
             name,
+            generic_params,
             params,
             return_type,
             effect_clause,
@@ -6965,12 +7099,10 @@ impl GoEmitCtx {
             // `Render`), and every call site already PascalCases a
             // `public_methods` name — declaration and dispatch must agree.
             // Otherwise inherent methods keep the public/private casing rule.
-            let method_name = self.go_method_name(
-                &name.name,
-                use_value_receiver
-                    || matches!(visibility, Visibility::Public)
-                    || self.public_methods.contains(&name.name),
-            );
+            let is_public_method = use_value_receiver
+                || matches!(visibility, Visibility::Public)
+                || self.public_methods.contains(&name.name);
+            let method_name = self.go_method_name(&name.name, is_public_method);
             // The AIR keeps `self` as a leading `Param` and method bodies refer
             // to `self.Field`. Name the Go receiver `self` and drop the leading
             // `self` param so the body resolves with no rewrite — otherwise the
@@ -7002,16 +7134,45 @@ impl GoEmitCtx {
                     .map(|t| format!(" {}", self.type_to_go(t)))
                     .unwrap_or_default()
             };
-            let receiver_prefix = if use_value_receiver { "" } else { "*" };
-            // Go binds a generic type's params on the receiver itself:
-            // `func (self *Box[T]) ...`. The bare-name arg list (`[T]`) brings
-            // `T` into scope for the receiver type, params, and body.
-            let receiver_generics = self.format_generic_param_args(target_generics);
-            self.writeln(&format!(
-                "func ({receiver_var} {receiver_prefix}{receiver_type}{receiver_generics}) \
-                 {method_name}({}){ret} {{",
-                all_params.join(", "),
-            ));
+            // DQ28: a method declaring its own type parameters (`Box[T].map[U]`)
+            // is free-function-lowered — Go forbids method type params. Emit
+            // `func Box_Map[T any, U any](self Box[T], ..) ..` (the receiver
+            // becomes a leading `self` *parameter*; the receiver's and the
+            // method's type params combine on the free function, which Go allows).
+            // Every call site is rewritten to `Box_Map(box, ..)` by the call
+            // emitter. A non-generic method keeps the idiomatic Go receiver form.
+            let receiver_base = receiver_type
+                .split_once('[')
+                .map_or(receiver_type, |(b, _)| b);
+            let freefn_lowered = !generic_params.is_empty()
+                && self.freefn_lowered_type(&name.name) == Some(receiver_base);
+            if freefn_lowered {
+                // Combine receiver type params (`[T any]`) with the method's own
+                // (`[U any]`) into one Go free-function type-param list.
+                let mut combined = target_generics.to_vec();
+                combined.extend(generic_params.iter().cloned());
+                let type_params = self.format_generic_params(&combined);
+                let receiver_args = self.format_generic_param_args(target_generics);
+                let self_param = format!("{receiver_var} {receiver_type}{receiver_args}");
+                let mut freefn_params = vec![self_param];
+                freefn_params.extend(all_params);
+                let fn_name = self.freefn_lowered_name(receiver_base, &name.name, is_public_method);
+                self.writeln(&format!(
+                    "func {fn_name}{type_params}({}){ret} {{",
+                    freefn_params.join(", "),
+                ));
+            } else {
+                let receiver_prefix = if use_value_receiver { "" } else { "*" };
+                // Go binds a generic type's params on the receiver itself:
+                // `func (self *Box[T]) ...`. The bare-name arg list (`[T]`) brings
+                // `T` into scope for the receiver type, params, and body.
+                let receiver_generics = self.format_generic_param_args(target_generics);
+                self.writeln(&format!(
+                    "func ({receiver_var} {receiver_prefix}{receiver_type}{receiver_generics}) \
+                     {method_name}({}){ret} {{",
+                    all_params.join(", "),
+                ));
+            }
             self.indent += 1;
             let old_handler_vars = self.current_handler_vars.clone();
             let expanded = self.expand_effect_names(effect_clause);
@@ -8173,6 +8334,23 @@ impl GoEmitCtx {
                 if let Some((recv, method, rest)) =
                     crate::generator::desugared_self_call(callee, args)
                 {
+                    // DQ28 free-function lowering: a generic method
+                    // (`box.map(f)`) lowers to a free function call
+                    // `Box_Map(box, f)` — the receiver leads as the first
+                    // argument. The method name uniquely identifies the type
+                    // (poisoned otherwise), so the rewrite is unambiguous.
+                    if let Some(ty) = self.freefn_lowered_type(&method.name).map(str::to_string) {
+                        let is_public = self.public_methods.contains(&method.name);
+                        let fn_name = self.freefn_lowered_name(&ty, &method.name, is_public);
+                        let _ = write!(self.buf, "{fn_name}(");
+                        self.emit_expr(recv)?;
+                        for arg in rest {
+                            self.buf.push_str(", ");
+                            self.emit_expr(&arg.value)?;
+                        }
+                        self.buf.push(')');
+                        return Ok(());
+                    }
                     self.emit_expr(recv)?;
                     let go_method = self
                         .go_method_name(&method.name, self.public_methods.contains(&method.name));
@@ -8353,6 +8531,20 @@ impl GoEmitCtx {
                 ..
             } => {
                 if self.try_emit_time_method(receiver, &method.name, args)? {
+                    return Ok(());
+                }
+                // DQ28 free-function lowering (the non-desugared `MethodCall`
+                // shape): `box.map(f)` → `Box_Map(box, f)`, receiver-first.
+                if let Some(ty) = self.freefn_lowered_type(&method.name).map(str::to_string) {
+                    let is_public = self.public_methods.contains(&method.name);
+                    let fn_name = self.freefn_lowered_name(&ty, &method.name, is_public);
+                    let _ = write!(self.buf, "{fn_name}(");
+                    self.emit_expr(receiver)?;
+                    for arg in args {
+                        self.buf.push_str(", ");
+                        self.emit_expr(&arg.value)?;
+                    }
+                    self.buf.push(')');
                     return Ok(());
                 }
                 self.emit_expr(receiver)?;
@@ -15201,6 +15393,181 @@ mod tests {
         assert!(
             out.contains("func (self *Box[T]) get() T {"),
             "generic method receiver should carry `[T]`, got: {out}"
+        );
+    }
+
+    /// `impl Box { fn map[U](self, f: Fn(T) -> U) -> Box[U] { Box { value:
+    /// f(self.value) } } }`.
+    fn generic_box_map_impl() -> AIRNode {
+        let self_param = node(
+            120,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(121, "self")),
+                ty: None,
+                default: None,
+            },
+        );
+        // `f: Fn(T) -> U`
+        let f_ty = node(
+            122,
+            NodeKind::TypeFunction {
+                params: vec![named_type(123, "T")],
+                ret: Box::new(named_type(124, "U")),
+                effects: vec![],
+            },
+        );
+        let f_param = node(
+            125,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(126, "f")),
+                ty: Some(Box::new(f_ty)),
+                default: None,
+            },
+        );
+        // Body: `Box { value: f(self.value) }`
+        let call_f = node(
+            127,
+            NodeKind::Call {
+                callee: Box::new(id_node(128, "f")),
+                type_args: vec![],
+                args: vec![AirArg {
+                    label: None,
+                    value: node(
+                        129,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(130, "self")),
+                            field: ident("value"),
+                        },
+                    ),
+                }],
+            },
+        );
+        let construct = node(
+            131,
+            NodeKind::RecordConstruct {
+                path: type_path(&["Box"]),
+                fields: vec![bock_air::AirRecordField {
+                    name: ident("value"),
+                    value: Some(Box::new(call_f)),
+                }],
+                spread: None,
+            },
+        );
+        let body = block(132, vec![], Some(construct));
+        let ret_ty = node(
+            133,
+            NodeKind::TypeNamed {
+                path: type_path(&["Box"]),
+                args: vec![named_type(134, "U")],
+            },
+        );
+        let method = node(
+            135,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("map"),
+                generic_params: vec![generic_param(136, "U")],
+                params: vec![self_param, f_param],
+                return_type: Some(Box::new(ret_ty)),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        );
+        node(
+            137,
+            NodeKind::ImplBlock {
+                annotations: vec![],
+                generic_params: vec![],
+                trait_path: None,
+                trait_args: vec![],
+                target: Box::new(named_type(138, "Box")),
+                where_clause: vec![],
+                methods: vec![method],
+            },
+        )
+    }
+
+    #[test]
+    fn method_level_type_params_lower_to_free_function() {
+        // DQ28: Go forbids method type params, so `Box[T].map[U]` lowers to a
+        // free function `func Box_Map[T any, U any](self Box[T], f func(T) U)
+        // Box[U]` (the receiver becomes a leading `self` parameter; the
+        // receiver's `T` and the method's `U` combine on the free function).
+        let out = gen(&module(
+            vec![],
+            vec![generic_box_record(), generic_box_map_impl()],
+        ));
+        assert!(
+            out.contains("func Box_Map[T any, U any](self Box[T], f func(T) U) Box[U] {"),
+            "method-generic should free-function-lower with combined type params, got: {out}"
+        );
+        // The invalid `func (self *Box[T]) Map[U](..)` (Go syntax error) must NOT
+        // be emitted.
+        assert!(
+            !out.contains(") Map["),
+            "must not emit a Go method with type params, got: {out}"
+        );
+    }
+
+    #[test]
+    fn method_level_type_param_call_site_rewrites_to_free_function() {
+        // A call `b.map(f)` to the free-function-lowered `Box.map[U]` rewrites to
+        // `Box_Map(b, f)` (receiver-first), for both the `MethodCall` and the
+        // desugared `Call(FieldAccess(b, map), [b, f])` shapes.
+        let recv = id_node(200, "b");
+        let cb = node(
+            201,
+            NodeKind::Lambda {
+                params: vec![param_node(202, "x")],
+                body: Box::new(block(
+                    203,
+                    vec![],
+                    Some(node(
+                        204,
+                        NodeKind::BinaryOp {
+                            op: BinOp::Mul,
+                            left: Box::new(id_node(205, "x")),
+                            right: Box::new(int_lit(206, "2")),
+                        },
+                    )),
+                )),
+            },
+        );
+        let call = node(
+            207,
+            NodeKind::MethodCall {
+                receiver: Box::new(recv),
+                method: ident("map"),
+                type_args: vec![],
+                args: vec![AirArg {
+                    label: None,
+                    value: cb,
+                }],
+            },
+        );
+        let let_stmt = node(
+            208,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(209, "r")),
+                ty: None,
+                value: Box::new(call),
+            },
+        );
+        let out = gen(&module(
+            vec![],
+            vec![generic_box_record(), generic_box_map_impl(), let_stmt],
+        ));
+        assert!(
+            out.contains("Box_Map(b, "),
+            "call site should rewrite to the free-function call `Box_Map(b, ..)`, got: {out}"
+        );
+        assert!(
+            !out.contains("b.Map("),
+            "call site must not keep the Go method-call form, got: {out}"
         );
     }
 
