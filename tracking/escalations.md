@@ -342,3 +342,35 @@ decided in design-questions.md. core.effect = 5/11; R1 COMPLETE. (Building it su
 #157: the `effect`-keyword module-path parser rejection, and a nondeterministic interpreter module-registration order
 — both fixed ×5-clean; the residual interpreter flat-op-map limitation → Q-interp-effect-op-collision, low-pri.)
 **Status:** resolved.
+
+## [2026-06-05 07:34 UTC] Two method/trait codegen semantics decisions (surfaced by examples-greening)
+
+**Type:** strategic (language semantics)
+**Severity:** medium (each blocks one example on a subset of targets; NOT blocking the 84/100 progress)
+**Trigger:** the examples-greening push got runtime-working examples to 84/100; the last two stubborn blockers are not
+codegen bugs but genuine semantics questions that the implementation should not decide unilaterally (per CLAUDE.md
+"spec divergence is OPEN, not silent"). Both are filed as design-questions DQ27/DQ28.
+
+**Context — two decisions:**
+1. **DQ27 / Q-method-collision-inherent-trait.** A `class` with an inherent method AND a same-named trait method —
+   `examples/target-optimized/react-components` has `impl Button { fn render … }` plus `impl Component for Button {
+   fn render = self.render() }`. On overload-less targets (js, ts) both bind to one name, so the trait one overwrites
+   the inherent and `self.render()` recurses infinitely; **the reference interpreter also stack-overflows** (so it's a
+   language-semantics gap, not merely codegen). This wave got react-components passing on **python/rust/go** (rust native;
+   go via exported-name + removing the self-recursive forwarder; python via its class model), but **js/ts still loop**.
+2. **DQ28 / Q-go-method-generics.** Bock allows type params on a method (`Box[T].map[U]`); Go forbids type params on
+   methods. Closing type-zoo on go needs a decision: monomorphize, lower the method to a free function, or restrict the
+   surface. (Other targets handle it.)
+
+**Options (orchestrator's informal read):**
+- DQ27: (a) an inherent method auto-satisfies a same-signature trait requirement → the explicit delegating `impl` is
+  redundant / a checker error (simplest, and arguably the intended model); (b) name-mangle trait methods distinctly from
+  inherent on overload-less targets (codegen-heavy); (c) forbid same-name inherent+trait at check time. **Recommend (a)**
+  — it matches how rust/python/go already behave and makes the example well-formed (or flags it). The interpreter overflow
+  (Q-interp-method-collision) should be fixed regardless.
+- DQ28: **Recommend monomorphization at codegen** (Go) or free-function lowering; low urgency (one example, one target).
+
+**Recommendation:** non-blocking — keep both OPEN for a Design ruling; the rest of examples-hardening can proceed. I did
+NOT change spec or the examples. The js/ts react-components and type-zoo/go reds are parked on these.
+**Awaiting:** owner/Design ruling on DQ27 (method/trait resolution) and DQ28 (go method generics).
+**Status:** pending

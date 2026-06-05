@@ -383,3 +383,27 @@ module-level annotations. Evidence: the per-section changelogs + the
 20260514-0548 spec-revision artifact (confirmed applied to the live
 spec). Only DQ1 (non-core) remains open; DQ2–DQ5 were decided by Design
 2026-05-29 and reconciled in #100 (see "Decided by Design" above).
+
+---
+
+## DQ27 — Inherent method vs same-named trait method resolution (overload-less targets) — OPEN
+
+**Raised:** 2026-06-05 (examples-greening, Q-class-codegen / react-components).
+**Question:** When a `class` has an inherent method and a trait requires a method of the same name, how do they resolve —
+especially on js/ts/python where a type has ONE namespace per name? react-components writes `impl Button { fn render … }`
++ `impl Component for Button { fn render = self.render() }`; with both bound to one name the trait `render` overwrites the
+inherent and `self.render()` recurses infinitely (the reference interpreter also stack-overflows).
+**Options:** (a) an inherent method auto-satisfies a same-signature trait requirement — the explicit delegating impl is
+redundant or a checker error [orchestrator's recommendation; matches current rust/python/go behavior]; (b) name-mangle
+trait methods distinctly from inherent on overload-less targets; (c) forbid same-name inherent+trait at check time.
+**Status:** OPEN — escalated 2026-06-05 (escalations.md). Blocks react-components on js/ts only. Interpreter overflow tracked
+separately as Q-interp-method-collision. Governs spec §6.4 (classes) + the trait sections.
+
+## DQ28 — Type parameters on methods vs Go's prohibition — OPEN
+
+**Raised:** 2026-06-05 (examples-greening, type-zoo/go).
+**Question:** Bock allows a method to declare its own type params (`Box[T].map[U]`). Go forbids type params on methods. How
+should the Go backend lower this — monomorphize per use, lower the method to a free generic function, or restrict the
+surface? (js/ts/python/rust already handle it.)
+**Options:** (a) monomorphization at codegen [recommended]; (b) free-function lowering; (c) restrict the language surface.
+**Status:** OPEN — escalated 2026-06-05. Low urgency (one example, one target). Q-go-method-generics in queue.

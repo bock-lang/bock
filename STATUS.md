@@ -6,7 +6,7 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 42
+- Ready: 49
 - v1-blocking: 2
 - Blocked: 22
 - Deferred: 1

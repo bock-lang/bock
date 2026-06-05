@@ -12,7 +12,24 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-04 21:51 — main 5e4d6c3 (+ this PR), 0 open PRs, clean, CI green.** ★ RESIDUAL PER-BACKEND
+_**Last reconciled 2026-06-05 07:34 — main e2200f5 (+#250 +this PR), 0 open PRs after merge, clean, CI green.** ★ EXAMPLES-
+GREENING + CLASS-CODEGEN PUSH (#238–#252 + perf-gate #248) — a sustained parallel fan-out drove examples **63→84/100
+runtime-working** (js 18 · ts 13 · py 18 · rust 19 · go 16; **49→84 across the whole session**). Waves: (a) per-target
+build-error fan-out #238–#242 (go/rust/ts/py emitters + the **Q-conformance-target-race** harness fix) → 74; (b) loop-tail-
+return (#243 js/#244 py; ts was #240) + **Q-glob-import-enum-variant** (#245) + go tuple-in-Result (#246) + rust residual
+builds (#247) → 80; (c) **Q-class-codegen** (#249 js/ts construction · #250 py methods · #251 go casing · #252 rust Fn/move)
+→ 84 — **react-components, the last all-red example, now passes py/rust/go.** Plus **Q-perf-gate-ci** (#248 — informational
+perf-regression CI gate, operator-requested) and a CRLF-normalize Windows hotfix (#250). **0 net regressions across ~20 PRs.**
+INCIDENTS: 4 sub-agent background-and-wait stalls (recovered by orchestrator re-verify+commit; [[engineer-subagent-dispatch-discipline]]
+sharpened); #250 Windows CRLF; a suspected perf regression INVESTIGATED + cleared (CI-vs-CI conformance 119s→107s, flat —
+local swing was cold-cache; [[perf-regression-watch]] recorded). **★★ AWAITING OPERATOR/DESIGN — 2 questions (see
+escalations.md + design-questions.md DQ27/DQ28):** (1) **Q-method-collision-inherent-trait** — an inherent method + a
+same-named trait method (`impl Component for Button { fn render = self.render() }`) → infinite recursion on overload-less
+targets (js/ts) AND in the reference interpreter; blocks react-components js/ts. (2) **Q-go-method-generics** — Go forbids
+type params on methods (`Box[T].map[U]`); needs a monomorphization/free-fn decision; blocks type-zoo go. NEW FOUND→queue:
+Q-go-chained-combinator-typing, Q-nested-compose-jstsgo (compose `f>>g>>h` mis-lowers on js/ts/go), Q-interp-method-collision.
+Baseline ratcheted to 84. ↓ —
+PRIOR: Last reconciled 2026-06-04 21:51 — main 5e4d6c3. ★ RESIDUAL PER-BACKEND
 FAN-OUT LANDED (#233 go · #234 ts · #235 py · #236 rust) — **8 FOUND codegen bugs cleared** across the long-pole targets
 (go `**`/pow, `.map` element typing, value-position bind/plain-record/nested-Optional match; ts match-narrowing; py
 matcharm-lambda + plain-record; rust str-literal match). 4 file-disjoint sessions, combined-state verified (conformance
@@ -153,12 +170,45 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   rust 9→10, go 7→8 (chat-protocol js+go). Re-run `BOCK_EXAMPLES_UPDATE_BASELINE=1 tools/scripts/examples-exec-audit.sh` and
   commit the refreshed baseline (à la #221) to lock the gains as the regression floor; also drops the stale
   `guessing-game/rust` build entry (benign value-less tail-loop `/* unsupported */`, byte-identical on main).
-- **[Q-conformance-target-race] Conformance exec test races on shared CARGO_TARGET_DIR (rust fixtures)** — bug · ready ·
-  `compiler/crates/bock-test-harness/` · — · links #224 · note: FOUND 2026-06-04 (#224 verify). Under `cargo test
-  --workspace` the rust execution fixtures run concurrent `cargo run` against one CARGO_TARGET_DIR → occasional
-  cross-fixture stdout contamination (exec_map_literal / exec_list_first_last_concat got another fixture's output). Serial
-  (`--test-threads=1`) is clean. Harness isolation gap, not codegen — give each rust fixture its own target dir or serialize
-  the rust-exec group.
+- **[Q-conformance-target-race] Conformance exec test races on shared CARGO_TARGET_DIR (rust fixtures)** — bug · **DONE (#242)** ·
+  `compiler/crates/bock-test-harness/` · — · links #224, #242 · note: **DONE 2026-06-04 (#242) — per-process private temp
+  target dir (`OnceLock<TempDir>`) for the rust exec path, set on the process env + the `bock build` command; validated 3×
+  under default-parallel `cargo test`. Shared-within-process → incremental cache preserved (no cold-rebuild-per-fixture).**
+  ORIG: FOUND 2026-06-04 (#224 verify) — concurrent `cargo run` against one CARGO_TARGET_DIR cross-contaminated stdout.
+- **[Q-perf-gate-ci] Informational performance-regression CI gate** — chore · **DONE (#248)** · `.github/workflows/`, `tools/` ·
+  — · links #248 · note: **DONE 2026-06-05 (#248, operator-requested) — `perf-measure.sh` times build/clippy/conformance-exec,
+  `tools/perf-baseline.txt` records the floor, `perf-gate.yml` is informational (`continue-on-error`), ratchet-to-blocking
+  documented (mirrors examples-exec.yml). FOLLOW-UP: a criterion micro-benchmark corpus on hot compiler paths (needs a benches
+  crate = manifest change) for stable per-op numbers — deferred.**
+- **[Q-class-codegen] `class` construction + method dispatch across backends** — impl · **PARTIALLY DONE (#249–#252); js/ts run blocked by DQ27** ·
+  `compiler/crates/bock-codegen/` · blocked-by: Q-method-collision-inherent-trait (js/ts) · links #249, #250, #251, #252,
+  react-components · note: **DONE 2026-06-05 — js/ts class literals now `new T(positional)` (#249, js/ts-local `class_fields`
+  map, not the shared record set); py attaches class impl/trait methods + base-before-subclass ordering (#250); go exports
+  method names (no self-recursive forwarder) + `Fn()->Void`→`func()` (#251); rust capturing-`Fn` alias→`impl Fn` + move clone
+  (#252). react-components now passes py/rust/go.** REMAINING: js/ts run-FAIL on the inherent-vs-trait method collision →
+  Q-method-collision-inherent-trait (DQ27).
+- **[Q-method-collision-inherent-trait] Inherent + same-named trait method → infinite recursion (js/ts; interpreter too)** — design · **blocked (DQ27)** ·
+  `compiler/crates/bock-codegen/` (js/ts) + spec §6.4/traits · blocked-by: DQ27 · links #249, react-components, DQ27,
+  escalations 2026-06-05 · note: FOUND 2026-06-05 (#249). `impl Component for Button { fn render = self.render() }` + inherent
+  `render` collide on one name on overload-less targets → infinite recursion (reference interpreter also stack-overflows).
+  AWAITING Design ruling (recommend: inherent auto-satisfies a same-signature trait requirement). Blocks react-components js/ts.
+- **[Q-go-method-generics] Go forbids type params on methods (`Box[T].map[U]`)** — design · **blocked (DQ28)** ·
+  `compiler/crates/bock-codegen/src/go.rs` · blocked-by: DQ28 · links #220, #246, type-zoo, DQ28, escalations 2026-06-05 ·
+  note: FOUND 2026-06-03, confirmed 2026-06-05 the last type-zoo/go blocker. Needs monomorphization or free-fn lowering — a
+  design/architecture call. AWAITING Design.
+- **[Q-go-chained-combinator-typing] Go `.filter(..).map(..)` chained-combinator element typing** — bug · ready ·
+  `compiler/crates/bock-codegen/src/go.rs` · — · links #246, #251 · note: FOUND 2026-06-05. A `.map` over a `.filter(..)`
+  *call* receiver keeps `func(n interface{})` (doesn't recover `[]int64`). The second remaining type-zoo/go blocker
+  alongside method-generics. Combinator-receiver element inference.
+- **[Q-nested-compose-jstsgo] Nested compose `f >> g >> h` mis-lowers on js/ts/go** — bug · ready ·
+  `compiler/crates/bock-codegen/` (js/ts/go) + maybe bock-air/lower.rs · — · links #247 · note: FOUND 2026-06-05 (#247 rust
+  session). A nested `>>` compose: js emits the closure source as a string; ts produces no output; go uses `interface{}`
+  typing in the compose closures. py/rust handle it (py via `emit_callee` parens; rust via `emit_callee_rs`). Shared-desugar
+  (lower.rs) × per-backend interaction; mirror the py/rust callee-parenthesization per backend.
+- **[Q-interp-method-collision] Reference interpreter stack-overflows on inherent+trait same-name method** — bug · ready · LOW ·
+  `compiler/crates/bock-interp/` · — · links DQ27, react-components · note: FOUND 2026-06-05 (#249). Independent of the
+  codegen DQ27 question — the interpreter itself infinite-recurses on `self.render()` when inherent + trait `render` collide.
+  Fix the interpreter's method resolution regardless of the DQ27 ruling.
 - **[Q-chat-protocol-residual] chat-protocol still fails ts/python/rust at runtime (unrelated to exprpos)** — bug · ready ·
   `compiler/crates/bock-codegen/` (rust/py/ts) · — · links #224 · note: FOUND 2026-06-04 (#224). After the exprpos desugar
   chat-protocol runs on js+go but still fails the other three for distinct reasons: **rust** `@concurrent`→tokio wiring + an

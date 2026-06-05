@@ -2193,3 +2193,34 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
   STATE: main 5e4d6c3, 0 open PRs (after this PR), clean, CI green, all worktrees/branches/caches cleaned. **No remaining
     examples blocker is a shared-architecture gap** — remainder is per-backend residue + LOW Q-propagate-exprpos-shared +
     Q-conformance-target-race (test-harness isolation). MS-examples-hardening: 63/100, all 5 targets climbing.
+
+[2026-06-05 07:34 UTC] ✦✦ SESSION DIGEST — examples-greening + class-codegen: 63→84/100 (49→84 across the session); wind-down
+  Input: operator "keep pushing, parallel as much as makes sense, work autonomously barring qualified blockers." Then full
+    speed endorsed (CPU crush fine; watch for perf regressions). Then "once those land we clean up and wind down."
+  SHIPPED (~20 PRs #238–#252 + #248, all gate-clean + CI-green, 0 net regressions):
+    • #238–#242 per-target build-error fan-out (go/rust/ts/py emitters) + **Q-conformance-target-race** harness fix → 74/100.
+    • #243–#247 loop-tail-return (js/py; ts #240), **Q-glob-import-enum-variant** (shared collector), go tuple-in-Result,
+      rust residual builds (todo-list/chat-protocol/data-pipeline) → 80/100.
+    • #249–#252 **Q-class-codegen** (js/ts `new T(..)` construction · py method attachment+ordering+$$ · go casing/Fn-Void ·
+      rust capturing-Fn/move) → 84/100. **react-components — the last all-red example — now passes py/rust/go.**
+    • #248 **Q-perf-gate-ci** (informational perf-regression gate, operator-requested).
+  METHOD: repeated 4–5-way FILE-DISJOINT per-backend fan-outs (own ONE emitter; generator.rs/AIR off-limits → report OPEN),
+    each verified on a COMBINED integration branch (conformance REQUIRE=all 0 failed) before push, per-PR CI-gated on CLEAN.
+    A read-only analysis agent classified react-components as a class-codegen cluster (not a feature gap) → enabled the wave.
+  INCIDENTS / LESSONS:
+    • 4 sub-agent BACKGROUND-AND-WAIT stalls (js, glob-import, py, go sessions set up a "Monitor/waiter" on their cargo test
+      and returned UNCOMMITTED) — even a verbatim "no background job" instruction didn't fully prevent it. Caught EVERY time
+      by inspecting worktree git-state on return (never trusting the report); recovered by re-running the gate + committing
+      directly. Memory [[engineer-subagent-dispatch-discipline]] sharpened.
+    • PERF SCARE: operator's CPU crushed + suspected regression. Investigated: load was concurrency (5× full `cargo test
+      --workspace`, each running the cross-toolchain conformance build-fest + the 20×5 audit), NOT a code regression — CI-vs-CI
+      conformance was FLAT (119s #224 → 107s #247). Built the perf gate (#248) the operator asked for; recorded [[perf-regression-watch]].
+    • #235 (earlier) + #250 Windows hotfixes: a shared fixed temp path race, then CRLF-vs-LF in a python-output assertion —
+      both Windows-only, both forward-fixed (unique temp path; `\r\n`→`\n` normalize in run_py).
+  AWAITING OPERATOR/DESIGN (escalations.md 2026-06-05 + DQ27/DQ28): Q-method-collision-inherent-trait (js/ts react-components +
+    interpreter overflow) and Q-go-method-generics (type-zoo/go). Both non-blocking; rest of examples-hardening can proceed.
+  STATE AT WIND-DOWN: main = #252 (+#250 +this tracking PR), 0 open PRs after merge, clean, CI green, all worktrees/branches/
+    caches cleaned. Baseline ratcheted to 84. MS-examples-hardening: **84/100 runtime-working** (js 18·ts 13·py 18·rust 19·go
+    16). Remaining reds: react-components js/ts (DQ27), type-zoo go (DQ28) + Q-go-chained-combinator, Q-nested-compose-jstsgo,
+    a few per-backend residuals + LOW Q-propagate-exprpos-shared. NEXT (operator's call): the DQ27/DQ28 rulings, then the
+    residual per-backend bugs.
