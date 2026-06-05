@@ -1,0 +1,21 @@
+# perf-baseline — wall-times (milliseconds) of the heavy build/test phases.
+# Generated on THIS machine; absolute numbers are machine-specific. The
+# strict gate compares RATIOS (current / baseline) against a tolerance, not
+# absolute ms, so a faster or slower machine re-baselines without churn.
+# CI re-baselines on its own runners; do not treat these ms as portable.
+#
+# Format: <phase>  <ms>   # note
+# Phases:
+#   build-clean  cargo build -p bock --bin bock after cargo clean -p bock
+#   build-incr   cargo build -p bock --bin bock no-op rebuild
+#   clippy       cargo clippy --workspace --all-targets
+#   conf-exec    cargo test -p bock-test-harness --test execution (DOMINANT;
+#                libtest 'finished in Ns' = pure exec, compile excluded)
+#
+# Regenerate: BOCK_PERF_UPDATE_BASELINE=1 bash tools/scripts/perf-measure.sh
+# Strict gate: BOCK_PERF_STRICT=1 [BOCK_PERF_TOLERANCE=1.5] bash .../perf-measure.sh
+#
+build-clean       8257   # clean rebuild of bock bin
+build-incr         177   # no-op incremental (already up to date)
+clippy           25010   # workspace, all targets
+conf-exec       474870   # libtest finished-in (wall 541161ms incl. compile)

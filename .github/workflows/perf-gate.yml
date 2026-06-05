@@ -1,0 +1,77 @@
+name: perf-gate
+
+# INFORMATIONAL gate. Measures wall-times of the heavy build/test phases —
+# clean + incremental `cargo build -p bock`, `cargo clippy --workspace
+# --all-targets`, and the DOMINANT conformance-execution test
+# (`cargo test -p bock-test-harness --test execution`) — and prints a table to
+# the job log and the run summary. It is intentionally NON-BLOCKING: the job is
+# marked `continue-on-error: true` and the measure script exits 0 by default, so
+# it never reds a PR. CI runner wall-times are noisy and machine-specific, so the
+# script compares RATIOS (current / baseline), never absolute ms.
+#
+# RATCHET TO BLOCKING (later): once these phase times are stable enough on the CI
+# runners to trust, flip this gate to required by (a) removing
+# `continue-on-error`, (b) refreshing tools/perf-baseline.txt from a green run on
+# the CI runner (the in-repo baseline is recorded on a dev machine; CI hardware
+# differs, so re-baseline there first), and (c) setting BOCK_PERF_STRICT=1 (and
+# optionally BOCK_PERF_TOLERANCE, default 1.5) on the measure step. In strict mode
+# the script exits non-zero when any phase exceeds baseline * tolerance — so the
+# ratchet can only tighten, never silently loosen. The dominant signal to gate on
+# is conf-exec; build/clippy times are noisier (cache-state dependent).
+#
+# TODO (out of scope here — needs a manifest change): a criterion micro-benchmark
+# corpus on the hot compiler paths (lexer / parser / typecheck / codegen) would
+# give stable per-operation numbers immune to CI scheduling noise, unlike these
+# whole-phase wall-times. That requires a dedicated `benches` crate added to the
+# cargo workspace and is left to a separate PR.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'spec/**'
+      - 'website/**'
+      - '**.md'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'spec/**'
+      - 'website/**'
+      - '**.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  perf-gate:
+    name: phase wall-time measure (informational)
+    runs-on: ubuntu-latest
+    # NON-BLOCKING: surfaces the timings without failing the PR. Remove this line
+    # (and set BOCK_PERF_STRICT=1 on the measure step) to ratchet to required.
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust toolchain (build bock + run conformance tests)
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Run perf-measure (informational)
+        # The script exits 0 by default; continue-on-error above is belt-and-braces
+        # so an unexpected non-zero (e.g. setup error) still doesn't red the PR
+        # while this gate is informational. It writes a table to the run summary
+        # via $GITHUB_STEP_SUMMARY.
+        run: bash ./tools/scripts/perf-measure.sh
