@@ -1237,6 +1237,45 @@ pub fn collect_record_names(modules: &[(&AIRModule, &Path)]) -> std::collections
     names
 }
 
+/// Collect every **class** declared across `modules`, mapping each class name to
+/// its **field names in declaration order**.
+///
+/// A Bock `class` and a `record` both lower to a JS/TS `class`, but with
+/// *different constructor shapes*: a `record T { a, b }` emits a destructured
+/// `constructor({ a, b })` (so a `T { a: x, b: y }` literal lowers to `new T({ a:
+/// x, b: y })`), whereas a `class T { a, b }` emits a **positional**
+/// `constructor(a, b)` (so a `T { a: x, b: y }` literal must lower to `new T(x,
+/// y)` — arguments in *field-declaration order*, regardless of the literal's
+/// field spelling order).
+///
+/// The js/ts `RecordConstruct` emitters consult this map (kept **separate** from
+/// [`collect_record_names`]) to pick the class's positional shape and to order
+/// the supplied field values by the declared field order. It is js/ts-only: the
+/// shared `record_names` set must stay records-only because py/go/rust derive
+/// other behavior from it, and a Bock class's positional construction is a
+/// js/ts emission concern. Without it a class literal falls through to the
+/// record/object path and emits a bare object literal whose prototype methods
+/// are unreachable (`btn.render is not a function`). Mirrors
+/// [`collect_record_names`] / [`collect_enum_variants`].
+#[must_use]
+pub fn collect_class_fields(
+    modules: &[(&AIRModule, &Path)],
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut classes = std::collections::HashMap::new();
+    for (module, _) in modules {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            continue;
+        };
+        for item in items {
+            if let NodeKind::ClassDecl { name, fields, .. } = &item.kind {
+                let field_order = fields.iter().map(|f| f.name.name.clone()).collect();
+                classes.insert(name.name.clone(), field_order);
+            }
+        }
+    }
+    classes
+}
+
 /// Pre-scan every reached module and collect the **declared names of all
 /// module-scope `const`s**.
 ///

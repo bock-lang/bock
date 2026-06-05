@@ -116,6 +116,8 @@ impl CodeGenerator for JsGenerator {
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
         ctx.trait_decls =
             crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
+        ctx.class_fields =
+            crate::generator::collect_class_fields(&[(module, std::path::Path::new(""))]);
         ctx.const_names =
             crate::generator::collect_const_names(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
@@ -200,6 +202,7 @@ impl CodeGenerator for JsGenerator {
         let enum_variants = crate::generator::collect_enum_variants(modules);
         let trait_decls = crate::generator::collect_trait_decls(modules);
         let record_names = crate::generator::collect_record_names(modules);
+        let class_fields = crate::generator::collect_class_fields(modules);
         let const_names = crate::generator::collect_const_names(modules);
         let public_symbols = crate::generator::collect_public_symbols_for_esm(modules);
         // Program-wide field/method name-collision set (camelCased). Built across
@@ -233,6 +236,9 @@ impl CodeGenerator for JsGenerator {
             // construction (`use`d from another module) lowers to `new Name(...)`
             // rather than a bare object literal that drops its prototype methods.
             ctx.record_names = record_names.clone();
+            // Class field-orders need the whole reachable set too: a cross-module
+            // `class` construction must lower to its positional `new Name(...)`.
+            ctx.class_fields = class_fields.clone();
             ctx.const_names = const_names.clone();
             // Program-wide collision set so renamed methods and their
             // cross-module call sites agree (see above).
@@ -338,6 +344,7 @@ impl CodeGenerator for JsGenerator {
                 let enum_variants = crate::generator::collect_enum_variants(ctx_modules);
                 let trait_decls = crate::generator::collect_trait_decls(ctx_modules);
                 let record_names = crate::generator::collect_record_names(ctx_modules);
+                let class_fields = crate::generator::collect_class_fields(ctx_modules);
                 let const_names = crate::generator::collect_const_names(ctx_modules);
                 let mut field_method_collisions = HashSet::new();
                 for (module, _) in ctx_modules {
@@ -351,6 +358,7 @@ impl CodeGenerator for JsGenerator {
                 ctx.enum_variants = enum_variants;
                 ctx.trait_decls = trait_decls;
                 ctx.record_names = record_names;
+                ctx.class_fields = class_fields;
                 ctx.const_names = const_names;
                 ctx.field_method_collisions = field_method_collisions;
                 ctx.seed_effect_registries(ctx_modules);
@@ -437,6 +445,15 @@ struct EmitCtx {
     composite_effects: HashMap<String, Vec<String>>,
     /// Names of records declared in this module (emitted as classes).
     record_names: HashSet<String>,
+    /// Names of `class` declarations mapped to their **field names in
+    /// declaration order**, pre-scanned across the reachable program. A Bock
+    /// `class` emits a *positional* `constructor(a, b)` (unlike a record's
+    /// destructured `constructor({ a, b })`), so a `class` literal `T { a: x, b:
+    /// y }` must lower to `new T(x, y)` with arguments ordered by the declared
+    /// field order — not the bare object literal the record path emits (whose
+    /// prototype methods would be unreachable). See
+    /// [`crate::generator::collect_class_fields`].
+    class_fields: HashMap<String, Vec<String>>,
     /// Declared names of module-scope `const`s, pre-scanned across the reachable
     /// program. A const identifier is emitted verbatim at both its declaration
     /// and every use so the two agree (the `to_camel_case` transform would
@@ -600,6 +617,7 @@ impl EmitCtx {
             fn_effects: HashMap::new(),
             composite_effects: HashMap::new(),
             record_names: HashSet::new(),
+            class_fields: HashMap::new(),
             const_names: HashSet::new(),
             cur_line: 1,
             cur_col: 1,
@@ -2254,6 +2272,15 @@ impl EmitCtx {
                 methods,
                 ..
             } => {
+                // Register the class's positional field order so a `class`
+                // literal lowers to `new Name(...)` (see `class_fields`). A
+                // pre-pass already seeds this across the reachable set; re-record
+                // here so the single-module emit path is correct even when the
+                // pre-pass is not run.
+                self.class_fields.insert(
+                    name.name.clone(),
+                    fields.iter().map(|f| f.name.name.clone()).collect(),
+                );
                 self.writeln(&format!("class {} {{", name.name));
                 self.indent += 1;
                 // Constructor
@@ -3404,6 +3431,41 @@ impl EmitCtx {
                     return Ok(());
                 }
                 let type_name = path.segments.last().map(|s| s.name.as_str()).unwrap_or("");
+                // A Bock `class` lowers to a *positional* `constructor(a, b)`
+                // (unlike a record's destructured `constructor({ a, b })`), so a
+                // class literal must construct as `new T(a_value, b_value)` with
+                // values ordered by the *declared* field order — not the literal's
+                // field order, and not a bare object literal (whose prototype
+                // methods would be unreachable). Falls through to the
+                // record/object path only when this is not a known class.
+                if let Some(field_order) = self.class_fields.get(type_name).cloned() {
+                    let _ = write!(self.buf, "new {type_name}(");
+                    for (i, fname) in field_order.iter().enumerate() {
+                        if i > 0 {
+                            self.buf.push_str(", ");
+                        }
+                        let supplied = fields.iter().find(|f| &f.name.name == fname);
+                        match supplied.and_then(|f| f.value.as_ref()) {
+                            Some(val) => self.emit_expr(val)?,
+                            // A field present in the literal as shorthand
+                            // (`T { label }` ≡ `T { label: label }`) — the RHS is
+                            // a value reference; otherwise (field omitted, only
+                            // possible with a `..base` spread) read it off `base`.
+                            None if supplied.is_some() => {
+                                self.buf.push_str(&js_value_ident(fname));
+                            }
+                            None => match spread {
+                                Some(sp) => {
+                                    self.emit_expr(sp)?;
+                                    let _ = write!(self.buf, ".{}", js_value_ident(fname));
+                                }
+                                None => self.buf.push_str("undefined"),
+                            },
+                        }
+                    }
+                    self.buf.push(')');
+                    return Ok(());
+                }
                 let is_class = self.record_names.contains(type_name);
                 if is_class {
                     let _ = write!(self.buf, "new {type_name}(");
@@ -5877,6 +5939,98 @@ mod tests {
         assert!(out.contains("constructor(name)"));
         assert!(out.contains("this.name = name;"));
         assert!(out.contains("greet()"));
+    }
+
+    /// A `class T { a, b }` literal must construct via the class's **positional**
+    /// constructor — `new T(a_value, b_value)` in *field-declaration order* — not
+    /// the bare object literal the record path would emit (whose prototype
+    /// methods would be unreachable). Q-class-codegen.
+    #[test]
+    fn class_literal_constructs_positionally() {
+        fn class_field(name: &str) -> bock_ast::RecordDeclField {
+            bock_ast::RecordDeclField {
+                id: 0,
+                span: span(),
+                name: ident(name),
+                ty: bock_ast::TypeExpr::Named {
+                    id: 0,
+                    span: span(),
+                    path: type_path(&["String"]),
+                    args: vec![],
+                },
+                default: None,
+            }
+        }
+        let cls = node(
+            1,
+            NodeKind::ClassDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Button"),
+                generic_params: vec![],
+                base: None,
+                traits: vec![],
+                fields: vec![class_field("label"), class_field("on_click")],
+                methods: vec![],
+            },
+        );
+        // Construct with the fields supplied OUT of declaration order
+        // (`on_click` before `label`) — the emitter must still pass them in
+        // declaration order positionally.
+        let construct = node(
+            10,
+            NodeKind::RecordConstruct {
+                path: type_path(&["Button"]),
+                fields: vec![
+                    AirRecordField {
+                        name: ident("on_click"),
+                        value: Some(Box::new(str_lit(11, "click"))),
+                    },
+                    AirRecordField {
+                        name: ident("label"),
+                        value: Some(Box::new(str_lit(12, "Submit"))),
+                    },
+                ],
+                spread: None,
+            },
+        );
+        let main_fn = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    21,
+                    vec![node(
+                        22,
+                        NodeKind::LetBinding {
+                            is_mut: false,
+                            pattern: Box::new(bind_pat(23, "b")),
+                            ty: None,
+                            value: Box::new(construct),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let out = gen(&module(vec![], vec![cls, main_fn]));
+        // Positional construction in declaration order — NOT a bare object literal.
+        assert!(
+            out.contains(r#"new Button("Submit", "click")"#),
+            "expected positional `new Button(...)` in declaration order, got:\n{out}"
+        );
+        assert!(
+            !out.contains("{ label:"),
+            "class literal must not emit a bare object literal:\n{out}"
+        );
     }
 
     #[test]

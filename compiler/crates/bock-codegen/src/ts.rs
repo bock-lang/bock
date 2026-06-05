@@ -185,6 +185,8 @@ impl CodeGenerator for TsGenerator {
             crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
         ctx.exported_types =
             crate::generator::collect_exported_type_names(&[(module, std::path::Path::new(""))]);
+        ctx.class_fields =
+            crate::generator::collect_class_fields(&[(module, std::path::Path::new(""))]);
         ctx.const_names =
             crate::generator::collect_const_names(&[(module, std::path::Path::new(""))]);
         ctx.emit_node(module)?;
@@ -257,6 +259,7 @@ impl CodeGenerator for TsGenerator {
         let trait_decls = crate::generator::collect_trait_decls(modules);
         let exported_types = crate::generator::collect_exported_type_names(modules);
         let record_names = crate::generator::collect_record_names(modules);
+        let class_fields = crate::generator::collect_class_fields(modules);
         let const_names = crate::generator::collect_const_names(modules);
         let public_symbols = crate::generator::collect_public_symbols_for_esm(modules);
         // Program-wide field/method name-collision set (camelCased). Built across
@@ -292,6 +295,9 @@ impl CodeGenerator for TsGenerator {
             // Record names need the whole reachable set so a cross-module record
             // construction lowers to `new Name(...)` (see the JS backend note).
             ctx.record_names = record_names.clone();
+            // Class field-orders likewise: a cross-module `class` construction
+            // must lower to its positional `new Name(...)`.
+            ctx.class_fields = class_fields.clone();
             ctx.const_names = const_names.clone();
             ctx.field_method_collisions = field_method_collisions.clone();
             ctx.seed_effect_registries(modules);
@@ -410,6 +416,7 @@ impl CodeGenerator for TsGenerator {
                 ctx.trait_decls = crate::generator::collect_trait_decls(ctx_modules);
                 ctx.exported_types = crate::generator::collect_exported_type_names(ctx_modules);
                 ctx.record_names = crate::generator::collect_record_names(ctx_modules);
+                ctx.class_fields = crate::generator::collect_class_fields(ctx_modules);
                 ctx.const_names = crate::generator::collect_const_names(ctx_modules);
                 let mut field_method_collisions = HashSet::new();
                 for (module, _) in ctx_modules {
@@ -518,6 +525,15 @@ struct TsEmitCtx {
     composite_effects: HashMap<String, Vec<String>>,
     /// Names of records declared in this module (emitted as classes).
     record_names: HashSet<String>,
+    /// Names of `class` declarations mapped to their **field names in
+    /// declaration order**, pre-scanned across the reachable program. A Bock
+    /// `class` emits a *positional* `constructor(a, b)` (unlike a record's
+    /// destructured `constructor({ a, b })`), so a `class` literal `T { a: x, b:
+    /// y }` must lower to `new T(x, y)` with arguments ordered by the declared
+    /// field order — not the bare object literal the record path emits (which
+    /// `tsc` rejects: the inherent/trait methods are not on an object-literal
+    /// type). See [`crate::generator::collect_class_fields`].
+    class_fields: HashMap<String, Vec<String>>,
     /// Declared names of module-scope `const`s, pre-scanned across the reachable
     /// program; emitted verbatim at both declaration and use so the two agree
     /// (the `to_camel_case` transform would mangle a SCREAMING_SNAKE use site).
@@ -722,6 +738,7 @@ impl TsEmitCtx {
             fn_effects: HashMap::new(),
             composite_effects: HashMap::new(),
             record_names: HashSet::new(),
+            class_fields: HashMap::new(),
             const_names: HashSet::new(),
             effect_names: HashSet::new(),
             cur_line: 1,
@@ -2668,6 +2685,15 @@ impl TsEmitCtx {
                 methods,
                 ..
             } => {
+                // Register the class's positional field order so a `class`
+                // literal lowers to `new Name(...)` (see `class_fields`). A
+                // pre-pass already seeds this across the reachable set; re-record
+                // here so the single-module emit path is correct even when the
+                // pre-pass is not run.
+                self.class_fields.insert(
+                    name.name.clone(),
+                    fields.iter().map(|f| f.name.name.clone()).collect(),
+                );
                 let export = if matches!(visibility, Visibility::Public) {
                     "export "
                 } else {
@@ -4306,6 +4332,42 @@ impl TsEmitCtx {
                     return Ok(());
                 }
                 let type_name = path.segments.last().map(|s| s.name.as_str()).unwrap_or("");
+                // A Bock `class` lowers to a *positional* `constructor(a, b)`
+                // (unlike a record's destructured `constructor({ a, b })`), so a
+                // class literal must construct as `new T(a_value, b_value)` with
+                // values ordered by the *declared* field order — not the literal's
+                // field order, and not a bare object literal (whose inherent/trait
+                // methods are not on the object-literal type, so `tsc` rejects the
+                // method call). Falls through to the record/object path only when
+                // this is not a known class.
+                if let Some(field_order) = self.class_fields.get(type_name).cloned() {
+                    let _ = write!(self.buf, "new {type_name}(");
+                    for (i, fname) in field_order.iter().enumerate() {
+                        if i > 0 {
+                            self.buf.push_str(", ");
+                        }
+                        let supplied = fields.iter().find(|f| &f.name.name == fname);
+                        match supplied.and_then(|f| f.value.as_ref()) {
+                            Some(val) => self.emit_expr(val)?,
+                            // A field present in the literal as shorthand
+                            // (`T { label }` ≡ `T { label: label }`) — the RHS is
+                            // a value reference; otherwise (field omitted, only
+                            // possible with a `..base` spread) read it off `base`.
+                            None if supplied.is_some() => {
+                                self.buf.push_str(&ts_value_ident(fname));
+                            }
+                            None => match spread {
+                                Some(sp) => {
+                                    self.emit_expr(sp)?;
+                                    let _ = write!(self.buf, ".{}", ts_value_ident(fname));
+                                }
+                                None => self.buf.push_str("undefined"),
+                            },
+                        }
+                    }
+                    self.buf.push(')');
+                    return Ok(());
+                }
                 let is_class = self.record_names.contains(type_name);
                 if is_class {
                     let _ = write!(self.buf, "new {type_name}(");
@@ -6987,6 +7049,85 @@ mod tests {
         assert!(
             out.contains("constructor(x: number, y: number)"),
             "got: {out}"
+        );
+    }
+
+    /// A `class T { a, b }` literal must construct via the class's **positional**
+    /// constructor — `new T(a_value, b_value)` in *field-declaration order* — not
+    /// the bare object literal the record path emits (which `tsc` rejects with
+    /// `TS2339: Property '<method>' does not exist`). Q-class-codegen.
+    #[test]
+    fn class_literal_constructs_positionally() {
+        let class = node(
+            1,
+            NodeKind::ClassDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Button"),
+                generic_params: vec![],
+                base: None,
+                traits: vec![],
+                fields: vec![
+                    make_record_field("label", "String"),
+                    make_record_field("on_click", "String"),
+                ],
+                methods: vec![],
+            },
+        );
+        // Supply fields OUT of declaration order; the emitter must reorder to
+        // declaration order for the positional constructor.
+        let construct = node(
+            10,
+            NodeKind::RecordConstruct {
+                path: type_path(&["Button"]),
+                fields: vec![
+                    AirRecordField {
+                        name: ident("on_click"),
+                        value: Some(Box::new(str_lit(11, "click"))),
+                    },
+                    AirRecordField {
+                        name: ident("label"),
+                        value: Some(Box::new(str_lit(12, "Submit"))),
+                    },
+                ],
+                spread: None,
+            },
+        );
+        let main_fn = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    21,
+                    vec![node(
+                        22,
+                        NodeKind::LetBinding {
+                            is_mut: false,
+                            pattern: Box::new(bind_pat(23, "b")),
+                            ty: None,
+                            value: Box::new(construct),
+                        },
+                    )],
+                    None,
+                )),
+            },
+        );
+        let out = gen(&module(vec![], vec![class, main_fn]));
+        assert!(
+            out.contains(r#"new Button("Submit", "click")"#),
+            "expected positional `new Button(...)` in declaration order, got:\n{out}"
+        );
+        assert!(
+            !out.contains("{ label:"),
+            "class literal must not emit a bare object literal:\n{out}"
         );
     }
 

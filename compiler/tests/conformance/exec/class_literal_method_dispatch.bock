@@ -1,0 +1,66 @@
+// TEST: exec_class_literal_method_dispatch
+// EXPECT: output "label=Submit;render=<button>Submit</button>;clicks=1"
+// EXPECT: targets js, ts, rust, go
+//
+// Q-class-codegen regression fixture: a `class` (not a `record`) constructed
+// from a class literal and then **method-called**.
+//
+// A Bock `class T { a, b }` emits a *positional* constructor `new T(a, b)` on
+// js/ts (a `record` emits a *destructured* `constructor({ a, b })`). Before the
+// fix, the js/ts `RecordConstruct` emitter gated `new T(...)` solely on the
+// shared `record_names` set, which `collect_record_names` populated from
+// `RecordDecl` only — never `ClassDecl`. A `class` literal therefore fell
+// through to a **bare object literal** (`{ label, count }`) with no prototype,
+// so the class's inherent methods were unreachable: js failed at runtime with
+// `btn.render is not a function`, and `tsc` rejected the method call with
+// `TS2339: Property 'render' does not exist`. The fix adds a js/ts-only
+// `class_fields` map (class name → field order, via
+// `collect_class_fields`) so a class literal lowers to its positional
+// `new T(value_in_declaration_order, ...)` and the prototype methods dispatch.
+//
+// The literal here supplies fields **out of declaration order** (`count` before
+// `label`) to confirm the emitter reorders the supplied values into the
+// constructor's positional (declaration) order rather than the literal's order.
+//
+// `class_fields` is kept SEPARATE from the shared `record_names` set so the
+// go/rust backends (which derive other behavior from `record_names`) are
+// unaffected; on those targets a class already constructed correctly, and this
+// fixture pins that they keep working.
+//
+// PYTHON is intentionally EXCLUDED from the `targets` list above: it surfaces a
+// SEPARATE, pre-existing Python codegen defect that is orthogonal to this
+// js/ts class-literal fix and lives in a non-owned file (`py.rs`). The Python
+// backend emits `class Counter` with its `__init__` but drops the `impl
+// Counter { fn render, fn bumped }` methods entirely — they are neither nested
+// in the class nor attached afterward — so `c.render()` raises `AttributeError:
+// 'Counter' object has no attribute 'render'`. (Python construction itself is
+// fine: it uses keyword args `Counter(count=0, label="Submit")`, so it never had
+// the positional-ordering bug js/ts had.) No existing exec fixture pairs a
+// `class` (not `record`) with `impl` methods on Python, which is why this gap
+// was uncaught. Tracked as a FOUND finding for the Python-codegen owner; add
+// `python` back to `targets` once `impl`-on-`class` method emission lands there.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+class Counter {
+  label: String
+  count: Int
+}
+
+impl Counter {
+  fn render(self) -> String {
+    return "<button>${self.label}</button>"
+  }
+
+  fn bumped(self) -> Int {
+    return self.count + 1
+  }
+}
+
+fn main() -> Void {
+  // Fields supplied out of declaration order on purpose (count, then label).
+  let c = Counter { count: 0, label: "Submit" }
+  println("label=${c.label};render=${c.render()};clicks=${c.bumped()}")
+}
