@@ -220,14 +220,16 @@ impl CodeGenerator for TsGenerator {
     /// Optional/Result runtime *types* and concurrency/range runtime *helpers*
     /// are emitted once into a shared `_bock_runtime.ts`, imported per file. The
     /// minimal `package.json` `{"type":"module"}` run affordance — which makes
-    /// the `tsc`-emitted `.js` tree run under `node` — is emitted by the
-    /// **scaffolder** in project mode (S6a / DV18), not by codegen, so
-    /// `--source-only` output is bare source.
+    /// the `.ts` source tree run under `node --experimental-strip-types` — is
+    /// emitted by the **scaffolder** in project mode (S6a / DV18), not by codegen,
+    /// so `--source-only` output is bare source.
     ///
     /// Output-path mapping is keyed on each module's *declared* path
-    /// (`module core.option` ⇒ `core/option.ts`, imported `"./core/option.js"` —
-    /// ESM specifiers reference the *emitted* `.js`, which `tsc`'s
-    /// `.js`→`.ts` resolution follows). The entry module is always `main.ts`.
+    /// (`module core.option` ⇒ `core/option.ts`, imported `"./core/option.ts"` —
+    /// ESM specifiers reference the *emitted* `.ts` source directly so node
+    /// strip-types resolves them verbatim; `tsc` accepts the `.ts` extension via
+    /// `rewriteRelativeImportExtensions`, which also rewrites it to `.js` on
+    /// emit). The entry module is always `main.ts`.
     fn generate_project(
         &self,
         modules: &[(&AIRModule, &std::path::Path)],
@@ -381,9 +383,11 @@ impl CodeGenerator for TsGenerator {
         // Run-affordance emission moved to the project-mode scaffolder (S6a /
         // DV18): codegen emits only the per-module `.ts` *source* tree in all
         // modes; the `package.json` `{"type":"module"}` run affordance — which
-        // makes the `tsc`-emitted `.js` tree run as ES modules under `node
-        // main.js` — is emitted by `JsScaffolder` (shared js/ts) in project mode
-        // only (never under `--source-only`). See `scaffold.rs`.
+        // makes the `.ts` source tree run as ES modules under `node
+        // --experimental-strip-types main.ts` — is emitted by `JsScaffolder`
+        // (shared js/ts) in project mode only (never under `--source-only`). The
+        // TS-only `tsconfig.json` (with `rewriteRelativeImportExtensions`) is
+        // emitted by the TS scaffolder. See `scaffold.rs`.
 
         Ok(GeneratedCode { files })
     }
@@ -403,10 +407,12 @@ impl CodeGenerator for TsGenerator {
             modules,
             framework,
             &self.target().conventions.file_extension,
-            // TS/ESM specifiers reference the emitted `.js`, which `tsc`'s
-            // `.js`→`.ts` resolution follows (and a strict `tsc --noEmit` rejects
-            // a `.ts` specifier without `allowImportingTsExtensions`).
-            "js",
+            // TS/ESM specifiers reference the emitted `.ts` source directly so the
+            // tree runs verbatim under `node --experimental-strip-types` (which
+            // does not rewrite `.js`→`.ts`); `tsc` accepts the `.ts` specifier via
+            // `rewriteRelativeImportExtensions` (emitted into the scaffolded
+            // tsconfig), which also rewrites it to `.js` on emit.
+            "ts",
             |module, source_path, is_entry| self.module_output_path(module, source_path, is_entry),
             |ctx_modules| {
                 let mut ctx = TsEmitCtx::new();
@@ -870,11 +876,22 @@ impl TsEmitCtx {
     /// concurrency/range helpers via a value `import`), the explicit cross-module
     /// `use` imports, and the implicit prelude imports. Grouped one statement per
     /// source module, with the relative specifier computed from this file's
-    /// declared module-path. ESM specifiers reference the *emitted* `.js` (which
-    /// `tsc` resolves back to the `.ts`).
+    /// declared module-path. ESM specifiers reference the *emitted* `.ts` source
+    /// directly (resolved verbatim by node strip-types; accepted by `tsc` via
+    /// `rewriteRelativeImportExtensions`, which rewrites it to `.js` on emit).
     fn emit_esm_imports(&mut self, imports: &[AIRNode]) -> Result<(), CodegenError> {
-        // ESM specifiers reference the emitted `.js`, not the `.ts` source.
-        let ext = "js";
+        // ESM specifiers reference the emitted `.ts` source directly (not a `.js`
+        // that is never written). `node --experimental-strip-types` resolves
+        // specifiers verbatim against files on disk — it does not rewrite `.js` →
+        // `.ts` — so a `.js` specifier `ERR_MODULE_NOT_FOUND`s on any *value*
+        // import (type-only imports are erased by the strip pass, so they happened
+        // to work, but value imports of runtime helpers / cross-module functions
+        // did not). A `.ts` specifier runs verbatim under node *and* type-checks
+        // under `tsc` when `rewriteRelativeImportExtensions` is set (emitted into
+        // the scaffolded `tsconfig.json`; see `scaffold.rs::tsconfig_json`) — that
+        // flag also rewrites the specifier to `.js` on emit so the conformance
+        // `tsc -p .` → `node main.js` plan still runs.
+        let ext = "ts";
 
         // Shared runtime: type-only and value imports, split so a type name never
         // appears in a value `import` (which would be a runtime error if elided
@@ -6284,10 +6301,10 @@ mod tests {
     #[test]
     fn per_module_emits_native_esm_import_tree_ts() {
         // entry `module main` uses `mathutil.add_one`; emission must produce
-        // `main.ts` (with `import { addOne } from "./mathutil.js"` — the relative
-        // specifier references the *emitted* `.js`) and `mathutil.ts`. The
-        // `package.json` run affordance is emitted by the scaffolder (project
-        // mode), NOT codegen (S6a / DV18).
+        // `main.ts` (with `import { addOne } from "./mathutil.ts"` — the relative
+        // specifier references the *emitted* `.ts` source directly) and
+        // `mathutil.ts`. The `package.json` run affordance is emitted by the
+        // scaffolder (project mode), NOT codegen (S6a / DV18).
         let call = node(
             10,
             NodeKind::Call {
@@ -6334,8 +6351,8 @@ mod tests {
         assert!(
             main_file
                 .content
-                .contains("import { addOne } from \"./mathutil.js\";"),
-            "main.ts must import the camelCased fn via the `.js` specifier; got:\n{}",
+                .contains("import { addOne } from \"./mathutil.ts\";"),
+            "main.ts must import the camelCased fn via the `.ts` specifier; got:\n{}",
             main_file.content
         );
         assert!(
@@ -6413,7 +6430,7 @@ mod tests {
         assert!(
             main_file
                 .content
-                .contains("import type { Color } from \"./palette.js\";"),
+                .contains("import type { Color } from \"./palette.ts\";"),
             "main.ts must `import type` the enum type; got:\n{}",
             main_file.content
         );
@@ -9356,7 +9373,7 @@ mod tests {
     // `module main` does `use models.*` and references a bare enum variant
     // (`Electronics`) declared in `module models`. The variant emits as the
     // value-const `Category_Electronics`, which must be imported from
-    // `./models.js`. The shared import scan keys on the value-name but the AIR
+    // `./models.ts`. The shared import scan keys on the value-name but the AIR
     // references the bare source name; the shared collector
     // (`generator::implicit_esm_imports_for`) now probes the variant's bare
     // source name too, so the import is produced for js and ts alike.
@@ -9433,9 +9450,9 @@ mod tests {
             .expect("main.ts emitted");
         assert!(
             main_file.content.contains("Category_Electronics")
-                && main_file.content.contains(r#"from "./models.js""#),
+                && main_file.content.contains(r#"from "./models.ts""#),
             "main.ts must import the glob-referenced enum variant \
-             `Category_Electronics` from ./models.js; got:\n{}",
+             `Category_Electronics` from ./models.ts; got:\n{}",
             main_file.content
         );
         // It must be a value import (not `import type`) — the variant is a const.

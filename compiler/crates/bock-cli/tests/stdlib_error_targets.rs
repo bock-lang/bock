@@ -9,7 +9,10 @@
 //! import/module mechanism:
 //!
 //! - **python** — `core/error.py`; entry `from core.error import …`.
-//! - **js / ts** — `core/error.{js,ts}`; entry `import … from "./core/error.js"`.
+//! - **js** — `core/error.js`; entry `import … from "./core/error.js"`.
+//! - **ts** — `core/error.ts`; entry `import … from "./core/error.ts"` (the
+//!   emitted `.ts` tree imports siblings via `.ts` specifiers — see
+//!   `bock-codegen::ts`).
 //! - **rust** — `src/core/error.rs`; entry `use crate::core::error::{…}`.
 //! - **go** — flat `core.error.go` in one `package main`; same-package symbols
 //!   are visible without an import, so the entry has no import statement — the
@@ -111,7 +114,9 @@ fn module_file_path(build_dir: &Path, target: &str, module: &str, ext: &str) -> 
 /// Assert the entry file wires to the per-module `module` file (dotted path,
 /// e.g. `core.error`) the way `target` emits cross-module references:
 /// - python — `from core.error import …`.
-/// - js / ts — ESM `import … from "./core/error.js"` (always the `.js` ext).
+/// - js — ESM `import … from "./core/error.js"` (the `.js` ext).
+/// - ts — ESM `import … from "./core/error.ts"` (the emitted `.ts` tree imports
+///   siblings via `.ts` specifiers — see `bock-codegen::ts`).
 /// - rust — `use crate::core::error::{…};`.
 /// - go — same package, no import statement; the per-module *shape* (a separate
 ///   module file carrying the symbol, asserted by the caller) is the evidence.
@@ -122,7 +127,10 @@ fn assert_entry_imports_module(entry: &str, target: &str, module: &str) {
             "target {target}: entry must import from the {module} module file",
         ),
         "js" | "ts" => {
-            let rel = format!("./{}.js", module.replace('.', "/"));
+            // js specifiers reference the emitted `.js`; ts references the
+            // emitted `.ts` source directly (see `bock-codegen::ts`).
+            let spec_ext = if target == "ts" { "ts" } else { "js" };
+            let rel = format!("./{}.{spec_ext}", module.replace('.', "/"));
             assert!(
                 entry.contains("import ") && entry.contains(&rel),
                 "target {target}: entry must `import … from \"{rel}\"`",
