@@ -34,6 +34,18 @@ decided→link)`
 
 ## Escalated to Design (core spec — pending)
 
+> **Priority ordering (advisory — Design 2026-06-05, after DQ27/DQ28).** Work the remaining OPEN questions in this order —
+> cross-target correctness first, then semantics, then ratification, then reversible impl-detail:
+> **(1) DQ23** Int/Int division (§3.6) + Bool interpolation spelling — the same source yields `3` on rust/go vs `3.4` on
+> js/ts/py, a direct cross-target-equivalence violation (highest leverage; likely behind some examples reds).
+> **(2) DQ20** `expr?` propagation — `?` is a no-op on js/ts/py/go (only rust early-returns) yet §7.10 says it must
+> early-return; nearly a rubber-stamp, the value is unblocking the impl. **(3) DQ18** List `push`/`append` mutability (§5
+> coherence + real programs). **(4) DQ22** bare `m.contains(k)` (check-passes-then-fails trap; quick). **(5) one batched
+> ratification** of DQ10/DQ11/DQ12/DQ13/DQ14/DQ15/DQ24 + DV17 (bless the shipped stdlib surface; spec hygiene).
+> **(6) DQ17** Optional repr — recommend leaving non-normative. **(7) DQ21** has_body flag → move to the impl backlog (no
+> language decision). **DQ1** stays the non-core CLI track (orchestrator + operator). Source: the 2026-06-05 DQ27/DQ28 design
+> handoff (removed from spec/changelogs; its prioritization captured here).
+
 ### DQ10 — normative primitive-conformance matrix
 - **Question:** which (primitive × core-trait) conformances are **normative** for
   v1? §18.2/§18.5 name the traits but never pin the matrix. Specifically: is
@@ -386,7 +398,7 @@ spec). Only DQ1 (non-core) remains open; DQ2–DQ5 were decided by Design
 
 ---
 
-## DQ27 — Inherent method vs same-named trait method resolution (overload-less targets) — OPEN
+## DQ27 — Inherent method vs same-named trait method resolution (overload-less targets) — DECIDED
 
 **Raised:** 2026-06-05 (examples-greening, Q-class-codegen / react-components).
 **Question:** When a `class` has an inherent method and a trait requires a method of the same name, how do they resolve —
@@ -396,14 +408,28 @@ inherent and `self.render()` recurses infinitely (the reference interpreter also
 **Options:** (a) an inherent method auto-satisfies a same-signature trait requirement — the explicit delegating impl is
 redundant or a checker error [orchestrator's recommendation; matches current rust/python/go behavior]; (b) name-mangle
 trait methods distinctly from inherent on overload-less targets; (c) forbid same-name inherent+trait at check time.
-**Status:** OPEN — escalated 2026-06-05 (escalations.md). Blocks react-components on js/ts only. Interpreter overflow tracked
-separately as Q-interp-method-collision. Governs spec §6.4 (classes) + the trait sections.
+**Decision (Design 2026-06-05):** option (a), formalized as the **single-method-namespace rule** — a type (record/class) has
+ONE method namespace across inherent `impl`, class body, and trait-impl blocks; a trait requirement is satisfied by a
+name+signature match anywhere in it; defining the same method name+signature twice for one type is a coherence error
+(**E4012**). react-components' delegating `impl Component for Button { fn render = self.render() }` was the duplicate — fixed
+to an empty `impl Component for Button {}` (the inherent `render` satisfies the trait), so js/ts no longer recurse. Rejected
+(b) name-mangling (non-idiomatic output) and (c) forbid-only (subsumed by (a)). Q-interp-method-collision becomes unreachable
+for check-passing programs (the duplicate is rejected before execution).
+**Status:** decided → Design 2026-06-05; reconciled #258 (checker E4012 + react-components fix + spec §6.4/6.5/6.7 + changelog
+`20260605-method-namespace.md`). Impl items Q-method-collision-inherent-trait + Q-class-codegen DONE; react-components now
+runs on all 5.
 
-## DQ28 — Type parameters on methods vs Go's prohibition — OPEN
+## DQ28 — Type parameters on methods vs Go's prohibition — DECIDED
 
 **Raised:** 2026-06-05 (examples-greening, type-zoo/go).
 **Question:** Bock allows a method to declare its own type params (`Box[T].map[U]`). Go forbids type params on methods. How
 should the Go backend lower this — monomorphize per use, lower the method to a free generic function, or restrict the
 surface? (js/ts/python/rust already handle it.)
 **Options:** (a) monomorphization at codegen [recommended]; (b) free-function lowering; (c) restrict the language surface.
-**Status:** OPEN — escalated 2026-06-05. Low urgency (one example, one target). Q-go-method-generics in queue.
+**Decision (Design 2026-06-05):** KEEP the language surface (reject (c)); the Go backend lowers method-level type params.
+Design recommends **free-function lowering** (`Box[T].map[U]` → `func Box_Map[T, U](self Box[T], f func(T) U) Box[U]`, call
+sites rewritten) over monomorphization — the mechanism is the Go codegen's choice (same observable behavior). No normative
+spec change; an optional non-normative note may go in the Go target profile §22.
+**Status:** decided → Design 2026-06-05; reconciled #256 (Q-go-method-generics DONE — free-fn lowering in go.rs). NOTE: fully
+closing type-zoo/go also needs **Q-checker-method-generic-call-infer** (the checker can't yet infer `U` for a `b.map(dbl)`
+call — which is why type-zoo only *declares* `Box.map`).
