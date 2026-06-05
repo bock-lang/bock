@@ -1,0 +1,67 @@
+// TEST: exec_go_class_trait_method_casing
+// EXPECT: output "btn:click!;page:[click!]"
+// EXPECT: targets go
+//
+// Go class/trait method-name casing + no self-recursive forwarder. A class has
+// an *inherent* method (`render`) whose name a `trait` the class implements also
+// declares. Go interface methods are always exported (PascalCase), so the
+// inherent method must be declared `Render` too (it is the real implementation
+// that satisfies the interface), and every dispatch site — `self.render()`,
+// `w.render()`, `card.render()` — must agree on `Render`.
+//
+// Two defects this guards:
+//   1. Casing: before the fix the inherent `render` emitted lowercase `render`
+//      while dispatch / `impl Component` expected `Render`
+//      (`page.Render undefined (has method render)`).
+//   2. Recursion: the `impl Component for Button` forwarder
+//      (`fn render(self) { self.render() }`) emitted
+//      `func (Button) Render() { return self.Render() }` — infinite recursion.
+//      The redundant same-named trait-impl forwarder is now skipped; the
+//      inherent exported `Render` satisfies the interface directly.
+//
+// `Widget.render` is inherent with NO `impl Component for Widget`, proving an
+// inherent method is exported when a trait merely *declares* the name. js/ts/
+// python/rust dispatch by source name; this proves Go's casing now agrees.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale).
+module main
+
+trait Component {
+  fn render(self) -> String
+}
+
+class Button {
+  label: String
+}
+
+impl Button {
+  fn render(self) -> String {
+    "${self.label}!"
+  }
+}
+
+impl Component for Button {
+  fn render(self) -> String {
+    self.render()
+  }
+}
+
+record Widget {
+  inner: String
+}
+
+impl Widget {
+  fn render(self) -> String {
+    "[${self.inner}]"
+  }
+}
+
+fn render_one(c: Button) -> String {
+  c.render()
+}
+
+fn main() -> Void {
+  let b = Button { label: "click" }
+  let w = Widget { inner: render_one(b) }
+  println("btn:${b.render()};page:${w.render()}")
+}

@@ -1,0 +1,37 @@
+// TEST: exec_go_map_field_keys_from_call
+// EXPECT: output "n=1;v=hi"
+// EXPECT: targets go
+//
+// Go map-method receiver typing through a record-returning *call* binding. A
+// built-in map method (`keys`/`get`) on a `value.field` whose declared type is
+// `Map[K, V]` must type its inline Go closure as `map[K]V`, not the erased
+// `map[interface{}]interface{}` `go build` rejects against the concrete struct
+// field. That resolution needs the local's Go record type. A record *literal*
+// binding (`let s = State { ... }`) already recorded it; a binding to a
+// record-returning *function call* (`let s = make_state()`) did NOT, so
+// `s.fields.keys()` / `s.fields.get(k)` fell back to the erased map type and
+// failed the Go build. The fix records an untyped `let`'s Go record type when
+// the value's inferred type names a record with a `Map`/`List` field. (This is
+// the binding form react-components uses: `let form = create_form()`.)
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale).
+module main
+
+record State {
+  fields: Map[String, String]
+}
+
+fn make_state() -> State {
+  State { fields: {"k": "hi"} }
+}
+
+fn main() -> Void {
+  let s = make_state()
+  let ks = s.fields.keys()
+  let n = ks.length()
+  let v = match s.fields.get("k") {
+    Some(x) => x
+    None => "?"
+  }
+  println("n=${n};v=${v}")
+}
