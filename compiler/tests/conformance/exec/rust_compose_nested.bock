@@ -1,0 +1,44 @@
+// TEST: exec_rust_compose_nested
+// EXPECT: output "14"
+// EXPECT: targets python, rust
+//
+// Nested function composition `f >> g >> h` (data-pipeline `build_report_-
+// pipeline`, #239 follow-up). The AIR compose desugar lowers `f >> g` to
+// `(__compose_x) => g(f(__compose_x))`; when `>>` chains, the inner compose
+// becomes a `Lambda` that appears as the *callee* `f` in `f(__compose_x)`. The
+// Rust backend emitted that closure callee unparenthesised:
+//
+//   |x| outer(|x| inner(base(x))(x))   // call binds to the body, not the closure
+//
+// which is `|x| inner(base(x))` applied to `(x)` — invalid (`E0618`: expected
+// function, found the return type). The backend now parenthesises a closure
+// callee (`(|x| …)(x)`), mirroring the python backend, so the chain runs
+// left-to-right: add_one(5)=6, double(6)=12, add_two(12)=14.
+//
+// Restricted to `python, rust`: the js/ts/go backends have their own
+// pre-existing nested-`>>` lowering gaps (a shared-desugar × backend issue
+// tracked separately, FOUND in #239); only rust changed here.
+module main
+
+fn add_one(n: Int) -> Int {
+  n + 1
+}
+
+fn double(n: Int) -> Int {
+  n * 2
+}
+
+fn add_two(n: Int) -> Int {
+  n + 2
+}
+
+// Three-way composition: ((n+1) then *2) then +2.
+fn build() -> Fn(Int) -> Int {
+  add_one >> double >> add_two
+}
+
+fn main() -> Void {
+  let pipeline = build()
+  // (5 + 1) * 2 + 2 = 16
+  println("${pipeline(5)}")
+}
