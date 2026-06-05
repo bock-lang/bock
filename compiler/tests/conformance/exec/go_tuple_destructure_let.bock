@@ -1,0 +1,28 @@
+// TEST: exec_go_tuple_destructure_let
+// EXPECT: output "count=3 total=6;x=10 y=20;a=1 b=hi"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go tuple-destructuring `let` (type-zoo's `let (count, total) = stats(items)`).
+// A `let (a, b) = <tuple-expr>` binds each tuple element to a name. Before the
+// fix the Go backend emitted `count := stats(...)` — it bound only the first
+// name to the *whole* tuple struct and dropped every later name (`undefined:
+// total` at the use site, a `go build` error). The fix hoists the tuple value
+// into a temp and binds each name off the corresponding `.Field{i}`
+// (`__t := stats(...); count := __t.Field0; total := __t.Field1`). Covered: a
+// call-returned tuple, a tuple literal of mixed primitive types, and a heterogeneous
+// `(Int, String)` literal. Asserted on all five targets so the destructured
+// values, not just a clean Go compile, are checked.
+module main
+
+public fn stats(items: List[Int]) -> (Int, Int) {
+  let count = items.len()
+  let total = items.len() + 3
+  (count, total)
+}
+
+fn main() -> Void {
+  let (count, total) = stats([1, 2, 3])
+  let (x, y) = (10, 20)
+  let (a, b) = (1, "hi")
+  println("count=${count} total=${total};x=${x} y=${y};a=${a} b=${b}")
+}

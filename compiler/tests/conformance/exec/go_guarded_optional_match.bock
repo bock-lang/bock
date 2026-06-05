@@ -1,0 +1,41 @@
+// TEST: exec_go_guarded_optional_match
+// EXPECT: output "positive: 42;non-positive: -1;absent;ok: 9;err: bad"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go value-position `match` with a *guarded* Optional/Result arm whose bound
+// payload is used in the guard / body (type-zoo's `describe_optional`). A guarded
+// arm (`Some(n) if (n > 0) => …`) routes to the if-chain IIFE, which binds the
+// payload off `opt.v`. Before the fix that leaf bind was the bare `interface{}`
+// payload (`n := opt.v`), so the guard `n > 0` and body arithmetic failed
+// `go build` ("operator > not defined on interface"). The fix asserts a *leaf*
+// Optional/Result payload bind to its declared concrete element type
+// (`n := __bockAsInt64(opt.v)` / `e := res.v.(string)`), recovered by peeling the
+// scrutinee's declared type — the same payload typing the tag-switch arms and the
+// guard-let binder already apply. Asserted on all five targets so the computed
+// result, not just a clean Go compile, is checked.
+module main
+
+public fn describe_optional(opt: Optional[Int]) -> String {
+  match opt {
+    Some(n) if (n > 0) => "positive: ${n}"
+    Some(n) => "non-positive: ${n}"
+    None => "absent"
+  }
+}
+
+public fn describe_result(res: Result[Int, String]) -> String {
+  match res {
+    Ok(v) if (v > 0) => "ok: ${v}"
+    Ok(v) => "non-positive ok: ${v}"
+    Err(e) => "err: ${e}"
+  }
+}
+
+fn main() -> Void {
+  let a = describe_optional(Some(42))
+  let b = describe_optional(Some(-1))
+  let c = describe_optional(None)
+  let d = describe_result(Ok(9))
+  let e = describe_result(Err("bad"))
+  println("${a};${b};${c};${d};${e}")
+}

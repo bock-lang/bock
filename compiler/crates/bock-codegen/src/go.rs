@@ -1029,6 +1029,11 @@ struct GoEmitCtx {
     /// `__try1`, …). Go has no native `?`; each propagate hoists the operand into
     /// a `__tryN` local before its unwrap-or-early-return lowering.
     try_counter: usize,
+    /// Monotonic counter for unique tuple-destructuring-`let` temp names
+    /// (`__tup0`, `__tup1`, …). Go has no tuple destructuring; a
+    /// `let (a, b) = expr` hoists `expr` into a `__tupN` struct local and binds
+    /// each name off its `.Field{i}`, so two such lets in one block do not collide.
+    let_tuple_counter: usize,
     /// Depth of enclosing *expression-position* `loop` IIFEs (`let r = loop { …
     /// break <v> }`). Bock's `loop` is a value-producing expression whose
     /// `break <v>` yields the loop's value; Go's `for`+`break` carries no value.
@@ -1051,6 +1056,18 @@ struct GoEmitCtx {
     /// assertion any typed use of the bound value (`x + 10`) fails Go
     /// compilation. Scoped per function body and restored on exit.
     var_optional_elem: HashMap<String, String>,
+    /// Maps an in-scope variable name → its declared type-expression AIR node
+    /// (an `Optional[Result[(Int, Int), String]]` param maps to that
+    /// `TypeOptional`/`TypeNamed` node). The single-element `var_*_elem` maps
+    /// only record the *one-level* peeled Go type, which is not enough to
+    /// type-assert the payload of a *nested* constructor pattern: a
+    /// `match v { Some(Ok((a, b))) => … }` must peel Optional → Result → Tuple
+    /// to assert the boxed `interface{}` payload to its concrete tuple struct
+    /// (`struct{ Field0 int64; Field1 int64 }`) before `.Field0` reads.
+    /// Threaded through the pattern-bind/test recursion (peeling Optional on
+    /// `Some`, Result on `Ok`/`Err`) so a nested tuple pattern lands on the
+    /// concrete struct type. Scoped per function body and restored on exit.
+    var_decl_type_node: HashMap<String, AIRNode>,
     /// Maps a *method* name → the Go element type of its `Optional[T]` return
     /// (`int64` for `fn next(self) -> Int?`). Pre-scanned across every
     /// impl/class/trait block so a `match` whose scrutinee is a method call
@@ -1311,6 +1328,15 @@ struct GoEmitCtx {
     /// trailing `panic("unreachable")` instead of `return nil` when typed, since
     /// a concrete (non-interface) return type has no `nil`.
     current_fn_ret_type: Option<String>,
+    /// The enclosing function's declared return type *node*, kept when it is a
+    /// function type (`Fn(Int) -> Int`). A lambda in tail-return position
+    /// (`fn compose(...) -> Fn(Int) -> Int { (x) => f(g(x)) }`) is otherwise
+    /// emitted with `interface{}` params and an `interface{}` return — not
+    /// assignable to the declared `func(int64) int64` return. This lets the
+    /// return-position emitter type that lambda's params/return from the declared
+    /// function type. `None` outside a typed return body (or when the return type
+    /// is not a function type). Saved/restored alongside `current_fn_ret_type`.
+    current_fn_ret_type_node: Option<AIRNode>,
     /// The Go type a value-position expression is being assigned *into*, when
     /// known and distinct from the enclosing function's return type. Set around a
     /// `let x: T = <value>`'s value emit. An expression-position `match` lowers
@@ -1502,9 +1528,11 @@ impl GoEmitCtx {
             loop_label_counter: 0,
             guard_counter: 0,
             try_counter: 0,
+            let_tuple_counter: 0,
             loop_expr_depth: 0,
             fn_optional_ret_elem: HashMap::new(),
             var_optional_elem: HashMap::new(),
+            var_decl_type_node: HashMap::new(),
             method_optional_ret_elem: HashMap::new(),
             method_ret_record_args: HashMap::new(),
             method_return_go_types: HashMap::new(),
@@ -1541,6 +1569,7 @@ impl GoEmitCtx {
             go_self_subst: None,
             self_param_traits: HashSet::new(),
             current_fn_ret_type: None,
+            current_fn_ret_type_node: None,
             current_expected_type: None,
             current_fn_ret_collection_elem: None,
             fn_signatures: HashMap::new(),
@@ -2472,6 +2501,102 @@ impl GoEmitCtx {
         None
     }
 
+    /// If `node` is an `Optional[T]` (or `T?`) type expression, return its inner
+    /// `T` type node. The *node*-returning analogue of
+    /// [`Self::optional_elem_go_type`]: lets the pattern recursion peel one
+    /// Optional layer and keep descending a nested constructor pattern
+    /// (`Some(Ok((a, b)))`) so a leaf tuple pattern lands on a concrete tuple
+    /// type node. Sees through a `type X = Optional[T]` alias.
+    fn optional_inner_type_node<'a>(&'a self, node: &'a AIRNode) -> Option<&'a AIRNode> {
+        if let Some(target) = self.resolve_type_alias(node) {
+            return self.optional_inner_type_node(target);
+        }
+        match &node.kind {
+            NodeKind::TypeOptional { inner } => Some(inner),
+            NodeKind::TypeNamed { path, args }
+                if path.segments.last().is_some_and(|s| s.name == "Optional") =>
+            {
+                args.first()
+            }
+            _ => None,
+        }
+    }
+
+    /// Clone `ret`'s function-type node when the declared return type is a
+    /// function type (`Fn(Int) -> Int`), else `None`. Kept on
+    /// [`Self::current_fn_ret_type_node`] so a lambda in tail-return position can
+    /// take its param/return Go types from the declared function type. (Does not
+    /// peel a `type` alias to a function type — a function returning such an
+    /// alias is vanishingly rare in the v1 examples and the lambda still emits
+    /// correctly via inference, just un-typed.)
+    fn fn_type_ret_node(ret: Option<&AIRNode>) -> Option<AIRNode> {
+        let node = ret?;
+        if matches!(node.kind, NodeKind::TypeFunction { .. }) {
+            Some(node.clone())
+        } else {
+            None
+        }
+    }
+
+    /// The `(param_go_types, return_go_type)` of a `TypeFunction` node, each
+    /// rendered as Go. Used to type a lambda emitted in return position from the
+    /// enclosing function's declared `Fn(...) -> ...` return type. Returns `None`
+    /// when `node` is not a function type.
+    fn fn_type_go_signature(&self, node: &AIRNode) -> Option<(Vec<String>, String)> {
+        if let NodeKind::TypeFunction { params, ret, .. } = &node.kind {
+            let param_tys = params.iter().map(|p| self.type_to_go(p)).collect();
+            return Some((param_tys, self.type_to_go(ret)));
+        }
+        None
+    }
+
+    /// When `tail` is a bare lambda being emitted in *tail-return position* and
+    /// the enclosing function's declared return type is a function type
+    /// (`fn compose(...) -> Fn(Int) -> Int { (x) => f(g(x)) }`), pin the lambda's
+    /// param/return Go types from that declared type, so the emitted closure is
+    /// `func(x int64) int64` rather than the inference fallback
+    /// `func(x interface{}) interface{}` (not assignable to the declared return).
+    /// Returns the saved `(expected_lambda_param_types, forced_lambda_ret)` so the
+    /// caller restores them after the emit; a no-op (saved state unchanged) when
+    /// the tail is not a lambda or the return type is not a function type.
+    #[allow(clippy::type_complexity)]
+    fn pin_return_lambda_types(&mut self, tail: &AIRNode) -> (Option<Vec<String>>, Option<String>) {
+        let saved = (
+            self.expected_lambda_param_types.clone(),
+            self.forced_lambda_ret.clone(),
+        );
+        if !matches!(tail.kind, NodeKind::Lambda { .. }) {
+            return saved;
+        }
+        if let Some(node) = &self.current_fn_ret_type_node {
+            if let Some((param_tys, ret_ty)) = self.fn_type_go_signature(node) {
+                self.expected_lambda_param_types = Some(param_tys);
+                self.forced_lambda_ret = Some(ret_ty);
+            }
+        }
+        saved
+    }
+
+    /// If `node` is a `Result[T, E]` type expression, return its `(T, E)` inner
+    /// type nodes. The *node*-returning analogue of
+    /// [`Self::result_elem_go_types`], used to peel a Result layer while
+    /// descending a nested constructor pattern. Sees through a
+    /// `type X = Result[T, E]` alias.
+    fn result_inner_type_nodes<'a>(
+        &'a self,
+        node: &'a AIRNode,
+    ) -> Option<(&'a AIRNode, Option<&'a AIRNode>)> {
+        if let Some(target) = self.resolve_type_alias(node) {
+            return self.result_inner_type_nodes(target);
+        }
+        if let NodeKind::TypeNamed { path, args } = &node.kind {
+            if path.segments.last().is_some_and(|s| s.name == "Result") {
+                return args.first().map(|ok| (ok, args.get(1)));
+            }
+        }
+        None
+    }
+
     /// The `(K, V)` Go types of a `Map` *value* expression used as the receiver
     /// of a built-in map method. Recovered from a declared `Map[K, V]`
     /// identifier (via [`Self::var_map_kv`]) or a homogeneously-typed map
@@ -3056,6 +3181,13 @@ impl GoEmitCtx {
         gp_names: &[String],
         bindings: &HashMap<String, String>,
     ) -> Option<Vec<String>> {
+        // A callee param declared via a `type` alias to a function type
+        // (`type Predicate = Fn(Int) -> Bool`) is a `TypeNamed`; see through it
+        // to the underlying `TypeFunction` so the lambda argument still gets its
+        // param types (`func(x int64) bool`, not the erased `interface{}`).
+        if let Some(target) = self.resolve_type_alias(fn_param_ty) {
+            return self.specialise_lambda_param_types(target, gp_names, bindings);
+        }
         let NodeKind::TypeFunction { params, .. } = &fn_param_ty.kind else {
             return None;
         };
@@ -3687,6 +3819,11 @@ impl GoEmitCtx {
             } = &p.kind
             {
                 let name = self.pattern_to_binding_name(pattern);
+                // Record the full declared type node so a `match` whose
+                // scrutinee is this param can peel a *nested* Optional/Result to
+                // assert a tuple payload to its concrete struct (see
+                // `var_decl_type_node`).
+                self.var_decl_type_node.insert(name.clone(), (**t).clone());
                 if let Some(elem) = self.optional_elem_go_type(t) {
                     self.var_optional_elem.insert(name.clone(), elem);
                 }
@@ -3916,6 +4053,20 @@ impl GoEmitCtx {
             },
             _ => None,
         }
+    }
+
+    /// The declared type-expression AIR node of a match scrutinee, when it is a
+    /// variable (parameter or typed `let`) recorded in [`Self::var_decl_type_node`].
+    /// Returns `None` for any other scrutinee shape (a call, a method call, …) —
+    /// the pattern recursion then leaves a nested tuple payload un-asserted (the
+    /// prior `interface{}` behavior; never wrong, only un-typed). Used to seed
+    /// the declared-type threading through the if-chain pattern lowering so a
+    /// `match v { Some(Ok((a, b))) => … }` asserts its tuple payload.
+    fn scrutinee_decl_type_node(&self, scrutinee: &AIRNode) -> Option<&AIRNode> {
+        if let NodeKind::Identifier { name } = &scrutinee.kind {
+            return self.var_decl_type_node.get(&go_value_ident(&name.name));
+        }
+        None
     }
 
     /// The Go payload type of an *argument expression* whose static type is
@@ -6546,6 +6697,7 @@ impl GoEmitCtx {
         }
         let saved_record_args = self.var_record_type_args.clone();
         let saved_lambda_ret = self.var_lambda_ret.clone();
+        let saved_decl_type = self.var_decl_type_node.clone();
         let (
             saved_opt_scope,
             saved_list_scope,
@@ -6568,12 +6720,15 @@ impl GoEmitCtx {
         } else {
             let prev_ret = self.current_fn_ret_type.take();
             let prev_ret_coll = self.current_fn_ret_collection_elem.take();
+            let prev_ret_node = self.current_fn_ret_type_node.take();
             self.current_fn_ret_type = return_type.map(|t| self.type_to_go(t));
             self.current_fn_ret_collection_elem =
                 return_type.and_then(|t| self.collection_elem_go_types(t));
+            self.current_fn_ret_type_node = Self::fn_type_ret_node(return_type);
             self.emit_block_body_return(body)?;
             self.current_fn_ret_type = prev_ret;
             self.current_fn_ret_collection_elem = prev_ret_coll;
+            self.current_fn_ret_type_node = prev_ret_node;
         }
         self.var_optional_elem = saved_opt_scope;
         self.var_list_elem = saved_list_scope;
@@ -6583,6 +6738,7 @@ impl GoEmitCtx {
         self.var_go_type = saved_go_types;
         self.var_record_type_args = saved_record_args;
         self.var_lambda_ret = saved_lambda_ret;
+        self.var_decl_type_node = saved_decl_type;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
         self.writeln("}");
@@ -6781,6 +6937,7 @@ impl GoEmitCtx {
                     .insert(ename.clone(), to_camel_case(ename));
             }
             let saved_record_args = self.var_record_type_args.clone();
+            let saved_decl_type = self.var_decl_type_node.clone();
             let (
                 saved_opt_scope,
                 saved_list_scope,
@@ -6797,13 +6954,16 @@ impl GoEmitCtx {
             if return_type.is_some() && !is_void {
                 let prev_ret = self.current_fn_ret_type.take();
                 let prev_ret_coll = self.current_fn_ret_collection_elem.take();
+                let prev_ret_node = self.current_fn_ret_type_node.take();
                 self.current_fn_ret_type = return_type.as_deref().map(|t| self.type_to_go(t));
                 self.current_fn_ret_collection_elem = return_type
                     .as_deref()
                     .and_then(|t| self.collection_elem_go_types(t));
+                self.current_fn_ret_type_node = Self::fn_type_ret_node(return_type.as_deref());
                 self.emit_block_body_return(body)?;
                 self.current_fn_ret_type = prev_ret;
                 self.current_fn_ret_collection_elem = prev_ret_coll;
+                self.current_fn_ret_type_node = prev_ret_node;
             } else {
                 self.emit_block_body(body)?;
             }
@@ -6813,6 +6973,7 @@ impl GoEmitCtx {
             self.var_map_kv = saved_map_scope;
             self.var_set_elem = saved_set_scope;
             self.var_record_type_args = saved_record_args;
+            self.var_decl_type_node = saved_decl_type;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
             self.writeln("}");
@@ -6993,6 +7154,52 @@ impl GoEmitCtx {
                         return Ok(());
                     }
                 }
+                // Tuple-destructuring `let (a, b, …) = expr`. Go has no tuple
+                // destructuring and `pattern_to_binding_name` collapses a tuple
+                // pattern to its *first* element — so without this every later
+                // name was dropped (`undefined: total`) and the first bound the
+                // whole struct. Hoist the value into a `__tupN` struct local and
+                // bind each element off its `.Field{i}` (recursing through the
+                // shared bind emitter for a nested element pattern). A bare-`_`
+                // tuple pattern still binds nothing.
+                if let NodeKind::TuplePat { elems } = &pattern.kind {
+                    let n = self.let_tuple_counter;
+                    self.let_tuple_counter += 1;
+                    let tmp = format!("__tup{n}");
+                    let ind = self.indent_str();
+                    let _ = write!(self.buf, "{ind}{tmp} := ");
+                    // The declared tuple type (when annotated) types each field;
+                    // otherwise the struct literal/return value carries its own
+                    // Go types and the `.Field{i}` reads inherit them.
+                    self.emit_expr(value)?;
+                    self.buf.push('\n');
+                    self.writeln(&format!("_ = {tmp}"));
+                    let decl_ty = ty.as_deref();
+                    let field_tys = self.tuple_field_decl_tys(decl_ty, elems.len());
+                    for (i, e) in elems.iter().enumerate() {
+                        let access = format!("{tmp}.Field{i}");
+                        let mut binds = String::new();
+                        self.collect_binds_go(
+                            e,
+                            &access,
+                            field_tys.get(i).and_then(|t| *t),
+                            &mut binds,
+                        );
+                        for stmt in binds.split("; ") {
+                            let stmt = stmt.trim();
+                            if stmt.is_empty() {
+                                continue;
+                            }
+                            self.writeln(stmt);
+                            if let Some(name) = stmt.split_whitespace().next() {
+                                if name != "_" {
+                                    self.go_record_declared(name);
+                                }
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
                 let binding = self.pattern_to_go_binding(pattern);
                 // Shadowing re-bind of a name already declared in this Go block
                 // (the immutable-update idiom, `let acc = …; let acc = f(acc)`,
@@ -7033,6 +7240,12 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 if let Some(t) = ty {
+                    // Record the full declared type node so a later `match` on
+                    // this binding can peel a *nested* Optional/Result to assert
+                    // a tuple payload to its concrete struct (mirrors the param
+                    // path; see `var_decl_type_node`).
+                    self.var_decl_type_node
+                        .insert(self.pattern_to_binding_name(pattern), (**t).clone());
                     // Record an `Optional[T]` binding's element type so a later
                     // `match binding { Some(x) => ... }` can type-assert `x`.
                     if let Some(elem) = self.optional_elem_go_type(t) {
@@ -9448,6 +9661,12 @@ impl GoEmitCtx {
             "__match".to_string()
         };
 
+        // The scrutinee's declared type, cloned to an owned node so it survives
+        // the `&mut self` bind emit below. Threads through the pattern lowering
+        // so a *nested tuple* payload (`Some(Ok((a, b)))`) is asserted to its
+        // concrete tuple struct rather than read off a bare `interface{}`.
+        let decl_ty: Option<AIRNode> = self.scrutinee_decl_type_node(scrutinee).cloned();
+
         let arm_count = arms.len();
         let mut first = true;
         let mut closed = false;
@@ -9460,7 +9679,7 @@ impl GoEmitCtx {
             else {
                 continue;
             };
-            let test = self.pattern_test_go(pattern, &root);
+            let test = self.pattern_test_go(pattern, &root, decl_ty.as_ref());
             let is_catch_all = matches!(
                 pattern.kind,
                 NodeKind::WildcardPat | NodeKind::BindPat { .. }
@@ -9488,7 +9707,8 @@ impl GoEmitCtx {
                     // failed guard then falls through to the next `else if` (the
                     // fall-through a `switch` could not express).
                     let g_str = self.expr_to_string(g)?;
-                    let binds = self.pattern_binds_to_string_go(pattern, &root);
+                    let binds =
+                        self.pattern_binds_to_string_go_typed(pattern, &root, decl_ty.as_ref());
                     let guard_test = if binds.is_empty() {
                         format!("({g_str})")
                     } else {
@@ -9509,7 +9729,7 @@ impl GoEmitCtx {
             first = false;
             self.buf.push('\n');
             self.indent += 1;
-            self.pattern_binds_go(pattern, &root)?;
+            self.pattern_binds_go_typed(pattern, &root, decl_ty.as_ref())?;
             if emit_return {
                 self.emit_block_body_return(body)?;
             } else {
@@ -9573,7 +9793,7 @@ impl GoEmitCtx {
         self.buf.push('\n');
 
         // The else arm runs when the pattern does NOT match; it diverges.
-        let test = self.pattern_test_go(pat, &guard_tmp);
+        let test = self.pattern_test_go(pat, &guard_tmp, None);
         if !test.is_empty() {
             self.writeln(&format!("if !({test}) {{"));
             self.indent += 1;
@@ -9655,7 +9875,7 @@ impl GoEmitCtx {
     ) -> Result<(), CodegenError> {
         self.pattern_binds_go(pat, access)?;
         let mut binds = String::new();
-        self.collect_binds_go(pat, access, &mut binds);
+        self.collect_binds_go(pat, access, None, &mut binds);
         for stmt in binds.split("; ") {
             // Each emitted bind is `name := …`; record the `name`.
             if let Some(name) = stmt.split_whitespace().next() {
@@ -9757,10 +9977,110 @@ impl GoEmitCtx {
         }
     }
 
+    /// The Go expression reading an Optional/Result *leaf* payload bind off the
+    /// runtime container `access` (`access.v`), asserted to the concrete element
+    /// `elem` when known. The pattern-match analogue of [`Self::try_payload_access`]
+    /// (which takes a bare temp name): a `match v { Some(n) if (n > 0) => … }`
+    /// binds `n := access.v.(int64)` so typed use of `n` compiles. Numeric
+    /// payloads use the widening helpers (a boxed untyped Go constant would panic
+    /// on a hard `.(int64)`); `Void`/unit/`interface{}` and the unknown-type
+    /// fallback read the raw payload (a hard assertion on a boxed `nil` panics).
+    fn payload_access_go(&self, access: &str, elem: Option<&str>) -> String {
+        match elem {
+            Some("int64") => format!("__bockAsInt64({access}.v)"),
+            Some("float64") => format!("__bockAsFloat64({access}.v)"),
+            Some("struct{}") | Some("interface{}") | Some("any") | None => {
+                format!("{access}.v")
+            }
+            Some(ty) => format!("{access}.v.({ty})"),
+        }
+    }
+
+    /// Peel one declared-type layer for an Optional/Result constructor tag,
+    /// returning the inner type node carried by the matched payload: `Some`/`None`
+    /// peel `Optional[T]` → `T`; `Ok` peel `Result[T, E]` → `T`; `Err` → `E`.
+    /// Returns `None` when the declared type is unknown or does not match the
+    /// tag's container (the payload then stays the runtime `interface{}` — never
+    /// wrong, only un-asserted). The result is `cloned` so the borrow of
+    /// `decl_ty` does not outlive the recursion step.
+    fn peel_constructor_decl_ty(
+        &self,
+        leaf: &str,
+        decl_ty: Option<&AIRNode>,
+    ) -> Option<Box<AIRNode>> {
+        let ty = decl_ty?;
+        match leaf {
+            "Some" | "None" => self
+                .optional_inner_type_node(ty)
+                .map(|n| Box::new(n.clone())),
+            "Ok" => self
+                .result_inner_type_nodes(ty)
+                .map(|(ok, _)| Box::new(ok.clone())),
+            "Err" => self
+                .result_inner_type_nodes(ty)
+                .and_then(|(_, err)| err)
+                .map(|n| Box::new(n.clone())),
+            _ => None,
+        }
+    }
+
+    /// The Go access expression for the payload of an Optional/Result
+    /// constructor pattern's sole field. `Some(Ok(…))` re-asserts the boxed
+    /// `interface{}` payload to the inner container runtime struct
+    /// (`.v.(__bockResult)`), via [`go_typed_access`]. A nested *tuple* payload
+    /// (`Some(Ok((a, b)))`) instead asserts the payload to its concrete tuple
+    /// struct (`.v.(struct{ Field0 int64; Field1 int64 })`) so the subsequent
+    /// `.Field0`/`.Field1` reads type-check — without it the field access lands
+    /// on a bare `interface{}` and fails `go build`. `child_ty` is the
+    /// peeled declared type of the payload (the tuple type, when known).
+    fn constructor_child_access_go(
+        &self,
+        child: &AIRNode,
+        access: &str,
+        child_ty: Option<&AIRNode>,
+    ) -> String {
+        if let NodeKind::TuplePat { .. } = &child.kind {
+            if let Some(t) = child_ty {
+                if let NodeKind::TypeTuple { .. } = &t.kind {
+                    let struct_ty = self.type_to_go(t);
+                    return format!("{access}.v.({struct_ty})");
+                }
+            }
+        }
+        go_typed_access(child, &format!("{access}.v"))
+    }
+
+    /// The per-field declared type nodes of a tuple pattern position, recovered
+    /// from a declared `TypeTuple` of the expected arity. Returns a vector of
+    /// `Option<&AIRNode>` (one per field, `None` where the declared type is
+    /// unknown or not a matching tuple) so the caller can thread each field's
+    /// type into the element sub-pattern.
+    fn tuple_field_decl_tys<'a>(
+        &self,
+        decl_ty: Option<&'a AIRNode>,
+        arity: usize,
+    ) -> Vec<Option<&'a AIRNode>> {
+        if let Some(t) = decl_ty {
+            if let NodeKind::TypeTuple { elems } = &t.kind {
+                if elems.len() == arity {
+                    return elems.iter().map(Some).collect();
+                }
+            }
+        }
+        vec![None; arity]
+    }
+
     /// Build the boolean test that selects `pat` against the Go expression
     /// `access` (a correctly-typed value at this pattern position). Returns the
     /// empty string for a pattern that always matches (wildcard / bare bind).
-    fn pattern_test_go(&self, pat: &AIRNode, access: &str) -> String {
+    ///
+    /// `decl_ty`, when present, is the declared type-expression node of the
+    /// value at this position (recovered from the match scrutinee's declared
+    /// type and peeled as the recursion descends `Some`/`Ok`/`Err`). It is only
+    /// needed to type-assert a *nested tuple* payload (`Some(Ok((a, b)))`) to its
+    /// concrete tuple struct before reading `.Field0`; every other arm ignores
+    /// it and passes `None` down (the value at that position is already concrete).
+    fn pattern_test_go(&self, pat: &AIRNode, access: &str, decl_ty: Option<&AIRNode>) -> String {
         match &pat.kind {
             NodeKind::WildcardPat | NodeKind::BindPat { .. } => String::new(),
             NodeKind::LiteralPat { lit } => {
@@ -9773,8 +10093,12 @@ impl GoEmitCtx {
                 if matches!(leaf, "Some" | "None" | "Ok" | "Err") {
                     let mut tests = vec![format!("{access}.tag == \"{leaf}\"")];
                     if let Some(f) = fields.first() {
-                        let child = go_typed_access(f, &format!("{access}.v"));
-                        let sub = self.pattern_test_go(f, &child);
+                        // Peel one declared-type layer matching this tag so a
+                        // nested tuple payload can be asserted to its struct.
+                        let child_ty = self.peel_constructor_decl_ty(leaf, decl_ty);
+                        let child =
+                            self.constructor_child_access_go(f, access, child_ty.as_deref());
+                        let sub = self.pattern_test_go(f, &child, child_ty.as_deref());
                         if !sub.is_empty() {
                             tests.push(sub);
                         }
@@ -9807,7 +10131,7 @@ impl GoEmitCtx {
                 for f in fields {
                     if let Some(p) = &f.pattern {
                         let go_field = to_pascal_case(&f.name.name);
-                        let sub = self.pattern_test_go(p, &format!("{access}.{go_field}"));
+                        let sub = self.pattern_test_go(p, &format!("{access}.{go_field}"), None);
                         if !sub.is_empty() {
                             tests.push(sub);
                         }
@@ -9820,9 +10144,17 @@ impl GoEmitCtx {
                 }
             }
             NodeKind::TuplePat { elems } => {
+                // The access is already the concrete tuple struct (the parent
+                // `Some`/`Ok` peel asserted it). Per-field types come from the
+                // declared tuple type when known.
+                let field_tys = self.tuple_field_decl_tys(decl_ty, elems.len());
                 let mut tests = Vec::new();
                 for (i, e) in elems.iter().enumerate() {
-                    let sub = self.pattern_test_go(e, &format!("{access}.Field{i}"));
+                    let sub = self.pattern_test_go(
+                        e,
+                        &format!("{access}.Field{i}"),
+                        field_tys.get(i).and_then(|t| *t),
+                    );
                     if !sub.is_empty() {
                         tests.push(sub);
                     }
@@ -9846,7 +10178,7 @@ impl GoEmitCtx {
                 };
                 let mut tests = vec![len_test];
                 for (i, e) in elems.iter().enumerate() {
-                    let sub = self.pattern_test_go(e, &format!("{access}[{i}]"));
+                    let sub = self.pattern_test_go(e, &format!("{access}[{i}]"), None);
                     if !sub.is_empty() {
                         tests.push(sub);
                     }
@@ -9865,7 +10197,7 @@ impl GoEmitCtx {
                 let alts: Vec<String> = alternatives
                     .iter()
                     .map(|a| {
-                        let t = self.pattern_test_go(a, access);
+                        let t = self.pattern_test_go(a, access, decl_ty);
                         if t.is_empty() {
                             "true".to_string()
                         } else {
@@ -9883,7 +10215,18 @@ impl GoEmitCtx {
     /// recursing into nested constructor / record / tuple sub-patterns. The
     /// trailing `_ = name` keeps an unused binding from failing `go build`.
     fn pattern_binds_go(&mut self, pat: &AIRNode, access: &str) -> Result<(), CodegenError> {
-        let binds = self.pattern_binds_to_string_go(pat, access);
+        self.pattern_binds_go_typed(pat, access, None)
+    }
+
+    /// As [`Self::pattern_binds_go`], but threading the scrutinee's declared type
+    /// node so a nested tuple payload is bound off a struct-asserted access.
+    fn pattern_binds_go_typed(
+        &mut self,
+        pat: &AIRNode,
+        access: &str,
+        decl_ty: Option<&AIRNode>,
+    ) -> Result<(), CodegenError> {
+        let binds = self.pattern_binds_to_string_go_typed(pat, access, decl_ty);
         if binds.is_empty() {
             return Ok(());
         }
@@ -9902,13 +10245,27 @@ impl GoEmitCtx {
     /// Collect `pat`'s bindings as a single-line string of `name := …; _ = name;
     /// ` statements. Shared by [`Self::pattern_binds_go`] (statement position)
     /// and the guard-evaluating anonymous func in [`Self::emit_match_ifchain`].
-    fn pattern_binds_to_string_go(&self, pat: &AIRNode, access: &str) -> String {
+    /// Threads the scrutinee's declared type node so a nested tuple payload
+    /// (`Some(Ok((a, b)))`) is bound off a struct-asserted access rather than a
+    /// bare `interface{}`.
+    fn pattern_binds_to_string_go_typed(
+        &self,
+        pat: &AIRNode,
+        access: &str,
+        decl_ty: Option<&AIRNode>,
+    ) -> String {
         let mut out = String::new();
-        self.collect_binds_go(pat, access, &mut out);
+        self.collect_binds_go(pat, access, decl_ty, &mut out);
         out
     }
 
-    fn collect_binds_go(&self, pat: &AIRNode, access: &str, out: &mut String) {
+    fn collect_binds_go(
+        &self,
+        pat: &AIRNode,
+        access: &str,
+        decl_ty: Option<&AIRNode>,
+        out: &mut String,
+    ) {
         match &pat.kind {
             NodeKind::BindPat { name, .. } => {
                 let n = go_value_ident(&name.name);
@@ -9918,8 +10275,29 @@ impl GoEmitCtx {
                 let leaf = path.segments.last().map_or("", |s| s.name.as_str());
                 if matches!(leaf, "Some" | "None" | "Ok" | "Err") {
                     if let Some(f) = fields.first() {
-                        let child = go_typed_access(f, &format!("{access}.v"));
-                        self.collect_binds_go(f, &child, out);
+                        // Peel one declared-type layer for this tag so a nested
+                        // tuple payload is asserted to its concrete struct before
+                        // its `.Field0`/`.Field1` reads (mirrors `pattern_test_go`).
+                        let child_ty = self.peel_constructor_decl_ty(leaf, decl_ty);
+                        // A *leaf* payload bind (`Some(n)`, `Ok(v)`) with a known
+                        // concrete element type asserts the boxed `interface{}`
+                        // payload to that type, so typed use inside a guard or
+                        // arm body (`n > 0`) type-checks — the same payload typing
+                        // the guard-let binder and the tag-switch arms apply. A
+                        // nested constructor/tuple/record payload re-asserts via
+                        // `constructor_child_access_go` and recurses.
+                        if let NodeKind::BindPat { name, .. } = &f.kind {
+                            let n = go_value_ident(&name.name);
+                            if n != "_" {
+                                let elem = child_ty.as_deref().map(|t| self.type_to_go(t));
+                                let rhs = self.payload_access_go(access, elem.as_deref());
+                                let _ = write!(out, "{n} := {rhs}; _ = {n}; ");
+                                return;
+                            }
+                        }
+                        let child =
+                            self.constructor_child_access_go(f, access, child_ty.as_deref());
+                        self.collect_binds_go(f, &child, child_ty.as_deref(), out);
                     }
                 } else {
                     // User-enum variant: bind payload fields off the asserted
@@ -9927,7 +10305,7 @@ impl GoEmitCtx {
                     let variant_ty = self.go_variant_struct(path);
                     for (i, f) in fields.iter().enumerate() {
                         let child = format!("{access}.({variant_ty}).Field{i}");
-                        self.collect_binds_go(f, &child, out);
+                        self.collect_binds_go(f, &child, None, out);
                     }
                 }
             }
@@ -9949,7 +10327,7 @@ impl GoEmitCtx {
                     let go_field = to_pascal_case(&f.name.name);
                     let child = format!("{base}.{go_field}");
                     match &f.pattern {
-                        Some(p) => self.collect_binds_go(p, &child, out),
+                        Some(p) => self.collect_binds_go(p, &child, None, out),
                         None => {
                             let n = to_camel_case(&f.name.name);
                             let _ = write!(out, "{n} := {child}; _ = {n}; ");
@@ -9958,13 +10336,19 @@ impl GoEmitCtx {
                 }
             }
             NodeKind::TuplePat { elems } => {
+                let field_tys = self.tuple_field_decl_tys(decl_ty, elems.len());
                 for (i, e) in elems.iter().enumerate() {
-                    self.collect_binds_go(e, &format!("{access}.Field{i}"), out);
+                    self.collect_binds_go(
+                        e,
+                        &format!("{access}.Field{i}"),
+                        field_tys.get(i).and_then(|t| *t),
+                        out,
+                    );
                 }
             }
             NodeKind::ListPat { elems, rest } => {
                 for (i, e) in elems.iter().enumerate() {
-                    self.collect_binds_go(e, &format!("{access}[{i}]"), out);
+                    self.collect_binds_go(e, &format!("{access}[{i}]"), None, out);
                 }
                 // `..rest` binds the remaining elements as a tail slice
                 // (`rest := access[n:]`); a bare `..` (RestPat) or absent rest
@@ -9978,7 +10362,7 @@ impl GoEmitCtx {
             }
             NodeKind::OrPat { alternatives } => {
                 if let Some(first) = alternatives.first() {
-                    self.collect_binds_go(first, access, out);
+                    self.collect_binds_go(first, access, decl_ty, out);
                 }
             }
             _ => {}
@@ -10577,6 +10961,16 @@ impl GoEmitCtx {
                 {
                     self.current_expected_type = self.current_fn_ret_type.clone();
                 }
+                // A lambda returned directly (`-> Fn(Int) -> Int { (x) => … }`)
+                // takes its param/return types from the declared function type.
+                let saved_lambda_hints = if should_return {
+                    self.pin_return_lambda_types(t)
+                } else {
+                    (
+                        self.expected_lambda_param_types.clone(),
+                        self.forced_lambda_ret.clone(),
+                    )
+                };
                 if should_return {
                     let ind = self.indent_str();
                     let _ = write!(self.buf, "{ind}return ");
@@ -10587,6 +10981,8 @@ impl GoEmitCtx {
                     self.emit_expr(t)?;
                     self.buf.push('\n');
                 }
+                self.expected_lambda_param_types = saved_lambda_hints.0;
+                self.forced_lambda_ret = saved_lambda_hints.1;
                 self.expected_collection_elem = prev_expected;
                 self.current_expected_type = prev_expected_type;
             }
@@ -10627,6 +11023,17 @@ impl GoEmitCtx {
             {
                 self.current_expected_type = self.current_fn_ret_type.clone();
             }
+            // A lambda body returned directly (`-> Fn(Int) -> Int { (x) => … }`,
+            // or the single-expression form `compose(...) { (x) => f(g(x)) }`)
+            // takes its param/return types from the declared function type.
+            let saved_lambda_hints = if should_return {
+                self.pin_return_lambda_types(node)
+            } else {
+                (
+                    self.expected_lambda_param_types.clone(),
+                    self.forced_lambda_ret.clone(),
+                )
+            };
             if should_return {
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}return ");
@@ -10637,6 +11044,8 @@ impl GoEmitCtx {
                 self.emit_expr(node)?;
                 self.buf.push('\n');
             }
+            self.expected_lambda_param_types = saved_lambda_hints.0;
+            self.forced_lambda_ret = saved_lambda_hints.1;
             self.expected_collection_elem = prev_expected;
             self.current_expected_type = prev_expected_type;
         }
@@ -13333,6 +13742,166 @@ mod tests {
             ctx.type_to_go(&type_named("Result", vec![int_ty(), str_ty()])),
             "__bockResult"
         );
+    }
+
+    /// `optional_inner_type_node` / `result_inner_type_nodes` peel one container
+    /// layer for the nested-pattern declared-type threading: an
+    /// `Optional[Result[(Int, Int), String]]` peels to its `Result[…]`, which
+    /// peels to the `(Int, Int)` tuple and the `String` err. Rendering the peeled
+    /// tuple node reproduces the concrete struct the nested tuple payload is
+    /// asserted to.
+    #[test]
+    fn peel_optional_result_tuple_decl_type_nodes() {
+        let ctx = GoEmitCtx::new();
+        let int_ty = || type_named("Int", vec![]);
+        let str_ty = || type_named("String", vec![]);
+        let tuple_ty = node(
+            910,
+            NodeKind::TypeTuple {
+                elems: vec![int_ty(), int_ty()],
+            },
+        );
+        let result_ty = type_named("Result", vec![tuple_ty, str_ty()]);
+        let opt_ty = type_named("Optional", vec![result_ty]);
+
+        // Optional → Result.
+        let inner = ctx
+            .optional_inner_type_node(&opt_ty)
+            .expect("peels Optional");
+        assert!(matches!(inner.kind, NodeKind::TypeNamed { .. }));
+        // Result → (tuple ok, string err).
+        let (ok, err) = ctx.result_inner_type_nodes(inner).expect("peels Result");
+        assert_eq!(
+            ctx.type_to_go(ok),
+            "struct{ Field0 int64; Field1 int64 }",
+            "the Ok payload is the concrete tuple struct"
+        );
+        assert_eq!(ctx.type_to_go(err.expect("err arg present")), "string");
+        // A non-container type peels to nothing.
+        assert!(ctx.optional_inner_type_node(&int_ty()).is_none());
+        assert!(ctx.result_inner_type_nodes(&int_ty()).is_none());
+    }
+
+    /// `peel_constructor_decl_ty` maps a tag to the inner declared type it carries
+    /// (`Some`/`Ok` → ok/elem, `Err` → err), and `tuple_field_decl_tys` splits a
+    /// declared tuple type into per-field nodes (or `None` on arity mismatch).
+    #[test]
+    fn constructor_and_tuple_decl_type_peeling() {
+        let ctx = GoEmitCtx::new();
+        let int_ty = || type_named("Int", vec![]);
+        let str_ty = || type_named("String", vec![]);
+        let result_ty = type_named("Result", vec![int_ty(), str_ty()]);
+        let opt_ty = type_named("Optional", vec![result_ty.clone()]);
+
+        // `Some` peels Optional → Result (a runtime container, renders __bockResult).
+        let some_inner = ctx
+            .peel_constructor_decl_ty("Some", Some(&opt_ty))
+            .expect("Some peels Optional");
+        assert_eq!(ctx.type_to_go(&some_inner), "__bockResult");
+        // `Ok` peels Result → Int; `Err` → String.
+        let ok_inner = ctx
+            .peel_constructor_decl_ty("Ok", Some(&result_ty))
+            .expect("Ok peels Result");
+        assert_eq!(ctx.type_to_go(&ok_inner), "int64");
+        let err_inner = ctx
+            .peel_constructor_decl_ty("Err", Some(&result_ty))
+            .expect("Err peels Result");
+        assert_eq!(ctx.type_to_go(&err_inner), "string");
+        // Unknown declared type ⇒ no peel.
+        assert!(ctx.peel_constructor_decl_ty("Some", None).is_none());
+
+        // A 2-tuple splits into two field nodes; an arity mismatch yields Nones.
+        let tuple_ty = node(
+            911,
+            NodeKind::TypeTuple {
+                elems: vec![int_ty(), str_ty()],
+            },
+        );
+        let fields = ctx.tuple_field_decl_tys(Some(&tuple_ty), 2);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(ctx.type_to_go(fields[0].expect("field 0")), "int64");
+        assert_eq!(ctx.type_to_go(fields[1].expect("field 1")), "string");
+        // Arity mismatch / unknown ⇒ all None.
+        assert!(ctx
+            .tuple_field_decl_tys(Some(&tuple_ty), 3)
+            .iter()
+            .all(Option::is_none));
+        assert!(ctx
+            .tuple_field_decl_tys(None, 2)
+            .iter()
+            .all(Option::is_none));
+    }
+
+    /// `fn_type_go_signature` renders a declared `Fn(Int) -> Int` to its Go
+    /// param/return types, used to type a lambda returned in tail position;
+    /// `fn_type_ret_node` only keeps a function-typed return.
+    #[test]
+    fn fn_type_signature_for_returned_lambda() {
+        let ctx = GoEmitCtx::new();
+        let int_ty = || type_named("Int", vec![]);
+        let fn_ty = node(
+            912,
+            NodeKind::TypeFunction {
+                params: vec![int_ty()],
+                ret: Box::new(int_ty()),
+                effects: Vec::new(),
+            },
+        );
+        let (params, ret) = ctx.fn_type_go_signature(&fn_ty).expect("is a fn type");
+        assert_eq!(params, vec!["int64".to_string()]);
+        assert_eq!(ret, "int64");
+        // A non-function return type yields no signature / no kept node.
+        assert!(ctx.fn_type_go_signature(&int_ty()).is_none());
+        assert!(GoEmitCtx::fn_type_ret_node(Some(&int_ty())).is_none());
+        assert!(GoEmitCtx::fn_type_ret_node(Some(&fn_ty)).is_some());
+    }
+
+    /// `payload_access_go` asserts an Optional/Result *leaf* payload bind to its
+    /// concrete element type — numeric via the widening helpers, others via a
+    /// direct assertion — and reads the raw payload for unit/unknown types (a hard
+    /// assertion on a boxed `nil` would panic).
+    #[test]
+    fn payload_access_typed_leaf_bind() {
+        let ctx = GoEmitCtx::new();
+        assert_eq!(
+            ctx.payload_access_go("opt", Some("int64")),
+            "__bockAsInt64(opt.v)"
+        );
+        assert_eq!(
+            ctx.payload_access_go("opt", Some("float64")),
+            "__bockAsFloat64(opt.v)"
+        );
+        assert_eq!(
+            ctx.payload_access_go("res", Some("string")),
+            "res.v.(string)"
+        );
+        assert_eq!(ctx.payload_access_go("opt", Some("struct{}")), "opt.v");
+        assert_eq!(ctx.payload_access_go("opt", None), "opt.v");
+    }
+
+    /// `specialise_lambda_param_types` sees through a `type` alias to a function
+    /// type so a lambda argument bound to a `Predicate = Fn(Int) -> Bool`
+    /// parameter is typed `func(x int64) bool`, not the erased `interface{}`.
+    #[test]
+    fn lambda_param_types_see_through_fn_type_alias() {
+        let mut ctx = GoEmitCtx::new();
+        let int_ty = || type_named("Int", vec![]);
+        let bool_ty = || type_named("Bool", vec![]);
+        let fn_ty = node(
+            913,
+            NodeKind::TypeFunction {
+                params: vec![int_ty()],
+                ret: Box::new(bool_ty()),
+                effects: Vec::new(),
+            },
+        );
+        // Register `type Predicate = Fn(Int) -> Bool`.
+        ctx.type_aliases.insert("Predicate".to_string(), fn_ty);
+        let alias = type_named("Predicate", vec![]);
+        let tys = ctx
+            .specialise_lambda_param_types(&alias, &[], &HashMap::new())
+            .expect("alias resolves to a fn type");
+        assert_eq!(tys, vec!["int64".to_string()]);
     }
 
     #[test]

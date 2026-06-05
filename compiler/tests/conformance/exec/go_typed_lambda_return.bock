@@ -1,0 +1,32 @@
+// TEST: exec_go_typed_lambda_return
+// EXPECT: output "compose=16;direct=7"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go typed-lambda-in-return-position (type-zoo's `compose_int`). A function
+// declared `-> Fn(Int) -> Int` whose body is a bare lambda (`(x) => f(g(x))`)
+// must emit `func(x int64) int64 { … }`. Before the fix the Go backend emitted
+// the inference fallback `func(x interface{}) interface{}` — neither assignable
+// to the declared `func(int64) int64` return type nor usable in `f(g(x))` where
+// `g` wants an `int64` (`need type assertion`, a `go build` error). The fix pins
+// the returned lambda's param/return Go types from the enclosing function's
+// declared function-return type. Exercised through both the composing form and a
+// direct returned lambda. Asserted on all five targets so the applied result,
+// not just a clean Go compile, is checked.
+module main
+
+public fn compose_int(f: Fn(Int) -> Int, g: Fn(Int) -> Int) -> Fn(Int) -> Int {
+  (x) => f(g(x))
+}
+
+public fn adder(n: Int) -> Fn(Int) -> Int {
+  (x) => x + n
+}
+
+fn double(x: Int) -> Int { x * 2 }
+fn inc(x: Int) -> Int { x + 1 }
+
+fn main() -> Void {
+  let composed = compose_int(double, inc)
+  let add5 = adder(5)
+  println("compose=${composed(7)};direct=${add5(2)}")
+}

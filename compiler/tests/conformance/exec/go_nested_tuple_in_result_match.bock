@@ -1,0 +1,43 @@
+// TEST: exec_go_nested_tuple_in_result_match
+// EXPECT: output "pair: 1, 2;single: 7;err: bad;none"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Go nested *tuple-in-Result-in-Optional* value-position match (pattern-lab's
+// `deeply_nested`). A `match val { Some(Ok((a, b))) => … }` on a scrutinee of
+// declared type `Optional[Result[(Int, Int), String]]` routes to the if-chain
+// IIFE (a nested constructor pattern). The chain peels `Some` (Optional payload),
+// then `Ok` (Result payload) to an `interface{}`, and then reads the tuple
+// fields. Before the fix the tuple binds read `.Field0`/`.Field1` directly off
+// that un-asserted `interface{}` payload — `interface{} has no field Field0`, a
+// `go build` error. The fix threads the scrutinee's declared type through the
+// pattern recursion (peeling Optional on `Some` and Result on `Ok`/`Err`), so a
+// nested `TuplePat` asserts the payload to its concrete tuple struct
+// (`.v.(struct{ Field0 int64; Field1 int64 })`) before the field reads. A
+// single-payload nested `Ok` (`Some(Ok(n))`) and the `Err`/`None` arms are
+// exercised too. Asserted on all five targets so the computed result, not just a
+// clean Go compile, is checked.
+module main
+
+public fn deeply_nested(val: Optional[Result[(Int, Int), String]]) -> String {
+  match val {
+    Some(Ok((a, b))) => "pair: ${a}, ${b}"
+    Some(Err(e)) => "error: ${e}"
+    None => "nothing"
+  }
+}
+
+public fn nested_single(val: Optional[Result[Int, String]]) -> String {
+  match val {
+    Some(Ok(n)) => "single: ${n}"
+    Some(Err(e)) => "err: ${e}"
+    None => "none"
+  }
+}
+
+fn main() -> Void {
+  let pair = deeply_nested(Some(Ok((1, 2))))
+  let single = nested_single(Some(Ok(7)))
+  let err = nested_single(Some(Err("bad")))
+  let none = nested_single(None)
+  println("${pair};${single};${err};${none}")
+}
