@@ -563,6 +563,8 @@ class Button : Component, Renderable {
 
 Single inheritance, multiple trait implementation. Classes are always available in v1; the paradigm modes that could restrict their use are Reserved for v1.x (§1.5).
 
+A class body's methods and the class's inherent/trait `impl` blocks share the type's single method namespace (§6.7, *Single method namespace*): a class-body `render` directly satisfies a `render` requirement declared by a trait in the class header, and the same method name may not also be defined in a separate `impl Trait for T` block.
+
 ### 6.5 — Traits
 
 ```bock
@@ -579,6 +581,8 @@ trait Collection {
   fn is_empty(self) -> Bool { self.len() == 0 }
 }
 ```
+
+A trait requirement is satisfied by a matching method **anywhere** in the implementing type's single method namespace (§6.7, *Single method namespace*), not only by a method written inside the `impl Trait for T` block. An inherent or class-body method of matching name and signature satisfies the requirement and lets the trait-impl block be empty.
 
 ### 6.6 — Platform Traits
 
@@ -615,6 +619,24 @@ let q = Point.from_coords(3, 4)
 ```
 
 A bare type name in expression position is only valid when followed by `.method()` (associated function call) or `{ ... }` (record construction). Type names are not values on their own.
+
+#### Single method namespace
+
+A type — `record` or `class` — has exactly **one method namespace**, keyed by method name. Every method that applies to the type contributes to that single namespace, whether it is declared:
+
+- in an inherent `impl T { … }` block,
+- in the `class T { … }` body (§6.4), or
+- in a trait `impl Trait for T { … }` block (including a trait declared in the class header).
+
+Three rules follow:
+
+1. **Trait requirements are satisfied by a name + signature match anywhere in the namespace.** A method named `render` whose signature matches `Component`'s `render` requirement satisfies that requirement regardless of which block declares it. An `impl Component for T { }` block may therefore be **empty** when an inherent or class-body method of matching name and signature already provides the required method. There is no distinction between "the inherent `render`" and "the trait `render`" — there is one `render`.
+
+2. **Defining the same method name more than once for one type is a coherence error** (`E4012`), regardless of which blocks the definitions appear in. An inherent `render` plus a trait-impl `render` for the same type is rejected at check time even when their signatures are identical (the second definition is redundant) — and especially when they differ.
+
+3. **A type cannot satisfy two traits that require the same method name with incompatible signatures.** On the v1 targets a type has one method slot per name, so this is genuinely unsatisfiable and is reported as the same `E4012` coherence error rather than resolved by name-mangling.
+
+These rules do **not** apply to the parameterized conversion traits `From[T]` and `Into[T]`: each instantiation (`From[Int]`, `From[String]`, …) is selected by its trait argument, not by a bare `.from()`/`.into()` call, so the shared method name across instantiations is not a namespace collision. Generic blanket impls (`impl[T] Trait for Foo[T]`) are likewise exempt.
 
 ### 6.8 — Type Aliases
 
