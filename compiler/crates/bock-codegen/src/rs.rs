@@ -110,6 +110,9 @@ impl CodeGenerator for RsGenerator {
         ctx.generic_decls =
             crate::generator::collect_generic_decls(&[(module, std::path::Path::new(""))]);
         ctx.collect_clone_targets(module);
+        // Aliases first: `collect_fn_returning_fns` resolves a `Fn`-typed alias
+        // in a return position, so the alias table must already be populated.
+        ctx.collect_fn_type_aliases(module);
         ctx.collect_fn_returning_fns(module);
         let trait_decls =
             crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
@@ -255,6 +258,12 @@ impl CodeGenerator for RsGenerator {
         template.generic_decls = generic_decls;
         template.collect_self_operand_methods(&trait_decls);
         template.trait_decls = trait_decls;
+        // Collect `Fn`-typed aliases across the whole reachable set first: a
+        // function in one module may return an alias declared in another, and
+        // `collect_fn_returning_fns` resolves through the alias table.
+        for (module, _) in modules {
+            template.collect_fn_type_aliases(module);
+        }
         for (module, _) in modules {
             template.collect_clone_targets(module);
             template.collect_fn_returning_fns(module);
@@ -422,6 +431,11 @@ impl CodeGenerator for RsGenerator {
         template.generic_decls = generic_decls;
         template.collect_self_operand_methods(&trait_decls);
         template.trait_decls = trait_decls;
+        // Aliases first (see the project path): the alias table must be complete
+        // before `collect_fn_returning_fns` resolves a `Fn`-typed alias return.
+        for (module, _) in modules {
+            template.collect_fn_type_aliases(module);
+        }
         for (module, _) in modules {
             template.collect_clone_targets(module);
             template.collect_fn_returning_fns(module);
@@ -742,6 +756,27 @@ struct RsEmitCtx {
     /// must use the `Debug` formatter (`{:?}`) instead of `{}` (E0277). Seeded
     /// per-block in [`Self::emit_block_body`]; saved/restored so it never leaks.
     collection_bindings: std::collections::HashSet<String>,
+    /// Maps a user `type` alias name (original, not snake-cased) whose RHS is a
+    /// `Fn(..) -> ..` to its underlying `TypeFunction` AIR node — e.g.
+    /// `type EventHandler = Fn() -> Void`. A signature position naming such an
+    /// alias is lowered to `impl Fn(..)` (param/return) exactly as a literal
+    /// `Fn(..)` would be: the alias resolves to a `fn` pointer, but the value
+    /// flowing through it is frequently a *capturing* closure (a closure that
+    /// captures does not coerce to `fn` — E0308). The `type` declaration itself
+    /// keeps the `fn`-pointer form (`impl Trait` is not nameable in a `type`
+    /// alias); only its *uses* in fn signatures widen. Populated once per program
+    /// by [`Self::collect_fn_type_aliases`].
+    fn_type_aliases: std::collections::HashMap<String, AIRNode>,
+    /// Snake-cased names of move-reused, non-`Copy` parameters whose declared
+    /// type is **concrete** (not a function's generic type parameter) — the
+    /// subset of [`Self::reused_let_bindings`] that is safe to `.clone()` when it
+    /// appears as a bare **value/block-tail** (`{ value }` arm) to avoid a
+    /// use-after-move (`E0382`). A generic `T` (e.g. `max_of<T: Ord>(a, b)`'s
+    /// `a`/`b`) is excluded: `T` has no `Clone` bound, so cloning it is `E0599`;
+    /// in a tail position the move is the value's *last* use anyway, so no clone
+    /// is needed there. Seeded alongside `reused_let_bindings` per function (see
+    /// [`Self::seed_reused_params`]) and restored together.
+    reused_value_tail_bindings: std::collections::HashSet<String>,
 }
 
 impl RsEmitCtx {
@@ -775,6 +810,8 @@ impl RsEmitCtx {
             fn_returning_fns: std::collections::HashSet::new(),
             fn_typed_bindings: std::collections::HashSet::new(),
             collection_bindings: std::collections::HashSet::new(),
+            fn_type_aliases: std::collections::HashMap::new(),
+            reused_value_tail_bindings: std::collections::HashSet::new(),
         }
     }
 
@@ -815,6 +852,8 @@ impl RsEmitCtx {
             fn_returning_fns: self.fn_returning_fns.clone(),
             fn_typed_bindings: std::collections::HashSet::new(),
             collection_bindings: std::collections::HashSet::new(),
+            fn_type_aliases: self.fn_type_aliases.clone(),
+            reused_value_tail_bindings: std::collections::HashSet::new(),
         }
     }
 
@@ -907,11 +946,59 @@ impl RsEmitCtx {
             {
                 if return_type
                     .as_deref()
-                    .is_some_and(|t| matches!(&t.kind, NodeKind::TypeFunction { .. }))
+                    .is_some_and(|t| self.type_is_fn_closure(t))
                 {
                     self.fn_returning_fns.insert(name.name.clone());
                 }
             }
+        }
+    }
+
+    /// Populate [`Self::fn_type_aliases`] from a module's `type` declarations:
+    /// every `type Name = Fn(..) -> ..` records `Name → <the TypeFunction node>`.
+    /// A fn-signature position naming such an alias then lowers to `impl Fn(..)`
+    /// (see [`Self::type_to_rs_fn_pos_bounded`] / [`Self::type_is_fn_closure`]),
+    /// so a *capturing* closure value flowing through the alias (the common case
+    /// — `with_logging` returning a closure that captures `name`/`handler`)
+    /// type-checks; a bare `fn` pointer would reject it (E0308). The `type`
+    /// declaration itself is unchanged (it keeps the `fn`-pointer form, which is
+    /// the only `Fn`-shaped type nameable in a Rust `type` alias).
+    fn collect_fn_type_aliases(&mut self, module: &AIRModule) {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            return;
+        };
+        for item in items {
+            if let NodeKind::TypeAlias { name, ty, .. } = &item.kind {
+                if matches!(&ty.kind, NodeKind::TypeFunction { .. }) {
+                    self.fn_type_aliases
+                        .insert(name.name.clone(), (**ty).clone());
+                }
+            }
+        }
+    }
+
+    /// True when a type, resolving through any `Fn`-typed `type` alias
+    /// ([`Self::fn_type_aliases`]), is a function type `Fn(..) -> ..` — the
+    /// signal to lower it to `impl Fn(..)` in a param/return position and to
+    /// treat a function returning it as a closure-returning function. A literal
+    /// `TypeFunction` qualifies directly; a `TypeNamed` qualifies when it names a
+    /// registered `Fn`-typed alias.
+    fn type_is_fn_closure(&self, ty: &AIRNode) -> bool {
+        self.resolve_fn_closure_type(ty).is_some()
+    }
+
+    /// If `ty` is (or, through a `Fn`-typed alias, resolves to) a function type,
+    /// return the underlying `TypeFunction` node; otherwise `None`. Resolution
+    /// follows one alias hop, which is all v1 produces (an alias whose RHS is a
+    /// bare `Fn(..)`); a chain of aliases is not expected and falls through.
+    fn resolve_fn_closure_type<'a>(&'a self, ty: &'a AIRNode) -> Option<&'a AIRNode> {
+        match &ty.kind {
+            NodeKind::TypeFunction { .. } => Some(ty),
+            NodeKind::TypeNamed { path, args } if args.is_empty() => {
+                let name = path.segments.last()?;
+                self.fn_type_aliases.get(&name.name)
+            }
+            _ => None,
         }
     }
 
@@ -2501,7 +2588,14 @@ impl RsEmitCtx {
     /// *returns* a closure (see [`Self::returning_fn_closure`]): the moved
     /// captures must be `'static` to satisfy the returned `impl Fn` (E0310).
     fn type_to_rs_fn_pos_bounded(&mut self, node: &AIRNode, static_bound: bool) -> String {
-        if let NodeKind::TypeFunction { params, ret, .. } = &node.kind {
+        // Resolve through a `Fn`-typed `type` alias (`type EventHandler = Fn() ->
+        // Void`): a signature position naming the alias lowers to `impl Fn(..)`
+        // just like a literal `Fn(..)`, so a *capturing* closure flowing through
+        // it type-checks (a `fn` pointer would reject it — E0308). The alias's
+        // own `type` declaration keeps the `fn`-pointer form.
+        let resolved = self.resolve_fn_closure_type(node).cloned();
+        if let Some(NodeKind::TypeFunction { params, ret, .. }) = resolved.as_ref().map(|n| &n.kind)
+        {
             let param_strs: Vec<String> = params.iter().map(|p| self.type_to_rs(p)).collect();
             let bound = if static_bound { " + 'static" } else { "" };
             format!(
@@ -3233,8 +3327,7 @@ impl RsEmitCtx {
         // A function whose declared return type is a `Fn(..) -> ..` returns an
         // `impl Fn` (a closure). Its closure params then need `+ 'static` and the
         // tail closure must `move`-capture — see `returning_fn_closure`.
-        let returns_fn_closure =
-            return_type.is_some_and(|t| matches!(&t.kind, NodeKind::TypeFunction { .. }));
+        let returns_fn_closure = return_type.is_some_and(|t| self.type_is_fn_closure(t));
         let param_strs = if returns_fn_closure {
             self.collect_param_strs_static_fn(params)
         } else {
@@ -3274,8 +3367,11 @@ impl RsEmitCtx {
             self.borrowed_handler_effects.insert(ename.clone());
         }
         // A by-value, non-`Copy` parameter reused after a move must clone on each
-        // by-value pass (`E0382`). See `seed_reused_params`.
-        let seeded = self.seed_reused_params(params, body);
+        // by-value pass (`E0382`). See `seed_reused_params`. The function's
+        // generic-param names keep a generic `T` value out of the bare-tail clone
+        // set (it may lack `Clone` — E0599).
+        let generic_names = Self::generic_param_name_set(generic_params);
+        let seeded = self.seed_reused_params(params, body, &generic_names);
         let prev_returning = self.return_closure_tail;
         // The flag is consulted only at the function's tail expression (the
         // returned value), so an intermediate `.map`/`.filter` closure in the
@@ -3286,6 +3382,7 @@ impl RsEmitCtx {
         self.return_closure_tail = prev_returning;
         for name in seeded {
             self.reused_let_bindings.remove(&name);
+            self.reused_value_tail_bindings.remove(&name);
         }
         self.current_handler_vars = old_handler_vars;
         self.borrowed_handler_effects = old_borrowed_handlers;
@@ -3362,10 +3459,12 @@ impl RsEmitCtx {
             }
             // Seed move-reuse clones for by-value, non-`Copy` method params (the
             // `self` receiver is borrowed and skipped). See `seed_reused_params`.
-            let seeded = self.seed_reused_params(rest, body);
+            let generic_names = Self::generic_param_name_set(generic_params);
+            let seeded = self.seed_reused_params(rest, body, &generic_names);
             self.emit_block_body(body)?;
             for name in seeded {
                 self.reused_let_bindings.remove(&name);
+                self.reused_value_tail_bindings.remove(&name);
             }
             self.current_handler_vars = old_handler_vars;
             self.borrowed_handler_effects = old_borrowed_handlers;
@@ -4651,7 +4750,7 @@ impl RsEmitCtx {
             NodeKind::Block { stmts, tail } => {
                 if stmts.is_empty() {
                     if let Some(t) = tail {
-                        return self.emit_expr(t);
+                        return self.emit_tail_value(t);
                     }
                 }
                 // Block in expression position: `{ stmts; tail }`
@@ -4662,7 +4761,7 @@ impl RsEmitCtx {
                 }
                 if let Some(t) = tail {
                     self.write_indent();
-                    self.emit_expr(t)?;
+                    self.emit_tail_value(t)?;
                     self.buf.push('\n');
                 }
                 self.indent -= 1;
@@ -4863,7 +4962,20 @@ impl RsEmitCtx {
     /// /`char`) and reference-bound `self`-operands are skipped: they are not
     /// moved, and cloning them would be needless (`clippy::clone_on_copy`). The
     /// leading `self` receiver is borrowed, never owned, so it is skipped too.
-    fn seed_reused_params(&mut self, params: &[AIRNode], body: &AIRNode) -> Vec<String> {
+    ///
+    /// `generic_param_names` is the set of the enclosing function's generic type
+    /// parameter names (`T`, `U`, …). A reused param whose declared type is one of
+    /// them is recorded in `reused_let_bindings` (so a by-value call pass still
+    /// clones — that path already requires a `Clone` bound the codegen
+    /// synthesizes) but **not** in [`Self::reused_value_tail_bindings`]: a generic
+    /// `T` used as a bare block-tail value (`max_of<T: Ord>`'s `{ a }`) is its
+    /// last use and must not be `.clone()`d there (`T` may lack `Clone` — E0599).
+    fn seed_reused_params(
+        &mut self,
+        params: &[AIRNode],
+        body: &AIRNode,
+        generic_param_names: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
         let mut added = Vec::new();
         for p in params {
             // Skip the `self` receiver — it lowers to `&self`/`&mut self`, never
@@ -4891,10 +5003,49 @@ impl RsEmitCtx {
                 || Self::identifier_used_in_loop(body, &rs_name))
                 && self.reused_let_bindings.insert(rs_name.clone())
             {
+                // A concrete (non-generic) type is `Clone`, so it is safe to clone
+                // in a bare value/block-tail position. A generic `T` is not (no
+                // `Clone` bound) — exclude it from the tail-clone set.
+                if !Self::ast_type_is_generic_param(ty.as_deref(), generic_param_names) {
+                    self.reused_value_tail_bindings.insert(rs_name.clone());
+                }
                 added.push(rs_name);
             }
         }
         added
+    }
+
+    /// True when `ty` is a bare reference to one of `generic_param_names` — a
+    /// `TypeNamed` with a single, argument-less segment matching a declared
+    /// generic type parameter (`T`, `U`). Such a type has no `Clone` bound unless
+    /// the codegen synthesized one, so it must not be cloned in a bare
+    /// value/tail position (see [`Self::seed_reused_params`]).
+    fn ast_type_is_generic_param(
+        ty: Option<&AIRNode>,
+        generic_param_names: &std::collections::HashSet<String>,
+    ) -> bool {
+        matches!(
+            ty.map(|t| &t.kind),
+            Some(NodeKind::TypeNamed { path, args })
+                if args.is_empty()
+                    && path.segments.len() == 1
+                    && path
+                        .segments
+                        .last()
+                        .is_some_and(|s| generic_param_names.contains(&s.name))
+        )
+    }
+
+    /// The set of generic type-parameter names declared by a function
+    /// (`fn f[T, U](..)` → `{T, U}`). Used to keep a generic `T` value out of the
+    /// bare-tail clone set (see [`Self::seed_reused_params`]).
+    fn generic_param_name_set(
+        generic_params: &[bock_ast::GenericParam],
+    ) -> std::collections::HashSet<String> {
+        generic_params
+            .iter()
+            .map(|gp| gp.name.name.clone())
+            .collect()
     }
 
     /// True when `name` is read anywhere inside a loop body (`for`/`while`/
@@ -5129,6 +5280,34 @@ impl RsEmitCtx {
             let snake = to_snake_case(&name.name);
             return self.fn_typed_bindings.contains(&snake)
                 && self.reused_let_bindings.contains(&snake);
+        }
+        false
+    }
+
+    /// True when a block's **tail expression** is a bare identifier naming a
+    /// move-reused, non-`Copy` binding ([`Self::reused_let_bindings`]) and so
+    /// must be `.clone()`d to keep an earlier or sibling use live (`E0382`).
+    ///
+    /// The case that motivates this: a non-`Copy` parameter (`value: String`)
+    /// read as the *value* of several sibling `if`/`else` arms —
+    /// `let a = if (..) { value } else { .. }; let b = if (..) { value } else
+    /// { .. }`. Each `{ value }` arm-tail moves the parameter, so the second arm
+    /// is a use-after-move. The call-argument emitter ([`Self::emit_call_arg`])
+    /// already clones such a binding when it is *passed to a call*; a bare
+    /// arm-tail (or block-tail) value is the remaining position where the same
+    /// move hazard appears. Cloning is always sound — every generated value type
+    /// is `Clone`.
+    ///
+    /// A function/closure-valued binding ([`Self::fn_typed_bindings`]) is
+    /// excluded: an `impl Fn` opaque type is not `Clone` (E0599); a move-reuse of
+    /// one is handled by the borrow path elsewhere. Only a bare identifier
+    /// qualifies — any other tail expression (a call, an interpolation, a
+    /// constructor) produces a fresh value with no move hazard.
+    fn tail_ident_needs_clone(&self, tail: &AIRNode) -> bool {
+        if let NodeKind::Identifier { name } = &tail.kind {
+            let snake = to_snake_case(&name.name);
+            return self.reused_value_tail_bindings.contains(&snake)
+                && !self.fn_typed_bindings.contains(&snake);
         }
         false
     }
@@ -5647,7 +5826,11 @@ impl RsEmitCtx {
                 self.write_indent();
                 let prev = self.returning_fn_closure;
                 self.returning_fn_closure = self.return_closure_tail;
+                let clone_tail = self.tail_ident_needs_clone(t);
                 let r = self.emit_expr(t);
+                if clone_tail {
+                    self.buf.push_str(".clone()");
+                }
                 self.returning_fn_closure = prev;
                 r?;
                 self.buf.push('\n');
@@ -5820,11 +6003,24 @@ impl RsEmitCtx {
         if let NodeKind::Block { stmts, tail } = &node.kind {
             if stmts.is_empty() {
                 if let Some(t) = tail {
-                    return self.emit_expr(t);
+                    return self.emit_tail_value(t);
                 }
             }
         }
         self.emit_expr(node)
+    }
+
+    /// Emit a value-position block tail, cloning a move-reused bare-identifier
+    /// tail (`{ value }` arm) so a sibling/later use stays live (`E0382`). See
+    /// [`Self::tail_ident_needs_clone`]; the call-arg and for-iterable emitters
+    /// apply the same clone in their positions.
+    fn emit_tail_value(&mut self, tail: &AIRNode) -> Result<(), CodegenError> {
+        let clone_tail = self.tail_ident_needs_clone(tail);
+        self.emit_expr(tail)?;
+        if clone_tail {
+            self.buf.push_str(".clone()");
+        }
+        Ok(())
     }
 
     fn pattern_to_binding_name(&self, pat: &AIRNode) -> String {
@@ -9355,6 +9551,212 @@ mod tests {
                 body: Box::new(body),
             },
         )
+    }
+
+    /// A function whose declared return type is a `Fn`-typed **`type` alias**
+    /// (`type EventHandler = Fn() -> Void`; `fn with_logging(..) -> EventHandler`)
+    /// is recognised as a closure-returning function exactly as a literal `Fn(..)`
+    /// return would be: the return + the `Fn`-typed param lower to `impl Fn(..)`,
+    /// and the tail closure gets `move`. A bare `fn` pointer (the alias's own
+    /// lowering) would reject the body's *capturing* closure (E0308). The
+    /// `react-components` `with_logging` shape.
+    #[test]
+    fn rust_fn_typed_alias_return_uses_impl_fn_and_move() {
+        // type EventHandler = Fn() -> Void
+        let alias = node(
+            1,
+            NodeKind::TypeAlias {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                name: ident("EventHandler"),
+                generic_params: vec![],
+                ty: Box::new(node(
+                    2,
+                    NodeKind::TypeFunction {
+                        params: vec![],
+                        ret: Box::new(type_named_node(3, "Void")),
+                        effects: vec![],
+                    },
+                )),
+                where_clause: vec![],
+            },
+        );
+        // fn with_logging(handler: EventHandler) -> EventHandler { () => handler() }
+        let inner_call = node(
+            30,
+            NodeKind::Call {
+                callee: Box::new(id_node(31, "handler")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let lambda = node(
+            32,
+            NodeKind::Lambda {
+                params: vec![],
+                body: Box::new(inner_call),
+            },
+        );
+        let handler_param = node(
+            10,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(11, "handler")),
+                ty: Some(Box::new(type_named_node(12, "EventHandler"))),
+                default: None,
+            },
+        );
+        let f = node(
+            20,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("with_logging"),
+                generic_params: vec![],
+                params: vec![handler_param],
+                return_type: Some(Box::new(type_named_node(21, "EventHandler"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(40, vec![], Some(lambda))),
+            },
+        );
+        let out = gen(&module(vec![], vec![alias, f]));
+        assert!(
+            out.contains("-> impl Fn() -> ()"),
+            "alias return must lower to impl Fn, got: {out}"
+        );
+        assert!(
+            out.contains("handler: impl Fn() -> () + 'static"),
+            "alias param must lower to impl Fn + 'static, got: {out}"
+        );
+        assert!(
+            out.contains("move ||"),
+            "tail closure must move-capture, got: {out}"
+        );
+        // The alias declaration itself keeps the `fn`-pointer form (the only
+        // `Fn`-shaped type nameable in a Rust `type` alias).
+        assert!(
+            out.contains("type EventHandler = fn() -> ();"),
+            "alias decl must stay a fn pointer, got: {out}"
+        );
+        assert!(check_rs_syntax(&out), "generated rust must parse: {out}");
+    }
+
+    /// A non-`Copy` parameter used as the bare **value** of several sibling
+    /// `if`/`else` arms (`let a = if (..) { value } else { .. }; let b = if (..)
+    /// { value } else { .. }`) is moved by the first arm-tail; the later arm is a
+    /// use-after-move (E0382). The Rust backend clones the reused-param tail
+    /// (`{ value.clone() }`). The `react-components` `update_field` shape.
+    #[test]
+    fn rust_reused_param_value_tail_is_cloned() {
+        // let a = if (c) { value } else { "" }
+        // let b = if (c) { value } else { "" }
+        let make_if = |id: u32| {
+            node(
+                id,
+                NodeKind::If {
+                    let_pattern: None,
+                    condition: Box::new(id_node(id + 1, "c")),
+                    then_block: Box::new(block(id + 2, vec![], Some(id_node(id + 3, "value")))),
+                    else_block: Some(Box::new(block(id + 4, vec![], Some(str_lit(id + 5, ""))))),
+                },
+            )
+        };
+        let let_a = node(
+            50,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(51, "a")),
+                ty: None,
+                value: Box::new(make_if(60)),
+            },
+        );
+        let let_b = node(
+            70,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(71, "b")),
+                ty: None,
+                value: Box::new(make_if(80)),
+            },
+        );
+        let value_param = node(
+            10,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(11, "value")),
+                ty: Some(Box::new(type_named_node(12, "String"))),
+                default: None,
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("pick"),
+                generic_params: vec![],
+                params: vec![value_param],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(40, vec![let_a, let_b], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("{ value.clone() }"),
+            "reused String param tail must clone, got: {out}"
+        );
+    }
+
+    /// A **generic** `T`-typed parameter used as a bare arm-tail value
+    /// (`max_of<T: Ord>(a, b) { if (a > b) { a } else { b } }`) must NOT be
+    /// cloned: `T` carries no `Clone` bound, so `a.clone()` is E0599 — and the
+    /// arm-tail is the value's last use, so no clone is needed. Guards the
+    /// reused-param tail clone against the `type-zoo` `max_of` regression.
+    #[test]
+    fn rust_generic_param_value_tail_not_cloned() {
+        let if_node = node(
+            30,
+            NodeKind::If {
+                let_pattern: None,
+                condition: Box::new(node(
+                    31,
+                    NodeKind::BinaryOp {
+                        op: BinOp::Gt,
+                        left: Box::new(id_node(32, "a")),
+                        right: Box::new(id_node(33, "b")),
+                    },
+                )),
+                then_block: Box::new(block(34, vec![], Some(id_node(35, "a")))),
+                else_block: Some(Box::new(block(36, vec![], Some(id_node(37, "b"))))),
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("max_of"),
+                generic_params: vec![generic_param(2, "T")],
+                params: vec![typed_param_node(3, "a", "T"), typed_param_node(4, "b", "T")],
+                return_type: Some(Box::new(type_named_node(5, "T"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(40, vec![], Some(if_node))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("a.clone()") && !out.contains("b.clone()"),
+            "generic T param tail must NOT clone, got: {out}"
+        );
+        assert!(
+            out.contains("{ a } else { b }"),
+            "generic arm tails must be emitted bare, got: {out}"
+        );
     }
 
     /// A collection-typed binding interpolated into a string formats with `{:?}`

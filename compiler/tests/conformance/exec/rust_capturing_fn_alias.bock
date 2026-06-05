@@ -1,0 +1,41 @@
+// TEST: exec_rust_capturing_fn_alias
+// EXPECT: output "wrap:start;run:hi;wrap:end"
+// EXPECT: targets rust
+//
+// Capturing-closure-through-a-`Fn`-alias regression (Rust `Fn`-type codegen,
+// react-components blocker). A `type` alias to a function type used as a
+// function's *return type*, where the value flowing through it is a closure that
+// CAPTURES its environment:
+//
+//   type Handler = Fn() -> Void
+//   fn wrap(label, inner: Handler) -> Handler { () => { ...inner()... } }
+//
+// The returned `() => { ... }` captures `label` and `inner`. Rust lowers a bare
+// `type Handler = fn() -> ()` to a `fn` pointer, which a *capturing* closure does
+// not coerce to (E0308). The Rust backend now resolves a `Fn`-typed alias in a
+// fn signature to `impl Fn(..)` (and `move`s the returned closure), exactly as a
+// literal `Fn(..)` return is handled. The `Fn`-typed param `inner` widens to
+// `impl Fn(..) + 'static` for the same reason.
+//
+// rust-only: this fixture pins the Rust-backend lowering. The same source on
+// js/ts/python/go is the `react-components` shape those sibling backends still
+// fail to run; their fixes are tracked separately.
+module main
+
+type Handler = Fn() -> Void
+
+@managed
+fn wrap(label: String, inner: Handler) -> Handler {
+  () => {
+    print("wrap:start;")
+    inner()
+    print("wrap:end")
+  }
+}
+
+@managed
+fn main() {
+  let h = wrap("save", () => print("run:hi;"))
+  h()
+  println("")
+}
