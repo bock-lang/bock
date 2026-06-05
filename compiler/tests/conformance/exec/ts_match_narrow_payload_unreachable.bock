@@ -1,25 +1,36 @@
 // TEST: ts_match_narrow_payload_unreachable
-// EXPECT: output "id 1"
+// EXPECT: output "id 1;id 2"
 // EXPECT: targets ts
 //
 // Q-ts-match-narrowing regression guard — the examples/real-world/task-api
-// blocker, reduced to its core shape. `demo` is a `Void`-returning function with
-// TWO consecutive statement-position `match`es over a `Result[Task, String]`,
-// exactly like `run_demo`'s `create_task → match` sequence. Each `Ok` arm's tail
-// is a `println`, and because the function returns `Void` the TS emitter lowers
-// each arm to `return console.log(...)`. So the FIRST match's both arms `return`
-// — which makes TS mark everything after it (the second match) unreachable.
+// blocker, reduced to its core shape. `demo` has TWO consecutive
+// statement-position `match`es over a `Result[Task, String]`, exactly like
+// `run_demo`'s `create_task → match` sequence, each binding the `Ok` payload and
+// passing it to `show(t: Task)`.
 //
-// TS control-flow narrowing is reachability-scoped: in that unreachable region,
-// `switch (r2._tag) { case "Ok": const t = r2._0; … }` no longer narrows `r2`,
-// so `r2._0` widened back to the full union payload `Task | string`. Passing it
-// to `show(t: Task)` then failed strict `tsc` with TS2345 ("'string | Task' is
-// not assignable to 'Task'") — the precise diagnostic that blocked task-api on
-// ts. The emitter now pins each constructor-arm payload binding to the matched
-// member via `const t = (r2 as Extract<typeof r2, { _tag: "Ok" }>)._0;`, which
-// holds regardless of reachability, so the binding never widens. The harness
-// type-checks the scaffolded project with strict `tsc -p .` before running, so
-// this fixture compiled only after the fix.
+// Two regressions are pinned here:
+//
+//  1. Payload narrowing across reachability. Previously each `println` arm of a
+//     `Void`-returning function lowered to `return console.log(...)`. That made
+//     the FIRST match's arms both `return`, so TS marked the second match
+//     unreachable; in that region `switch (r2._tag) { case "Ok": … }` no longer
+//     narrowed `r2`, so `r2._0` widened back to the union payload `Task | string`
+//     and `show(t)` failed strict `tsc` with TS2345 ("'string | Task' is not
+//     assignable to 'Task'"). The emitter now pins each constructor-arm payload
+//     binding to the matched member via
+//     `const t = (r2 as Extract<typeof r2, { _tag: "Ok" }>)._0;`, which holds
+//     regardless of reachability, so the binding never widens.
+//
+//  2. Statement-position match arms must NOT early-`return`. A statement-position
+//     `match` arm's tail is discarded (the `match` is a statement, not the
+//     function's value); emitting `return <arm value>` would abort the function
+//     after the first match, dropping the second. The arms here write into a
+//     shared accumulator, so both matches must run for the full output to print
+//     — a `return`-instead-of-discard regression would truncate it to "id 1".
+//
+// The harness type-checks the scaffolded project with strict `tsc -p .` before
+// running, so this fixture compiles (regression 1) and runs to completion
+// (regression 2) only with both fixes in place.
 //
 // Restricted to `ts`: the unreachable-narrowing widening is a TypeScript
 // flow-analysis artifact with no analogue on the other backends (js is untyped;
@@ -39,21 +50,23 @@ fn make(id: Int) -> Result[Task, String] {
   Ok(Task { id: id })
 }
 
-fn demo() -> Void {
+fn demo() -> String {
+  let mut out = ""
   let r1 = make(1)
   match r1 {
-    Ok(t) => println(show(t))
-    Err(e) => println("err ${e}")
+    Ok(t) => out = show(t)
+    Err(e) => out = "err ${e}"
   }
-  // To TS this match is unreachable (both arms above `return`), so narrowing on
-  // `r2._tag` no longer reaches `r2._0` — the widening trigger the cast fixes.
+  // To TS the early-return shape would make this match unreachable; narrowing on
+  // `r2._tag` must still reach `r2._0` — the widening the Extract cast fixes.
   let r2 = make(2)
   match r2 {
-    Ok(t) => println(show(t))
-    Err(e) => println("err ${e}")
+    Ok(t) => out = "${out};${show(t)}"
+    Err(e) => out = "${out};err ${e}"
   }
+  out
 }
 
 fn main() -> Void {
-  demo()
+  println(demo())
 }
