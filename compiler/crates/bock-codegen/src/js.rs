@@ -564,6 +564,19 @@ struct EmitCtx {
     /// pre-statement hoist walk and the subsequent expression emission because
     /// both traverse the *same* borrowed AIR node tree.
     propagate_temps: HashMap<usize, String>,
+    /// When set, a block-body tail expression is **discarded** — emitted as a
+    /// bare expression statement (`<value>;`) rather than `return <value>;`. A
+    /// loop body (`for`/`while`/`loop`) and a statement-position `if`/`match`
+    /// arm are statement context: their tail is not the enclosing function's
+    /// value, so `return`ing it would abort the function on the first iteration
+    /// (e.g. `for (…) { return console.log(i); }` exits `main` after one line).
+    /// Set for the duration of a loop body via [`EmitCtx::emit_loop_body`] and
+    /// for a block's non-tail statements in [`EmitCtx::emit_block_body_inner`];
+    /// cleared (saved/restored) when entering a genuine value context — a
+    /// lambda body, a value-position block/`match` IIFE — so their tail still
+    /// `return`s the body's value. See the TS backend's `ValueSink::Discard`
+    /// (#240) for the mirror of this design.
+    discard_tail: bool,
 }
 
 /// One JS lexical block's `let`/`const` binding state — see
@@ -612,6 +625,7 @@ impl EmitCtx {
             let_scopes: Vec::new(),
             propagate_temp_counter: 0,
             propagate_temps: HashMap::new(),
+            discard_tail: false,
         }
     }
 
@@ -2816,7 +2830,7 @@ impl EmitCtx {
                 self.emit_expr(iterable)?;
                 self.buf.push_str(") {\n");
                 self.indent += 1;
-                self.emit_block_body(body)?;
+                self.emit_loop_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
                 self.loop_labels.pop();
@@ -2829,7 +2843,7 @@ impl EmitCtx {
                 self.emit_expr(condition)?;
                 self.buf.push_str(") {\n");
                 self.indent += 1;
-                self.emit_block_body(body)?;
+                self.emit_loop_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
                 self.loop_labels.pop();
@@ -2839,7 +2853,7 @@ impl EmitCtx {
                 self.emit_loop_label_prefix(body);
                 self.writeln("while (true) {");
                 self.indent += 1;
-                self.emit_block_body(body)?;
+                self.emit_loop_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
                 self.loop_labels.pop();
@@ -3282,7 +3296,14 @@ impl EmitCtx {
                 if matches!(body.kind, NodeKind::Block { .. }) {
                     self.buf.push_str("{\n");
                     self.indent += 1;
-                    self.emit_block_body(body)?;
+                    // A lambda body is a fresh function-body tail context: its
+                    // tail is the lambda's return value, so clear any active
+                    // `discard_tail` (e.g. from an enclosing loop body) for the
+                    // duration of the body.
+                    let prev = std::mem::replace(&mut self.discard_tail, false);
+                    let r = self.emit_block_body(body);
+                    self.discard_tail = prev;
+                    r?;
                     self.indent -= 1;
                     self.write_indent();
                     self.buf.push('}');
@@ -3570,10 +3591,17 @@ impl EmitCtx {
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => {
-                // Match in expression position → IIFE with switch.
+                // Match in expression position → IIFE with switch. The IIFE
+                // arrow returns the matched arm's value, so the arm bodies must
+                // `return` their tail — clear any active `discard_tail` (e.g. a
+                // statement-position context such as an enclosing loop body or a
+                // non-tail statement) for the IIFE body, restored after.
                 self.buf.push_str("(() => {\n");
                 self.indent += 1;
-                self.emit_match(scrutinee, arms)?;
+                let prev = std::mem::replace(&mut self.discard_tail, false);
+                let r = self.emit_match(scrutinee, arms);
+                self.discard_tail = prev;
+                r?;
                 self.indent -= 1;
                 self.write_indent();
                 self.buf.push_str("})()");
@@ -4322,6 +4350,24 @@ impl EmitCtx {
         r
     }
 
+    /// Emit a **loop body** (`for`/`while`/`loop`). A loop body is statement
+    /// position: its tail expression is discarded (a Bock loop evaluates to
+    /// Unit; the body's value is not the function's value). The default
+    /// [`Self::emit_block_body`] treats a tail as a function-body return, which
+    /// for a loop body emits `return console.log(i);` — aborting the function on
+    /// the first iteration (the loop runs once, then the fn exits). Setting
+    /// [`Self::discard_tail`] for the body's duration routes the tail to a bare
+    /// expression statement instead. The flag is saved/restored so it never
+    /// leaks past the loop, and any nested lambda / value-position IIFE clears
+    /// it (their tail is genuinely returned). A `break v` value still flows
+    /// through the separate `/* break value */` path, not this discard flag.
+    fn emit_loop_body(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
+        let prev = std::mem::replace(&mut self.discard_tail, true);
+        let r = self.emit_block_body(node);
+        self.discard_tail = prev;
+        r
+    }
+
     /// Lower every `?` (`Propagate`) reachable in `stmt`'s own evaluation into a
     /// pre-statement hoist, then record the unwrapped-payload temp so the
     /// `Propagate` arm of [`Self::emit_expr`] substitutes `<temp>._0` in place.
@@ -4403,9 +4449,25 @@ impl EmitCtx {
 
     fn emit_block_body_inner(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         if let NodeKind::Block { stmts, tail } = &node.kind {
+            // Every non-tail statement is statement position: its value is
+            // discarded. A statement-position `if`/`match` whose branch/arm body
+            // ends in an expression (e.g. `println(...)`) must NOT `return` that
+            // value — doing so aborts the function before the statements after
+            // the `if`/`match` run. Activate `discard_tail` for the non-tail
+            // statements (restored before the tail, which keeps function-body
+            // return semantics). A nested loop/lambda overrides this within its
+            // own body, so the discard applies only to the immediate
+            // statement-position control flow.
+            let prev_discard = std::mem::replace(&mut self.discard_tail, true);
+            let mut stmt_res = Ok(());
             for s in stmts {
-                self.emit_node(s)?;
+                stmt_res = self.emit_node(s);
+                if stmt_res.is_err() {
+                    break;
+                }
             }
+            self.discard_tail = prev_discard;
+            stmt_res?;
             if let Some(t) = tail {
                 // A statement tail (`break`/`continue`/`return`/assignment) is
                 // emitted as a statement, never wrapped in `return`.
@@ -4443,10 +4505,7 @@ impl EmitCtx {
                 // A `?` in the tail value (e.g. body tail `find_task(id)?`)
                 // hoists to a pre-`return` temp + early-return.
                 self.hoist_propagates(t)?;
-                let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}return ");
-                self.emit_expr(t)?;
-                self.buf.push_str(";\n");
+                self.emit_tail_value(t)?;
             }
         } else if crate::generator::node_is_statement(node) || tail_is_statement_form(node) {
             self.emit_node(node)?;
@@ -4459,17 +4518,33 @@ impl EmitCtx {
                 self.emit_match(scrutinee, arms)?;
             } else {
                 self.hoist_propagates(node)?;
-                let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}return ");
-                self.emit_expr(node)?;
-                self.buf.push_str(";\n");
+                self.emit_tail_value(node)?;
             }
         } else {
             // Single expression as body.
             self.hoist_propagates(node)?;
-            let ind = self.indent_str();
+            self.emit_tail_value(node)?;
+        }
+        Ok(())
+    }
+
+    /// Emit a block-body tail *value* expression. In a function-body /
+    /// value-context block this is `return <value>;`. In a statement-position
+    /// block ([`Self::discard_tail`] set — a loop body, or a statement-position
+    /// `if`/`match` branch) the value is discarded, emitted as a bare expression
+    /// statement `<value>;`; a `return` there would abort the enclosing function
+    /// on the first loop iteration (the fizzbuzz / chat-protocol silent
+    /// truncation bug). Callers that need an early-return-on-`?` must call
+    /// [`Self::hoist_propagates`] first (this just renders the value).
+    fn emit_tail_value(&mut self, value: &AIRNode) -> Result<(), CodegenError> {
+        let ind = self.indent_str();
+        if self.discard_tail {
+            self.buf.push_str(&ind);
+            self.emit_expr(value)?;
+            self.buf.push_str(";\n");
+        } else {
             let _ = write!(self.buf, "{ind}return ");
-            self.emit_expr(node)?;
+            self.emit_expr(value)?;
             self.buf.push_str(";\n");
         }
         Ok(())
@@ -8472,5 +8547,359 @@ mod tests {
             !out.contains("return throw"),
             "`return throw …` is invalid JS; the throw must be a bare statement, got: {out}"
         );
+    }
+
+    // ── Loop / statement-position tails must be discarded, not `return`ed ─────
+    //
+    // A loop (`for`/`while`/`loop`) body's final expression — and a
+    // statement-position `if`/`match` arm's tail — is discarded in Bock (these
+    // are statements, not the function's value). The JS backend's
+    // `emit_block_body_inner` had wrapped every block tail in `return`, so
+    // e.g. `for i in … { println(i) }` emitted `for (…) { return
+    // console.log(i); }` — the `return` aborts the function on iteration 1
+    // (fizzbuzz printed one line, then `main` returned; it exited 0, so the
+    // exit-code-only exec audit hid the truncation). These pin the discard
+    // behaviour for each statement context, and guard that a genuine
+    // value-returning tail (function body, lambda, value-position `match` IIFE)
+    // still `return`s.
+
+    /// `1..=hi` inclusive range over a `count` literal.
+    fn incl_range(id: u32, lo: &str, hi: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::Range {
+                lo: Box::new(int_lit(id + 1, lo)),
+                hi: Box::new(int_lit(id + 2, hi)),
+                inclusive: true,
+            },
+        )
+    }
+
+    #[test]
+    fn for_loop_body_tail_call_is_discarded_not_returned() {
+        // fn main() { for i in 1..=3 { println(i) } }
+        let loop_body = block(
+            30,
+            vec![],
+            Some(call_node(31, "println", vec![id_node(33, "i")])),
+        );
+        let for_loop = node(
+            10,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(11, "i")),
+                iterable: Box::new(incl_range(20, "1", "3")),
+                body: Box::new(loop_body),
+            },
+        );
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(1, "main", vec![], block(2, vec![for_loop], None))],
+        ));
+        assert!(
+            !out.contains("return console.log"),
+            "a for-loop body's tail call must be a discarded statement, not a \
+             `return` (which aborts the loop after one iteration); got:\n{out}"
+        );
+        assert!(
+            out.contains("console.log(i);"),
+            "the loop body should still emit the call as a statement; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn while_loop_body_tail_call_is_discarded_not_returned() {
+        // fn main() { while (true) { println("x") } }
+        let loop_body = block(
+            30,
+            vec![],
+            Some(call_node(31, "println", vec![str_lit(33, "x")])),
+        );
+        let while_loop = node(
+            10,
+            NodeKind::While {
+                condition: Box::new(bool_lit(20, true)),
+                body: Box::new(loop_body),
+            },
+        );
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(1, "main", vec![], block(2, vec![while_loop], None))],
+        ));
+        assert!(
+            !out.contains("return console.log"),
+            "a while-loop body's tail call must be a discarded statement, not a \
+             `return`; got:\n{out}"
+        );
+        assert!(
+            out.contains("console.log(\"x\");"),
+            "the loop body should still emit the call as a statement; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn infinite_loop_body_tail_call_is_discarded_not_returned() {
+        // fn main() { loop { println("x") } }
+        let loop_body = block(
+            30,
+            vec![],
+            Some(call_node(31, "println", vec![str_lit(33, "x")])),
+        );
+        let inf_loop = node(
+            10,
+            NodeKind::Loop {
+                body: Box::new(loop_body),
+            },
+        );
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(1, "main", vec![], block(2, vec![inf_loop], None))],
+        ));
+        assert!(
+            !out.contains("return console.log"),
+            "a `loop` body's tail call must be a discarded statement, not a \
+             `return`; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn statement_match_arm_tail_call_is_discarded_not_returned() {
+        // fn run(r) { match r { Ok(v) => println(v); Err(e) => println(e) }; println("done") }
+        // The trailing statement makes the `match` non-tail (statement position),
+        // so its arm tails are discarded, not returned — a `return` inside the
+        // `switch` would skip the `println("done")` after the match.
+        let ok_arm = match_arm(
+            20,
+            node(
+                21,
+                NodeKind::ConstructorPat {
+                    path: type_path(&["Ok"]),
+                    fields: vec![bind_pat(22, "v")],
+                },
+            ),
+            None,
+            block(
+                23,
+                vec![],
+                Some(call_node(24, "println", vec![id_node(26, "v")])),
+            ),
+        );
+        let err_arm = match_arm(
+            30,
+            node(
+                31,
+                NodeKind::ConstructorPat {
+                    path: type_path(&["Err"]),
+                    fields: vec![bind_pat(32, "e")],
+                },
+            ),
+            None,
+            block(
+                33,
+                vec![],
+                Some(call_node(34, "println", vec![id_node(36, "e")])),
+            ),
+        );
+        let match_stmt = node(
+            40,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(41, "r")),
+                arms: vec![ok_arm, err_arm],
+            },
+        );
+        let trailer = call_node(50, "println", vec![str_lit(52, "done")]);
+        let body = block(3, vec![match_stmt], Some(trailer));
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(1, "run", vec![param_node(2, "r")], body)],
+        ));
+        assert!(
+            out.contains("console.log(v);") && out.contains("console.log(e);"),
+            "statement-position match arms should emit their tail call as a \
+             discarded statement; got:\n{out}"
+        );
+        assert!(
+            !out.contains("return console.log(v);") && !out.contains("return console.log(e);"),
+            "a statement-position match arm's tail call must be a discarded \
+             statement, not a `return` (which would skip the code after the \
+             match); got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn loop_in_function_body_does_not_discard_the_function_tail() {
+        // fn total() { let mut sum = 0; for i in 1..=3 { sum = sum + i }; sum }
+        // The loop body discards its (absent) tail, but the function's own tail
+        // `sum` must still `return` — the discard must not leak past the loop.
+        let assign = node(
+            40,
+            NodeKind::Assign {
+                op: AssignOp::Assign,
+                target: Box::new(id_node(41, "sum")),
+                value: Box::new(node(
+                    42,
+                    NodeKind::BinaryOp {
+                        op: BinOp::Add,
+                        left: Box::new(id_node(43, "sum")),
+                        right: Box::new(id_node(44, "i")),
+                    },
+                )),
+            },
+        );
+        let for_loop = node(
+            10,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(11, "i")),
+                iterable: Box::new(incl_range(20, "1", "3")),
+                body: Box::new(block(30, vec![assign], None)),
+            },
+        );
+        let body = block(
+            2,
+            vec![let_binding(5, "sum", true, int_lit(6, "0")), for_loop],
+            Some(id_node(7, "sum")),
+        );
+        let out = gen(&module(vec![], vec![fn_decl(1, "total", vec![], body)]));
+        assert!(
+            out.contains("return sum;"),
+            "the function-body tail after a loop must still `return`; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn value_position_match_in_loop_body_still_returns_arm_values() {
+        // fn main() { for i in 1..=3 { let s = match i { 1 => "one"; _ => "many" } } }
+        // The `match` is in value position (a `let` initialiser), so its IIFE
+        // arms must `return` their value even though the enclosing loop body is a
+        // discard context — the discard must not leak into the value IIFE.
+        let arm1 = match_arm(
+            60,
+            node(
+                61,
+                NodeKind::LiteralPat {
+                    lit: Literal::Int("1".into()),
+                },
+            ),
+            None,
+            str_lit(62, "one"),
+        );
+        let arm_def = match_arm(
+            70,
+            node(71, NodeKind::WildcardPat),
+            None,
+            str_lit(72, "many"),
+        );
+        let match_expr = node(
+            50,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(51, "i")),
+                arms: vec![arm1, arm_def],
+            },
+        );
+        let let_s = let_binding(40, "s", false, match_expr);
+        let for_loop = node(
+            10,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(11, "i")),
+                iterable: Box::new(incl_range(20, "1", "3")),
+                body: Box::new(block(30, vec![let_s], None)),
+            },
+        );
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(1, "main", vec![], block(2, vec![for_loop], None))],
+        ));
+        assert!(
+            out.contains("return \"one\";") && out.contains("return \"many\";"),
+            "a value-position `match` IIFE inside a loop body must still `return` \
+             its arm values; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn lambda_in_loop_body_still_returns_its_tail() {
+        // fn main() { for i in 1..=3 { let f = (x) => { x } } }
+        // The lambda body's tail is the lambda's return value; the enclosing
+        // loop's discard context must not turn it into a bare statement.
+        let lambda = node(
+            50,
+            NodeKind::Lambda {
+                params: vec![param_node(51, "x")],
+                body: Box::new(block(52, vec![], Some(id_node(53, "x")))),
+            },
+        );
+        let let_f = let_binding(40, "f", false, lambda);
+        let for_loop = node(
+            10,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(11, "i")),
+                iterable: Box::new(incl_range(20, "1", "3")),
+                body: Box::new(block(30, vec![let_f], None)),
+            },
+        );
+        let out = gen(&module(
+            vec![],
+            vec![fn_decl(1, "main", vec![], block(2, vec![for_loop], None))],
+        ));
+        assert!(
+            out.contains("return x;"),
+            "a lambda body's tail inside a loop must still `return`; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn function_body_tail_call_still_returns() {
+        // Regression guard: a plain value-returning function-body tail still
+        // emits `return` — the discard only applies in statement position.
+        // fn greet() { println("hi") }   (last expr is the body's value)
+        let body = block(
+            2,
+            vec![],
+            Some(call_node(10, "println", vec![str_lit(12, "hi")])),
+        );
+        let out = gen(&module(vec![], vec![fn_decl(1, "greet", vec![], body)]));
+        assert!(
+            out.contains("return console.log(\"hi\");"),
+            "a function-body tail call must still `return`; got:\n{out}"
+        );
+    }
+
+    /// End-to-end: a `for` loop printing N lines must print all N lines, not 1.
+    /// This is the fizzbuzz silent-truncation bug — the loop body's tail
+    /// `println` previously `return`ed from `main` after the first iteration.
+    #[test]
+    fn e2e_for_loop_prints_all_iterations_not_just_first() {
+        if !has_node() {
+            return;
+        }
+        // fn main() { for i in 1..=5 { println(i) } }
+        let loop_body = block(
+            30,
+            vec![],
+            Some(call_node(31, "println", vec![id_node(33, "i")])),
+        );
+        let for_loop = node(
+            10,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(11, "i")),
+                iterable: Box::new(incl_range(20, "1", "5")),
+                body: Box::new(loop_body),
+            },
+        );
+        let code = gen(&module(
+            vec![],
+            vec![fn_decl(1, "main", vec![], block(2, vec![for_loop], None))],
+        ));
+        let full = format!("{code}\nmain();\n");
+        assert!(check_js_syntax(&full), "emitted JS must be valid:\n{full}");
+        let out = run_js(&full);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.len(),
+            5,
+            "the loop must print all 5 iterations (a `return` in the body would \
+             stop after the first); got {} line(s):\n{out}\n--- source ---\n{full}",
+            lines.len()
+        );
+        assert_eq!(lines, vec!["1", "2", "3", "4", "5"], "got:\n{out}");
     }
 }
