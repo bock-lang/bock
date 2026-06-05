@@ -20,19 +20,20 @@ class Button {
 }
 
 impl Button {
-  fn render(self) -> String {
-    "<button onclick>${self.label}</button>"
-  }
-
   fn click(self) -> Void {
     let handler = self.on_click
     handler()
   }
 }
 
+// A type has one method namespace (spec §6.4/§6.7): `render` is defined exactly
+// once — here, in the `Component` impl — and that single definition both
+// satisfies the `Component.render` requirement and answers a direct
+// `btn.render()` call. Defining `render` again in the inherent `impl Button`
+// above would be a duplicate-definition coherence error (E4012).
 impl Component for Button {
   fn render(self) -> String {
-    self.render()
+    "<button onclick>${self.label}</button>"
   }
 }
 
