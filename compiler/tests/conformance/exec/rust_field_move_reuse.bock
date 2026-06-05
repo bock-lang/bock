@@ -1,0 +1,71 @@
+// TEST: exec_rust_field_move_reuse
+// EXPECT: output "all:3;done:1;pending:2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Field-access move-then-reuse regression (Rust by-value reuse of a record
+// *field*, todo-list example, #239 follow-up). A non-`Copy` record field
+// (`bag.items: List[Item]` → Rust `Vec<Item>`) passed *by value* to a free
+// function is moved out of the owning binding, leaving it partially moved; a
+// later read of the same binding (another field, or the same field again) is
+// then a use-after-(partial-)move (`E0382`):
+//
+//   count_all(bag.items)          // moves bag.items out of bag
+//   let bag = bag.mark_first()    // E0382: borrow of partially moved `bag`
+//   count_done(bag.items)         // moves bag.items
+//   count_done(bag.items) again   // E0382: use of moved value bag.items
+//
+// The Rust backend now clones a record-field argument when its base binding is
+// move-reused, mirroring the bare-identifier clone (every generated record
+// derives `Clone`). All five targets must agree; only Rust's lowering changed.
+module main
+
+public record Item {
+  id: Int
+  done: Bool
+}
+
+impl Item {
+  public fn complete(self) -> Item {
+    Item { id: self.id, done: true }
+  }
+}
+
+public record Bag {
+  items: List[Item]
+}
+
+impl Bag {
+  public fn mark_first(self) -> Bag {
+    let updated = self.items.map((it) => {
+      if (it.id == 1) { it.complete() } else { it }
+    })
+    Bag { items: updated }
+  }
+}
+
+fn count_all(items: List[Item]) -> Int {
+  items.len()
+}
+
+fn count_done(items: List[Item]) -> Int {
+  items.filter((it) => it.done == true).len()
+}
+
+fn count_pending(items: List[Item]) -> Int {
+  items.filter((it) => it.done == false).len()
+}
+
+fn main() -> Void {
+  let bag = Bag { items: [
+    Item { id: 1, done: false },
+    Item { id: 2, done: false },
+    Item { id: 3, done: false }
+  ] }
+  // First by-value pass of bag.items, then bag is reused below.
+  let all = count_all(bag.items)
+  let bag = bag.mark_first()
+  // bag.items passed by value twice in a row.
+  let done = count_done(bag.items)
+  let pending = count_pending(bag.items)
+  println("all:${all};done:${done};pending:${pending}")
+}

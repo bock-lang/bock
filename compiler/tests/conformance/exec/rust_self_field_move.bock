@@ -1,0 +1,60 @@
+// TEST: exec_rust_self_field_move
+// EXPECT: output "TEXT|hi;ACK|ok"
+// EXPECT: targets js, ts, rust, go
+//
+// (python omitted: it emits `impl Serializable for Msg` as a subclass before the
+// `Serializable` trait class is defined — a pre-existing python-backend
+// trait/impl ordering gap unrelated to this rust fix; FOUND in #239.)
+//
+// `self.field` moved by value inside a `&self` method, in a *let-binding RHS*
+// rather than a return/tail (chat-protocol `serialize`, #239 follow-up). A
+// non-`Copy` `self` field (`self.kind: Kind` → a generated Rust enum) passed by
+// value to a free function inside a borrowed-`self` method is moved out of the
+// shared reference (`E0507: cannot move out of self.kind behind a shared
+// reference`):
+//
+//   impl Serializable for Msg {
+//     fn serialize(self) -> String {
+//       let tag = tag_of(self.kind)        // <- moves self.kind out of &self
+//       "${tag}|${self.body}"
+//     }
+//   }
+//
+// The Rust backend now recognises a `self.field` move in a let-RHS (and a bare
+// free-call statement), not only in a return/tail, and clones the field there
+// (the record derives `Clone`). All five targets must agree; only Rust's
+// lowering changed.
+module main
+
+public enum Kind { Text, Ack }
+
+public record Msg {
+  kind: Kind
+  body: String
+}
+
+public fn tag_of(k: Kind) -> String {
+  match k {
+    Text => "TEXT"
+    Ack => "ACK"
+  }
+}
+
+public trait Serializable {
+  fn serialize(self) -> String
+}
+
+impl Serializable for Msg {
+  public fn serialize(self) -> String {
+    // self.kind moved by value into tag_of, inside a let-binding RHS, then
+    // self.body read again below — both reads borrow &self.
+    let tag = tag_of(self.kind)
+    "${tag}|${self.body}"
+  }
+}
+
+fn main() -> Void {
+  let a = Msg { kind: Text, body: "hi" }
+  let b = Msg { kind: Ack, body: "ok" }
+  println("${a.serialize()};${b.serialize()}")
+}

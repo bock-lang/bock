@@ -1,0 +1,38 @@
+// TEST: exec_rust_fn_binding_reuse
+// EXPECT: output "6;7;8"
+// EXPECT: targets js, ts, python, rust
+//
+// (go omitted: a fn returning `Fn(Int) -> Int` hits a pre-existing go-backend
+// closure/interface lowering gap unrelated to this rust fix; FOUND in #239.)
+//
+// A function/closure-valued `let` binding reused across multiple by-value calls
+// (data-pipeline `report_pipeline`, #239 follow-up). A binding whose RHS is a
+// fn-returning helper holds an `impl Fn` value in Rust. The move-reuse pass used
+// to `.clone()` such a binding on each reuse, but an `impl Fn` opaque type is
+// not `Clone` (`E0599: no method named clone found for opaque type impl Fn`).
+//
+//   let f = make_adder(1)
+//   apply(f, 5)            // 6
+//   apply(f, 6)           // 7  — f reused
+//   apply(f, 7)           // 8  — f reused again
+//
+// The Rust backend now *borrows* a reused fn-typed binding (`&f`) instead of
+// cloning it — `&F: Fn` when `F: Fn`, so it satisfies the `impl Fn` parameter
+// and leaves the binding live. All five targets must agree.
+module main
+
+fn make_adder(by: Int) -> Fn(Int) -> Int {
+  (n) => n + by
+}
+
+fn apply(f: Fn(Int) -> Int, x: Int) -> Int {
+  f(x)
+}
+
+fn main() -> Void {
+  let adder = make_adder(1)
+  let a = apply(adder, 5)
+  let b = apply(adder, 6)
+  let c = apply(adder, 7)
+  println("${a};${b};${c}")
+}

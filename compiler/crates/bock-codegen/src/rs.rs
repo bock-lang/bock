@@ -110,6 +110,7 @@ impl CodeGenerator for RsGenerator {
         ctx.generic_decls =
             crate::generator::collect_generic_decls(&[(module, std::path::Path::new(""))]);
         ctx.collect_clone_targets(module);
+        ctx.collect_fn_returning_fns(module);
         let trait_decls =
             crate::generator::collect_trait_decls(&[(module, std::path::Path::new(""))]);
         ctx.collect_self_operand_methods(&trait_decls);
@@ -256,6 +257,7 @@ impl CodeGenerator for RsGenerator {
         template.trait_decls = trait_decls;
         for (module, _) in modules {
             template.collect_clone_targets(module);
+            template.collect_fn_returning_fns(module);
         }
         // Effect-op resolution needs the whole reachable set: a bare op in one
         // module may belong to an effect declared in another (cross-module
@@ -422,6 +424,7 @@ impl CodeGenerator for RsGenerator {
         template.trait_decls = trait_decls;
         for (module, _) in modules {
             template.collect_clone_targets(module);
+            template.collect_fn_returning_fns(module);
         }
         template.seed_effect_registries(modules);
 
@@ -638,6 +641,12 @@ struct RsEmitCtx {
     /// applies only inside such methods (never to general field reads, which
     /// would be noisy and could over-require `Clone`).
     in_clone_self_method: bool,
+    /// True while emitting the **target** (LHS) of an assignment
+    /// (`self.cursor = …`). Suppresses the [`Self::in_clone_self_method`]
+    /// `self.field` → `self.field.clone()` rewrite there: an assignment target is
+    /// a place expression, and `self.cursor.clone() = …` is not valid Rust. Set
+    /// and cleared around the target emit in the `Assign` arm.
+    in_assign_target: bool,
     /// Names of trait methods whose non-receiver operand is `Self`-typed
     /// (`compare`/`eq`/`beats`/…). Such an operand is emitted and *called* by
     /// shared reference in Rust: the trait/impl signature is `other: &Self` /
@@ -710,6 +719,21 @@ struct RsEmitCtx {
     /// moved captures satisfy the `'static` default of the returned `impl Fn`
     /// (E0310).
     returning_fn_closure: bool,
+    /// Names (original, not snake-cased) of top-level functions whose declared
+    /// return type is a `Fn(..) -> ..` (lowered to `impl Fn`). A `let` binding
+    /// whose RHS calls such a function holds a closure value, so it must not be
+    /// `.clone()`d on reuse (an `impl Fn` opaque type is not `Clone` — E0599);
+    /// it is borrowed instead. Populated once per program by
+    /// [`Self::collect_fn_returning_fns`].
+    fn_returning_fns: std::collections::HashSet<String>,
+    /// Snake-cased names of in-scope `let` bindings whose value is a function /
+    /// closure (`impl Fn`) — a `Lambda`/`Compose` RHS, an explicit `Fn(..)`
+    /// annotation, or a call to a [`Self::fn_returning_fns`] helper. A move-reuse
+    /// pass of such a binding is **borrowed** (`&f`) rather than cloned: `impl
+    /// Fn` is not `Clone` (E0599), but `&F: Fn` when `F: Fn`, so a borrow
+    /// satisfies an `impl Fn` parameter and leaves the binding live for the next
+    /// pass. Seeded per-block (saved/restored) so it never leaks.
+    fn_typed_bindings: std::collections::HashSet<String>,
     /// Snake-cased names of in-scope `let` bindings whose value is a Rust
     /// collection (`Vec`/`HashMap`/`HashSet`) — recognised from the binding's
     /// RHS (`map.keys()`, a list literal, …) or a `List`/`Map`/`Set` type
@@ -739,6 +763,7 @@ impl RsEmitCtx {
             clone_target_records: std::collections::HashSet::new(),
             clone_bound_records: std::collections::HashSet::new(),
             in_clone_self_method: false,
+            in_assign_target: false,
             self_operand_methods: std::collections::HashSet::new(),
             reused_match_bindings: std::collections::HashSet::new(),
             reused_let_bindings: std::collections::HashSet::new(),
@@ -747,6 +772,8 @@ impl RsEmitCtx {
             implicit_imports: Vec::new(),
             return_closure_tail: false,
             returning_fn_closure: false,
+            fn_returning_fns: std::collections::HashSet::new(),
+            fn_typed_bindings: std::collections::HashSet::new(),
             collection_bindings: std::collections::HashSet::new(),
         }
     }
@@ -776,6 +803,7 @@ impl RsEmitCtx {
             clone_target_records: self.clone_target_records.clone(),
             clone_bound_records: self.clone_bound_records.clone(),
             in_clone_self_method: false,
+            in_assign_target: false,
             self_operand_methods: self.self_operand_methods.clone(),
             reused_match_bindings: std::collections::HashSet::new(),
             reused_let_bindings: std::collections::HashSet::new(),
@@ -784,6 +812,8 @@ impl RsEmitCtx {
             implicit_imports: Vec::new(),
             return_closure_tail: false,
             returning_fn_closure: false,
+            fn_returning_fns: self.fn_returning_fns.clone(),
+            fn_typed_bindings: std::collections::HashSet::new(),
             collection_bindings: std::collections::HashSet::new(),
         }
     }
@@ -857,6 +887,47 @@ impl RsEmitCtx {
             if needs_clone_bound {
                 self.clone_bound_records.insert(target_name);
             }
+        }
+    }
+
+    /// Populate [`Self::fn_returning_fns`] with the names of top-level functions
+    /// whose declared return type is a `Fn(..) -> ..` (lowered to a non-`Clone`
+    /// `impl Fn`). A `let` binding whose RHS calls such a function (e.g.
+    /// `let pipeline = build_report_pipeline()`) then holds a closure value and
+    /// must be borrowed, not cloned, on a move-reuse (E0599 — `impl Fn` is not
+    /// `Clone`). See [`Self::fn_typed_bindings`].
+    fn collect_fn_returning_fns(&mut self, module: &AIRModule) {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            return;
+        };
+        for item in items {
+            if let NodeKind::FnDecl {
+                name, return_type, ..
+            } = &item.kind
+            {
+                if return_type
+                    .as_deref()
+                    .is_some_and(|t| matches!(&t.kind, NodeKind::TypeFunction { .. }))
+                {
+                    self.fn_returning_fns.insert(name.name.clone());
+                }
+            }
+        }
+    }
+
+    /// True when a `let`-binding RHS produces a function / closure value (`impl
+    /// Fn`) — a `Lambda`, a `Compose` (`f >> g`), or a call to a
+    /// [`Self::fn_returning_fns`] helper. Such a binding is borrowed (not cloned)
+    /// on a move-reuse. A conservative syntactic probe; when unsure it returns
+    /// `false` (the binding keeps the default clone-or-move path).
+    fn rhs_is_fn_valued(&self, value: &AIRNode) -> bool {
+        match &value.kind {
+            NodeKind::Lambda { .. } | NodeKind::Compose { .. } => true,
+            NodeKind::Call { callee, .. } => {
+                matches!(&callee.kind, NodeKind::Identifier { name }
+                    if self.fn_returning_fns.contains(&name.name))
+            }
+            _ => false,
         }
     }
 
@@ -935,6 +1006,19 @@ impl RsEmitCtx {
                 stmts.iter().any(Self::body_moves_self_field)
             }
             NodeKind::Return { value: Some(v) } => Self::expr_contains_self_field(v),
+            // A `let x = … self.field …` RHS moves the field by value out of the
+            // `&self` receiver just as a return does (`E0507`) — e.g.
+            // `let tag = type_tag(self.msg_type)` in a trait `serialize(self)`.
+            // The RHS is a value position (never an assignment LHS), so cloning
+            // the `self.field` read there is sound.
+            NodeKind::LetBinding { value, .. } => Self::expr_contains_self_field(value),
+            // A bare free-function call statement that passes `self.field` by
+            // value (`emit(self.payload)`) moves it out too. A `MethodCall` is
+            // excluded: its `self.field.method()` receiver *borrows* (methods
+            // lower to `&self`), so it is not a move. `Assign` is excluded as
+            // well — its target is a place expression whose `self.field` must NOT
+            // clone (the `in_assign_target` guard also defends the emit site).
+            NodeKind::Call { .. } => Self::expr_contains_self_field(node),
             // Control-flow whose arms carry value/return positions worth
             // descending into (e.g. a `match` whose arms `return Some(self.v)`).
             NodeKind::If {
@@ -3803,7 +3887,13 @@ impl RsEmitCtx {
             NodeKind::Assign { op, target, value } => {
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}");
-                self.emit_expr(target)?;
+                // The target is a place expression; suppress the clone-self
+                // `self.field` → `self.field.clone()` rewrite while emitting it.
+                let prev_assign_target = self.in_assign_target;
+                self.in_assign_target = true;
+                let target_res = self.emit_expr(target);
+                self.in_assign_target = prev_assign_target;
+                target_res?;
                 let op_str = match op {
                     AssignOp::Assign => " = ",
                     AssignOp::AddAssign => " += ",
@@ -4036,13 +4126,10 @@ impl RsEmitCtx {
                                 }
                                 // A by-value pass of a reused binding into an
                                 // effect op (`storage.write(key, value)` before a
-                                // later `format!("…", key)`) moves it; clone so the
-                                // later use stays live (`E0382`).
-                                let clone_reused = self.arg_is_reused_binding(&arg.value);
-                                self.emit_expr(&arg.value)?;
-                                if clone_reused {
-                                    self.buf.push_str(".clone()");
-                                }
+                                // later `format!("…", key)`) moves it; clone (or
+                                // borrow a reused closure) so the later use stays
+                                // live (`E0382`/`E0599`). See `emit_call_arg`.
+                                self.emit_call_arg(&arg.value, false)?;
                             }
                             self.buf.push(')');
                             return Ok(());
@@ -4130,19 +4217,10 @@ impl RsEmitCtx {
                         if i > 0 {
                             self.buf.push_str(", ");
                         }
-                        if borrow_operands {
-                            self.buf.push('&');
-                        }
-                        // A by-value pass of a reused binding into a method arg
-                        // (`storage.write(key, value)` before a later
-                        // `format!("…", key)`) moves it; clone so the later use is
-                        // still live (`E0382`). Borrowed operands are never moved.
-                        let clone_reused =
-                            !borrow_operands && self.arg_is_reused_binding(&arg.value);
-                        self.emit_expr(&arg.value)?;
-                        if clone_reused {
-                            self.buf.push_str(".clone()");
-                        }
+                        // A `Self`-operand is borrowed; otherwise clone a reused
+                        // binding / reused-owner field, or borrow a reused closure
+                        // binding (`E0382`/`E0599`). See `emit_call_arg`.
+                        self.emit_call_arg(&arg.value, borrow_operands)?;
                     }
                     self.buf.push(')');
                     return Ok(());
@@ -4153,7 +4231,7 @@ impl RsEmitCtx {
                 } else {
                     None
                 };
-                self.emit_expr(callee)?;
+                self.emit_callee_rs(callee)?;
                 self.buf.push('(');
                 // A `recv.m(b)` whose callee is a `Self`-operand trait method but
                 // which is NOT the desugared self-call shape (the receiver isn't
@@ -4170,18 +4248,11 @@ impl RsEmitCtx {
                     if i > 0 {
                         self.buf.push_str(", ");
                     }
-                    if borrow_operands {
-                        self.buf.push('&');
-                    }
-                    // A by-value pass of a reused match binding (e.g.
-                    // `filter`'s `pred(x)` before the later `[x]`) must clone, or
-                    // Rust moves the value here and rejects the later use
-                    // (`E0382`). A borrowed operand is never moved, so skip it.
-                    let clone_reused = !borrow_operands && self.arg_is_reused_binding(&arg.value);
-                    self.emit_expr(&arg.value)?;
-                    if clone_reused {
-                        self.buf.push_str(".clone()");
-                    }
+                    // A `Self`-operand is borrowed; otherwise clone a reused
+                    // match/let binding or a reused-owner field (`filter`'s
+                    // `pred(x)` before a later `[x]`), or borrow a reused closure
+                    // binding (`E0382`/`E0599`). See `emit_call_arg`.
+                    self.emit_call_arg(&arg.value, borrow_operands)?;
                 }
                 if let Some(ea) = effects_args {
                     if !args.is_empty() {
@@ -4209,16 +4280,10 @@ impl RsEmitCtx {
                     if i > 0 {
                         self.buf.push_str(", ");
                     }
-                    if borrow_operands {
-                        self.buf.push('&');
-                    }
-                    // Clone a reused binding passed by value into a method arg so
-                    // a later use stays live (`E0382`). See `arg_is_reused_binding`.
-                    let clone_reused = !borrow_operands && self.arg_is_reused_binding(&arg.value);
-                    self.emit_expr(&arg.value)?;
-                    if clone_reused {
-                        self.buf.push_str(".clone()");
-                    }
+                    // A `Self`-operand is borrowed; otherwise clone a reused
+                    // binding / reused-owner field, or borrow a reused closure
+                    // binding (`E0382`/`E0599`). See `emit_call_arg`.
+                    self.emit_call_arg(&arg.value, borrow_operands)?;
                 }
                 self.buf.push(')');
                 Ok(())
@@ -4226,11 +4291,14 @@ impl RsEmitCtx {
             NodeKind::FieldAccess { object, field } => {
                 self.emit_expr(object)?;
                 let _ = write!(self.buf, ".{}", to_snake_case(&field.name));
-                // Inside a generic clone-target impl method, reading a `self`
-                // field yields it by value; a `&self` receiver cannot move a
-                // non-`Copy` field out, so clone it. The impl carries the
-                // matching `T: Clone` bound and the record derives `Clone`.
+                // Inside a clone-self method, reading a `self` field yields it by
+                // value; a `&self` receiver cannot move a non-`Copy` field out, so
+                // clone it. The impl carries the matching `T: Clone` bound (when
+                // generic) and the record derives `Clone`. Never on an assignment
+                // target (`self.cursor = …`): that is a place expression, and
+                // `self.cursor.clone() = …` is invalid Rust.
                 if self.in_clone_self_method
+                    && !self.in_assign_target
                     && matches!(&object.kind, NodeKind::Identifier { name } if name.name == "self")
                 {
                     self.buf.push_str(".clone()");
@@ -4541,7 +4609,13 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::Assign { op, target, value } => {
-                self.emit_expr(target)?;
+                // The target is a place expression; suppress the clone-self
+                // `self.field` → `self.field.clone()` rewrite while emitting it.
+                let prev_assign_target = self.in_assign_target;
+                self.in_assign_target = true;
+                let target_res = self.emit_expr(target);
+                self.in_assign_target = prev_assign_target;
+                target_res?;
                 let op_str = match op {
                     AssignOp::Assign => " = ",
                     AssignOp::AddAssign => " += ",
@@ -4994,6 +5068,100 @@ impl RsEmitCtx {
         }
     }
 
+    /// Emit an expression in **callee** position, parenthesizing it when its
+    /// surface syntax would otherwise swallow the trailing argument list.
+    ///
+    /// The case that matters is a bare closure callee: `|x| body` followed by
+    /// `(arg)` parses in Rust as `|x| (body(arg))` — the call binds to the body,
+    /// never invoking the closure. Wrapping it as `(|x| body)(arg)` makes the
+    /// call apply to the closure itself. This arises when the AIR compose
+    /// desugar (`f >> g` → `(__compose_x) => g(f(__compose_x))`) **nests**:
+    /// chained `>>` lowers the inner compose to a `Lambda` (or a `Compose` still
+    /// awaiting lowering), which then appears as the callee `f` inside
+    /// `f(__compose_x)`. Mirrors the python backend's `emit_callee`.
+    fn emit_callee_rs(&mut self, callee: &AIRNode) -> Result<(), CodegenError> {
+        if matches!(
+            callee.kind,
+            NodeKind::Lambda { .. } | NodeKind::Compose { .. }
+        ) {
+            self.buf.push('(');
+            self.emit_expr(callee)?;
+            self.buf.push(')');
+            Ok(())
+        } else {
+            self.emit_expr(callee)
+        }
+    }
+
+    /// True when a by-value call argument must be cloned to keep an earlier
+    /// value live (`E0382`). Extends [`Self::arg_is_reused_binding`] (the bare
+    /// reused-binding case) with the **record-field** case: passing
+    /// `owner.field` by value moves the field out of `owner`, partially moving
+    /// it; if `owner` is itself a move-reused binding (read again afterward — a
+    /// later `owner.other`, `owner.method()`, or the same `owner.field` again),
+    /// that later read is a use-after-(partial-)move. Cloning the field at the
+    /// pass site leaves `owner` intact (every generated record derives `Clone`),
+    /// mirroring [`Self::iterable_is_reused`] for `for`-iterables. A non-reused
+    /// owner (a fresh value, a one-shot local) needs no clone: the single move is
+    /// fine. Only a one-level `<ident>.<field>` is handled; deeper chains
+    /// (`a.b.c`) are rare in v1 and fall through to the no-clone path.
+    fn arg_needs_clone(&self, arg: &AIRNode) -> bool {
+        if self.arg_is_reused_binding(arg) {
+            return true;
+        }
+        if let NodeKind::FieldAccess { object, .. } = &arg.kind {
+            // `owner.field` clones when `owner` is a reused binding: the field
+            // move would partially move `owner`, breaking a later read of it.
+            return self.arg_is_reused_binding(object);
+        }
+        false
+    }
+
+    /// True when `arg` is a bare identifier naming a function/closure-valued
+    /// binding ([`Self::fn_typed_bindings`]) that is reused
+    /// ([`Self::reused_let_bindings`]). Such a binding holds an `impl Fn` opaque
+    /// value, which is **not** `Clone` (E0599) — so a move-reuse pass must
+    /// *borrow* it (`&f`) rather than clone it. `&F` satisfies an `impl Fn`
+    /// parameter when `F: Fn`, and the borrow leaves the binding live for the
+    /// next pass.
+    fn arg_is_reused_fn_binding(&self, arg: &AIRNode) -> bool {
+        if let NodeKind::Identifier { name } = &arg.kind {
+            let snake = to_snake_case(&name.name);
+            return self.fn_typed_bindings.contains(&snake)
+                && self.reused_let_bindings.contains(&snake);
+        }
+        false
+    }
+
+    /// Emit a single positional call argument, applying the move-reuse fixups a
+    /// by-value Rust call needs to honour Bock's value semantics:
+    ///
+    /// - `borrow` (the `Self`-operand-trait case): pass by shared reference
+    ///   (`&arg`) so the caller can keep using the value.
+    /// - a reused function/closure binding: borrow it (`&f`) — an `impl Fn` is
+    ///   not `Clone`, but `&F: Fn` ([`Self::arg_is_reused_fn_binding`]).
+    /// - a reused non-`Copy` binding or a record field of a reused owner: clone
+    ///   it (`arg.clone()`) so a later use stays live
+    ///   ([`Self::arg_needs_clone`]).
+    fn emit_call_arg(&mut self, arg: &AIRNode, borrow: bool) -> Result<(), CodegenError> {
+        if borrow {
+            self.buf.push('&');
+            self.emit_expr(arg)?;
+            return Ok(());
+        }
+        if self.arg_is_reused_fn_binding(arg) {
+            self.buf.push('&');
+            self.emit_expr(arg)?;
+            return Ok(());
+        }
+        let clone_reused = self.arg_needs_clone(arg);
+        self.emit_expr(arg)?;
+        if clone_reused {
+            self.buf.push_str(".clone()");
+        }
+        Ok(())
+    }
+
     /// True when a `for` iterable should be cloned to avoid moving (or partially
     /// moving) a binding that is reused after the loop. Covers a bare reused
     /// binding (`for n in nodes` with `nodes` used again — [`Self::arg_is_reused_binding`])
@@ -5393,7 +5561,10 @@ impl RsEmitCtx {
                 return Ok(());
             }
         }
-        self.emit_expr(right)?;
+        // `x |> (|v| …)` pipes into a closure: parenthesize the closure callee
+        // so the `(left)` call applies to it, not to its body. See
+        // `emit_callee_rs`.
+        self.emit_callee_rs(right)?;
         self.buf.push('(');
         self.emit_expr(left)?;
         self.buf.push(')');
@@ -5426,6 +5597,11 @@ impl RsEmitCtx {
             // interpolation of one formats with `{:?}` (a `Vec`/`HashMap`/
             // `HashSet` has no `Display`). See `collection_bindings`.
             let prev_collection = self.collection_bindings.clone();
+            // Track which `let` bindings hold a function/closure (`impl Fn`) so a
+            // move-reuse of one is *borrowed* (`&f`) rather than `.clone()`d — an
+            // `impl Fn` opaque type is not `Clone` (E0599). See
+            // `fn_typed_bindings`.
+            let prev_fn_typed = self.fn_typed_bindings.clone();
             for s in stmts {
                 if let NodeKind::LetBinding {
                     pattern, value, ty, ..
@@ -5439,7 +5615,14 @@ impl RsEmitCtx {
                         if ty.as_deref().is_some_and(Self::type_is_display_collection)
                             || Self::expr_is_collection_valued(value)
                         {
-                            self.collection_bindings.insert(rs_name);
+                            self.collection_bindings.insert(rs_name.clone());
+                        }
+                        if ty
+                            .as_deref()
+                            .is_some_and(|t| matches!(&t.kind, NodeKind::TypeFunction { .. }))
+                            || self.rhs_is_fn_valued(value)
+                        {
+                            self.fn_typed_bindings.insert(rs_name);
                         }
                     }
                 }
@@ -5449,6 +5632,7 @@ impl RsEmitCtx {
             }
             self.reused_let_bindings = prev_reused_let;
             self.collection_bindings = prev_collection;
+            self.fn_typed_bindings = prev_fn_typed;
             self.task_bound_names = prev;
             if let Some(t) = tail {
                 // A statement tail (`return`/`break`/`continue`/assignment) is
