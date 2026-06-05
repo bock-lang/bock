@@ -4669,7 +4669,7 @@ impl PyEmitCtx {
                 } else {
                     None
                 };
-                self.emit_expr(callee)?;
+                self.emit_callee(callee)?;
                 self.buf.push('(');
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -4729,12 +4729,19 @@ impl PyEmitCtx {
             }
             NodeKind::Pipe { left, right } => self.emit_pipe(left, right),
             NodeKind::Compose { left, right } => {
-                // `f >> g` → `lambda x: g(f(x))`
-                let _ = write!(self.buf, "lambda x: ");
-                self.emit_expr(right)?;
+                // `f >> g` → `(lambda x: g(f(x)))`. The whole lambda is wrapped
+                // so that a nested compose — emitted here as a `lambda x: ...`
+                // for `left`/`right` — is itself parenthesized before the
+                // `(x)` call is appended; otherwise Python binds the `(x)` to
+                // the inner lambda's body rather than invoking it. (In practice
+                // the AIR lowers `>>` to a `Lambda` before codegen, so this arm
+                // is a defensive fall-through; `emit_callee` covers the lowered
+                // form.)
+                self.buf.push_str("(lambda x: ");
+                self.emit_callee(right)?;
                 self.buf.push('(');
-                self.emit_expr(left)?;
-                self.buf.push_str("(x))");
+                self.emit_callee(left)?;
+                self.buf.push_str("(x)))");
                 Ok(())
             }
             NodeKind::Await { expr } => {
@@ -4968,15 +4975,21 @@ impl PyEmitCtx {
                 Ok(())
             }
             NodeKind::Block { stmts, tail } => {
-                // Blocks in expression position: emit last expression.
-                // Python doesn't have IIFEs like JS; if there are stmts we just
-                // emit the tail (best effort).
+                // Blocks in expression position. Python `lambda` bodies are
+                // expression-only, so leading statements can't live inside an
+                // IIFE the way they do in JS. When every leading statement is a
+                // pure-expressible `let`/expression statement we fold them into
+                // immediately-applied lambdas (`try_emit_block_stmts_as_expr`)
+                // so their effects run and their bindings reach the tail.
                 if stmts.is_empty() {
                     if let Some(t) = tail {
                         return self.emit_expr(t);
                     }
+                } else if self.try_emit_block_stmts_as_expr(stmts, tail.as_deref())? {
+                    return Ok(());
                 }
-                // Fallback: wrap in a lambda (only works for simple cases).
+                // Fallback for shapes the fold can't model (mutable `let`,
+                // assignment, loops): wrap the tail alone (best effort).
                 self.buf.push_str("(lambda: ");
                 if let Some(t) = tail {
                     self.emit_expr(t)?;
@@ -5489,13 +5502,34 @@ impl PyEmitCtx {
 
     // ── Pipe operator ───────────────────────────────────────────────────────
 
+    /// Emit an expression in callee position, parenthesizing it when its
+    /// surface syntax would otherwise swallow the trailing argument list.
+    ///
+    /// A bare Python `lambda` is the case that matters: `lambda x: body`
+    /// followed by `(arg)` parses as `lambda x: (body(arg))` — the call binds
+    /// to the body, never invoking the lambda. Wrapping it as `(lambda x:
+    /// body)(arg)` makes the call apply to the lambda itself. This shows up
+    /// whenever the AIR compose desugar (`f >> g` → `(__compose_x) =>
+    /// g(f(__compose_x))`) nests: chained `>>` lowers the inner compose to a
+    /// `Lambda`, which then appears as the callee `f` inside `f(__compose_x)`.
+    fn emit_callee(&mut self, callee: &AIRNode) -> Result<(), CodegenError> {
+        if matches!(callee.kind, NodeKind::Lambda { .. }) {
+            self.buf.push('(');
+            self.emit_expr(callee)?;
+            self.buf.push(')');
+            Ok(())
+        } else {
+            self.emit_expr(callee)
+        }
+    }
+
     fn emit_pipe(&mut self, left: &AIRNode, right: &AIRNode) -> Result<(), CodegenError> {
         if let NodeKind::Call { callee, args, .. } = &right.kind {
             let has_placeholder = args
                 .iter()
                 .any(|a| matches!(a.value.kind, NodeKind::Placeholder));
             if has_placeholder {
-                self.emit_expr(callee)?;
+                self.emit_callee(callee)?;
                 self.buf.push('(');
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -5511,7 +5545,7 @@ impl PyEmitCtx {
                 return Ok(());
             }
         }
-        self.emit_expr(right)?;
+        self.emit_callee(right)?;
         self.buf.push('(');
         self.emit_expr(left)?;
         self.buf.push(')');
@@ -6334,9 +6368,110 @@ impl PyEmitCtx {
                 if let Some(t) = tail {
                     return self.emit_expr(t);
                 }
+            } else if self.try_emit_block_stmts_as_expr(stmts, tail.as_deref())? {
+                // A block with leading statements *and* a tail value — e.g. a
+                // value-position `match` arm `Ok(sum) => { let s = …; … }`. The
+                // leading `let`s / side-effecting expression statements are
+                // folded into immediately-applied lambdas so they actually run
+                // and their bindings are in scope for the tail. See
+                // `try_emit_block_stmts_as_expr`.
+                return Ok(());
             }
         }
         self.emit_expr(node)
+    }
+
+    /// Emit a block's leading statements + tail as a single Python expression by
+    /// folding each statement into an immediately-applied lambda, preserving
+    /// both the statement's effect and any binding it introduces:
+    ///
+    /// ```text
+    /// { let x = V; REST }         →  (lambda x: <REST>)(V)
+    /// { side_effect(); REST }     →  (lambda _: <REST>)(side_effect())
+    /// ```
+    ///
+    /// Python `lambda` bodies are expression-only, so a block with statements in
+    /// expression position (a value-position `match`/`if` arm) otherwise loses
+    /// its leading statements — the old "best effort" emitted `(lambda: <tail>)()`
+    /// and dropped them, leaving later references unbound (the calculator
+    /// `let step2 = …` bug) or skipping a side effect (microservice's dropped
+    /// `log`).
+    ///
+    /// Returns `Ok(true)` when the whole block was emitted this way. Returns
+    /// `Ok(false)` — emitting nothing — when a leading statement can't be
+    /// expressed as a pure expression (mutable `let`, assignment, loop, …); the
+    /// caller then falls back to the prior best-effort path. The conservative
+    /// gate keeps this from emitting broken code for shapes it can't model.
+    fn try_emit_block_stmts_as_expr(
+        &mut self,
+        stmts: &[AIRNode],
+        tail: Option<&AIRNode>,
+    ) -> Result<bool, CodegenError> {
+        // Every leading statement must be expressible as a value-producing
+        // expression: an immutable simple `let`, or a plain expression
+        // statement. Anything else (mutable/destructuring `let`, assignment,
+        // loop, `return`, nested block) bails so the caller can fall back.
+        for s in stmts {
+            match &s.kind {
+                NodeKind::LetBinding {
+                    is_mut, pattern, ..
+                } if *is_mut || Self::simple_bind_name(pattern).is_none() => {
+                    return Ok(false);
+                }
+                NodeKind::LetBinding { .. } => {}
+                NodeKind::Assign { .. }
+                | NodeKind::While { .. }
+                | NodeKind::For { .. }
+                | NodeKind::Loop { .. }
+                | NodeKind::Return { .. }
+                | NodeKind::Break { .. }
+                | NodeKind::Continue
+                | NodeKind::Block { .. } => return Ok(false),
+                _ => {}
+            }
+        }
+        self.emit_block_stmt_chain(stmts, tail)?;
+        Ok(true)
+    }
+
+    /// Recursively emit the `(lambda …: …)(…)` chain validated by
+    /// [`Self::try_emit_block_stmts_as_expr`].
+    fn emit_block_stmt_chain(
+        &mut self,
+        stmts: &[AIRNode],
+        tail: Option<&AIRNode>,
+    ) -> Result<(), CodegenError> {
+        let Some((first, rest)) = stmts.split_first() else {
+            // No more leading statements — emit the tail value (or `None`).
+            return match tail {
+                Some(t) => self.emit_expr(t),
+                None => {
+                    self.buf.push_str("None");
+                    Ok(())
+                }
+            };
+        };
+        match &first.kind {
+            NodeKind::LetBinding { pattern, value, .. } => {
+                let name = Self::simple_bind_name(pattern).unwrap_or_else(|| "_".to_string());
+                let _ = write!(self.buf, "(lambda {name}: ");
+                self.emit_block_stmt_chain(rest, tail)?;
+                self.buf.push_str(")(");
+                self.emit_expr(value)?;
+                self.buf.push(')');
+                Ok(())
+            }
+            // A bare expression statement: bind its value to a throwaway
+            // parameter so the effect runs, then continue with the rest.
+            _ => {
+                self.buf.push_str("(lambda _: ");
+                self.emit_block_stmt_chain(rest, tail)?;
+                self.buf.push_str(")(");
+                self.emit_expr(first)?;
+                self.buf.push(')');
+                Ok(())
+            }
+        }
     }
 
     /// The single Python value-name a *simple* `let` pattern binds, if any: only
@@ -7787,6 +7922,45 @@ mod tests {
         let out = gen(&module(vec![], vec![f]));
         assert!(out.contains("lambda x: (x * 2)"), "got: {out}");
         assert!(out.contains("double(5)"), "got: {out}");
+    }
+
+    /// A `Call` whose callee is a `Lambda` must parenthesize the lambda so the
+    /// trailing argument list invokes the lambda, not its body. Without the
+    /// grouping, `lambda x: x(42)` parses as `lambda x: (x(42))` — the `(42)`
+    /// binds to the body, never calling the lambda.
+    ///
+    /// This is the shape the AIR compose desugar (`f >> g` →
+    /// `(__compose_x) => g(f(__compose_x))`) produces for chained `>>`: the
+    /// inner compose lowers to a `Lambda`, which then appears as the callee
+    /// `f` in the outer `f(__compose_x)`. See examples/real-world/data-pipeline
+    /// (`normalize >> compute_summary >> format_summary`).
+    #[test]
+    fn py_call_with_lambda_callee_parenthesizes() {
+        // (lambda x: x)(42)
+        let lambda = node(
+            1,
+            NodeKind::Lambda {
+                params: vec![param_node(2, "x")],
+                body: Box::new(id_node(3, "x")),
+            },
+        );
+        let call = node(
+            4,
+            NodeKind::Call {
+                callee: Box::new(lambda),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(5, "42"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let f = fn_decl_tail(0, Visibility::Private, "test", call);
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("(lambda x: x)(42)"),
+            "lambda callee must be parenthesized so it is invoked; got: {out}"
+        );
     }
 
     #[test]
@@ -10270,6 +10444,75 @@ mod tests {
         assert!(
             out.contains("match p:") && out.contains("case _BockSome(_BockOk(n)):"),
             "nested constructor value match must test+bind the inner Ok, got:\n{out}"
+        );
+        assert!(
+            !has_python3() || check_py_syntax(&out),
+            "generated python must parse, got:\n{out}"
+        );
+    }
+
+    /// Q-py-valpos-stmt-arms: a value-position `match` arm whose body is a
+    /// *block with leading statements* must run those statements and keep their
+    /// bindings in scope for the tail. The calculator's chained-computation arm
+    /// `Ok(sum) => { let step2 = …; <inner match> }` previously emitted
+    /// `(lambda: <tail>)()`, dropping the `let step2` and leaving `step2`
+    /// unbound at runtime. The fix folds the `let` into an immediately-applied
+    /// lambda: `(lambda step2: <tail>)(<value>)`.
+    #[test]
+    fn py_valpos_match_arm_block_keeps_leading_let() {
+        // Ok(n) => { let doubled = (n + n); doubled }
+        let let_stmt = node(
+            500,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(501, "doubled")),
+                ty: None,
+                value: Box::new(node(
+                    502,
+                    NodeKind::BinaryOp {
+                        op: BinOp::Add,
+                        left: Box::new(id_node(503, "n")),
+                        right: Box::new(id_node(504, "n")),
+                    },
+                )),
+            },
+        );
+        let ok_arm = node(
+            510,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    511,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Ok"]),
+                        fields: vec![bind_pat(512, "n")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(513, vec![let_stmt], Some(id_node(514, "doubled")))),
+            },
+        );
+        let err_arm = node(
+            520,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    521,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Err"]),
+                        fields: vec![bind_pat(522, "e")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(523, vec![], Some(id_node(524, "e")))),
+            },
+        );
+        let out = gen(&match_fn("keep_let", vec![ok_arm, err_arm]));
+        assert!(
+            out.contains("lambda doubled:"),
+            "value-position match-arm block must keep its `let doubled` binding, got:\n{out}"
+        );
+        assert!(
+            !out.contains("(lambda: "),
+            "must not emit the statement-dropping `(lambda: <tail>)()` form, got:\n{out}"
         );
         assert!(
             !has_python3() || check_py_syntax(&out),
