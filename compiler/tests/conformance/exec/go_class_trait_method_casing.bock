@@ -13,11 +13,14 @@
 //   1. Casing: before the fix the inherent `render` emitted lowercase `render`
 //      while dispatch / `impl Component` expected `Render`
 //      (`page.Render undefined (has method render)`).
-//   2. Recursion: the `impl Component for Button` forwarder
-//      (`fn render(self) { self.render() }`) emitted
-//      `func (Button) Render() { return self.Render() }` — infinite recursion.
-//      The redundant same-named trait-impl forwarder is now skipped; the
-//      inherent exported `Render` satisfies the interface directly.
+//   2. Recursion: under the single-method-namespace rule (DQ27, spec §6.7) a
+//      type has one method namespace, so `render` is defined exactly *once* —
+//      here, as the inherent `Button.render` — and `impl Component for Button`
+//      is empty. The inherent exported `Render` satisfies the interface
+//      directly. (The previous form declared `render` in both blocks with a
+//      `self.render()` forwarder, which is now an E4012 coherence error and
+//      had emitted `func (Button) Render() { return self.Render() }` —
+//      infinite recursion.)
 //
 // `Widget.render` is inherent with NO `impl Component for Widget`, proving an
 // inherent method is exported when a trait merely *declares* the name. js/ts/
@@ -40,11 +43,8 @@ impl Button {
   }
 }
 
-impl Component for Button {
-  fn render(self) -> String {
-    self.render()
-  }
-}
+// Button is a Component via its inherent `render` (one method namespace, §6.7).
+impl Component for Button {}
 
 record Widget {
   inner: String

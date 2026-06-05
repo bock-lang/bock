@@ -940,7 +940,12 @@ pub fn trait_arg_key(args: &[Type]) -> String {
 /// genuine signature conflict). The key is deterministic and intended only for
 /// equality comparison, not display.
 fn method_sig_key(method: &AIRNode) -> String {
-    let NodeKind::FnDecl { params, return_type, .. } = &method.kind else {
+    let NodeKind::FnDecl {
+        params,
+        return_type,
+        ..
+    } = &method.kind
+    else {
         return String::new();
     };
     let param_keys: Vec<String> = params
