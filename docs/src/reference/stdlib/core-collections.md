@@ -21,12 +21,20 @@ These lower as built-in **methods** on the value — use them directly:
 - **`List`** (read-only): `len`/`length`/`count`, `is_empty`, `get`
   (→ `Optional[T]`), `contains`, `first`/`last`, `concat`, `index_of`,
   `join`.
+- **`List`** (in-place mutators): `push`/`append` mutate the list in
+  place — they require a **`mut` receiver** (a `let mut` list, a `mut`
+  parameter, or a field reached through a `mut` receiver) and return
+  **`Void`**. To build a list *functionally* (a new list, no `mut`),
+  use `+` / `concat` instead. `append` is the spelling alias for
+  `push`. See the spec, §18.3.
 - **`Set`**: `add`/`remove`, `union`/`intersection`/`difference`,
   `contains`, `is_subset`/`is_superset`, `len`, `is_empty`, `to_list`,
-  `filter`/`map`.
+  `filter`/`map`. `contains` (element membership) is a `Set` method.
 - **`Map`**: `get` (→ `Optional[V]`), `set`/`delete`, `merge`,
-  `contains_key`, `keys`/`values`/`entries`/`to_list`, `len`,
-  `is_empty`, `filter`.
+  `contains_key`/`contains_value`, `keys`/`values`/`entries`/`to_list`,
+  `len`, `is_empty`, `filter`. Map membership is `contains_key` (key) /
+  `contains_value` (value); bare `contains` is **not** a `Map` method
+  (the compiler suggests `contains_key`).
 
 Because `Set` already ships `union`/`intersection`/`difference` and
 `Map` already ships `merge`, those set/map-algebra helpers are not

@@ -1713,6 +1713,36 @@ impl RsEmitCtx {
         Ok(true)
     }
 
+    /// Emit an in-place `List` mutator (`push`/`append`, DQ18) to its Rust form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_mutating_method`]. Bock
+    /// `List[T]` lowers to `Vec<T>`, whose `push` is `&mut self`, so this emits
+    /// `(recv).push(x)` against the receiver *place* (not a clone — these methods
+    /// mutate in place). The checker types these as `Void`, so they appear in
+    /// statement position; the ownership pass guarantees the receiver is a `mut`
+    /// lvalue, and the `let mut` / `mut` parameter binding (whose `is_mut` flag
+    /// this backend already honours when emitting the binding) makes the place
+    /// `&mut`-able.
+    fn try_emit_list_mutating_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, _method, rest)) =
+            crate::generator::desugared_list_mutating_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let Some(x) = rest.first() else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let x = self.expr_to_string(&x.value)?;
+        let _ = write!(self.buf, "({recv_str}).push(({x}))");
+        Ok(true)
+    }
+
     /// Emit a functional (closure-taking) `List` built-in method call to its
     /// Rust form.
     ///
@@ -4282,6 +4312,9 @@ impl RsEmitCtx {
                 // before the generic fall-through, which would emit `n.to_float(n)`
                 // (no such inherent method on `i64`/`f64`).
                 if self.try_emit_numeric_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_mutating_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {

@@ -1587,6 +1587,34 @@ impl TsEmitCtx {
         Ok(true)
     }
 
+    /// Emit an in-place `List` mutator (`push`/`append`, DQ18) to its TS form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_mutating_method`].
+    /// Bock's `List[T]` lowers to a mutable `Array<T>` (`T[]`), so `recv.push(x)`
+    /// lowers directly. The checker types these as `Void` (statement position);
+    /// the receiver is a `mut` lvalue (ownership-enforced), evaluated once.
+    fn try_emit_list_mutating_method(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, _method, rest)) =
+            crate::generator::desugared_list_mutating_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let Some(x) = rest.first() else {
+            return Ok(false);
+        };
+        self.buf.push('(');
+        self.emit_expr(recv)?;
+        self.buf.push_str(").push(");
+        self.emit_expr(&x.value)?;
+        self.buf.push(')');
+        Ok(true)
+    }
+
     /// Emit a functional (closure-taking) `List` built-in method call to its TS
     /// form.
     ///
@@ -4142,6 +4170,9 @@ impl TsEmitCtx {
                 // likewise route by the checker's `recv_kind = "Primitive:Int|…"`
                 // before the generic fall-through, which would emit `n.to_float(n)`.
                 if self.try_emit_numeric_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_mutating_method(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {

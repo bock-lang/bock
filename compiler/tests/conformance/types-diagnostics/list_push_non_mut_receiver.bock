@@ -1,0 +1,16 @@
+// TEST: list_push_non_mut_receiver
+// EXPECT: error E5004 at 14:5
+//
+// DQ18: `List.push`/`append` are in-place mutators — they require a `mut`
+// receiver and return `Void`. Pushing onto a plain (non-`mut`) `let` binding is
+// a checker error (`E5004`, the ownership pass) that points at the receiver and
+// suggests `let mut`. Functional list-building (`+` / `concat`) stays
+// value-returning and needs no `mut`, so it is the recommended alternative in
+// the diagnostic note.
+module main
+
+fn main() -> Void {
+  let acc: List[Int] = []
+  acc.push(1)
+  println("${acc.len()}")
+}
