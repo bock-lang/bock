@@ -146,7 +146,9 @@ status(open | resolved→link)`
   benchmarking to target-native tools (`cargo bench`/`pytest-benchmark`/…). So core.test ships NO benchmarking surface
   (DQ26). · **Disposition:** **OPEN → Design** — amend §18.3's core.test line to read "benchmarking delegated to
   native tools (§20.4), not shipped" (one-line spec clarification; no behavior change; the impl is correct). Surfaced
-  by the core.test build (#169 changelog). Non-blocking (v1 stdlib is complete). · **Status:** OPEN.
+  by the core.test build (#169 changelog). Non-blocking (v1 stdlib is complete). · **Status:** RESOLVED 2026-06-06 — §18.3
+  core.test line corrected (DV17, in the stdlib-surface ratification batch): "benchmarking" dropped entirely, trimmed to the
+  shipped "assertions (free + fluent)", BDD/mocking/property/snapshot → Reserved-v1.x; changelog `20260606-stdlib-surface-ratification`.
 
 ### DV18 — source mode emits run-affordance manifests, but §20.6.2 says source mode emits none
 - **§:** §20.6.2 · **impl-does:** `--source-only` still emits the run-affordance manifests (`Cargo.toml`, `go.mod`,
