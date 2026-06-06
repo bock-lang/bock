@@ -1,0 +1,34 @@
+// TEST: exec_ts_strict_eval_ident
+// EXPECT: output "eval(2,3)=5;arguments=7"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression guard for Q-calculator-ts-eval. TypeScript modules are emitted in
+// strict mode (ES modules always are), which makes `eval` and `arguments`
+// illegal as *binding* names even though neither is a reserved word: a
+// `function eval(...)` declaration is rejected with `TS1215: Invalid use of
+// 'eval'`, and a `let arguments` binding is likewise refused. The calculator
+// example named its evaluator `eval`, so `bock build -t ts` (which runs `tsc
+// --noEmit`) failed on otherwise-correct output.
+//
+// The TS backend now escapes `eval`/`arguments` with the same trailing-`_`
+// mangle the shared reserved-word sanitizer uses (`eval` → `eval_`), applied at
+// the single value-ident funnel so the declaration, every call site, and the
+// interpolation *reference* site agree. The other targets accept these names
+// verbatim (JS sloppy/non-module mode, Python, Rust, Go), so the program must
+// still run identically everywhere — hence all five targets.
+//
+// `eval` is a free function whose name collides; `arguments` is a local binding.
+// Both are referenced in arithmetic and string-interpolated into the output (a
+// reference site), so a mismatched escape would corrupt the output even if it
+// compiled. `main` is intentionally NOT `public`.
+module main
+
+fn eval(a: Int, b: Int) -> Int {
+  a + b
+}
+
+fn main() -> Void {
+  let arguments: Int = 3 + 4
+  let total: Int = eval(2, 3)
+  println("eval(2,3)=${total};arguments=${arguments}")
+}

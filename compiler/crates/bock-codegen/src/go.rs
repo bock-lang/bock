@@ -1304,6 +1304,15 @@ struct GoEmitCtx {
     /// erased `map[interface{}]interface{}` Go rejects against the concrete
     /// struct field. Only `Map`-typed fields are recorded. Pre-scanned.
     record_field_map_kv: HashMap<String, HashMap<String, (String, String)>>,
+    /// Maps a record name → (field name → the Go type of that field), for every
+    /// field of every record. The general scalar analogue of
+    /// [`Self::record_field_list_elem`]/[`Self::record_field_map_kv`]: lets
+    /// [`Self::infer_go_expr_type`] resolve a bare `obj.field` access (e.g. a
+    /// `.map((b) => b.id)` closure body where `b: Block` and `record Block { id:
+    /// Int }`) to the field's concrete Go type (`int64`), so the result slice is
+    /// sized `[]int64` rather than the erased `[]interface{}` Go rejects against
+    /// a declared `[]int64` return. Pre-scanned across the reached modules.
+    record_field_go_type: HashMap<String, HashMap<String, String>>,
     /// Maps a record name → its generic-param names in declaration order
     /// (`"SortedSet" → ["T"]`). Lets a construction site substitute a field's
     /// declared list-element type (`record SortedSet[T] { items: List[T] }` →
@@ -1590,6 +1599,7 @@ impl GoEmitCtx {
             record_param_fields: HashMap::new(),
             record_field_list_elem: HashMap::new(),
             record_field_map_kv: HashMap::new(),
+            record_field_go_type: HashMap::new(),
             record_generic_param_names: HashMap::new(),
             current_self_record: None,
             trait_decls: crate::generator::TraitDeclRegistry::new(),
@@ -1903,6 +1913,18 @@ impl GoEmitCtx {
             if !map_fields.is_empty() {
                 self.record_field_map_kv
                     .insert(name.name.clone(), map_fields);
+            }
+            // Record EVERY field's Go type, keyed by field name — lets
+            // `infer_go_expr_type` resolve a bare `obj.field` access (a
+            // `.map((b) => b.id)` closure body) to the field's concrete Go type,
+            // sizing the result slice concretely rather than as `[]interface{}`.
+            let field_go_types: HashMap<String, String> = fields
+                .iter()
+                .map(|f| (f.name.name.clone(), self.ast_type_to_go(&f.ty)))
+                .collect();
+            if !field_go_types.is_empty() {
+                self.record_field_go_type
+                    .insert(name.name.clone(), field_go_types);
             }
             if generic_params.is_empty() {
                 continue;
@@ -3849,6 +3871,30 @@ impl GoEmitCtx {
                     return None;
                 }
                 Some(rendered)
+            }
+            // A bare `obj.field` access where `obj` is a variable of a known
+            // record type resolves to the field's recorded Go type. This types a
+            // `.map((b) => b.id)` closure body to `int64` (for `b: Block`,
+            // `record Block { id: Int }`), sizing the `map` result slice as
+            // `[]int64` rather than the erased `[]interface{}` Go rejects against
+            // a declared `[]int64` return. `self.field` resolves through the
+            // current-impl record; a non-identifier object (a chained access) is
+            // left unresolved (conservative — `interface{}`, never wrong).
+            NodeKind::FieldAccess { object, field } => {
+                let record = match &object.kind {
+                    NodeKind::Identifier { name } if name.name == "self" => {
+                        self.current_self_record.clone()?
+                    }
+                    NodeKind::Identifier { name } => {
+                        let obj_go_ty = self.var_go_type.get(&go_value_ident(&name.name))?;
+                        Self::go_type_record_head(obj_go_ty).to_string()
+                    }
+                    _ => return None,
+                };
+                self.record_field_go_type
+                    .get(&record)
+                    .and_then(|m| m.get(&field.name))
+                    .cloned()
             }
             // A `recv.method()` call resolves to the method's recorded Go return
             // type. Keyed by method name only; the pre-scan poisons (omits) any

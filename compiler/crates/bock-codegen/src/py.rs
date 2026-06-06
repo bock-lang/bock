@@ -6062,6 +6062,18 @@ impl PyEmitCtx {
             let alias = format!("{py_name}__s{}", self.shadow_counter);
             return (alias.clone(), Some((py_name.to_string(), alias)));
         }
+        // A `let` whose name collides with a Python builtin the codegen *itself*
+        // emits as a call (`list(map.keys())`, `set(...)`, `map(...)`) must be
+        // renamed even when it shadows nothing — binding `list = [...]` rebinds
+        // the global `list` for the rest of the function scope, so a later
+        // codegen-emitted `list(...)` would raise `TypeError: 'list' object is
+        // not callable`. The rename flows to references via the same
+        // `renames` map `resolve_shadow_name` consults, so use sites stay in sync.
+        if is_shadow_sensitive_py_builtin(py_name) {
+            self.shadow_counter += 1;
+            let alias = format!("{py_name}__b{}", self.shadow_counter);
+            return (alias.clone(), Some((py_name.to_string(), alias)));
+        }
         (py_name.to_string(), None)
     }
 
@@ -6920,6 +6932,51 @@ fn py_value_ident(name: &str) -> String {
     crate::generator::escape_target_keyword(
         &to_snake_case(name),
         crate::generator::KeywordTarget::Python,
+    )
+}
+
+/// True when `name` (an already snake_cased Python value identifier) collides
+/// with a built-in that the Python backend *emits as a call* in generated code —
+/// the collection constructors and functional combinators a list/set/map literal
+/// or method lowers to (`list(...)`, `set(...)`, `dict(...)`, `map(...)`,
+/// `filter(...)`, `sorted(...)`, `enumerate(...)`, `range(...)`, `len(...)`,
+/// `tuple(...)`, `frozenset(...)`, `zip(...)`, `iter(...)`, `print(...)`).
+///
+/// A local `let list = [...]` rebinds these names for the rest of the
+/// (function-scoped) Python frame, so a subsequent codegen-emitted `list(...)`
+/// would raise `TypeError: 'list' object is not callable`. [`PyEmitCtx::
+/// plan_shadow_let`] renames such bindings to a fresh alias so the builtin stays
+/// callable; references resolve through the same alias map. The set is limited to
+/// builtins the codegen actually emits (not every Python builtin) so unrelated
+/// names are never mangled. Bock keywords (`type`, etc.) are handled separately
+/// by [`crate::generator::escape_target_keyword`].
+fn is_shadow_sensitive_py_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "list"
+            | "set"
+            | "dict"
+            | "map"
+            | "filter"
+            | "sorted"
+            | "enumerate"
+            | "range"
+            | "len"
+            | "tuple"
+            | "frozenset"
+            | "zip"
+            | "iter"
+            | "next"
+            | "print"
+            | "str"
+            | "int"
+            | "float"
+            | "bool"
+            | "abs"
+            | "min"
+            | "max"
+            | "sum"
+            | "round"
     )
 }
 

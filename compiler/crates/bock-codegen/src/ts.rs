@@ -5921,11 +5921,25 @@ fn is_time_method_name(name: &str) -> bool {
 /// than the illegal bare keyword. Apply at every value declaration and reference
 /// site so the escaped name is used uniformly; member/method names use bare
 /// [`to_camel_case`]. See [`crate::generator::escape_target_keyword`].
+///
+/// On top of the shared reserved-word escape, TS modules are emitted in *strict
+/// mode* (ES modules always are), which makes `eval` and `arguments` illegal as
+/// binding names — a `function eval(...)` declaration is rejected with `TS1215:
+/// Invalid use of 'eval'` even though `eval` is not a keyword. The shared
+/// keyword set is target-agnostic and JS (non-module/sloppy-mode) accepts these
+/// names, so they are escaped here, in the TS-only funnel, with the same
+/// trailing-`_` mangle the keyword escape uses (`eval` → `eval_`). Applied at
+/// the single value-ident funnel so declarations and references stay in sync.
 fn ts_value_ident(name: &str) -> String {
-    crate::generator::escape_target_keyword(
+    let escaped = crate::generator::escape_target_keyword(
         &to_camel_case(name),
         crate::generator::KeywordTarget::Ts,
-    )
+    );
+    if matches!(escaped.as_str(), "eval" | "arguments") {
+        format!("{escaped}_")
+    } else {
+        escaped
+    }
 }
 
 /// True when binding `bind_name` against `access` would be a self-reference:
