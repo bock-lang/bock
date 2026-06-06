@@ -270,7 +270,9 @@ Identifiers start with a letter or underscore and continue with letters, digits,
 
 **Floats:** `3.14`, `1.0e10`, `2.5E-3`. Optional type suffix: `3.14_f64`.
 
-**Booleans:** `true`, `false`.
+**Booleans:** `true`, `false`. These lowercase spellings are canonical: a `Bool`
+stringified through `${expr}` string interpolation or `.to_string()` produces
+exactly `"true"` / `"false"` on every target, matching the literals.
 
 **Characters:** `'a'`, `'\n'`, `'\u{1F600}'`.
 
@@ -293,6 +295,19 @@ let html = """
 ### 3.6 — Operators
 
 **Arithmetic:** `+`, `-`, `*`, `/`, `%`, `**` (power).
+
+**Integer division and remainder.** When both operands are an integer type
+(`Int` or any sized variant `Int8`…`Int128`, `UInt8`…`UInt64`; §4.2), `/` is
+*integer division* yielding an integer that is **truncated toward zero**, not
+floored: `17 / 5 == 3`, `-17 / 5 == -3`, `17 / -5 == -3`, `-17 / -5 == 3`. All
+sized integer types divide identically. `%` is the remainder of that truncated
+division and takes the sign of the **dividend**: `-17 % 5 == -2`, `17 % -5 == 2`.
+For all integer operands the identity `(a / b) * b + (a % b) == a` holds. When
+both operands are a float type, `/` is IEEE 754 true division and `%` is the
+floating-point remainder; these are unchanged. A mixed `Int`/`Float` operand pair
+is a type error — there is no implicit coercion (§4.2); convert explicitly first.
+Integer division **or** modulo by zero is a runtime abort (a `Panic` ambient
+effect, §10.5), equivalent on every target.
 
 **Comparison:** `==`, `!=`, `<`, `>`, `<=`, `>=`, `is` (type check).
 

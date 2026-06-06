@@ -1,0 +1,21 @@
+// TEST: exec_bool_spelling
+// EXPECT: output "true false;true false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ23 (§3.5): a `Bool` stringified through `${b}` interpolation or `.to_string()`
+// produces the canonical **lowercase** `"true"` / `"false"` on every target,
+// matching the Bool literals. The trap is Python: a bare `f"{b}"` and `str(b)`
+// print the capitalized `True` / `False`, so the Python backend lowercases such
+// values (the checker stamps `Bool`-typed interpolation parts; `to_string()` on a
+// `Bool` receiver routes to the lowercase form). JS/TS template literals and
+// Rust/Go formatting already print lowercase. The first half exercises the
+// interpolation path, the second the `.to_string()` method path.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn main() -> Void {
+  let t: Bool = true
+  let f: Bool = false
+  println("${t} ${f};${t.to_string()} ${f.to_string()}")
+}

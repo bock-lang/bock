@@ -1,0 +1,36 @@
+// TEST: exec_int_div_large
+// EXPECT: output "4503599627370496;1"
+// EXPECT: targets python, rust, go
+//
+// DQ23 (§3.6) precision guard: integer division/modulo must stay in exact
+// integer arithmetic and NOT route through float true-division.
+// `9007199254740993` is `2^53 + 1` — the first odd integer not exactly
+// representable as an IEEE-754 double (it rounds to `2^53`). The remainder is the
+// discriminator: the exact integer `(2^53+1) % 2 == 1`, but a float route — most
+// dangerously Python's `int(a / b)`, which the toward-zero helper deliberately
+// avoids — first rounds `2^53+1` to the even `2^53`, after which the odd bit is
+// gone and `% 2` reads `0`. A passing `;1` proves the Python (and Rust/Go)
+// lowering kept the low bit in exact integer arithmetic.
+// `(2^53+1) / 2 == 4503599627370496` (the truncated quotient).
+//
+// Restricted to `python, rust, go`: JS/TS map `Int` to the IEEE-754 `number`,
+// which cannot represent any integer above `2^53` at all — the *literal*
+// `9007199254740993` is already rounded to `2^53` at parse time, before any
+// division, so the precision a 64-bit integer target preserves is structurally
+// unavailable on `number`. (A BigInt-backed `Int` on JS/TS is a separate,
+// DQ23-orthogonal concern.) The truncate-toward-zero behavior of the JS/TS
+// integer `/` lowering within `number`'s safe range is covered by
+// `exec_int_div_truncate` and `exec_int_mod_sign`.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn opaque(n: Int) -> Int {
+  return n
+}
+
+fn main() -> Void {
+  let big: Int = opaque(9007199254740993)
+  let two: Int = opaque(2)
+  println("${big / two};${big % two}")
+}

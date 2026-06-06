@@ -1,0 +1,27 @@
+// TEST: exec_int_mod_by_zero
+// EXPECT: output "before"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ23 (§3.6 / §10.5): integer modulo by zero is a **runtime abort** (a Panic
+// ambient effect), equivalent on every target — the modulo half of the coherent
+// div/modulo pair. The program prints `before`, then evaluates `a % z` with
+// `z == 0`, which must abort before the `after` print. A correct abort leaves
+// exactly `before` on stdout. Rust/Go panic on integer `% 0`; Python's `%`
+// raises `ZeroDivisionError`; the JS/TS lowering inserts the same explicit
+// zero-check throw it uses for `/` (JS `a % 0` is `NaN`, not a throw). The zero
+// flows through `opaque` so it cannot be folded.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn opaque(n: Int) -> Int {
+  return n
+}
+
+fn main() -> Void {
+  let z: Int = opaque(0)
+  let a: Int = opaque(7)
+  println("before")
+  println("${a % z}")
+  println("after")
+}

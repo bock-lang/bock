@@ -111,6 +111,42 @@ pub const LIST_CONCAT_META_KEY: &str = "list_concat";
 /// strings with `+` natively and ignore this key.
 pub const STRING_CONCAT_META_KEY: &str = "string_concat";
 
+/// Metadata key stamped on a `BinaryOp { op: Div | Rem, .. }` node whose two
+/// operands both resolve to an **integer** primitive (`Int`, the sized
+/// `Int8`…`Int128` / `UInt8`…`UInt64`). It marks the `/` or `%` as *integer*
+/// division / remainder — distinct from float (true) division — so codegen can
+/// lower it to the cross-target integer semantics fixed by DQ23 (§3.6):
+///
+/// - **`/` truncates toward zero** (`-17 / 5 == -3`, not the floor `-4`), yields
+///   `Int`, and **aborts on a zero divisor** (a Panic ambient effect, §10.5).
+/// - **`%` is the remainder of that truncated division**, taking the sign of the
+///   *dividend* (`-17 % 5 == -2`, `17 % -5 == 2`), and likewise aborts on zero.
+///
+/// Rust and Go already match this with native `/` / `%`, so their backends ignore
+/// the stamp. JS/TS need `Math.trunc` plus an explicit zero-abort (JS `/` is float
+/// division and `Math.trunc(a/0)` yields `Infinity`, not a throw). Python needs an
+/// integer-only toward-zero helper (its `//` *floors* and `int(a/b)` routes
+/// through lossy float division) and a dividend-sign `%` helper (its `%` follows
+/// floor division). A purely syntactic codegen check cannot see that bare
+/// identifiers (`a / b`) are integer-typed, so the type-aware checker records it
+/// here. The value is a `Value::Bool(true)`.
+pub const INT_ARITH_META_KEY: &str = "int_arith";
+
+/// Metadata key stamped on an expression node whose resolved type is `Bool` and
+/// whose value is about to be *stringified* — an `${expr}` interpolation part or
+/// the receiver of a `.to_string()` / `.display()` call. It tells codegen to emit
+/// the **canonical lowercase spelling** `"true"` / `"false"` (§3.5), matching the
+/// Bool literals, rather than the target's native default.
+///
+/// JS/TS template literals and Rust/Go formatting already print lowercase, so
+/// those backends ignore the stamp. Python is the outlier: `f"{b}"` and `str(b)`
+/// print the capitalized `True` / `False`, so the Python backend reads this stamp
+/// to map the value through a lowercase conversion. The interpolation expression
+/// part's resolved type is not otherwise reachable from codegen (it lives only in
+/// the dropped type side-table), so the checker records it on the node directly.
+/// The value is a `Value::Bool(true)`.
+pub const BOOL_STRINGIFY_META_KEY: &str = "bool_stringify";
+
 /// Base node id for AIR nodes the checker synthesizes (the `for`-over-`Iterable`
 /// desugar). Chosen high enough to sit far above the dense, zero-based ids the
 /// lowerer assigns to real nodes, so synthesized nodes never collide with real
@@ -1995,6 +2031,37 @@ impl TypeChecker {
                             .insert(STRING_CONCAT_META_KEY.to_string(), Value::Bool(true));
                     }
                 }
+                // `/` and `%` on two *integer* operands are integer division /
+                // remainder with the cross-target truncate-toward-zero,
+                // dividend-sign, abort-on-zero semantics fixed by DQ23 (§3.6).
+                // Stamp the node so codegen lowers it to that contract rather than
+                // the target's native operator (JS `/` is float division; Python
+                // `//` floors and `%` follows floor division). Both operands must
+                // resolve to an integer primitive — a mixed `Int`/`Float` operand
+                // pair is a §4.2 type error reported by `infer_binop`, not stamped.
+                if matches!(op, BinOp::Div | BinOp::Rem) {
+                    let is_int = |t: &Type| {
+                        matches!(
+                            self.subst.apply(t),
+                            Type::Primitive(
+                                PrimitiveType::Int
+                                    | PrimitiveType::Int8
+                                    | PrimitiveType::Int16
+                                    | PrimitiveType::Int32
+                                    | PrimitiveType::Int64
+                                    | PrimitiveType::Int128
+                                    | PrimitiveType::UInt8
+                                    | PrimitiveType::UInt16
+                                    | PrimitiveType::UInt32
+                                    | PrimitiveType::UInt64
+                            )
+                        )
+                    };
+                    if is_int(&lt) && is_int(&rt) {
+                        node.metadata
+                            .insert(INT_ARITH_META_KEY.to_string(), Value::Bool(true));
+                    }
+                }
                 result
             }
 
@@ -2432,7 +2499,20 @@ impl TypeChecker {
                 if let NodeKind::Interpolation { parts } = &mut node.kind {
                     for part in parts.iter_mut() {
                         if let bock_air::AirInterpolationPart::Expr(e) = part {
-                            self.infer_node(e);
+                            let part_ty = self.infer_node(e);
+                            // A `Bool`-typed `${expr}` part must stringify to the
+                            // canonical lowercase `"true"`/`"false"` (§3.5). Python
+                            // f-strings would otherwise print `True`/`False`; stamp
+                            // the part node so the Python backend lowercases it. The
+                            // part's resolved type is not otherwise reachable from
+                            // codegen (it lives only in the dropped side-table).
+                            if matches!(
+                                self.subst.apply(&part_ty),
+                                Type::Primitive(PrimitiveType::Bool)
+                            ) {
+                                e.metadata
+                                    .insert(BOOL_STRINGIFY_META_KEY.to_string(), Value::Bool(true));
+                            }
                         }
                     }
                 }
@@ -6813,6 +6893,147 @@ mod tests {
         assert_eq!(
             list_call.metadata.get(RECV_KIND_META_KEY),
             Some(&Value::String("List".to_string())),
+        );
+    }
+
+    /// Build a binary-op node `left <op> right`.
+    fn binop_node(gen: &NodeIdGen, op: BinOp, left: AIRNode, right: AIRNode) -> AIRNode {
+        make_node(
+            gen,
+            NodeKind::BinaryOp {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+    }
+
+    /// An integer literal of a *sized* type (e.g. `42_i32` → `Int32`).
+    fn sized_int_lit(gen: &NodeIdGen, suffix: &str) -> AIRNode {
+        make_node(
+            gen,
+            NodeKind::Literal {
+                lit: Literal::Int(format!("42_{suffix}")),
+            },
+        )
+    }
+
+    #[test]
+    fn stamps_int_arith_on_integer_div_and_rem() {
+        // `17 / 5` and `17 % 5` — both operands `Int` — get the `int_arith` stamp
+        // so codegen lowers them to DQ23's truncate-toward-zero / dividend-sign
+        // semantics (§3.6).
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        let mut div = binop_node(&gen, BinOp::Div, int_lit(&gen), int_lit(&gen));
+        checker.infer_node(&mut div);
+        assert_eq!(
+            div.metadata.get(INT_ARITH_META_KEY),
+            Some(&Value::Bool(true)),
+            "expected int_arith stamped on Int / Int",
+        );
+
+        let mut rem = binop_node(&gen, BinOp::Rem, int_lit(&gen), int_lit(&gen));
+        checker.infer_node(&mut rem);
+        assert_eq!(
+            rem.metadata.get(INT_ARITH_META_KEY),
+            Some(&Value::Bool(true)),
+            "expected int_arith stamped on Int % Int",
+        );
+    }
+
+    #[test]
+    fn stamps_int_arith_on_sized_integer_div() {
+        // "All sized integer types divide the same way" (DQ23): a `Int32 / Int32`
+        // is stamped just like `Int / Int`.
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        let mut div = binop_node(
+            &gen,
+            BinOp::Div,
+            sized_int_lit(&gen, "i32"),
+            sized_int_lit(&gen, "i32"),
+        );
+        checker.infer_node(&mut div);
+        assert_eq!(
+            div.metadata.get(INT_ARITH_META_KEY),
+            Some(&Value::Bool(true)),
+            "expected int_arith stamped on Int32 / Int32",
+        );
+
+        // UInt64 too.
+        let mut udiv = binop_node(
+            &gen,
+            BinOp::Div,
+            sized_int_lit(&gen, "u64"),
+            sized_int_lit(&gen, "u64"),
+        );
+        checker.infer_node(&mut udiv);
+        assert_eq!(
+            udiv.metadata.get(INT_ARITH_META_KEY),
+            Some(&Value::Bool(true)),
+            "expected int_arith stamped on UInt64 / UInt64",
+        );
+    }
+
+    #[test]
+    fn no_int_arith_stamp_on_float_div_or_addition() {
+        // Float division is IEEE true division — NOT integer division — so it is
+        // not stamped. And `+` (even on integers) is never integer division.
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        let mut fdiv = binop_node(&gen, BinOp::Div, float_lit(&gen), float_lit(&gen));
+        checker.infer_node(&mut fdiv);
+        assert!(
+            !fdiv.metadata.contains_key(INT_ARITH_META_KEY),
+            "Float / Float must not be stamped int_arith",
+        );
+
+        let mut add = binop_node(&gen, BinOp::Add, int_lit(&gen), int_lit(&gen));
+        checker.infer_node(&mut add);
+        assert!(
+            !add.metadata.contains_key(INT_ARITH_META_KEY),
+            "Int + Int is not integer division",
+        );
+    }
+
+    #[test]
+    fn stamps_bool_stringify_on_bool_interpolation_part() {
+        // A `Bool`-typed `${expr}` part is stamped so the Python backend prints
+        // the canonical lowercase `true`/`false` (§3.5). A non-Bool part is not.
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+
+        let mut interp = make_node(
+            &gen,
+            NodeKind::Interpolation {
+                parts: vec![
+                    bock_air::AirInterpolationPart::Expr(Box::new(bool_lit(&gen, true))),
+                    bock_air::AirInterpolationPart::Expr(Box::new(int_lit(&gen))),
+                ],
+            },
+        );
+        checker.infer_node(&mut interp);
+        let NodeKind::Interpolation { parts } = &interp.kind else {
+            panic!("expected interpolation");
+        };
+        let bock_air::AirInterpolationPart::Expr(bool_part) = &parts[0] else {
+            panic!("expected expr part 0");
+        };
+        assert_eq!(
+            bool_part.metadata.get(BOOL_STRINGIFY_META_KEY),
+            Some(&Value::Bool(true)),
+            "expected bool_stringify stamped on the Bool interpolation part",
+        );
+        let bock_air::AirInterpolationPart::Expr(int_part) = &parts[1] else {
+            panic!("expected expr part 1");
+        };
+        assert!(
+            !int_part.metadata.contains_key(BOOL_STRINGIFY_META_KEY),
+            "Int interpolation part must not be stamped bool_stringify",
         );
     }
 }

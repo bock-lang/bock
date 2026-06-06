@@ -2983,6 +2983,13 @@ impl PyEmitCtx {
             }
             // Bool.
             ("Bool", "negate") => format!("(not ({recv_str}))"),
+            // `Bool.to_string()` / `.display()` must yield the canonical lowercase
+            // `"true"`/`"false"` (§3.5), not Python's `str(b)` → `"True"`/`"False"`.
+            // Handled here (before the primitive *bridge* path that maps
+            // `to_string` → `str(..)`) so the Bool case is intercepted.
+            ("Bool", "to_string" | "display") => {
+                format!("('true' if ({recv_str}) else 'false')")
+            }
             // Char (a one-code-point Python `str`).
             ("Char", "to_upper") => format!("({recv_str}).upper()"),
             ("Char", "to_lower") => format!("({recv_str}).lower()"),
@@ -4712,6 +4719,29 @@ impl PyEmitCtx {
                 Ok(())
             }
             NodeKind::BinaryOp { op, left, right } => {
+                // Integer `/` and `%` (DQ23, §3.6). Python's native operators do
+                // NOT match the contract: `//` *floors* (`-17 // 5 == -4`, the
+                // ruling wants `-3`) and `%` follows floor division (`-17 % 5 == 3`,
+                // the ruling wants `-2`); `int(a / b)` routes through lossy float
+                // true-division and loses precision on large integers. Lower to an
+                // integer-only IIFE that truncates toward zero (quotient magnitude
+                // from `abs(a) // abs(b)`, sign from the operands) and gives a
+                // dividend-sign remainder. The `//` / `%` inside still raise
+                // `ZeroDivisionError` on a zero divisor — an abort — matching the
+                // other targets.
+                if matches!(op, BinOp::Div | BinOp::Rem) && crate::generator::is_int_arith(node) {
+                    let lam = if matches!(op, BinOp::Div) {
+                        "(lambda __a, __b: (abs(__a) // abs(__b)) * (1 if (__a < 0) == (__b < 0) else -1))("
+                    } else {
+                        "(lambda __a, __b: (abs(__a) % abs(__b)) * (1 if __a >= 0 else -1))("
+                    };
+                    self.buf.push_str(lam);
+                    self.emit_expr(left)?;
+                    self.buf.push_str(", ");
+                    self.emit_expr(right)?;
+                    self.buf.push(')');
+                    return Ok(());
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {
@@ -5095,7 +5125,18 @@ impl PyEmitCtx {
                         }
                         AirInterpolationPart::Expr(expr) => {
                             self.buf.push('{');
-                            self.emit_expr(expr)?;
+                            // A `Bool`-typed part must print the canonical
+                            // lowercase `true`/`false` (§3.5); a bare `f"{b}"`
+                            // would print Python's `True`/`False`. The checker
+                            // stamps such parts (`is_bool_stringify`); map them
+                            // through a lowercasing conditional expression.
+                            if crate::generator::is_bool_stringify(expr) {
+                                self.buf.push_str("'true' if (");
+                                self.emit_expr(expr)?;
+                                self.buf.push_str(") else 'false'");
+                            } else {
+                                self.emit_expr(expr)?;
+                            }
                             self.buf.push('}');
                         }
                     }
