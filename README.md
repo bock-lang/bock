@@ -148,6 +148,7 @@ Bock is open source under the [MIT License](LICENSE).
 
 ## Community
 
+- **Discussions:** [GitHub Discussions](https://github.com/bock-lang/bock/discussions)
 - **GitHub:** [bock-lang/bock](https://github.com/bock-lang/bock) ([issues](https://github.com/bock-lang/bock/issues), [examples](https://github.com/bock-lang/bock/tree/main/examples))
 - **Reddit:** [r/bocklang](https://reddit.com/r/bocklang)
 - **Web:** [bocklang.org](https://bocklang.org)
