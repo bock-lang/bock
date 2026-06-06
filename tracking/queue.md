@@ -12,7 +12,17 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-05 22:10 — main c095258, 0 open PRs, clean, CI green.** ★ todo()/guessing-game RULING APPLIED + 3
+_**Last reconciled 2026-06-06 — main 9c53c0f, 0 open PRs, clean, CI green.** ★ DQ23 DECIDED + DONE + README refreshed.
+**DQ23** ruled Option A (truncating-toward-zero integer division) and shipped in **#264** (checker `int_arith`/`bool_stringify`
+stamps; js/ts/py division+modulo arms — toward-zero truncation, dividend-sign `%`, zero-divisor abort; rust/go already
+conformant; spec §3.6/§3.5 + changelog; acceptance fixtures green ×5 incl. negative operands + zero-divisor abort). DQ20 also
+CLOSED (done-by-impl). **With DQ23 + DQ20 closed, NO cross-target-correctness decision is open** — remaining design items are
+non-blocking (DQ18 list mutability; DQ22 `m.contains`; the DQ10–15/24+DV17 ratification batch). Side-quest: **root README
+refreshed** (#265 — verified commands/links, marketing-locked voice incl. the canonical three-paragraph ¶1; AI kept out of the
+lead). FOLLOW-UPS (operator/website, non-blocking): set the GitHub "About" to the 12-word locked descriptor; create the Bluesky
+handle + enable GitHub Discussions (until then the README omits both, and the website footer's Discussions link should be
+dropped to avoid a 404). ↓ —
+PRIOR: Last reconciled 2026-06-05 22:10 — main c095258, 0 open PRs, clean, CI green.** ★ todo()/guessing-game RULING APPLIED + 3
 codegen reds fixed → examples **95/100 run-to-completion + 5 stub-showcase = 100/100 non-red, 100/100 build-clean ×5.** #262
 fixed the 3 real codegen reds (**Q-calculator-ts-eval** — ts strict-mode `eval`→`eval_`; **Q-py-collections-builtin-shadow** —
 py builtin-shadow rename `list`→`list__bN`; **Q-systems-allocator-go-build** — go `obj.field` element typing). Design ruled
@@ -155,9 +165,13 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `compiler/crates/bock-codegen/src/go.rs` · — · links examples-exec · note: FOUND 2026-06-05 (honest audit). systems-allocator
   fails `bock build -t go` (build FAIL) while passing js/ts/py/rust. Investigate + fix the go codegen gap. Blocks
   systems-allocator go.
-- **[Q-int-div-semantics] Normative Int/Int division (§3.6) + Bool interpolation spelling** — impl · blocked (DQ23) ·
-  `compiler/crates/bock-types/src/checker.rs` (a `BinaryOp` stamp like `list_concat`) + `compiler/crates/bock-codegen/` ·
-  blocked-by: DQ23 · links DQ23, probe 2026-06-05 · note: `17/5` → `3` on rust/go vs `3.4` on js/ts/py — a cross-target
+- **[Q-int-div-semantics] Normative Int/Int division (§3.6) + Bool interpolation spelling** — impl · **DONE (#264 — Option A truncating-toward-zero)** ·
+  `compiler/crates/bock-types/src/checker.rs` (`int_arith` + `bool_stringify` `BinaryOp` stamps) + `compiler/crates/bock-codegen/` ·
+  links DQ23, #264 · note: **DONE 2026-06-06 (DQ23 ruled Option A).** Checker `int_arith` stamp (both operands integer) +
+  `bool_stringify` stamp; js/ts/py division+modulo arms emit toward-zero truncation, dividend-sign modulo, and a zero-divisor
+  abort; rust/go already conformant (no change). Bool interpolation/`to_string` → lowercase `true`/`false`. Spec §3.6/§3.5 +
+  changelog. Acceptance fixtures green ×5: negative operands (div+mod), zero-divisor abort, large-int precision (py/rust/go —
+  js/ts `Int` is IEEE `number`, a representation ceiling orthogonal to DQ23), Bool spelling. ORIG: `17/5` → `3` on rust/go vs `3.4` on js/ts/py — a cross-target
   divergence. Read-only probe confirmed operand type is NOT available at the codegen `/` site (checker side-table dropped); a
   checker stamp is the prerequisite, but it mirrors the existing `list_concat`/`string_concat` stamps (cheap). **Option A
   (truncating-Int):** js/ts emit `Math.trunc(a/b)`, py `math.trunc` (toward-zero, NOT `//` floor) gated on the stamp; result

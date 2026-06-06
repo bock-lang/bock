@@ -36,12 +36,12 @@ decided→link)`
 
 > **Priority ordering (advisory — Design 2026-06-05, after DQ27/DQ28).** Work the remaining OPEN questions in this order —
 > cross-target correctness first, then semantics, then ratification, then reversible impl-detail:
-> **(1) DQ23** Int/Int division (§3.6) + Bool interpolation spelling — the same source yields `3` on rust/go vs `3.4` on
-> js/ts/py, a direct cross-target-equivalence violation (highest leverage; **the leading open decision** — feasibility probed,
-> Option A recommended, impl scoped as `Q-int-div-semantics`). ~~**(2) DQ20** `expr?` propagation~~ — **CLOSED** (done-by-impl,
-> #226–#229; see DQ20 below). **(3) DQ18** List `push`/`append` mutability (§5
-> coherence + real programs). **(4) DQ22** bare `m.contains(k)` (check-passes-then-fails trap; quick). **(5) one batched
-> ratification** of DQ10/DQ11/DQ12/DQ13/DQ14/DQ15/DQ24 + DV17 (bless the shipped stdlib surface; spec hygiene).
+> ~~**(1) DQ23** Int/Int division~~ — **DECIDED + DONE** (Option A truncating-Int; #264; see DQ23 above). ~~**(2) DQ20** `expr?`
+> propagation~~ — **CLOSED** (done-by-impl, #226–#229). **With DQ23 + DQ20 closed, no cross-target-correctness decision is
+> open.** Remaining, none blocking: **DQ18** List `push`/`append` mutability (§5 coherence + real programs — the only one with
+> real semantic weight left). **DQ22** bare `m.contains(k)` (check-passes-then-fails trap; quick). **One batched
+> ratification** of DQ10/DQ11/DQ12/DQ13/DQ14/DQ15/DQ24 + DV17 (bless the shipped stdlib surface; spec hygiene — a single
+> consolidated pass before any v1 freeze, blocks nothing).
 > **(6) DQ17** Optional repr — recommend leaving non-normative. **(7) DQ21** has_body flag → move to the impl backlog (no
 > language decision). **DQ1** stays the non-core CLI track (orchestrator + operator). Source: the 2026-06-05 DQ27/DQ28 design
 > handoff (removed from spec/changelogs; its prioritization captured here).
@@ -199,7 +199,7 @@ decided→link)`
   end-to-end ×5; this is only the spelling of the membership method. Non-blocking.
 - **Status:** escalated → Design (escalations.md)
 
-### DQ23 — normative Int/Int division semantics (§3.6) [+ Bool string-conversion spelling]
+### DQ23 — normative Int/Int division semantics (§3.6) [+ Bool string-conversion spelling] — DECIDED
 - **Question:** §3.6 lists `/` as arithmetic but never pins Int/Int result semantics. Codegen diverges:
   Rust/Go truncate (`17/5`→`3`), js/ts/python true-divide (`3.4`). Decide the normative v1 semantic —
   truncating-Int (Rust/Go) or always-Float? Once decided, js/ts/py codegen must match (truncating needs
@@ -216,7 +216,16 @@ decided→link)`
   floor) + 1 stamp; result type stays `Int`; small/safe. **Option B (always-Float):** changes `infer_binop` Div result→`Float`,
   rippling through inference (breaks `let n: Int = a/b`, shifts `.expected` broadly, risks rs/go generated-code compile
   failures); large/risky. **Orchestrator recommendation: Option A.**
-- **Status:** escalated → Design (escalations.md) — **the leading open core-spec decision** (after DQ27/DQ28); awaiting ruling.
+- **Decision (Design 2026-06-06):** **Option A — truncating integer division, toward zero.** `Int/Int -> Int` truncating
+  toward zero (`17/5==3`, `-17/5==-3`); all sized ints divide the same; `Float/Float` unchanged (IEEE); mixed Int/Float is a
+  §4.2 type error (no implicit coercion); `%` is the truncated remainder taking the **dividend's** sign (`-17%5==-2`); integer
+  div/mod by zero is a Panic abort (§10.5), equivalent ×5. Bool interpolation/`to_string` is canonical lowercase `true`/`false`.
+  Basis (not just cost): §4.2 forbids implicit numeric coercion (always-Float would weld an Int→Float coercion into `/`); the
+  other arithmetic ops are type-preserving; `%` presupposes integer division (`(a/b)*b + a%b == a`).
+- **Status:** decided → Design 2026-06-06; reconciled #264 (Q-int-div-semantics DONE — checker `int_arith` + `bool_stringify`
+  stamps; js/ts/py division+modulo arms with toward-zero truncation, dividend-sign modulo, and zero-divisor abort; rust/go
+  already conformant; spec §3.6/§3.5 + changelog `20260606-int-div-semantics.md`). Acceptance fixtures (negative operands,
+  zero-divisor abort, large-int precision, Bool spelling) green ×5.
 
 ### DQ24 — `core.iter` shipped surface refinements (combinator set + protocol shape)
 - **Question:** `core.iter` shipped (#151/#152) on a minimum-useful floor; three surface choices refine DQ12 and
