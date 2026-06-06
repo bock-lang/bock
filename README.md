@@ -9,12 +9,14 @@
 
 ## What Bock is
 
-Bock is a feature-declarative programming language. You describe the
-behavior, types, and effects you want in one source of truth, and Bock
-compiles that source to JavaScript, TypeScript, Python, Rust, and Go. A
-function declares its contract in the signature: the types, the effects,
-and the relationship between input and output are visible before you read
-the body.
+A function in Bock declares what it does, what types it operates on, what
+effects it has, and what guarantees it requires. Annotations and
+signatures carry the intent; the body carries the work. The compiler
+resolves the rest. A function annotated `@concurrent` becomes
+`Promise.all` in JavaScript, `tokio::join!` in Rust, and goroutines in Go.
+An effect declared with `with Log` becomes a structured logger parameter
+in every target. The same source describes the program. The compiler
+describes how each target should run it.
 
 Most cross-platform languages add a runtime: a virtual machine, a
 translation layer, a library your program depends on at execution time.
