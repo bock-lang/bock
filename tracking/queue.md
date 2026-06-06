@@ -12,7 +12,20 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-05 18:45 — main e096253, 0 open PRs, clean, CI green.** ★ DQ27/DQ28 SHIPPED + EXAMPLES 84→92/100.
+_**Last reconciled 2026-06-05 22:10 — main c095258, 0 open PRs, clean, CI green.** ★ todo()/guessing-game RULING APPLIED + 3
+codegen reds fixed → examples **95/100 run-to-completion + 5 stub-showcase = 100/100 non-red, 100/100 build-clean ×5.** #262
+fixed the 3 real codegen reds (**Q-calculator-ts-eval** — ts strict-mode `eval`→`eval_`; **Q-py-collections-builtin-shadow** —
+py builtin-shadow rename `list`→`list__bN`; **Q-systems-allocator-go-build** — go `obj.field` element typing). Design ruled
+on **todo()** (Never-typed; aborts via the Panic ambient effect §10.5; optional message — §18.2 normative + changelog) and
+**guessing-game** (a `todo()`-stub showcase: compile-verified, NOT run-to-completion — its stubs need v1.x RNG/stdin;
+recategorized in the audit as **STUB** = non-red — the honest +5; baseline re-recorded). **DQ20 CLOSED** (done-by-impl:
+Q-propagate-operator-noop #226–#229; only the LOW Q-propagate-exprpos-shared residual remains, no v1 example hits it). DQ23
+feasibility PROBED (orchestrator, read-only): operand type isn't available at the codegen `/` site, but the established
+`list_concat`/`string_concat` checker-stamp pattern makes the prerequisite cheap; **Option A (truncating-Int) recommended**
+(3 codegen arms + 1 stamp; result type stays Int) over B (always-Float, ripples through inference). **NEXT design decision =
+DQ23** (escalated, awaiting ruling). Remaining open codegen: **Q-checker-method-generic-call-infer** (type-zoo/go `b.map(dbl)`
+inference — the DQ28 residual). ↓ —
+PRIOR: Last reconciled 2026-06-05 18:45 — main e096253, 0 open PRs, clean, CI green.** ★ DQ27/DQ28 SHIPPED + EXAMPLES 84→92/100.
 The operator relayed Design's DQ27/DQ28 rulings (handoff folded into the hub); a file-disjoint fan-out landed both rulings +
 the non-blocking lane in two waves — **6 PRs**: #255 ts-tsc-gate · #256 **DQ28** go free-fn method-generics + chained-combinator
 + compose(go) · #257 nested-compose js/ts · #258 **DQ27** single-method-namespace (checker **E4012** + react-components fix +
@@ -126,7 +139,7 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ## Ready
 
-- **[Q-py-collections-builtin-shadow] type-zoo python locals named `list`/`map`/`set` shadow builtins** — bug · ready ·
+- **[Q-py-collections-builtin-shadow] type-zoo python locals named `list`/`map`/`set` shadow builtins** — bug · **DONE (#262 — py codegen renames builtin-shadowing `let`s to `list__bN`)** ·
   `examples/spec-exercisers/type-zoo/` + `compiler/crates/bock-codegen/src/py.rs` · — · links #259 · note: FOUND 2026-06-05,
   surfaced (not caused) by #259 — the py statement-`match` fix de-masked type-zoo py, which then hits `keys = list(map.keys())`
   → `TypeError: 'list' object is not callable` because the example binds locals `list`/`map`/`set`. Rename in the example, or
@@ -135,13 +148,27 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `compiler/crates/bock-types/` · — · links #256, DQ28 · note: FOUND 2026-06-05 (#256). With DQ28's go free-fn lowering landed,
   the remaining type-zoo/go gap is that a *call* `b.map(dbl)` fails inference of `U` at check time on ALL targets (which is why
   type-zoo only *declares* `Box.map`, never calls it). Infer method-level type params from the argument types.
-- **[Q-calculator-ts-eval] calculator ts emits `TS1215: Invalid use of 'eval'`** — bug · ready · LOW ·
+- **[Q-calculator-ts-eval] calculator ts emits `TS1215: Invalid use of 'eval'`** — bug · **DONE (#262 — ts.rs `ts_value_ident` escapes `eval`/`arguments`)** · LOW ·
   `compiler/crates/bock-codegen/src/ts.rs` · — · links #260 · note: FOUND 2026-06-05 (honest audit). Pre-existing (not a
   regression): `calculator` fails `bock build -t ts` with TS1215. Blocks calculator ts (build FAIL). Low (one example/target).
-- **[Q-systems-allocator-go-build] systems-allocator go build error** — bug · ready ·
+- **[Q-systems-allocator-go-build] systems-allocator go build error** — bug · **DONE (#262 — go.rs `obj.field` type inference sizes `.map` element type)** ·
   `compiler/crates/bock-codegen/src/go.rs` · — · links examples-exec · note: FOUND 2026-06-05 (honest audit). systems-allocator
   fails `bock build -t go` (build FAIL) while passing js/ts/py/rust. Investigate + fix the go codegen gap. Blocks
   systems-allocator go.
+- **[Q-int-div-semantics] Normative Int/Int division (§3.6) + Bool interpolation spelling** — impl · blocked (DQ23) ·
+  `compiler/crates/bock-types/src/checker.rs` (a `BinaryOp` stamp like `list_concat`) + `compiler/crates/bock-codegen/` ·
+  blocked-by: DQ23 · links DQ23, probe 2026-06-05 · note: `17/5` → `3` on rust/go vs `3.4` on js/ts/py — a cross-target
+  divergence. Read-only probe confirmed operand type is NOT available at the codegen `/` site (checker side-table dropped); a
+  checker stamp is the prerequisite, but it mirrors the existing `list_concat`/`string_concat` stamps (cheap). **Option A
+  (truncating-Int):** js/ts emit `Math.trunc(a/b)`, py `math.trunc` (toward-zero, NOT `//` floor) gated on the stamp; result
+  type stays Int. **Option B (always-Float):** change `infer_binop` Div result→Float (ripples through inference, breaks
+  `let n: Int = a/b`, shifts `.expected`). One engineer session once DQ23 is ruled. Bundle the Bool-interpolation spelling
+  (py `True`/`False`→`true`/`false` — same stamp-in-py-interpolation shape).
+- **[Q-todo-guessing-game-disposition] todo() semantics + guessing-game stub-showcase recat** — design/chore · **DONE (this PR)** ·
+  `spec/bock-spec.md §18.2` + `spec/changelogs/` + `tools/scripts/examples-exec-audit.sh` + `tools/examples-exec-baseline.txt` ·
+  links Design ruling 2026-06-05 · note: Design ruled `todo()` = Never-typed, Panic-effect abort, optional message (§18.2
+  normative + changelog `20260605-todo-semantics.md`); `guessing-game` = compile-verified stub showcase (its `todo()` stubs
+  need v1.x RNG/stdin), recategorized in the audit as **STUB** (non-red). Examples now 95/100 run + 5 stub = 100/100 non-red.
 - **[Q-import-reject] Reject bare module-qualified import** — bug · ready ·
   `compiler/crates/bock-parser|bock-types/` · — · links DQ8 · note: a `use` of a
   module path with neither a brace-list nor a wildcard (bare `use core.error`) is

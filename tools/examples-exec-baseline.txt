@@ -8,6 +8,7 @@
 # cluster lands so the ratchet can only tighten, never loosen silently.
 #
 fundamentals/calculator	js	pass
+fundamentals/calculator	ts	pass
 fundamentals/calculator	python	pass
 fundamentals/calculator	rust	pass
 fundamentals/calculator	go	pass
@@ -83,7 +84,7 @@ spec-exercisers/pattern-lab	rust	pass
 spec-exercisers/pattern-lab	go	pass
 spec-exercisers/type-zoo	js	pass
 spec-exercisers/type-zoo	ts	pass
-spec-exercisers/type-zoo	python	build
+spec-exercisers/type-zoo	python	pass
 spec-exercisers/type-zoo	rust	pass
 spec-exercisers/type-zoo	go	pass
 target-optimized/microservice	js	pass
@@ -105,3 +106,4 @@ target-optimized/systems-allocator	js	pass
 target-optimized/systems-allocator	ts	pass
 target-optimized/systems-allocator	python	pass
 target-optimized/systems-allocator	rust	pass
+target-optimized/systems-allocator	go	pass
