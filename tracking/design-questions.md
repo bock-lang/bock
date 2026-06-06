@@ -34,17 +34,13 @@ decided→link)`
 
 ## Escalated to Design (core spec — pending)
 
-> **Priority ordering (advisory — Design 2026-06-05, after DQ27/DQ28).** Work the remaining OPEN questions in this order —
-> cross-target correctness first, then semantics, then ratification, then reversible impl-detail:
-> ~~**(1) DQ23** Int/Int division~~ — **DECIDED + DONE** (Option A truncating-Int; #264; see DQ23 above). ~~**(2) DQ20** `expr?`
-> propagation~~ — **CLOSED** (done-by-impl, #226–#229). **With DQ23 + DQ20 closed, no cross-target-correctness decision is
-> open.** Remaining, none blocking: **DQ18** List `push`/`append` mutability (§5 coherence + real programs — the only one with
-> real semantic weight left). **DQ22** bare `m.contains(k)` (check-passes-then-fails trap; quick). **One batched
-> ratification** of DQ10/DQ11/DQ12/DQ13/DQ14/DQ15/DQ24 + DV17 (bless the shipped stdlib surface; spec hygiene — a single
-> consolidated pass before any v1 freeze, blocks nothing).
-> **(6) DQ17** Optional repr — recommend leaving non-normative. **(7) DQ21** has_body flag → move to the impl backlog (no
-> language decision). **DQ1** stays the non-core CLI track (orchestrator + operator). Source: the 2026-06-05 DQ27/DQ28 design
-> handoff (removed from spec/changelogs; its prioritization captured here).
+> **★ DESIGN BOARD CLEAR (2026-06-06) — except DQ1 (non-core CLI).** Every core-spec design question is decided:
+> **DQ27/DQ28** (method namespace / go method generics), **DQ23 + DQ20** (Int division / `?` propagation — cross-target
+> correctness), **todo()/guessing-game**, **DQ18** (List `push`/`append` = `mut self` Void mutators; #269) + **DQ22** (reject
+> Map `contains`; #269), the **stdlib-surface ratification batch DQ10/DQ11/DQ12/DQ13/DQ14/DQ15/DQ24 + DV17** (changelog
+> `20260606-stdlib-surface-ratification`), **DQ17 CLOSED** (Optional repr left non-normative), and **DQ21 → impl backlog** (no
+> language decision). **DQ1** (`bock check` default strictness) stays the non-core CLI track (orchestrator + operator). Remaining
+> work is implementation + the v1.x deferrals recorded in the entries below, not open decisions.
 
 ### DQ10 — normative primitive-conformance matrix
 - **Question:** which (primitive × core-trait) conformances are **normative** for
@@ -137,7 +133,7 @@ decided→link)`
   escalated to the broader **codegen-completeness milestone** (Q-codegen-completeness). core.iter resumes
   List-backed (and generic) after the milestone's P0/P1. No longer a floor question — gated by milestone progress.
 
-### DQ17 — canonical Optional codegen representation (normative?)
+### DQ17 — canonical Optional codegen representation (normative?) — CLOSED (non-normative, 2026-06-06)
 - **Question:** is the cross-target `Optional`/`Some`/`None` codegen representation normative, or
   a free per-backend choice? #124/#126 shipped a tagged representation (`BockOption<T>` TS,
   `__bockOption` Go, `_BockSome`/`_BockNone` Python, tagged object JS) on the defensible "mirror
@@ -145,7 +141,7 @@ decided→link)`
 - **§:** §18 / codegen · **context:** surfaced by #126 (Python repr OPEN→Design). Non-blocking.
 - **Status:** escalated → Design (escalations.md)
 
-### DQ18 — List `push`/`append` mutability semantics
+### DQ18 — List `push`/`append` mutability semantics — DECIDED + DONE (#269)
 - **Question:** the checker models `push`/`append` → `List[T]` (value-returning; checker.rs:~2563), which
   conflicts with §5's "immutable by default, explicit `mut` to mutate" model. Decide: (a) value-returning
   functional `push` (clean for GC targets + Go `append`; O(n) Rust clone), or (b) `mut self` void mutation
@@ -183,7 +179,7 @@ decided→link)`
   `f(g()?)`); no v1 example hits it.
 - **Status:** decided (done-by-impl) → closed; reconciled 2026-06-05. NOT a pending Design item.
 
-### DQ21 — distinguishing default vs required trait methods in AIR
+### DQ21 — distinguishing default vs required trait methods in AIR — → IMPL BACKLOG (no language decision, 2026-06-06)
 - **Question:** trait default methods (#140) are detected by an empty-block heuristic (a bodyless/required trait
   method lowers to an empty AIR `Block`; a default has a non-empty body). This misclassifies a genuinely empty
   default body. Add a robust `has_body: bool` flag to the AIR `FnDecl` (a `bock-air` change), or keep the heuristic?
@@ -191,7 +187,7 @@ decided→link)`
   heuristic is exact for the current lowerer; the flag is the unambiguous follow-up. Non-blocking.
 - **Status:** escalated → Design (escalations.md)
 
-### DQ22 — bare `m.contains(k)` on a Map: reject or alias to `contains_key`?
+### DQ22 — bare `m.contains(k)` on a Map: reject or alias to `contains_key`? — DECIDED + DONE (#269, reject + suggest)
 - **Question:** the checker resolves Map membership as `contains_key`; a bare `m.contains(k)` resolves to a fresh
   var (not a real Map method) → passes `bock check` but has no codegen lowering. Should the checker reject
   `m.contains` on a Map (only `contains_key` valid), or alias `contains`→`contains_key`?

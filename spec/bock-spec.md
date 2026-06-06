@@ -597,6 +597,8 @@ trait Collection {
 }
 ```
 
+**Associated types (`type Item`) are syntax-parsed, with semantics Reserved for v1.x.** The `Collection` example above illustrates the associated-type *syntax*; in v1 it has no operational meaning. The v1 stdlib iteration protocol uses the generic `Iterator[T]` / `Iterable[T]` traits (§18.3, `core.iter`), not associated types. (This follows the Reserved-for-v1.x leading-note pattern used in §14.1 and §16.3.)
+
 A trait requirement is satisfied by a matching method **anywhere** in the implementing type's single method namespace (§6.7, *Single method namespace*), not only by a method written inside the `impl Trait for T` block. An inherent or class-body method of matching name and signature satisfies the requirement and lets the trait-impl block be empty.
 
 ### 6.6 — Platform Traits
@@ -1742,7 +1744,7 @@ Additional providers can be added as trait implementations without changes to th
 
 ### 18.2 — Prelude (Auto-Imported)
 
-Always available without import: `Int`, `Float`, `Bool`, `String`, `Char`, `Void`, `Never`, `Duration`, `Instant`, `Optional`/`Some`/`None`, `Result`/`Ok`/`Err`, `Ordering`/`Less`/`Equal`/`Greater`, `List`, `Map`, `Set`, `Fn`, core traits (`Comparable`, `Equatable`, `Hashable`, `Displayable`, `Serializable`, `Cloneable`, `Default`, `Into`, `From`, `Iterator`, `Iterable`), utility functions (`print`, `println`, `debug`, `assert`, `todo`, `unreachable`, `sleep`).
+Always available without import: `Int`, `Float`, `Bool`, `String`, `Char`, `Void`, `Never`, `Duration`, `Instant`, `Optional`/`Some`/`None`, `Result`/`Ok`/`Err`, `Ordering`/`Less`/`Equal`/`Greater`, `List`, `Map`, `Set`, `Fn`, core traits (`Comparable`, `Equatable`, `Hashable`, `Displayable`, `Serializable`, `Cloneable`, `Default`, `Into`, `From`, `TryFrom`, `Iterator`, `Iterable`, `Error`), utility functions (`print`, `println`, `debug`, `assert`, `todo`, `unreachable`, `sleep`).
 
 `Ordering` and its variants (`Less`, `Equal`, `Greater`) are in the prelude because the prelude trait `Comparable` returns `Ordering` from its `compare` method (§18.3 `core.compare`): user code must be able to name `Ordering` and its variants without an import to write a `compare` implementation or to `match` the result of a `cmp()` call.
 
@@ -1764,13 +1766,13 @@ The 15 `core.*` modules are tiered: 11 ship in **v1**, 4 are **Reserved for v1.x
 - **Membership (`Map` vs. `Set`).** `Map` membership is `contains_key(k)` (test for a key) and `contains_value(v)` (test for a value); bare `contains` is **not** a `Map` method (a map has both keys and values, so an unqualified `contains` is ambiguous) and the compiler rejects `map.contains(...)` with a "did you mean `contains_key`?" suggestion — it is **not** aliased. `contains(e)` **is** a `Set` method (a set has only elements, so it is unambiguous).
 
 `core.string` (v1) — String manipulation, `StringBuilder`. `String.len()` returns the count of Unicode scalar values (characters), not bytes; use `byte_len()` for byte count. Reserved for v1.x: `Regex`.
-`core.iter` (v1) — `Iterator` trait and combinators.
+`core.iter` (v1) — generic `Iterator[T]` / `Iterable[T]` protocol (not associated-type) with an **eager, `List`-returning** combinator floor. The normative v1 combinator set is **six**: `to_list`, `count`, `fold`, `map`, `filter`, `take`. Signatures: `next(mut self) -> Optional[T]` (`mut self` because it advances the cursor, per §5 / the `core.collections` List-mutation rule), `iter(self) -> ListIterator[T]`. **Dual iteration model:** `for x in <built-in collection>` uses the native per-target fast path; `for x in <user type>` desugars to the `iter()`/`next()` drive. Combinators dispatch **concretely** on `ListIterator[T]`; a user iterable's `iter()` returns a `ListIterator` (materializing a `List`, consistent with the eager floor), so combinators work on user iterables through `ListIterator`. `ListIterator` satisfies `Iterator[T]` via its **inherent** `next` method (no separate `impl Iterator for ListIterator` block — the single-method-namespace rule, §6.4/§6.7); nothing in the v1 floor dispatches through the `Iterator` trait itself. **Reserved for v1.x:** associated-type iterators, lazy combinators, generic-bound combinator dispatch (`I: Iterator[T]`), custom iterator-return types (`iter() -> Self`), and the larger combinator surface (`enumerate`, `zip`, `flat_map`, `skip`, `reduce`, `sum`/`product`, `min`/`max`, `any`/`all`, `find`, …). The wider combinator list recorded in changelog `20260529-2251` was an aspirational surface, refined here to the feasible v1 floor of six after the List-codegen constraints surfaced by DQ16; the larger set is the v1.x target.
 `core.compare` (v1) — `Ordering`, `Comparable`, `Equatable`.
 `core.convert` (v1) — `Into`, `From`, `TryFrom`, `Displayable`.
 `core.error` (v1) — `Error` base trait. The v1 surface is `message(self) -> String` **only**. Error chaining (`cause`/`source`), an `Error: Displayable` supertrait, and context/wrapping helpers depend on trait objects (`Error` used as a type, not as a bound) — Reserved for v1.x — and ship together as the v1.x error-ergonomics bundle.
 `core.effect` (v1) — Effect system primitives.
 `core.time` (v1) — `Duration`, `Instant`, `sleep`, monotonic time primitives, `Clock` effect (see §18.3.1).
-`core.test` (v1) — Assertions, BDD grouping, mocking, benchmarking. Reserved for v1.x: property testing, snapshot testing.
+`core.test` (v1) — assertions (free + fluent) for `@test` functions. Reserved for v1.x: BDD grouping, mocking, property testing, snapshot testing. There is **no** Bock-level benchmarking (performance is delegated to target-native tools, §15.4 / §20.4).
 
 **Reserved for v1.x.**
 
@@ -1899,6 +1901,23 @@ Core traits opt types into language features. Implementing a trait on a user-def
 The integration is bidirectional: a type's `impl` block declares trait conformance, and the compiler uses that conformance to permit the corresponding syntactic form for values of that type. A type without `impl Comparable for MyType` cannot use `<` on `MyType` values; the compiler rejects the code at type-check time with a "type does not implement Comparable" diagnostic.
 
 **Sealed primitive conformances (coherence).** The canonical trait conformances for the **primitive types** — e.g. `Int: Comparable`, `Int: Equatable`, `String: Displayable`, `Bool: Equatable` — are provided by `core` and are **sealed.** User code may **not** implement a core trait for a primitive type; the compiler rejects such an `impl` as a coherence (orphan-rule) violation. A user who needs different behavior for a primitive wraps it in a newtype and implements the trait on the wrapper — for example `record Descending { value: Int }` with its own `impl Comparable for Descending` to reverse the ordering. This rule pins down only the `(core trait, primitive type)` quadrant; the broader orphan/coherence model for the other quadrants — `(user trait, user type)`, `(core trait, user type)`, `(user trait, primitive type)` — is **not specified here.**
+
+**Normative primitive-conformance matrix (v1).** The sealed `(core trait, primitive type)` conformances instantiate as follows:
+
+| Core trait | Conforming primitive types |
+|------------|----------------------------|
+| `Equatable` | `Int`, `Float`, `String`, `Bool`, `Char`, and the sized numerics |
+| `Comparable` | `Int`, `Float`, `String`, `Char`, and the sized numerics (**not `Bool`**) |
+| `Displayable` | all primitives |
+| `Hashable` | `Int`, `String`, `Bool`, `Char`, and the sized integers (**not `Float`**) |
+
+Three caveats are normative:
+
+- **`Float` is `Equatable` and `Comparable` with IEEE 754 (partial) semantics:** `NaN != NaN`, and every ordering comparison involving `NaN` is false. Float is not excluded; every target implements `==`/`<` on floats per IEEE 754, so IEEE is the cross-target-equivalent behavior. This mirrors Rust's `f64: PartialEq + PartialOrd` (not `Eq`/`Ord`). Bock has no `PartialEq`/`Eq` split, so `Equatable`/`Comparable` carry the IEEE partial semantics for `Float`.
+- **`Float` is not `Hashable`.** A hash structure keyed on `NaN` is unusable (a `NaN` key can never be retrieved, since `NaN != NaN`), so excluding `Float` from `Hashable` prevents a real bug, matching Rust's `f64: !Hash`.
+- **`Bool` is not `Comparable`.** `true > false` is an encoding artifact, not a meaningful domain order; a user who needs ordered booleans converts with `b.to_int()`. `Bool` is `Equatable`, so `==`/`!=` on booleans is supported.
+
+(Operator-gating of these conformances for **user** types — rejecting `<` on a type without `impl Comparable` — is the §18.5 general rule; wiring it for user types is an impl-completeness item, not a design question.)
 
 Trait conformance is checked at every site where the syntactic form is used: arithmetic expressions, comparison in `if` conditions, comparison in `match` guards, ordering in sorts, equality in pattern matching, iteration in `for` loops, interpolation in string expressions. The integration is uniform: there are no "Comparable for if-conditions only" partial conformances; declaring `impl Comparable for MyType` enables `<` on `MyType` everywhere the operator is valid.
 

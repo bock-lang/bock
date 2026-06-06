@@ -12,7 +12,17 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-06 — main 9c53c0f, 0 open PRs, clean, CI green.** ★ DQ23 DECIDED + DONE + README refreshed.
+_**Last reconciled 2026-06-06 (b) — main 56eece6, 0 open PRs, clean, CI green.** ★ DQ18 + DQ22 DONE (#269) + STDLIB-SURFACE
+RATIFICATION BATCH → **Design board empty except DQ1 (non-core CLI).** **#269:** List `push`/`append` are `mut self` Void
+mutators (mut-receiver `E5004`; codegen ×5 incl. go `recv = append(recv, x)`); Map `contains` rejected (`E4013` →
+`contains_key`); spec §18.3 + changelog; conformance 749/0. **Ratification (this PR, spec-only):** DQ10 primitive-conformance
+matrix (§18.5 note — Float IEEE-partial, Float not Hashable, Bool not Comparable), DQ11 convert surface ratified, DQ12 iter
+protocol (generic/eager/List-returning/dual model), DQ13 §18.2 +`TryFrom`/`Error`, DQ14 `iter()->ListIterator[T]` floor, DQ15
+concrete dispatch, DQ24 6-combinator floor (§18.3 + forward-refinement vs `20260529-2251`/DQ16) + §6.5 associated-type
+Reserved-v1.x note, DV17 core.test benchmarking dropped — one changelog `20260606-stdlib-surface-ratification.md`. **DQ17
+CLOSED** (non-normative); **DQ21 → impl backlog** (no language decision). NEW follow-up impl items (none blocking):
+Q-checker-unknown-method-concrete, Q-list-operator-gating-user-types, Q-list-mut-pop-insert-remove. ↓ —
+PRIOR: Last reconciled 2026-06-06 — main 9c53c0f, 0 open PRs, clean, CI green.** ★ DQ23 DECIDED + DONE + README refreshed.
 **DQ23** ruled Option A (truncating-toward-zero integer division) and shipped in **#264** (checker `int_arith`/`bool_stringify`
 stamps; js/ts/py division+modulo arms — toward-zero truncation, dividend-sign `%`, zero-divisor abort; rust/go already
 conformant; spec §3.6/§3.5 + changelog; acceptance fixtures green ×5 incl. negative operands + zero-divisor abort). DQ20 also
@@ -149,6 +159,25 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ## Ready
 
+- **[Q-list-mutation-dq18] List `push`/`append` mutation + Map `contains` reject** — impl/design · **DONE (#269 — DQ18 + DQ22)** ·
+  `compiler/crates/bock-types`, `compiler/crates/bock-codegen`, `spec §18.3`, `docs/.../core-collections.md` · links DQ18, DQ22,
+  #269 · note: DONE 2026-06-06. `push`/`append` → `mut self` Void mutators (mut-receiver enforced, `E5004`); codegen ×5 (rust/js/ts
+  `.push`, py `.append`, go `recv = append(recv, x)`). Map `contains` rejected (`E4013` → `contains_key`); `contains` stays
+  Set-only. Spec §18.3 + changelog. `pop`/`insert`/`remove`/`reverse` left value-returning → Q-list-mut-pop-insert-remove.
+- **[Q-checker-unknown-method-concrete] unknown method on a concrete type → checker error, not fresh-var** — bug · ready ·
+  `compiler/crates/bock-types/src/checker.rs` · — · links DQ22, #269 · note: FOUND 2026-06-06 (DQ22). The general form of the
+  DQ22 trap: the checker resolves an unknown method on a concrete receiver to a fresh type var (passes `bock check`, emits no
+  codegen) instead of erroring. DQ22 fixed the narrow Map-`contains` case (#269); close the broad hole (error + suggestion) for
+  any (concrete-type, unknown-method) pair. EXCEPTION: §4.9 `Flexible`/sketch-mode narrowing resolves aggressively by design —
+  must NOT leak into concrete-typed receivers. Verify-heavy (may surface latent issues); run full conformance + examples-exec.
+- **[Q-list-operator-gating-user-types] §18.5 operator-gating for user types not wired** — bug · ready ·
+  `compiler/crates/bock-types/` · — · links DQ10, §18.5 · note: FOUND 2026-06-06 (DQ10 ratification, flagged out-of-scope by
+  Design). §18.5's rule (implementing the trait gates the operator) works for primitives; wiring it so a USER type without `impl
+  Comparable` is rejected for `<` is an impl-completeness item, not a design question.
+- **[Q-list-mut-pop-insert-remove] `pop`/`insert`/`remove`/`reverse` mutating-method semantics** — impl · ready ·
+  `compiler/crates/bock-types`, `compiler/crates/bock-codegen` · — · links DQ18, #269 · note: FOUND 2026-06-06 (#269). DQ18 did
+  `push`/`append` (`mut self` Void); the other in-place mutators have distinct shapes (`pop` → `Optional[T]`, `insert`/`remove`
+  by index, `reverse` → Void) and were left value-returning. Apply the `mut self` model with the right return types + codegen ×5.
 - **[Q-py-collections-builtin-shadow] type-zoo python locals named `list`/`map`/`set` shadow builtins** — bug · **DONE (#262 — py codegen renames builtin-shadowing `let`s to `list__bN`)** ·
   `examples/spec-exercisers/type-zoo/` + `compiler/crates/bock-codegen/src/py.rs` · — · links #259 · note: FOUND 2026-06-05,
   surfaced (not caused) by #259 — the py statement-`match` fix de-masked type-zoo py, which then hits `keys = list(map.keys())`
