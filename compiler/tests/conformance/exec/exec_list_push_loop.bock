@@ -1,0 +1,40 @@
+// TEST: exec_list_push_loop
+// EXPECT: output "3;10;20;30"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ18: `List.push` is an in-place mutator requiring a `mut` receiver and
+// returning `Void`. The canonical pattern — build a list in a loop by pushing
+// onto a `let mut` accumulator — must produce identical output on every target:
+//
+//   js / ts:  (acc).push(v)
+//   python:   (acc).append(v)
+//   rust:     let mut acc … ; (acc).push(v)
+//   go:       acc = append(acc, v)        // slice growth is reassignment in Go
+//
+// The receiver is a `let mut` binding (ownership-enforced), so the Rust binding
+// emits `mut` and the Go reassignment target is a valid lvalue. Values are
+// joined into a single integer-only string so the output never depends on the
+// per-target `Bool` stringification (a List-independent concern).
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn build(xs: List[Int]) -> List[Int] {
+  let mut acc: List[Int] = []
+  for x in xs {
+    acc.push(x * 10)
+  }
+  return acc
+}
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = "${xs.len()}"
+  for v in xs {
+    out = "${out};${v}"
+  }
+  return out
+}
+
+fn main() -> Void {
+  println("${join(build([1, 2, 3]))}")
+}

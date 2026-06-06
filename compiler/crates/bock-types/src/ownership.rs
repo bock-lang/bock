@@ -35,6 +35,21 @@ const E_LOOP_MOVE: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 5003,
 };
+/// `E5004` — an in-place `List` mutator (`push`/`append`, DQ18) was called on a
+/// receiver that is not a mutable lvalue. These methods mutate the list in place
+/// and return `Void`, so they require a `mut` binding (a `let mut` list, a `mut`
+/// parameter, or a field reachable through a `mut` receiver). Functional
+/// list-building (`+` / `concat`) stays value-returning and needs no `mut`.
+const E_MUT_RECEIVER_NEEDED: DiagnosticCode = DiagnosticCode {
+    prefix: 'E',
+    number: 5004,
+};
+
+/// The in-place `List` mutators (DQ18) that require a `mut` receiver and return
+/// `Void`. Kept narrow to the decided methods; the other in-place mutators
+/// (`pop`/`insert`/`remove`/`reverse`/`sort`/…) still return the receiver and
+/// are left to a follow-up.
+const MUT_LIST_RECEIVER_METHODS: &[&str] = &["push", "append"];
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -183,6 +198,87 @@ impl OwnershipAnalyzer {
             false
         } else {
             self.analyze_node(node)
+        }
+    }
+
+    /// Whether `node` is a **mutable lvalue** — a place that may be mutated in
+    /// place. Used to enforce DQ18's `mut`-receiver requirement on the in-place
+    /// `List` mutators (`push`/`append`).
+    ///
+    /// The rules mirror the binding-level `mut` model `bind_pattern`/`bind_param`
+    /// already track:
+    ///
+    /// - A bare identifier is mutable iff its binding was declared `mut`
+    ///   (`let mut` / `mut` parameter). An unknown identifier (not in `env` —
+    ///   e.g. a global const or a name from an un-analysed scope) is treated as
+    ///   non-mutable. A `@managed` binding is always permitted (GC semantics, no
+    ///   `mut` tracking).
+    /// - A field access (`r.items`) or index (`xs[i]`) is mutable iff its base
+    ///   place is mutable, so `r.items.push(x)` requires `r` to be `mut`.
+    /// - Anything else (a call result, a literal, an arbitrary expression) is a
+    ///   temporary, not a place, and is non-mutable.
+    fn is_mutable_lvalue(&self, node: &AIRNode) -> bool {
+        match &node.kind {
+            NodeKind::Identifier { name } => match self.env.get(&name.name) {
+                Some(var) => var.is_mut || matches!(var.state, OwnershipState::Managed),
+                // Not a tracked local (global/const/unknown) — not a `mut` place.
+                None => false,
+            },
+            NodeKind::FieldAccess { object, .. } => self.is_mutable_lvalue(object),
+            NodeKind::Index { object, .. } => self.is_mutable_lvalue(object),
+            _ => false,
+        }
+    }
+
+    /// Enforce DQ18's `mut`-receiver requirement for the in-place `List`
+    /// mutators (`push`/`append`).
+    ///
+    /// The lowerer desugars `recv.push(x)` to
+    /// `Call { callee: FieldAccess(recv, "push"), args: [recv, x] }` and the
+    /// checker stamps the call node with `recv_kind = "List"`. When the receiver
+    /// is not a mutable lvalue, emit `E5004` pointing at the receiver and
+    /// suggesting `let mut`.
+    fn check_list_mut_receiver(&mut self, call: &AIRNode, callee: &AIRNode) {
+        // Only fire on a `List` receiver. An absent stamp (unresolved receiver
+        // type) is left alone so this never false-positives on a user type whose
+        // method happens to be named `push`.
+        if self.recv_kind(call) != Some("List") {
+            return;
+        }
+        let NodeKind::FieldAccess { object, field } = &callee.kind else {
+            return;
+        };
+        if !MUT_LIST_RECEIVER_METHODS.contains(&field.name.as_str()) {
+            return;
+        }
+        if self.is_mutable_lvalue(object) {
+            return;
+        }
+        let recv_desc = match &object.kind {
+            NodeKind::Identifier { name } => format!("`{}`", name.name),
+            _ => "the receiver".to_string(),
+        };
+        self.diags
+            .error(
+                E_MUT_RECEIVER_NEEDED,
+                format!(
+                    "cannot call `{}` on {recv_desc}: \
+                     it mutates the list in place and requires a `mut` receiver",
+                    field.name
+                ),
+                object.span,
+            )
+            .note(
+                "declare the list with `let mut`, or use `+` / `concat` to build a \
+                 new list without mutation",
+            );
+    }
+
+    /// Read the checker's `recv_kind` stamp off a (desugared) call node, if any.
+    fn recv_kind<'a>(&self, node: &'a AIRNode) -> Option<&'a str> {
+        match node.metadata.get(crate::checker::RECV_KIND_META_KEY) {
+            Some(Value::String(s)) => Some(s.as_str()),
+            _ => None,
         }
     }
 
@@ -647,6 +743,12 @@ impl OwnershipAnalyzer {
 
             // ── Calls ─────────────────────────────────────────────────────────
             NodeKind::Call { callee, args, .. } => {
+                // DQ18: an in-place `List` mutator (`push`/`append`) requires a
+                // `mut` receiver. The lowerer desugars `recv.push(x)` into this
+                // `Call(FieldAccess(recv, …), [recv, …])` shape and the checker
+                // stamps `recv_kind = "List"`, so this is the single site that
+                // sees both the method name and the receiver place.
+                self.check_list_mut_receiver(node, callee);
                 self.analyze_node(callee);
                 for arg in args {
                     // Arguments are borrows by default; explicit `move` or
@@ -1467,5 +1569,167 @@ mod tests {
         let diags = analyze_ownership(&m);
         assert!(diags.has_errors());
         assert!(diags.iter().any(|d| d.code == E_USE_AFTER_MOVE));
+    }
+
+    // ── Tests: DQ18 in-place List mutator (`push`/`append`) mut-receiver ───────
+
+    /// Build a desugared `recv.<method>(arg)` call in the lowerer's shape
+    /// (`Call { callee: FieldAccess(recv, method), args: [recv, arg] }`) with the
+    /// checker's `recv_kind = "List"` stamp. The `self` arg shares the
+    /// field-access object's NodeId, matching `desugared_self_call`'s identity
+    /// test.
+    fn desugared_list_call(
+        gen: &NodeIdGen,
+        receiver: AIRNode,
+        method: &str,
+        arg: AIRNode,
+    ) -> AIRNode {
+        // The receiver appears in both the field-access object and the `self`
+        // arg with the SAME id (the lowerer clones it identically).
+        let recv_self = receiver.clone();
+        let callee = node(
+            gen,
+            NodeKind::FieldAccess {
+                object: Box::new(receiver),
+                field: ident(method),
+            },
+        );
+        let mut call = node(
+            gen,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                args: vec![
+                    AirArg {
+                        label: None,
+                        value: recv_self,
+                    },
+                    AirArg {
+                        label: None,
+                        value: arg,
+                    },
+                ],
+                type_args: vec![],
+            },
+        );
+        call.metadata.insert(
+            crate::checker::RECV_KIND_META_KEY.to_string(),
+            Value::String("List".to_string()),
+        );
+        call
+    }
+
+    #[test]
+    fn push_on_mut_let_binding_ok() {
+        // let mut acc = 42   (stands in for a `mut` List binding)
+        // acc.push(1)        -- OK: receiver is `mut`
+        let gen = NodeIdGen::new();
+        let let_acc = let_binding(&gen, "acc", true, lit_node(&gen));
+        let push = desugared_list_call(&gen, id_node(&gen, "acc"), "push", lit_node(&gen));
+        let b = block(&gen, vec![let_acc, push], None);
+        let m = module(&gen, vec![fn_decl(&gen, b)]);
+        let diags = analyze_ownership(&m);
+        assert!(
+            !diags.iter().any(|d| d.code == E_MUT_RECEIVER_NEEDED),
+            "push on a `mut` binding must not error: {:?}",
+            diags.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn push_on_non_mut_let_binding_errors() {
+        // let acc = 42
+        // acc.push(1)   -- ERROR: receiver not `mut`
+        let gen = NodeIdGen::new();
+        let let_acc = let_binding(&gen, "acc", false, lit_node(&gen));
+        let push = desugared_list_call(
+            &gen,
+            id_node_at(&gen, "acc", 10, 13),
+            "push",
+            lit_node(&gen),
+        );
+        let b = block(&gen, vec![let_acc, push], None);
+        let m = module(&gen, vec![fn_decl(&gen, b)]);
+        let diags = analyze_ownership(&m);
+        assert!(diags.iter().any(|d| d.code == E_MUT_RECEIVER_NEEDED));
+        let err = diags
+            .iter()
+            .find(|d| d.code == E_MUT_RECEIVER_NEEDED)
+            .unwrap();
+        assert!(err.message.contains("push"));
+        assert!(err.message.contains("acc"));
+        assert!(
+            !err.notes.is_empty(),
+            "expected a `let mut` suggestion note"
+        );
+    }
+
+    #[test]
+    fn append_on_non_mut_let_binding_errors() {
+        // `append` is the spelling alias and is held to the same rule as `push`.
+        let gen = NodeIdGen::new();
+        let let_acc = let_binding(&gen, "acc", false, lit_node(&gen));
+        let push = desugared_list_call(&gen, id_node(&gen, "acc"), "append", lit_node(&gen));
+        let b = block(&gen, vec![let_acc, push], None);
+        let m = module(&gen, vec![fn_decl(&gen, b)]);
+        let diags = analyze_ownership(&m);
+        assert!(diags.iter().any(|d| d.code == E_MUT_RECEIVER_NEEDED));
+    }
+
+    #[test]
+    fn push_on_mut_parameter_ok() {
+        // fn f(mut xs: List) { xs.push(1) }   -- OK: `mut` parameter
+        let gen = NodeIdGen::new();
+        let push = desugared_list_call(&gen, id_node(&gen, "xs"), "push", lit_node(&gen));
+        let b = block(&gen, vec![push], None);
+        // A `mut` parameter `xs`.
+        let param = node(
+            &gen,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(&gen, "xs", true)),
+                ty: None,
+                default: None,
+            },
+        );
+        let f = node(
+            &gen,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: bock_ast::Visibility::Public,
+                is_async: false,
+                name: ident("f"),
+                generic_params: vec![],
+                params: vec![param],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(b),
+            },
+        );
+        let m = module(&gen, vec![f]);
+        let diags = analyze_ownership(&m);
+        assert!(
+            !diags.iter().any(|d| d.code == E_MUT_RECEIVER_NEEDED),
+            "push on a `mut` parameter must not error"
+        );
+    }
+
+    #[test]
+    fn push_in_loop_on_mut_binding_ok() {
+        // The canonical loop-build pattern: pushing onto a `mut` accumulator
+        // inside a loop is fine (the receiver place is mutable; the loop-move
+        // guard is about moving the *binding*, which push does not).
+        let gen = NodeIdGen::new();
+        let let_acc = let_binding(&gen, "acc", true, lit_node(&gen));
+        let push = desugared_list_call(&gen, id_node(&gen, "acc"), "push", lit_node(&gen));
+        let loop_body = block(&gen, vec![push], None);
+        let lp = loop_node(&gen, loop_body);
+        let b = block(&gen, vec![let_acc, lp], None);
+        let m = module(&gen, vec![fn_decl(&gen, b)]);
+        let diags = analyze_ownership(&m);
+        assert!(
+            !diags.iter().any(|d| d.code == E_MUT_RECEIVER_NEEDED),
+            "push in a loop on a `mut` binding must not error: {:?}",
+            diags.iter().collect::<Vec<_>>()
+        );
     }
 }

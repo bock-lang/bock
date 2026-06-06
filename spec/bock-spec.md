@@ -1758,7 +1758,11 @@ The 15 `core.*` modules are tiered: 11 ship in **v1**, 4 are **Reserved for v1.x
 
 `core.option` (v1) — `Optional[T]` utilities.
 `core.result` (v1) — `Result[T, E]` utilities.
-`core.collections` (v1) — `List`, `Map`, `Set`, `SortedSet`. Reserved for v1.x: `Deque`, `SortedMap`, `Stack`, `Queue`, `BitSet`, `Array[T, N]`.
+`core.collections` (v1) — `List`, `Map`, `Set`, `SortedSet`. Reserved for v1.x: `Deque`, `SortedMap`, `Stack`, `Queue`, `BitSet`, `Array[T, N]`. `List`, `Map`, and `Set` are **built-in types** whose methods lower to each target's native collection op. Two normative rules govern their method surface:
+
+- **Mutation vs. functional building (`List`).** `push`/`append` are **in-place mutators**: they require a **`mut` receiver**, mutate the list, and return **`Void`**. Calling `push`/`append` on a non-`mut` receiver is a compile error (the receiver must be a `let mut` binding, a `mut` parameter, or a field reachable through a `mut` receiver); the recommended functional alternative is named in the diagnostic. Functional list-building stays on `+` / `concat`, which are **value-returning** (a new list), take no `mut`, and never mutate their operands. (`append` is the spelling alias for `push`; both lower identically.) This is the `mut` model of §5 applied to a built-in method — no new mechanism.
+- **Membership (`Map` vs. `Set`).** `Map` membership is `contains_key(k)` (test for a key) and `contains_value(v)` (test for a value); bare `contains` is **not** a `Map` method (a map has both keys and values, so an unqualified `contains` is ambiguous) and the compiler rejects `map.contains(...)` with a "did you mean `contains_key`?" suggestion — it is **not** aliased. `contains(e)` **is** a `Set` method (a set has only elements, so it is unambiguous).
+
 `core.string` (v1) — String manipulation, `StringBuilder`. `String.len()` returns the count of Unicode scalar values (characters), not bytes; use `byte_len()` for byte count. Reserved for v1.x: `Regex`.
 `core.iter` (v1) — `Iterator` trait and combinators.
 `core.compare` (v1) — `Ordering`, `Comparable`, `Equatable`.

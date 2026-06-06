@@ -66,6 +66,16 @@ const E_NO_CONVERSION: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 4012,
 };
+/// `E4013` — a method that does not exist on the receiver's built-in collection
+/// type was called, and the checker has a precise suggestion. Today this is
+/// DQ22's `Map.contains(...)` reject: `Map` membership is `contains_key` /
+/// `contains_value` (bare `contains` is `Set`-only), so a `m.contains(k)` is an
+/// error carrying a "did you mean `contains_key`?" suggestion rather than being
+/// silently resolved to a fresh type variable.
+const E_NO_SUCH_METHOD: DiagnosticCode = DiagnosticCode {
+    prefix: 'E',
+    number: 4013,
+};
 
 // ─── Receiver-type annotation (checker → codegen) ──────────────────────────────
 
@@ -2277,6 +2287,31 @@ impl TypeChecker {
                         // position the method takes precedence: re-resolve the
                         // method's function type from `method_types` and use it.
                         let recv_ty = self.subst.apply(&recv_ty);
+                        // DQ22: `contains` is not a `Map` method. Map membership is
+                        // `contains_key` (key) / `contains_value` (value); bare
+                        // `contains` is `Set`-only (a Set has only elements, so it
+                        // is unambiguous there). Reject `m.contains(...)` with a
+                        // precise "did you mean `contains_key`?" suggestion rather
+                        // than letting the unknown method resolve to a fresh type
+                        // variable. NOT aliased to `contains_key`.
+                        if field.name == "contains" {
+                            if let Type::Generic(g) = &recv_ty {
+                                if g.constructor == "Map" && g.args.len() == 2 {
+                                    self.diags
+                                        .error(
+                                            E_NO_SUCH_METHOD,
+                                            "`contains` is not a method on `Map`; \
+                                             did you mean `contains_key`?",
+                                            field.span,
+                                        )
+                                        .note(
+                                            "use `contains_key(k)` to test for a key \
+                                             or `contains_value(v)` for a value; bare \
+                                             `contains` is a `Set` method",
+                                        );
+                                }
+                            }
+                        }
                         if !matches!(callee_ty, Type::Function(_)) {
                             if let Some(fn_ty) =
                                 self.resolve_user_method_fn_type(&recv_ty, &field.name)
@@ -3493,9 +3528,14 @@ impl TypeChecker {
                     "first" | "last" | "find" | "get" => Type::Optional(Box::new(elem_ty.clone())),
                     "index_of" => Type::Optional(Box::new(Type::Primitive(PrimitiveType::Int))),
                     "contains" | "is_empty" | "any" | "all" => Type::Primitive(PrimitiveType::Bool),
-                    "push" | "append" | "pop" | "insert" | "remove" | "concat" | "reverse"
-                    | "sort" | "filter" | "dedup" | "take" | "skip" | "flat_map" | "slice"
-                    | "flatten" => receiver_ty.clone(),
+                    // DQ18: `push`/`append` are in-place mutators — they require
+                    // a `mut` receiver (enforced in `ownership.rs`) and return
+                    // `Void`. Functional list-building stays on `+`/`concat`.
+                    "push" | "append" => Type::Primitive(PrimitiveType::Void),
+                    "pop" | "insert" | "remove" | "concat" | "reverse" | "sort" | "filter"
+                    | "dedup" | "take" | "skip" | "flat_map" | "slice" | "flatten" => {
+                        receiver_ty.clone()
+                    }
                     "clear" | "for_each" => Type::Primitive(PrimitiveType::Void),
                     "join" | "display" => Type::Primitive(PrimitiveType::String),
                     "enumerate" => Type::Generic(GenericType {
@@ -3715,7 +3755,10 @@ impl TypeChecker {
                         vec![elem.clone()],
                         Type::Optional(Box::new(Type::Primitive(PrimitiveType::Int))),
                     ),
-                    "push" | "append" => mk(r, vec![elem.clone()], receiver_ty.clone()),
+                    // DQ18: `push`/`append` mutate in place and return `Void`.
+                    "push" | "append" => {
+                        mk(r, vec![elem.clone()], Type::Primitive(PrimitiveType::Void))
+                    }
                     "pop" => mk(r, vec![], receiver_ty.clone()),
                     "insert" => mk(
                         r,
@@ -5519,6 +5562,150 @@ mod tests {
         let ty = checker.infer_expr(&method_call);
         assert_eq!(ty, Type::Primitive(PrimitiveType::Bool));
         assert!(!checker.diags.has_errors());
+    }
+
+    // ── DQ18: `push`/`append` return Void ──────────────────────────────────
+
+    #[test]
+    fn method_call_list_push_returns_void() {
+        // [1].push(2) → Void (DQ18: in-place mutator, value-less)
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let list = make_node(
+            &gen,
+            NodeKind::ListLiteral {
+                elems: vec![int_lit(&gen)],
+            },
+        );
+        let method_call = make_node(
+            &gen,
+            NodeKind::MethodCall {
+                receiver: Box::new(list),
+                method: ident("push"),
+                type_args: vec![],
+                args: vec![bock_air::AirArg {
+                    label: None,
+                    value: int_lit(&gen),
+                }],
+            },
+        );
+        let ty = checker.infer_expr(&method_call);
+        assert_eq!(ty, Type::Primitive(PrimitiveType::Void));
+    }
+
+    #[test]
+    fn method_call_list_append_returns_void() {
+        // [1].append(2) → Void (append is the spelling alias for push)
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let list = make_node(
+            &gen,
+            NodeKind::ListLiteral {
+                elems: vec![int_lit(&gen)],
+            },
+        );
+        let method_call = make_node(
+            &gen,
+            NodeKind::MethodCall {
+                receiver: Box::new(list),
+                method: ident("append"),
+                type_args: vec![],
+                args: vec![bock_air::AirArg {
+                    label: None,
+                    value: int_lit(&gen),
+                }],
+            },
+        );
+        let ty = checker.infer_expr(&method_call);
+        assert_eq!(ty, Type::Primitive(PrimitiveType::Void));
+    }
+
+    // ── DQ22: `contains` is not a `Map` method ─────────────────────────────
+
+    /// Build a `{key: val}.<method>(arg)` call in the lowerer's desugared shape
+    /// (`Call { callee: FieldAccess(map, method), args: [map, arg] }`). The `map`
+    /// receiver is a single-entry `MapLiteral` so the checker resolves it to
+    /// `Map[K, V]`; the `self` arg shares the field-access object's NodeId.
+    fn desugared_map_method_call(
+        gen: &NodeIdGen,
+        method: &str,
+        key: AIRNode,
+        val: AIRNode,
+        arg: AIRNode,
+    ) -> AIRNode {
+        let map = make_node(
+            gen,
+            NodeKind::MapLiteral {
+                entries: vec![bock_air::AirMapEntry { key, value: val }],
+            },
+        );
+        let map_self = map.clone();
+        let callee = make_node(
+            gen,
+            NodeKind::FieldAccess {
+                object: Box::new(map),
+                field: ident(method),
+            },
+        );
+        make_node(
+            gen,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                type_args: vec![],
+                args: vec![
+                    bock_air::AirArg {
+                        label: None,
+                        value: map_self,
+                    },
+                    bock_air::AirArg {
+                        label: None,
+                        value: arg,
+                    },
+                ],
+            },
+        )
+    }
+
+    #[test]
+    fn map_contains_is_rejected_with_suggestion() {
+        // {"a": 1}.contains("a") → error: did you mean `contains_key`?
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let call = desugared_map_method_call(
+            &gen,
+            "contains",
+            str_lit(&gen),
+            int_lit(&gen),
+            str_lit(&gen),
+        );
+        let _ = checker.infer_expr(&call);
+        assert!(checker.diags.has_errors());
+        let err = checker
+            .diags
+            .iter()
+            .find(|d| d.code == E_NO_SUCH_METHOD)
+            .expect("expected an E4013 Map-contains rejection");
+        assert!(err.message.contains("contains_key"));
+        assert!(!err.notes.is_empty(), "expected a suggestion note");
+    }
+
+    #[test]
+    fn map_contains_key_still_resolves() {
+        // {"a": 1}.contains_key("a") → Bool, no rejection.
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let call = desugared_map_method_call(
+            &gen,
+            "contains_key",
+            str_lit(&gen),
+            int_lit(&gen),
+            str_lit(&gen),
+        );
+        let _ = checker.infer_expr(&call);
+        assert!(
+            !checker.diags.iter().any(|d| d.code == E_NO_SUCH_METHOD),
+            "contains_key must not be rejected"
+        );
     }
 
     // ── Interpolation ──────────────────────────────────────────────────────

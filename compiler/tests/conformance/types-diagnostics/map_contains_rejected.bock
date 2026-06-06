@@ -1,0 +1,17 @@
+// TEST: map_contains_rejected
+// EXPECT: error E4013 at 14:23
+//
+// DQ22: `contains` is NOT a `Map` method. Map membership is `contains_key`
+// (key) / `contains_value` (value); bare `contains` is `Set`-only (a Set has
+// only elements, so it is unambiguous there). The checker rejects
+// `m.contains(...)` with `E4013` and a "did you mean `contains_key`?"
+// suggestion — it is NOT aliased to `contains_key`. `Set.contains` and
+// `Map.contains_key` / `contains_value` keep working.
+module main
+
+fn main() -> Void {
+  let m: Map[String, Int] = {"a": 1}
+  let has: Bool = m.contains("a")
+  println("${m.len()}")
+  let _ = has
+}

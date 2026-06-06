@@ -2912,14 +2912,28 @@ pub fn desugared_self_call<'a>(
 }
 
 /// The read-only / non-mutating `List` built-in methods this codegen lowers
-/// natively per target (see [`desugared_list_method`]). Mutating methods
-/// (`push`/`pop`/`insert`/…) are intentionally excluded — their value-vs-`mut
-/// self` semantics is an open design question (DQ18) and `core.iter` does not
-/// need them.
+/// natively per target (see [`desugared_list_method`]). The remaining mutating
+/// methods (`pop`/`insert`/`remove`/…) are intentionally excluded — their
+/// value-vs-`mut self` semantics is a follow-up (DQ18 ruled only on
+/// `push`/`append`, lowered via [`desugared_list_mutating_method`]).
 pub const READ_ONLY_LIST_METHODS: &[&str] = &[
     "len", "length", "count", "is_empty", "get", "contains", "first", "last", "concat", "index_of",
     "join",
 ];
+
+/// The in-place `List` mutators (DQ18) lowered natively per target via
+/// [`desugared_list_mutating_method`]. These resolve in the checker to a `Void`
+/// return and require a `mut` receiver (enforced by the ownership pass), so each
+/// backend emits them in *statement position* as a value-less mutation:
+///
+/// - rust / js / ts: `recv.push(x)`
+/// - python: `recv.append(x)`
+/// - go: `recv = append(recv, x)` (slice growth is reassignment in Go; the `mut`
+///   receiver guarantees `recv` is a valid lvalue — a `let mut` binding or a
+///   mutable field place)
+///
+/// `append` is Bock's spelling alias for `push`; both lower identically.
+pub const MUTATING_LIST_METHODS: &[&str] = &["push", "append"];
 
 /// The raw `recv_kind` annotation tag the checker stamped on a desugared method
 /// call node, if any.
@@ -3055,6 +3069,38 @@ pub fn desugared_list_method<'a>(
     let (recv, field, rest) = desugared_self_call(callee, args)?;
     let method = field.name.as_str();
     if READ_ONLY_LIST_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
+/// Recognise a *desugared in-place `List` mutator call* (`push`/`append`, DQ18).
+///
+/// The mutating sibling of [`desugared_list_method`]: same desugared shape
+/// (`Call { callee: FieldAccess(recv, method), args: [recv, x] }`), same
+/// `recv_kind`-gating (a `recv_kind = "List"` stamp *or* an absent stamp; any
+/// other stamp — a user record, a `Map`/`Set`, a primitive — is rejected so a
+/// same-named user method is not shadowed), but the method must be one of
+/// [`MUTATING_LIST_METHODS`]. Returns the receiver, the validated method name,
+/// and the remaining (non-self) arguments (the single pushed element).
+///
+/// The checker types these calls as `Void` and the ownership pass guarantees the
+/// receiver is a `mut` lvalue, so each backend wires this into its `Call` arm
+/// (alongside [`desugared_list_method`]) and lowers it to the target's in-place
+/// idiom in statement position.
+#[must_use]
+pub fn desugared_list_mutating_method<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    if !matches!(raw_recv_kind(call_node), None | Some("List")) {
+        return None;
+    }
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if MUTATING_LIST_METHODS.contains(&method) {
         Some((recv, method, rest))
     } else {
         None

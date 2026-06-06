@@ -1,0 +1,39 @@
+// TEST: exec_list_push_field
+// EXPECT: output "3;1;2;3"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ18: `List.push` onto a *mutable record field* (`bag.items.push(x)`). The
+// receiver is a field reachable through a `mut` binding, which the ownership
+// pass accepts as a mutable lvalue. Each backend mutates the field place in
+// place:
+//
+//   js / ts:  (bag.items).push(x)
+//   python:   (bag.items).append(x)
+//   rust:     (bag.items).push(x)         // `bag` is `let mut`
+//   go:       bag.Items = append(bag.Items, x)   // field place reassignment
+//
+// Output is integer-only (count then elements) so it never depends on the
+// per-target `Bool` stringification.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+record Bag {
+  items: List[Int]
+}
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = "${xs.len()}"
+  for v in xs {
+    out = "${out};${v}"
+  }
+  return out
+}
+
+fn main() -> Void {
+  let mut bag: Bag = Bag { items: [] }
+  bag.items.push(1)
+  bag.items.push(2)
+  bag.items.push(3)
+  println("${join(bag.items)}")
+}

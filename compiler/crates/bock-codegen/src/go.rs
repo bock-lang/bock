@@ -5116,6 +5116,45 @@ impl GoEmitCtx {
         Ok(true)
     }
 
+    /// Emit an in-place `List` mutator (`push`/`append`, DQ18) in **statement
+    /// position** to its Go form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_mutating_method`]. Go
+    /// grows a slice by *reassignment* — `recv = append(recv, x)` — so unlike the
+    /// other backends (which emit a value-less `recv.push(x)`) this is an
+    /// assignment statement, emitted only from `emit_stmt`. The checker types
+    /// `push`/`append` as `Void`, so the call always appears in statement
+    /// position, and the ownership pass guarantees the receiver is a `mut` lvalue
+    /// (a `let mut` slice, a `mut` parameter, or a field reachable through a
+    /// `mut` receiver), so the same place expression is a valid assignment
+    /// target on the left of `=`. A field receiver lowers to its Go-cased place
+    /// (`r.Items = append(r.Items, x)`) via `expr_to_string`.
+    ///
+    /// Returns `false` (no statement emitted) when the call is not a recognised
+    /// in-place `List` mutator, so the caller falls back to the generic
+    /// expression-statement path.
+    fn try_emit_list_mutating_stmt(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, _method, rest)) =
+            crate::generator::desugared_list_mutating_method(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let Some(x) = rest.first() else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let x = self.expr_to_string(&x.value)?;
+        self.write_indent();
+        let _ = write!(self.buf, "{recv_str} = append({recv_str}, {x})");
+        self.buf.push('\n');
+        Ok(true)
+    }
+
     /// Render a closure (lambda) argument as a typed Go func literal, with its
     /// parameter types pinned to `param_types`, and report the func literal's
     /// inferred return type.
@@ -6792,6 +6831,17 @@ impl GoEmitCtx {
                 Ok(())
             }
             _ => {
+                // DQ18: an in-place `List` mutator (`push`/`append`) in
+                // statement position lowers to Go's slice-growth idiom
+                // `recv = append(recv, x)` — an assignment statement, not the
+                // value-less call the other backends emit. Intercept it here,
+                // before the generic expression-statement fall-through (Go has no
+                // expression form for in-place append).
+                if let NodeKind::Call { callee, args, .. } = &node.kind {
+                    if self.try_emit_list_mutating_stmt(node, callee, args)? {
+                        return Ok(());
+                    }
+                }
                 self.write_indent();
                 self.emit_expr(node)?;
                 self.buf.push('\n');
@@ -11336,6 +11386,16 @@ impl GoEmitCtx {
                 if crate::generator::node_is_statement(t) {
                     self.emit_node(t)?;
                     return Ok(());
+                }
+                // DQ18: an in-place `List` mutator (`push`/`append`) in *tail*
+                // position (a single-statement loop body `{ acc.push(x) }`) is a
+                // `Void` call, so it carries no value to return/emit — lower it to
+                // Go's slice-growth assignment statement, not the value-less call
+                // form `emit_expr` would otherwise emit.
+                if let NodeKind::Call { callee, args, .. } = &t.kind {
+                    if self.try_emit_list_mutating_stmt(t, callee, args)? {
+                        return Ok(());
+                    }
                 }
                 // A `match` with statement arms has no value; emit it in
                 // statement position (a Go `switch`) rather than as an
