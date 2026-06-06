@@ -87,6 +87,18 @@ fi
 FILTER="${BOCK_EXAMPLES_FILTER:-}"
 UPDATE_BASELINE="${BOCK_EXAMPLES_UPDATE_BASELINE:-0}"
 
+# ── Stub-showcase examples ────────────────────────────────────────────────────
+# Some examples deliberately leave function bodies as `todo()` placeholders to
+# demonstrate the stubbing workflow — and because their stubs need v1.x platform
+# surfaces (RNG/stdin) that have no v1 implementation. For these, a clean BUILD
+# plus a run that aborts at a `todo()` is the DEFINED, correct outcome: `todo()`
+# is Never-typed and aborts via the Panic ambient effect (§18.2/§10.5). They are
+# compile-verified, not run-to-completion, so a todo()-abort is reported as STUB
+# (non-red), not run-FAIL. See the 2026-06-05 Design ruling (todo() semantics +
+# guessing-game disposition).
+STUB_SHOWCASE_EXAMPLES="${BOCK_EXAMPLES_STUB_SHOWCASE:-fundamentals/guessing-game}"
+is_stub_showcase() { case " $STUB_SHOWCASE_EXAMPLES " in *" $1 "*) return 0;; *) return 1;; esac; }
+
 # ── Scratch namespace (honour the session convention; tolerate unset) ─────────
 NS="${BOCK_TEST_NAMESPACE:-examples-exec-$$}"
 WORK_ROOT="/tmp/${NS}-examples-exec"
@@ -215,6 +227,10 @@ for proj in "${PROJECTS[@]}"; do
       if [[ "${RUNTIME_OK[$tg]}" == "1" ]]; then
         if run_target "$bdir" "$tg"; then
           RESULT["$key"]="pass"; RAN["$key"]="ran"; printf ' %-9s' "PASS"
+        elif is_stub_showcase "$name"; then
+          # Stub showcase: a clean build + a todo()-abort run is the intended
+          # outcome (compile-verified, not run-to-completion). Non-red.
+          RESULT["$key"]="build"; RAN["$key"]="stub"; printf ' %-9s' "STUB"
         else
           RESULT["$key"]="build"; RAN["$key"]="ran"; printf ' %-9s' "run-FAIL"
         fi
@@ -234,7 +250,7 @@ for proj in "${PROJECTS[@]}"; do
         # Don't count a regression caused solely by a missing runtime
         # (builtonly can't reach 'pass'); only when the build itself regressed
         # or a run that previously passed now fails with the runtime present.
-        if [[ "${RAN[$key]}" != "builtonly" || "$cur" == "fail" ]]; then
+        if [[ ( "${RAN[$key]}" != "builtonly" && "${RAN[$key]}" != "stub" ) || "$cur" == "fail" ]]; then
           REGRESSIONS+=("$key: baseline=$base now=$cur")
         fi
       elif [[ "$(rank "$cur")" -gt "$(rank "$base")" ]]; then
@@ -246,7 +262,7 @@ for proj in "${PROJECTS[@]}"; do
 done
 
 echo
-echo "Legend: PASS=built+ran  run-FAIL=built but run errored  BUILD?=built (no runtime to run)  FAIL=build error"
+echo "Legend: PASS=built+ran  STUB=built; todo()-abort is the intended outcome (stub showcase)  run-FAIL=built but run errored  BUILD?=built (no runtime to run)  FAIL=build error"
 echo
 
 # ── Tallies ───────────────────────────────────────────────────────────────────
@@ -271,7 +287,8 @@ if [[ "$UPDATE_BASELINE" == "1" ]]; then
     echo "# examples-exec baseline — currently-passing (example, target) pairs."
     echo "# Format: <example-path>  <target>  <status>   status in {pass, build}."
     echo "#   pass  = builds AND runs clean"
-    echo "#   build = builds clean (run failed, or no runtime present at record time)"
+    echo "#   build = builds clean (run failed, no runtime present, or a stub-showcase"
+    echo "#           example whose todo()-abort run is the intended outcome, e.g. guessing-game)"
     echo "# Regenerate: BOCK_EXAMPLES_UPDATE_BASELINE=1 tools/scripts/examples-exec-audit.sh"
     echo "# The strict ratchet (BOCK_EXAMPLES_REQUIRE=...) fails CI if any listed"
     echo "# pair drops below its recorded status. Update this file when a codegen"
@@ -322,7 +339,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
         key="$name|$tg"
         case "${RESULT[$key]:-fail}" in
           pass)  cell="✅";;
-          build) [[ "${RAN[$key]:-}" == "builtonly" ]] && cell="🔨" || cell="⚠️";;
+          build) case "${RAN[$key]:-}" in builtonly) cell="🔨";; stub) cell="🧩";; *) cell="⚠️";; esac;;
           *)     cell="❌";;
         esac
         printf ' %s |' "$cell"
@@ -330,7 +347,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
       printf '\n'
     done
     echo
-    echo "Legend: ✅ built+ran · ⚠️ built, run failed · 🔨 built (no runtime) · ❌ build failed"
+    echo "Legend: ✅ built+ran · 🧩 stub showcase (todo()-abort intended) · ⚠️ built, run failed · 🔨 built (no runtime) · ❌ build failed"
     if [[ "${#REGRESSIONS[@]}" -gt 0 ]]; then
       echo
       echo "**Regressions vs baseline:** ${#REGRESSIONS[@]}"

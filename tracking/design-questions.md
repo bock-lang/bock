@@ -37,9 +37,9 @@ decided→link)`
 > **Priority ordering (advisory — Design 2026-06-05, after DQ27/DQ28).** Work the remaining OPEN questions in this order —
 > cross-target correctness first, then semantics, then ratification, then reversible impl-detail:
 > **(1) DQ23** Int/Int division (§3.6) + Bool interpolation spelling — the same source yields `3` on rust/go vs `3.4` on
-> js/ts/py, a direct cross-target-equivalence violation (highest leverage; likely behind some examples reds).
-> **(2) DQ20** `expr?` propagation — `?` is a no-op on js/ts/py/go (only rust early-returns) yet §7.10 says it must
-> early-return; nearly a rubber-stamp, the value is unblocking the impl. **(3) DQ18** List `push`/`append` mutability (§5
+> js/ts/py, a direct cross-target-equivalence violation (highest leverage; **the leading open decision** — feasibility probed,
+> Option A recommended, impl scoped as `Q-int-div-semantics`). ~~**(2) DQ20** `expr?` propagation~~ — **CLOSED** (done-by-impl,
+> #226–#229; see DQ20 below). **(3) DQ18** List `push`/`append` mutability (§5
 > coherence + real programs). **(4) DQ22** bare `m.contains(k)` (check-passes-then-fails trap; quick). **(5) one batched
 > ratification** of DQ10/DQ11/DQ12/DQ13/DQ14/DQ15/DQ24 + DV17 (bless the shipped stdlib surface; spec hygiene).
 > **(6) DQ17** Optional repr — recommend leaving non-normative. **(7) DQ21** has_body flag → move to the impl backlog (no
@@ -170,14 +170,18 @@ decided→link)`
   `20260602-1608-per-module-output-dq19.md`. Bundling stays behind a flag until all 5 run natively, then removed
   (DV13 CLOSED at S4).
 
-### DQ20 — `expr?` (error-propagation operator) lowering
+### DQ20 — `expr?` (error-propagation operator) lowering — DECIDED (done-by-impl)
 - **Question:** the `?` operator (Propagate) is a no-op on js/ts/py/go (Rust emits native `?`). Correct lowering
   must early-return on `Err`/`None`, which needs the enclosing function's return type at the `Propagate` site
   (Err-vs-None) — not currently on the AIR node. Add a checker annotation (like `recv_kind`, #137) for the
   return-type context + an expression→early-return transform, or restrict `?` to certain positions?
 - **§:** §error-handling / codegen · **context:** surfaced by #138 (P1-c); deferred from P1 →
   Q-codegen-completeness P4. Non-blocking (no regression; Rust works).
-- **Status:** escalated → Design (escalations.md)
+- **Decision (resolved by implementation 2026-06-04):** the obvious §7.10 semantics (unwrap-or-early-return) were
+  implemented directly — `Q-propagate-operator-noop` lowered `?` to early-return on js/ts/py/go (#226–#229). No Design
+  escalation was needed. Residual: only the LOW `Q-propagate-exprpos-shared` (a nested `?` inside a larger expression like
+  `f(g()?)`); no v1 example hits it.
+- **Status:** decided (done-by-impl) → closed; reconciled 2026-06-05. NOT a pending Design item.
 
 ### DQ21 — distinguishing default vs required trait methods in AIR
 - **Question:** trait default methods (#140) are detected by an empty-block heuristic (a bodyless/required trait
@@ -204,7 +208,15 @@ decided→link)`
   the canonical literal spelling `true`/`false` (harmonize Python's `True`/`False`).
 - **§:** §3.6 (+ §3.x Bool) · **context:** surfaced by the P4 design (item 5). Core-spec semantics. Non-blocking
   for R1 (no Int/Int division or Bool-interp in the iter/effect floor); minor R2 `string` output-equality interaction.
-- **Status:** escalated → Design (escalations.md)
+- **Feasibility (orchestrator read-only probe 2026-06-05; scopes queue `Q-int-div-semantics`):** operand type is NOT available
+  at the codegen `/` site (the checker's type side-table is dropped before codegen; `type_info.resolved_type` is always
+  `None`), so a **checker annotation is a prerequisite for either option** — but cheap: it mirrors the `list_concat`/
+  `string_concat` stamps the checker already applies to `BinaryOp` nodes at the same site (≈1 bit: "this `Div` has two Int
+  operands"). **Option A (truncating-Int):** 3 codegen arms (js/ts `Math.trunc(a/b)`, py `math.trunc` — toward-zero, not `//`
+  floor) + 1 stamp; result type stays `Int`; small/safe. **Option B (always-Float):** changes `infer_binop` Div result→`Float`,
+  rippling through inference (breaks `let n: Int = a/b`, shifts `.expected` broadly, risks rs/go generated-code compile
+  failures); large/risky. **Orchestrator recommendation: Option A.**
+- **Status:** escalated → Design (escalations.md) — **the leading open core-spec decision** (after DQ27/DQ28); awaiting ruling.
 
 ### DQ24 — `core.iter` shipped surface refinements (combinator set + protocol shape)
 - **Question:** `core.iter` shipped (#151/#152) on a minimum-useful floor; three surface choices refine DQ12 and
