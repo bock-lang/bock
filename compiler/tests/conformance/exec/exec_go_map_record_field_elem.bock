@@ -1,0 +1,44 @@
+// TEST: exec_go_map_record_field_elem
+// EXPECT: output "len=3;sum=6"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression guard for Q-systems-allocator-go-build. A `List[Record]` mapped
+// with a closure that reads a *field* of the element (`blocks.map((b) => b.id)`)
+// must produce a concretely-typed slice. The Go backend lowers each list
+// combinator to an immediately-invoked func literal whose result element type is
+// drawn from the closure's inferred return type; that inference had no arm for a
+// bare `obj.field` access, so `(b) => b.id` fell back to `interface{}` and the
+// `.map` emitted `[]interface{}` — which Go rejects against the function's
+// declared `[]int64` return (`cannot use ... ([]interface{}) as []int64`).
+// (systems-allocator's `block_ids` failed exactly this `go build`.)
+//
+// `infer_go_expr_type` now resolves a bare `obj.field` (and `self.field`) to the
+// field's recorded Go type via a per-record field-type map, so the `.map` result
+// is sized `[]int64`. The other targets type the same map fine; the program runs
+// identically everywhere. The `for`-loop sum consumes the slice to prove the
+// element type is genuinely `int64` (an `interface{}` element could not be added)
+// without relying on Optional-returning indexing in the output.
+module main
+
+record Block {
+  id: Int
+  size: Int
+}
+
+fn block_ids(blocks: List[Block]) -> List[Int] {
+  blocks.map((b) => b.id)
+}
+
+fn main() -> Void {
+  let blocks = [
+    Block { id: 1, size: 64 },
+    Block { id: 2, size: 128 },
+    Block { id: 3, size: 32 }
+  ]
+  let ids = block_ids(blocks)
+  let mut total = 0
+  for x in ids {
+    total = total + x
+  }
+  println("len=${ids.len()};sum=${total}")
+}

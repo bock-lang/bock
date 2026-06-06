@@ -1,0 +1,35 @@
+// TEST: exec_py_builtin_shadow_idents
+// EXPECT: output "n=5;keys=2;size=3;ext=7"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression guard for Q-py-collections-builtin-shadow. A Bock `let` whose name
+// is a legal Bock identifier can collide with a Python *builtin* the backend
+// itself emits as a call — `list(...)`, `set(...)`, `map(...)` — when lowering a
+// collection literal or method. Binding `list = [...]` rebinds the global `list`
+// for the rest of the (function-scoped) Python frame, so a later
+// codegen-emitted `list(some_map.keys())` raised `TypeError: 'list' object is
+// not callable`. (type-zoo's `collections_demo` bound exactly `list`/`map`/`set`
+// and crashed at runtime.)
+//
+// The Python backend now renames a `let` binding whose name shadows such a
+// builtin to a fresh alias (`list` → `list__bN`) in `plan_shadow_let`, flowing
+// the alias to every reference via the same map `resolve_shadow_name` consults —
+// so the builtin stays callable while the user's binding still works. The other
+// four targets have no such collision; the program runs identically everywhere.
+//
+// `map.keys()` forces the backend to emit its own `list(...)` materialiser
+// around a reference to the renamed `map` binding — the exact failing shape.
+module main
+
+fn main() -> Void {
+  let list = [10, 20, 30, 40, 50]
+  let map = {"name": "Bock", "version": "0.1"}
+  let set = #{"alpha", "beta", "gamma"}
+
+  let n = list.len()
+  let keys = map.keys()
+  let size = set.len()
+  let extended = list + [60, 70]
+
+  println("n=${n};keys=${keys.len()};size=${size};ext=${extended.len()}")
+}
