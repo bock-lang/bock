@@ -2969,6 +2969,45 @@ pub fn is_list_concat(node: &AIRNode, left: &AIRNode, right: &AIRNode) -> bool {
     stamped || has_list_literal
 }
 
+/// True when a `BinaryOp { op: Div | Rem, .. }` is **integer** division /
+/// remainder and must be lowered to DQ23's cross-target integer semantics (§3.6)
+/// rather than the target's native `/` / `%`.
+///
+/// The signal is the checker's [`bock_types::checker::INT_ARITH_META_KEY`] stamp,
+/// set on a `/` or `%` whose two operands both resolved to an integer primitive.
+/// A purely syntactic codegen check cannot see that bare identifiers (`a / b`)
+/// are integer-typed, so — unlike [`is_list_concat`], which has a list-literal
+/// fallback — there is no syntactic fallback here: the stamp is the sole signal.
+///
+/// Each backend that diverges from the contract on its native operator (JS/TS:
+/// float `/`, no zero-abort; Python: floor `//` and floor-`%`) calls this from
+/// its `NodeKind::BinaryOp { op: Div | Rem, .. }` arm. Rust and Go already match
+/// the contract with native `/` / `%`, so they ignore it. See the metadata key's
+/// docs for the per-target lowering rationale.
+#[must_use]
+pub fn is_int_arith(node: &AIRNode) -> bool {
+    matches!(
+        node.metadata.get(bock_types::checker::INT_ARITH_META_KEY),
+        Some(bock_air::Value::Bool(true))
+    )
+}
+
+/// True when an expression node is a `Bool` value that must stringify to the
+/// canonical lowercase `"true"` / `"false"` (§3.5) — the checker stamped it with
+/// [`bock_types::checker::BOOL_STRINGIFY_META_KEY`] because it appears as an
+/// `${expr}` interpolation part of `Bool` type.
+///
+/// Only the Python backend consults this (its `f"{b}"` prints `True`/`False`);
+/// JS/TS template literals and Rust/Go formatting already print lowercase.
+#[must_use]
+pub fn is_bool_stringify(node: &AIRNode) -> bool {
+    matches!(
+        node.metadata
+            .get(bock_types::checker::BOOL_STRINGIFY_META_KEY),
+        Some(bock_air::Value::Bool(true))
+    )
+}
+
 /// Recognise a *desugared `List` built-in method call*.
 ///
 /// Building on the same desugared shape [`desugared_self_call`] detects

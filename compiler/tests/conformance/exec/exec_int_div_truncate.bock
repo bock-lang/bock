@@ -1,0 +1,27 @@
+// TEST: exec_int_div_truncate
+// EXPECT: output "3;-3;-3;3"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ23 (§3.6): `Int / Int -> Int` truncates **toward zero** (NOT flooring), and
+// every target must agree. The four sign combinations of `17 / 5` pin the
+// direction: `17/5==3`, `-17/5==-3`, `17/-5==-3`, `-17/-5==3`. A floor-dividing
+// backend (Python's `//`, a naive lowering) would give `-17/5==-4` and fail
+// here, which is exactly the trap this fixture guards.
+//
+// Operands flow through `opaque` so no backend can constant-fold the division
+// away — the lowering itself is exercised at runtime.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn opaque(n: Int) -> Int {
+  return n
+}
+
+fn main() -> Void {
+  let a: Int = opaque(17)
+  let b: Int = opaque(5)
+  let na: Int = opaque(-17)
+  let nb: Int = opaque(-5)
+  println("${a / b};${na / b};${a / nb};${na / nb}")
+}

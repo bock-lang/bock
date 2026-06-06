@@ -4047,6 +4047,28 @@ impl TsEmitCtx {
                     self.buf.push(']');
                     return Ok(());
                 }
+                // Integer `/` and `%` (DQ23, §3.6): TS `/` is float division and
+                // `Math.trunc(a / 0)` yields `Infinity` rather than aborting, so
+                // lower to a self-contained IIFE that aborts on a zero divisor and
+                // truncates toward zero. TS `%` already takes the dividend's sign,
+                // so the remainder needs only the zero-abort. Arrow parameters are
+                // `number`-annotated for strict mode; both operands are passed as
+                // arguments so each is evaluated exactly once.
+                if matches!(op, BinOp::Div | BinOp::Rem) && crate::generator::is_int_arith(node) {
+                    let body = if matches!(op, BinOp::Div) {
+                        "Math.trunc(__a / __b)"
+                    } else {
+                        "__a % __b"
+                    };
+                    self.buf.push_str("((__a: number, __b: number): number => { if (__b === 0) { throw new Error(\"integer division or modulo by zero\"); } return ");
+                    self.buf.push_str(body);
+                    self.buf.push_str("; })(");
+                    self.emit_expr(left)?;
+                    self.buf.push_str(", ");
+                    self.emit_expr(right)?;
+                    self.buf.push(')');
+                    return Ok(());
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {

@@ -1,0 +1,29 @@
+// TEST: exec_int_div_by_zero
+// EXPECT: output "before"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ23 (§3.6 / §10.5): integer division by zero is a **runtime abort** (a Panic
+// ambient effect), equivalent on every target. The program prints `before`,
+// then evaluates `a / z` with `z == 0`, which must abort *before* reaching the
+// `after` print. The harness compares trimmed stdout, so a correct abort leaves
+// exactly `before` on stdout (the program never prints `after`); a backend that
+// did NOT abort — e.g. JS, where `Math.trunc(a / 0)` is `Infinity`, not a throw
+// — would also print `after` and fail this fixture. Rust/Go panic on integer
+// `/ 0` natively; Python raises `ZeroDivisionError`; the JS/TS lowering inserts
+// an explicit zero-check that throws. The zero flows through `opaque` so it
+// cannot be folded to a compile-time error.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn opaque(n: Int) -> Int {
+  return n
+}
+
+fn main() -> Void {
+  let z: Int = opaque(0)
+  let a: Int = opaque(7)
+  println("before")
+  println("${a / z}")
+  println("after")
+}
