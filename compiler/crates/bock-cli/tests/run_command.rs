@@ -1,5 +1,6 @@
 use std::io::Write;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
 
@@ -12,6 +13,43 @@ fn write_temp_file(content: &str) -> NamedTempFile {
     f.write_all(content.as_bytes()).unwrap();
     f.flush().unwrap();
     f
+}
+
+/// Run a prepared `bock` command with a hard wall-clock timeout, capturing
+/// stdout/stderr. Returns `Some(output)` if the process finished in time, or
+/// `None` (after killing the child) if it exceeded `timeout`.
+///
+/// The standard library has no built-in process timeout, so we poll
+/// `try_wait` on a short interval. A `None` result is a *test failure signal*:
+/// it means the program hung (e.g. a `mut self` iterator drive that never
+/// advances its cursor). This guard ensures a regression surfaces as a clean
+/// assertion rather than wedging the whole test run.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn bock");
+    let start = Instant::now();
+    loop {
+        match child.try_wait().expect("try_wait failed") {
+            Some(_status) => {
+                return Some(
+                    child
+                        .wait_with_output()
+                        .expect("wait_with_output after exit failed"),
+                );
+            }
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
 }
 
 #[test]
@@ -354,4 +392,108 @@ fn run_project_discovers_modules_across_subdirs() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("cross-dir-ok"), "stdout: {stdout}");
+}
+
+/// Regression (Q-iter-interp-mutself): a `loop { match it.next() { ... } }`
+/// drive over a record with a `next(mut self)` cursor must TERMINATE under the
+/// interpreter and yield the correct total. Before the fix, `mut self` field
+/// mutations did not persist across method-call frames, so the cursor never
+/// advanced, `None` was never reached, and the loop spun forever — the
+/// interpreter-only hang the compiled targets never had. The `run_with_timeout`
+/// guard turns any regression back into a clean assertion failure instead of a
+/// wedged CI run.
+#[test]
+fn run_mut_self_iterator_drive_terminates() {
+    let f = write_temp_file(
+        "module main\n\
+         \n\
+         record ListIter {\n\
+         \x20\x20xs: List[Int]\n\
+         \x20\x20cursor: Int\n\
+         }\n\
+         \n\
+         impl ListIter {\n\
+         \x20\x20fn next(mut self) -> Optional[Int] {\n\
+         \x20\x20\x20\x20match self.xs.get(self.cursor) {\n\
+         \x20\x20\x20\x20\x20\x20Some(v) => {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20self.cursor = self.cursor + 1\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20return Some(v)\n\
+         \x20\x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20\x20\x20None => return None\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20}\n\
+         }\n\
+         \n\
+         fn main() -> Void {\n\
+         \x20\x20let mut c: ListIter = ListIter { xs: [1, 2, 3], cursor: 0 }\n\
+         \x20\x20let mut total: Int = 0\n\
+         \x20\x20loop {\n\
+         \x20\x20\x20\x20match c.next() {\n\
+         \x20\x20\x20\x20\x20\x20Some(x) => {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20total = total + x\n\
+         \x20\x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20\x20\x20None => break\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20}\n\
+         \x20\x20println(\"sum=${total}\")\n\
+         }\n",
+    );
+    let mut cmd = bock_bin();
+    cmd.arg("run").arg(f.path());
+    let output = run_with_timeout(cmd, Duration::from_secs(30)).expect(
+        "`bock run` hung: mut self iterator cursor did not advance (Q-iter-interp-mutself)",
+    );
+    assert!(
+        output.status.success(),
+        "expected exit 0, got {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("sum=6"), "stdout: {stdout}");
+}
+
+/// `mut self` cursor advancement persists across *successive* method calls
+/// (not just within a loop): each `bump()` call mutates and returns the
+/// running counter, and a later non-`mut`-self `peek()` observes the persisted
+/// state. Guards that the write-back targets a plain-variable receiver lvalue.
+#[test]
+fn run_mut_self_persists_across_calls() {
+    let f = write_temp_file(
+        "module main\n\
+         \n\
+         record Counter {\n\
+         \x20\x20n: Int\n\
+         }\n\
+         \n\
+         impl Counter {\n\
+         \x20\x20fn bump(mut self) -> Int {\n\
+         \x20\x20\x20\x20self.n = self.n + 1\n\
+         \x20\x20\x20\x20return self.n\n\
+         \x20\x20}\n\
+         \x20\x20fn peek(self) -> Int {\n\
+         \x20\x20\x20\x20return self.n\n\
+         \x20\x20}\n\
+         }\n\
+         \n\
+         fn main() -> Void {\n\
+         \x20\x20let mut c: Counter = Counter { n: 0 }\n\
+         \x20\x20let a: Int = c.bump()\n\
+         \x20\x20let b: Int = c.bump()\n\
+         \x20\x20let d: Int = c.bump()\n\
+         \x20\x20println(\"a=${a} b=${b} d=${d} final=${c.peek()}\")\n\
+         }\n",
+    );
+    let mut cmd = bock_bin();
+    cmd.arg("run").arg(f.path());
+    let output = run_with_timeout(cmd, Duration::from_secs(30))
+        .expect("`bock run` hung on successive mut self calls");
+    assert!(
+        output.status.success(),
+        "expected exit 0, got {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("a=1 b=2 d=3 final=3"), "stdout: {stdout}",);
 }

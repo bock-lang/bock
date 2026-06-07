@@ -177,13 +177,6 @@ fn into_to_unrelated_target_errors() {
 /// `convert_output_smoke` conformance fixture, whose `// EXPECT: output`
 /// directive is parsed-but-not-executed by the harness today (staged for
 /// Q-fconf).
-///
-/// The smoke uses the free `convert_error(...)` constructor + field access
-/// rather than a conversion trait method: at run time the interpreter cannot
-/// dispatch `Type.from(x)` (user associated functions), the derived blanket
-/// `.into()` (no method body), or `Displayable.to_string` (shadowed by the
-/// universal record `to_string` builtin). Type-checking and codegen handle all
-/// three; this is an interpreter-scoping gap. See the session PR notes.
 #[test]
 fn run_prints_convert_error_message() {
     let f = write_temp_file(
@@ -201,6 +194,75 @@ fn run_prints_convert_error_message() {
     assert!(
         stdout.contains("out of range"),
         "expected `out of range` in stdout, got: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Runtime (Q-interp-enum / #110): a user-defined `From[Source] for Target`
+/// associated function dispatches through `Target.from(source)` under the
+/// interpreter. Previously the interpreter evaluated the *type* receiver
+/// (`Foot`) as a value and failed with `undefined variable: Foot`; the
+/// associated-function path now dispatches by type name through the method
+/// table, matching the compiled targets.
+#[test]
+fn run_user_associated_from_dispatches() {
+    let f = write_temp_file(
+        "module main\n\
+         \n\
+         record Meter { value: Float }\n\
+         record Foot { value: Float }\n\
+         \n\
+         impl From[Meter] for Foot {\n\
+         \x20\x20public fn from(value: Meter) -> Foot {\n\
+         \x20\x20\x20\x20Foot { value: value.value * 3.28 }\n\
+         \x20\x20}\n\
+         }\n\
+         \n\
+         fn main() -> Void {\n\
+         \x20\x20let m: Meter = Meter { value: 10.0 }\n\
+         \x20\x20let f: Foot = Foot.from(m)\n\
+         \x20\x20println(\"foot=${f.value}\")\n\
+         }\n",
+    );
+    let output = bock_bin().arg("run").arg(f.path()).output().unwrap();
+    assert_exit_code(&output, 0, "run user associated From.from");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("foot=32.8"),
+        "expected `foot=32.8` in stdout, got: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Runtime (Q-interp-enum / #110): a user `Displayable.to_string` impl on a
+/// record shadows the universal record `to_string` builtin under the
+/// interpreter, matching the compiled targets. Previously the interpreter
+/// dispatched the builtin first and printed the default record formatting
+/// (`Money {cents: 42}`) instead of the user impl's output.
+#[test]
+fn run_user_to_string_shadows_builtin() {
+    let f = write_temp_file(
+        "module main\n\
+         \n\
+         record Money { cents: Int }\n\
+         \n\
+         impl Displayable for Money {\n\
+         \x20\x20public fn to_string(self) -> String {\n\
+         \x20\x20\x20\x20\"cents=${self.cents}\"\n\
+         \x20\x20}\n\
+         }\n\
+         \n\
+         fn main() -> Void {\n\
+         \x20\x20let m: Money = Money { cents: 42 }\n\
+         \x20\x20println(m.to_string())\n\
+         }\n",
+    );
+    let output = bock_bin().arg("run").arg(f.path()).output().unwrap();
+    assert_exit_code(&output, 0, "run user to_string shadows builtin");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("cents=42") && !stdout.contains("Money {"),
+        "expected user `cents=42` (not default record formatting), got: {stdout}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr),
     );
 }
