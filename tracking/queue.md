@@ -12,7 +12,32 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-06 (b) — main 56eece6, 0 open PRs, clean, CI green.** ★ DQ18 + DQ22 DONE (#269) + STDLIB-SURFACE
+_**Last reconciled 2026-06-07 — main 09427b8, 0 open PRs, clean, CI green.** ★ BROAD BACKLOG FAN-OUT (wave 1) — 4
+file-disjoint lanes, all merged + integrated-state gate re-verified by the orchestrator on the combined tree (octopus
+merge → fmt/clippy/**test 2730+/0**/doc clean; conformance REQUIRE=all **0 failed**; examples-exec **STRICT** 20/20 build ·
+19/20 ran (+1 STUB) ×5, **no regressions**; new stdlib-fmt-check). PRs: **#274** types · **#273** interp · **#272** CI ·
+**#271** codegen. **~9 items CLOSED:** Q-checker-unknown-method-concrete (★ soundness — an unknown method on a CONCRETE
+receiver now errors **E4013** + nearest-name suggestion instead of resolving to a fresh var; gated to closed-method-set
+receivers [primitives, built-in List/Map/Set, Optional/Result, in-scope user records/classes], §4.9 Flexible/sketch EXEMPT;
+fix also surfaced+closed a trait-default-method resolution false-positive `Eq::not_equals`), Q-import-reject (bare `use
+core.error` → **E4014** pointing at the braced form), Q-self-subst (verified already-resolved #141), Q-iter-interp-mutself
+(`mut self` field writes now persist across interp method-call frames — the `loop { match it.next() }` hang is gone),
+Q-interp-enum (2/3: user associated-fn dispatch + user-impl `to_string` shadowing the builtin; blanket `.into()` split out →
+Q-blanket-into-codegen), Q-py-valpos-stmt-arms (py value-position match no longer drops a stmt-arm's leading statements),
+Q-rust-str-mixed-binding (rust `String` match mixing `&str` literal + whole-scrutinee bind), Q-stdlib-fmtcheck (8/10 stdlib
+files `bock fmt`'d — behavior-equivalence proven — + new **BLOCKING** `stdlib-fmt` CI job), Q-error-message-jstspy (verified
+already-fixed at base #193; fixture strengthened to read both field + method ×5). **examples-exec CI gate RATCHETED
+informational → BLOCKING** (+ a real `tsc --noEmit` on the ts row via a pinned `typescript@5`). Q-interp-effect-op-collision
+evaluated, left as-is (deterministic dependency-order shadowing #157 is correct for v1). **NEW FOUND (none blocking, all
+filed in Ready below):** **Q-bockfmt-cfarm-comma** + **Q-bockfmt-utf8-panic** (two `bock fmt` bugs that block
+`collections.bock`/`iter.bock` from the new fmt gate), **Q-prim-assoc re-scoped** (checker+codegen-COUPLED — enabling the
+checker alone yields broken `Type.from` codegen ×5; not checker-only as first noted), **Q-blanket-into-codegen** (derived
+`Into` `.into()` is unexecutable on the JS compiled target too — a codegen/AIR gap, not interpreter-only; pairs with
+Q-xmod-impl). **WAVE-2 backlog (deferred this wave only because they crate-conflict with the wave-1 lanes — bock-types ⨯
+Lane A, bock-codegen ⨯ Lane D):** Q-xmod-bounds + Q-xmod-impl, Q-checker-method-generic-call-infer,
+Q-list-operator-gating-user-types, Q-list-mut-pop-insert-remove, Q-propagate-exprpos-shared (LOW), low-pri effect
+diagnostics (Q-effect-op-node-lowering, Q-effect-import-unused), Q-clock-handler-routing. ↓ —
+PRIOR: Last reconciled 2026-06-06 (b) — main 56eece6, 0 open PRs, clean, CI green.** ★ DQ18 + DQ22 DONE (#269) + STDLIB-SURFACE
 RATIFICATION BATCH → **Design board empty except DQ1 (non-core CLI).** **#269:** List `push`/`append` are `mut self` Void
 mutators (mut-receiver `E5004`; codegen ×5 incl. go `recv = append(recv, x)`); Map `contains` rejected (`E4013` →
 `contains_key`); spec §18.3 + changelog; conformance 749/0. **Ratification (this PR, spec-only):** DQ10 primitive-conformance
@@ -159,17 +184,37 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ## Ready
 
+- **[Q-bockfmt-cfarm-comma] `bock fmt` appends an illegal trailing comma after a control-flow match arm** — bug · ready ·
+  `compiler/crates/bock-fmt/` · — · links #272, Q-stdlib-fmtcheck · note: FOUND 2026-06-07 (#272). `bock fmt` rewrites a
+  control-flow match-arm body like `None => break` to `None => break,`; the parser then rejects the formatted file (`E2020
+  expected expression, found ','`). Caught by the #272 stdlib-fmt behavior-equivalence check (it mangled `iter.bock`). Blocks
+  folding `iter.bock` into the `stdlib-fmt` gate. Suppress the trailing comma when an arm body is a control-flow statement
+  (`break`/`continue`/`return`/loop tail).
+- **[Q-bockfmt-utf8-panic] `bock fmt` panics on long multi-byte (UTF-8) comment lines** — bug · ready ·
+  `compiler/crates/bock-fmt/src/emit.rs` (`find_break_point`/`wrap_long_lines` ~:1736) · — · links #272, Q-stdlib-fmtcheck ·
+  note: FOUND 2026-06-07 (#272). A box-drawing divider comment (81 chars / 200+ bytes) panics the formatter — `end byte index
+  100 is not a char boundary` — the line-wrap slices at a byte offset that lands inside a multi-byte char. Blocks folding
+  `collections.bock` into the `stdlib-fmt` gate. Slice on char boundaries (char indices / `floor_char_boundary`).
+- **[Q-blanket-into-codegen] derived blanket `.into()` is unexecutable on compiled targets (JS confirmed)** — bug · ready ·
+  `compiler/crates/bock-codegen/` + maybe `compiler/crates/bock-air/src/lower.rs` · — · links #273, Q-interp-enum,
+  Q-xmod-impl · note: FOUND 2026-06-07 (#273). A derived `Into[Target] for Source` (the bodyless blanket from an `impl From`)
+  lowers `m.into()` to `m.into(m)` on JS but only `Source.prototype.from` is defined → `m.into is not a function`. Codegen/AIR
+  gap, NOT interpreter-only (the #273 interp lane split it out for exactly this reason). Rewrite `.into()` → `Target.from(self)`
+  in the lowerer so every target resolves it. Pairs with Q-xmod-impl (cross-module `.into()` resolution).
 - **[Q-list-mutation-dq18] List `push`/`append` mutation + Map `contains` reject** — impl/design · **DONE (#269 — DQ18 + DQ22)** ·
   `compiler/crates/bock-types`, `compiler/crates/bock-codegen`, `spec §18.3`, `docs/.../core-collections.md` · links DQ18, DQ22,
   #269 · note: DONE 2026-06-06. `push`/`append` → `mut self` Void mutators (mut-receiver enforced, `E5004`); codegen ×5 (rust/js/ts
   `.push`, py `.append`, go `recv = append(recv, x)`). Map `contains` rejected (`E4013` → `contains_key`); `contains` stays
   Set-only. Spec §18.3 + changelog. `pop`/`insert`/`remove`/`reverse` left value-returning → Q-list-mut-pop-insert-remove.
-- **[Q-checker-unknown-method-concrete] unknown method on a concrete type → checker error, not fresh-var** — bug · ready ·
-  `compiler/crates/bock-types/src/checker.rs` · — · links DQ22, #269 · note: FOUND 2026-06-06 (DQ22). The general form of the
-  DQ22 trap: the checker resolves an unknown method on a concrete receiver to a fresh type var (passes `bock check`, emits no
-  codegen) instead of erroring. DQ22 fixed the narrow Map-`contains` case (#269); close the broad hole (error + suggestion) for
-  any (concrete-type, unknown-method) pair. EXCEPTION: §4.9 `Flexible`/sketch-mode narrowing resolves aggressively by design —
-  must NOT leak into concrete-typed receivers. Verify-heavy (may surface latent issues); run full conformance + examples-exec.
+- **[Q-checker-unknown-method-concrete] unknown method on a concrete type → checker error, not fresh-var** — bug · **DONE (#274)** ·
+  `compiler/crates/bock-types/src/checker.rs` · — · links DQ22, #269, #274 · note: **DONE 2026-06-07 (#274).** An unknown
+  method on a concrete receiver now errors **E4013** + nearest-name (Levenshtein) suggestion instead of resolving to a fresh
+  var. Gated to closed-method-set receivers (primitives, built-in List/Map/Set, Optional/Result, in-scope user records/classes)
+  via `method_is_resolvable` (intrinsics + canonical primitive trait conformances + user inherent/trait impls + record
+  field-closures + conversion hooks + inherited trait defaults); §4.9 `Flexible`/sketch + `TypeVar`/`Error`/out-of-scope types
+  EXEMPT. The fix surfaced + closed a trait-default-method false-positive (`Eq::not_equals` inherited by a concrete type).
+  Verified: full conformance REQUIRE=all 0 failed + examples-exec 100/100 non-red. ORIG: FOUND 2026-06-06 (DQ22) — the general
+  form of the DQ22 Map-`contains` trap.
 - **[Q-list-operator-gating-user-types] §18.5 operator-gating for user types not wired** — bug · ready ·
   `compiler/crates/bock-types/` · — · links DQ10, §18.5 · note: FOUND 2026-06-06 (DQ10 ratification, flagged out-of-scope by
   Design). §18.5's rule (implementing the trait gates the operator) works for primitives; wiring it so a USER type without `impl
@@ -212,23 +257,23 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   links Design ruling 2026-06-05 · note: Design ruled `todo()` = Never-typed, Panic-effect abort, optional message (§18.2
   normative + changelog `20260605-todo-semantics.md`); `guessing-game` = compile-verified stub showcase (its `todo()` stubs
   need v1.x RNG/stdin), recategorized in the audit as **STUB** (non-red). Examples now 95/100 run + 5 stub = 100/100 non-red.
-- **[Q-import-reject] Reject bare module-qualified import** — bug · ready ·
-  `compiler/crates/bock-parser|bock-types/` · — · links DQ8 · note: a `use` of a
-  module path with neither a brace-list nor a wildcard (bare `use core.error`) is
-  not a v1 form; reject with a diagnostic pointing at the braced form. Decided by
-  DQ8; module-qualified access deferred to v1.x.
+- **[Q-import-reject] Reject bare module-qualified import** — bug · **DONE (#274)** ·
+  `compiler/crates/bock-types/` · — · links DQ8, #274 · note: **DONE 2026-06-07 (#274).** Bare `use core.error`
+  (`ImportItems::Module`, neither brace-list nor wildcard) was silently skipped; `check_module` now rejects it with **E4014**
+  pointing at the braced form `use core.error.{ ... }`. Braced/wildcard imports unaffected; spec §12.2 already mandated the
+  rejection (no spec edit). Decided by DQ8; module-qualified access deferred to v1.x.
 - **[Q-interp-enum] interpreter execution gaps for stdlib dispatch** — bug ·
-  ready · interpreter crate · — · links #104, #110, #121 · note: PARTIALLY fixed
-  by #121 (defect #5: method bodies now run with a globals-bearing env, so
-  `Some`/`None`/top-level fns + imported enum variants resolve in method bodies —
-  this likely closed the #104 `Ordering.Less` case). REMAINING (verify): the #110
-  convert dispatch gaps — user associated fns, the bodyless blanket `.into()`,
-  builtin-shadowed `to_string`. Re-test against #121; close or scope the residue.
+  **DONE 2/3 (#273)** · interpreter crate · — · links #104, #110, #121, #273, Q-blanket-into-codegen · note: **DONE 2026-06-07
+  (#273), 2 of 3 residual gaps closed:** user associated-fn dispatch (`Target.from(source)` — was "undefined variable") +
+  user-impl `to_string` shadowing the universal builtin (test-harness matcher names reserved so `expect()` keeps builtin
+  dispatch). The 3rd — the bodyless blanket `.into()` — was split out: it's a cross-cutting codegen/AIR gap (JS target crashes
+  too), not interpreter-only → **Q-blanket-into-codegen**. ORIG: #121 (defect #5) closed the #104 `Ordering.Less` case
+  (globals-bearing method-body env).
 - **[Q-self-subst] checker: `Self` not substituted in impl method sigs** — bug ·
-  ready · `compiler/crates/bock-types/` · — · note: an impl writing
-  `fn compare(self, other: Self)` → E4001 at call sites; the checker doesn't
-  substitute `Self`→concrete in impl method signatures. Workaround: write the
-  concrete operand type in impls. Narrow gap; low urgency. Found #104.
+  **DONE (verified already-fixed #141; re-confirmed #274)** · `compiler/crates/bock-types/` · — · links #141, #274 · note:
+  **VERIFIED 2026-06-07 (#274) — already resolved by #141.** `Self`→target substitution happens at impl-sig registration;
+  `a.combine(b)` / `fn compare(self, other: Self)` check clean, covered by existing exec fixtures (`self_return`,
+  `self_in_plain_impl`, `trait_self_typing`). No change needed. ORIG found #104.
 - **[Q-xmod-bounds] Cross-module where-bound enforcement** — bug · ready ·
   `compiler/crates/bock-types/` (export ABI) · — · links #108 · note: where-clause
   bounds on **imported** generic fns aren't enforced — `ExportedSymbol` carries no
@@ -239,10 +284,14 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   resolves via the impl-table, not seeded across modules — an `impl From[A] for B`
   in module X isn't visible to `.into()` in module Y. Seed the impl-table
   cross-module. Pairs with Q-xmod-bounds.
-- **[Q-prim-assoc] Primitive associated calls (`Float.from(3)`)** — bug · ready ·
-  `compiler/crates/bock-types/` · — · links #110 · note: the resolver doesn't
-  treat a primitive type name as an expression value, so `Float.from(3)` doesn't
-  resolve (`.into()` is the working primitive path). Minor usability gap.
+- **[Q-prim-assoc] Primitive associated calls (`Float.from(3)`)** — bug · ready · **RE-SCOPED: checker+codegen-COUPLED** ·
+  `compiler/crates/bock-types/` + `compiler/crates/bock-codegen/` (all 5) · — · links #110, #274 · note: **RE-SCOPED 2026-06-07
+  (#274).** The checker fix is straightforward, but #274 implemented it and confirmed `Float.from(3)`/`Int.try_from(s)` then
+  emit BROKEN codegen on all 5 (`float.from(3)` JS; `from`-keyword Python; no-such-type Rust/Go) — the associated
+  primitive-conversion lowering isn't wired in bock-codegen, so enabling the check alone converts a clean `E4002` into garbage
+  output (the exact anti-pattern Q-checker-unknown-method-concrete fixed). #274 reverted it. Needs a COUPLED checker+codegen
+  change (`Type.from`/`Type.try_from` lowering ×5) in one session. ORIG: the resolver doesn't treat a primitive type name as an
+  expression value (`.into()` is the working primitive path).
 - **[Q-match-exprpos] Expression-position control-flow lowering — PER-BACKEND done; SHARED value-position desugar remains** —
   impl · **DONE (#218/#219/#220 per-backend emitters + #224 shared core)** · `compiler/crates/bock-codegen/` ·
   — · links #121, #176, #218, #219, #220, MS-examples-hardening, Q-exprpos-shared-desugar · note: the 5-backend fan-out
@@ -399,34 +448,36 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `tsc` (the conformance harness + `bock build -t ts` use it). Add a `tsc --noEmit` step to the ts audit path so the matrix
   reflects type-safety. (Same "syntax-check ≠ correct" trap as the broader conformance-vs-examples gap.)
 - **[Q-py-valpos-stmt-arms] Python value-position `match` with statement arms below tail drops leading statements** — bug ·
-  ready · `compiler/crates/bock-codegen/src/py.rs` · — · links #235, Q-exprpos-shared-desugar, MS-examples-hardening · note:
-  FOUND 2026-06-04 (#235). A value-position `match` whose arm is a block of statements (nested below tail position) still
-  uses the lambda/ternary chain and drops the leading statements — e.g. microservice `handle_delete_user`'s `Ok(result) => {
-  log(...); Response {...} }` drops the `log`. Program runs correctly; same value-IIFE-with-statements class the shared
-  `hoist_value_cf` desugar targets — best fixed cross-backend, not py-only.
-- **[Q-rust-str-mixed-binding] Rust `String` `match` mixing `&str` literal + whole-scrutinee binding arm** — bug · ready ·
-  **LOW (no v1 example)** · `compiler/crates/bock-codegen/src/rs.rs` · — · links #236 · note: FOUND 2026-06-04 (#236). `match s
-  { "hi" => …, other => other }` on a `String` — #236 deliberately leaves the `.as_str()` wrap off when a binding arm is
-  present (so the `String` binding keeps its type), so the literal arm still E0308s. A full fix re-binds the `&str` slice to
-  `String` (`.to_string()`) in arms that need it (body-type analysis). No example hits it (pattern-lab uses `_`).
-- **[Q-stdlib-fmtcheck] Enable `fmt --check` on stdlib `.bock`** — chore · ready ·
-  `.github/workflows/`, `stdlib/` · — · links #119 · note: now that `bock fmt`
-  emits valid Bock (#119), the stdlib `.bock` files (hand-authored to avoid the old
-  mangling) can be `bock fmt`'d + `--check`'d in CI. Format them once + add a check.
+  **DONE (#271)** · `compiler/crates/bock-codegen/src/py.rs` · — · links #235, #271 · note: **DONE 2026-06-07 (#271).** New
+  `match_arm_drops_leading_stmts` predicate (mirroring the lambda-chain's bail set) routes a value-tail-plus-leading-statement
+  arm to the existing statement-form `match`/`case` (wired into both let-bound + tail-position paths); simple-let/bare-call/
+  tail-only arms stay on the lambda chain. Fixture exercises an observable side effect (outer-counter mutation: `steps=0`→`3`).
+  ORIG FOUND 2026-06-04 (#235).
+- **[Q-rust-str-mixed-binding] Rust `String` `match` mixing `&str` literal + whole-scrutinee binding arm** — bug ·
+  **DONE (#271)** · `compiler/crates/bock-codegen/src/rs.rs` · — · links #236, #271 · note: **DONE 2026-06-07 (#271).** Keep
+  the `match (s).as_str()` wrap in the mixed case AND re-bind each whole-scrutinee bind to owned `String` at the arm-body top
+  (`let other = other.to_string();` — always sound). Extracted a shared `emit_match_scrutinee_prefix` for stmt- and
+  expr-position matches; removed dead `scrutinee_matches_str_literal`. Fixture covers literal + guarded bind + plain bind.
+  ORIG FOUND 2026-06-04 (#236).
+- **[Q-stdlib-fmtcheck] Enable `fmt --check` on stdlib `.bock`** — chore · **DONE (#272)** ·
+  `.github/workflows/ci.yml`, `stdlib/`, `tools/scripts/stdlib-fmt-check.sh` · — · links #119, #272, Q-bockfmt-cfarm-comma,
+  Q-bockfmt-utf8-panic · note: **DONE 2026-06-07 (#272).** 8/10 stdlib core files `bock fmt`'d (whitespace/trailing-comma
+  normalization); behavior-equivalence PROVEN (full test suite + conformance REQUIRE=all 0 failed on the reformatted, rebuilt
+  `bock`). New blocking `stdlib-fmt` CI job runs `tools/scripts/stdlib-fmt-check.sh` (stages files into a temp tree since
+  `bock fmt` has no path flags). **`collections.bock` + `iter.bock` EXCLUDED** — `bock fmt` corrupts them → split out as
+  Q-bockfmt-cfarm-comma + Q-bockfmt-utf8-panic; fold them back in once those land.
 - **[Q-go-list-literal] Go `for x in [literal]` element typing** — bug · **DONE (#176)** · note: verified
   already-fixed — Go emits `for _, x := range []int64{...}` (typed slice + typed range var); pinned by the existing
   `go_typed_list_iter.bock` fixture. (No code change; #176 confirmed + pinned.)
 - **[Q-ts-generic-impl] TS generic impl-target `self` typing** — bug · **DONE (#176)** · note: verified
   already-fixed — TS emits `self: Box<T>` / `-> Box<T>`, compiles `--strict` clean; pinned by new
   `ts_generic_impl_self.bock` fixture. (No code change; #176 confirmed + pinned.)
-- **[Q-iter-interp-mutself] Interpreter hangs on a `mut self` iterator drive** — bug · ready ·
-  interpreter crate · — · links #151, #152 · note: a `loop { match it.next() }` drive over a
-  `ListIterator` HANGS under the tree-walking interpreter — `mut self` cursor mutations don't persist
-  across method calls, so `next()` never advances and `None` is never reached. Compiled targets (all 5)
-  are fine; only `bock run` (interpreter) is affected. Pre-existing (the proven `generic_iter_concrete_match.bock`
-  hangs identically) — NOT introduced by core.iter; surfaced by it. The `stdlib_iter.rs` smoke uses a single
-  `next()` to avoid it. Fix: persist `mut self` field mutations across interpreter method-call frames.
-  Same family as Q-interp-enum.
+- **[Q-iter-interp-mutself] Interpreter hangs on a `mut self` iterator drive** — bug · **DONE (#273)** ·
+  interpreter crate · — · links #151, #152, #273 · note: **DONE 2026-06-07 (#273).** `register_impl` now records the
+  `mut self` marker (`MethodEntry.self_is_mut`); `try_call_impl_method` returns the post-call `self` (`MethodOutcome`); both
+  dispatch sites write it back to the receiver lvalue (variable or record-field path) via new `write_back_receiver`. The
+  `loop { match it.next() }` drive over a `ListIterator` now terminates (`sum=6` EXIT=0 vs timeout EXIT=124 before); fixtures
+  carry a wall-clock guard so a regression asserts rather than hangs CI. Same family as Q-interp-enum (also #273).
 - **[Q-effect-op-node-lowering] Unhandled bare effect-op surfaces E1001, not E8020** — bug/diagnostic-quality ·
   ready (low-pri) · `compiler/crates/bock-air/` (lower.rs / verify_capabilities.rs) · — · links DV16, #155 · note:
   a genuinely-unhandled bare op (no handler, no `with`) surfaces resolver **E1001** "undefined name" rather than the
@@ -442,7 +493,10 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   (DONE this block → #155: Q-effect-interp-rust [Rust interpolation effect-op rewrite] + Q-effect-conformance-wiring
   [the inert effects/ suite now executes ×5]; DV16 RESOLVED.)
 - **[Q-interp-effect-op-collision] Interpreter flat op-name→effect map can't disambiguate same-named ops** — bug ·
-  ready (low-pri) · interpreter / `bock-cli/src/run.rs` · — · links #157 · note: the interpreter resolves bare effect
+  **deferred v1.x (evaluated #273 — #157 sufficient for v1)** · interpreter / `bock-cli/src/run.rs` · — · links #157, #273 ·
+  note: **EVALUATED 2026-06-07 (#273), left as-is** — #157's deterministic dependency-order shadowing (user effects shadow
+  core) is correct + sufficient for v1; full effect-qualified dispatch needs call-site effect info threaded from the checker
+  into the AIR (a bare `log(msg)` carries no qualifier) — a v1.x item, not cheap. ORIG: the interpreter resolves bare effect
   ops through a FLAT op-name→effect-name map, so two effects sharing an op name (e.g. a user `effect Logger { fn log }`
   + the embedded `core.effect.Log { fn log }`) collide — only last-writer-wins. #157 made registration deterministic
   (topological order → user effects shadow core), which is correct + sufficient for v1, but full qualification (a
@@ -453,14 +507,13 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   same-named record field to `<Name>Method` (applied at trait interface + receiver + call sites; field stays
   `Message`). Locked by a `go.rs` unit test + `conformance/exec/exec_core_error.bock` (rust+go). The js/ts/python
   variants of the same collision split out → **Q-error-message-jstspy** below.
-- **[Q-error-message-jstspy] `core.error.message()` field/method collision also breaks js/ts/python** — bug · ready ·
-  `bock-codegen/src/{js,ts,py}.rs` · — · links #191 · note: FOUND in S6b. The same `SimpleError { message }` field +
-  `message()` method collision is **pre-existing on js/ts/python** (structural shadowing — TS: "Duplicate identifier
-  'message'"; JS: instance field shadows the prototype method → `.message()` "not a function"; Python: dataclass field
-  overwrites the method). Go fixed (#191); the `exec_core_error.bock` fixture is restricted to rust+go to keep
-  conformance green. Each backend needs its own disambiguation (not just a name suffix). **Quality signal:** the v1
-  stdlib was "complete" but `core.error.message()` was never exercised cross-target — a name-collision codegen pattern
-  that may recur for other stdlib field/method pairs. Worth a pre-v1.0 fix; not on the ItemB critical path.
+- **[Q-error-message-jstspy] `core.error.message()` field/method collision also breaks js/ts/python** — bug ·
+  **DONE (verified already-fixed #193; fixture strengthened #271)** · `bock-codegen/src/{js,ts,py}.rs` · — · links #191, #193,
+  #271 · note: **VERIFIED 2026-06-07 (#271) — already fixed at base by #193.** The shared
+  `generator::disambiguate_method_name`/`collect_record_field_names` mechanism is wired on js/ts/py/go and `exec_core_error`
+  already ran unrestricted ×5; #271 confirmed BOTH the field (`e.message`) and the renamed method (`e.message()`) are reachable
+  on every target and STRENGTHENED `exec_core_error.bock` to read both (output `boom/boom;again: boom`), locking the invariant.
+  No js/ts/py source change was warranted. ORIG FOUND in S6b.
 - **[Q-clock-handler-routing] `Instant.now`/`sleep` bypass the Clock effect handler** — bug · ready · `bock-codegen` ·
   — · links #160 · note: the time host primitives are inlined per-target and bypass the installed `Clock` handler, so
   `std.testing.MockClock` virtual-time (§18.4) is not achievable — `sleep` always hits real host. Route now/sleep/
