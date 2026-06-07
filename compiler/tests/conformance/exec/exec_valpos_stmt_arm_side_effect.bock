@@ -1,0 +1,56 @@
+// TEST: exec_valpos_stmt_arm_side_effect
+// EXPECT: output "steps=3;ran 4"
+//
+// VALUE-POSITION MATCH ARM WITH A NON-EXPRESSIBLE LEADING STATEMENT (all 5).
+//
+// The `let summary = match …` RHS is a value-position `match`. Its `Run` arm is
+// a *block*: a side-effecting `for` loop FOLLOWED BY a tail value string. The
+// loop mutates the outer `steps` counter, so the loop's effect is OBSERVABLE in
+// the final stdout (`steps=3`) — independently of the arm's own value (`ran 4`).
+//
+// Q-py-valpos-stmt-arms regression lock. The Python backend lowered a
+// value-position `match` whose arm has a value tail through the
+// `(lambda __v: …)` conditional chain, folding each leading statement into an
+// immediately-applied lambda. A leading simple `let` or bare-call statement
+// folds fine, but a construct with no Python *expression* form — here a `for`
+// loop — made the fold bail, and the fall-back emitted only the arm's tail,
+// SILENTLY DROPPING THE LOOP. The program still produced the right arm value
+// (`ran 4`) but the loop's side effect vanished (`steps=0`, not `steps=3`). The
+// fix routes such an arm to the statement-form `match`/`case`, whose arm body
+// emits the loop and then assigns the tail. js/ts/rust/go already emit a real
+// statement block here; this fixture locks that the side effect survives on
+// ALL FIVE.
+//
+// The leading statement is deliberately a loop (not a `let` or a bare call):
+// those *are* expressible in the lambda chain and would not exercise the drop.
+// The mutated counter keeps the whole expected output on one line, so the diff
+// is a single string the harness can match.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Job {
+  Run(Int)
+  Skip
+}
+
+fn pick(n: Int) -> Job {
+  Run(n)
+}
+
+fn main() -> Void {
+  let mut steps: Int = 0
+  let summary: String = match pick(4) {
+    Run(n) => {
+      for i in 1..n {
+        steps = steps + 1
+      }
+      "ran ${n}"
+    }
+    Skip => {
+      "skipped"
+    }
+  }
+  println("steps=${steps};${summary}")
+}

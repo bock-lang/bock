@@ -777,6 +777,16 @@ struct RsEmitCtx {
     /// is needed there. Seeded alongside `reused_let_bindings` per function (see
     /// [`Self::seed_reused_params`]) and restored together.
     reused_value_tail_bindings: std::collections::HashSet<String>,
+    /// Snake-cased names of whole-scrutinee binding-arm patterns (`other => …`)
+    /// in the current `match` that must be re-bound from `&str` to an owned
+    /// `String` at the top of their arm body. Set only when [`Self::emit_match`]
+    /// matched a `String` scrutinee on `.as_str()` *because* the arms mix a
+    /// string-literal pattern with a whole-scrutinee bind (Q-rust-str-mixed-binding):
+    /// the `.as_str()` wrap retypes the bind to `&str`, so the arm body opens
+    /// with `let other = other.to_string();` to restore the `String` the Bock
+    /// binding has. Seeded per-`match` (saved/restored) so it never leaks to a
+    /// sibling/outer match.
+    str_rebind_match_binds: std::collections::HashSet<String>,
 }
 
 impl RsEmitCtx {
@@ -812,6 +822,7 @@ impl RsEmitCtx {
             collection_bindings: std::collections::HashSet::new(),
             fn_type_aliases: std::collections::HashMap::new(),
             reused_value_tail_bindings: std::collections::HashSet::new(),
+            str_rebind_match_binds: std::collections::HashSet::new(),
         }
     }
 
@@ -854,6 +865,7 @@ impl RsEmitCtx {
             collection_bindings: std::collections::HashSet::new(),
             fn_type_aliases: self.fn_type_aliases.clone(),
             reused_value_tail_bindings: std::collections::HashSet::new(),
+            str_rebind_match_binds: std::collections::HashSet::new(),
         }
     }
 
@@ -4803,23 +4815,12 @@ impl RsEmitCtx {
                 Ok(())
             }
             NodeKind::Match { scrutinee, arms } => {
-                // Match in expression position. Mirror `emit_match`: when any
-                // arm matches with a list pattern, match on the scrutinee's
-                // `.as_slice()` so the slice patterns match `&[T]` rather than
-                // `Vec<T>` (E0529).
+                // Match in expression position. Mirror `emit_match`: the
+                // scrutinee prefix (`.as_slice()` / `.as_str()`) and the mixed
+                // string-literal/bind re-bind set are computed identically by the
+                // shared `emit_match_scrutinee_prefix`.
                 self.buf.push_str("match ");
-                if arms.iter().any(Self::arm_matches_list) {
-                    self.buf.push('(');
-                    self.emit_expr(scrutinee)?;
-                    self.buf.push_str(").as_slice()");
-                } else if Self::scrutinee_matches_str_literal(arms) {
-                    // `String` scrutinee vs `&str` literal arms → `.as_str()`.
-                    self.buf.push('(');
-                    self.emit_expr(scrutinee)?;
-                    self.buf.push_str(").as_str()");
-                } else {
-                    self.emit_expr(scrutinee)?;
-                }
+                let prev_rebind = self.emit_match_scrutinee_prefix(scrutinee, arms)?;
                 self.buf.push_str(" {\n");
                 self.indent += 1;
                 for arm in arms {
@@ -4828,6 +4829,7 @@ impl RsEmitCtx {
                 self.indent -= 1;
                 self.write_indent();
                 self.buf.push('}');
+                self.str_rebind_match_binds = prev_rebind;
                 Ok(())
             }
             // Ownership nodes: direct mapping to Rust.
@@ -5394,25 +5396,10 @@ impl RsEmitCtx {
     fn emit_match(&mut self, scrutinee: &AIRNode, arms: &[AIRNode]) -> Result<(), CodegenError> {
         let ind = self.indent_str();
         let _ = write!(self.buf, "{ind}match ");
-        // Bock list/array values are `Vec<T>` in this backend, but Rust slice
-        // patterns (`[]`, `[head, ..tail]`) only match `[T]`/`&[T]`, not
-        // `Vec<T>` (E0529). When any arm matches with a list pattern, match on
-        // the scrutinee's `.as_slice()` (`&[T]`): default binding modes then
-        // bind elements by shared reference, and a `rest @ ..` tail binds to a
-        // sized `&[T]` (a by-value `[T]` tail would be unsized — E0277).
-        let slice_match = arms.iter().any(Self::arm_matches_list);
-        if slice_match {
-            self.buf.push('(');
-            self.emit_expr(scrutinee)?;
-            self.buf.push_str(").as_slice()");
-        } else if Self::scrutinee_matches_str_literal(arms) {
-            // `String` scrutinee vs `&str` literal arms → match on `.as_str()`.
-            self.buf.push('(');
-            self.emit_expr(scrutinee)?;
-            self.buf.push_str(").as_str()");
-        } else {
-            self.emit_expr(scrutinee)?;
-        }
+        // The scrutinee prefix (`.as_slice()` for list-pattern arms, `.as_str()`
+        // for `&str`-literal arms) and the mixed string-literal/bind re-bind set
+        // are chosen by `emit_match_scrutinee_prefix`.
+        let prev_rebind = self.emit_match_scrutinee_prefix(scrutinee, arms)?;
         self.buf.push_str(" {\n");
         self.indent += 1;
         for arm in arms {
@@ -5420,7 +5407,97 @@ impl RsEmitCtx {
         }
         self.indent -= 1;
         self.writeln("}");
+        self.str_rebind_match_binds = prev_rebind;
         Ok(())
+    }
+
+    /// Emit the scrutinee expression for a `match`, choosing the `.as_slice()` /
+    /// `.as_str()` wrap, and seed [`Self::str_rebind_match_binds`] for a mixed
+    /// string-literal / whole-scrutinee-bind match. Shared by the statement-form
+    /// [`Self::emit_match`] and the expression-position `Match` arm so both lower
+    /// the scrutinee identically.
+    ///
+    /// Returns the *previous* `str_rebind_match_binds` set so the caller restores
+    /// it after emitting the arms (the set is per-`match`, never leaking to a
+    /// sibling/outer match). The caller writes the surrounding `match`/`{`/`}`.
+    fn emit_match_scrutinee_prefix(
+        &mut self,
+        scrutinee: &AIRNode,
+        arms: &[AIRNode],
+    ) -> Result<std::collections::HashSet<String>, CodegenError> {
+        let prev_rebind = std::mem::take(&mut self.str_rebind_match_binds);
+        let slice_match = arms.iter().any(Self::arm_matches_list);
+        // A `String` scrutinee that mixes `&str` literal arms with a
+        // whole-scrutinee bind (`other => …`) must still match on `.as_str()`
+        // (the literal arm is `&str`, so a bare `String` scrutinee is E0308), but
+        // the wrap retypes the bind to `&str`. We re-bind those arms to an owned
+        // `String` inside their body — see `str_rebind_match_binds`.
+        let str_literal_match = !slice_match && arms.iter().any(Self::arm_matches_str_literal);
+        let mixed_bind = str_literal_match && arms.iter().any(Self::arm_binds_scrutinee);
+        if slice_match {
+            // Bock list/array values are `Vec<T>` in this backend, but Rust slice
+            // patterns (`[]`, `[head, ..tail]`) only match `[T]`/`&[T]`, not
+            // `Vec<T>` (E0529). Match on the scrutinee's `.as_slice()` (`&[T]`):
+            // default binding modes then bind elements by shared reference, and a
+            // `rest @ ..` tail binds to a sized `&[T]` (a by-value `[T]` tail
+            // would be unsized — E0277).
+            self.buf.push('(');
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str(").as_slice()");
+        } else if str_literal_match {
+            // `String` scrutinee vs `&str` literal arms → match on `.as_str()`.
+            // This now also fires when a whole-scrutinee bind is present (the
+            // `mixed_bind` case): the bind arm is re-bound to `String` below.
+            self.buf.push('(');
+            self.emit_expr(scrutinee)?;
+            self.buf.push_str(").as_str()");
+            if mixed_bind {
+                for arm in arms {
+                    if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
+                        Self::collect_scrutinee_bind_names(
+                            pattern,
+                            &mut self.str_rebind_match_binds,
+                        );
+                    }
+                }
+            }
+        } else {
+            self.emit_expr(scrutinee)?;
+        }
+        Ok(prev_rebind)
+    }
+
+    /// Collect the snake-cased names a top-level whole-scrutinee binding pattern
+    /// introduces (`other`, or each alternative of `a | b`, or the bind inside a
+    /// guard pattern), used to drive the `&str` → `String` re-bind in a mixed
+    /// string-literal / bind match (see [`Self::emit_match`]).
+    fn collect_scrutinee_bind_names(pat: &AIRNode, out: &mut std::collections::HashSet<String>) {
+        match &pat.kind {
+            NodeKind::BindPat { name, .. } => {
+                out.insert(to_snake_case(&name.name));
+            }
+            NodeKind::OrPat { alternatives } => {
+                for alt in alternatives {
+                    Self::collect_scrutinee_bind_names(alt, out);
+                }
+            }
+            NodeKind::GuardPat { pattern, .. } => {
+                Self::collect_scrutinee_bind_names(pattern, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// Emit `let <name> = <name>.to_string();` for each `&str` whole-scrutinee
+    /// bind that a mixed string-literal / bind `String` match must restore to an
+    /// owned `String` (Q-rust-str-mixed-binding). Called at the top of the arm
+    /// body, inside the arm's `{ }` block. `&str::to_string()` always yields a
+    /// `String`, so the shadowing `let` is sound regardless of how the body uses
+    /// the binding.
+    fn emit_str_rebinds(&mut self, names: &[String]) {
+        for n in names {
+            self.writeln(&format!("let {n} = {n}.to_string();"));
+        }
     }
 
     /// Whether a match arm's pattern is (or, under `|`/guard, contains) a list
@@ -5447,7 +5524,7 @@ impl RsEmitCtx {
 
     /// Whether a match arm's pattern is (or, under `|`/guard, contains) a string
     /// literal pattern — the signal to match on the scrutinee's `.as_str()`. See
-    /// [`Self::scrutinee_matches_str_literal`].
+    /// [`Self::emit_match_scrutinee_prefix`].
     fn arm_matches_str_literal(arm: &AIRNode) -> bool {
         if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
             Self::pattern_is_str_literal(pattern)
@@ -5472,10 +5549,10 @@ impl RsEmitCtx {
     }
 
     /// Whether an arm's pattern binds the whole scrutinee by name at top level
-    /// (`other => …`), looking through `|`-alternatives and a trailing guard. Such
-    /// a binding would change type from owned `String` to `&str` if the scrutinee
-    /// were `.as_str()`-wrapped, so its presence suppresses the wrap (see
-    /// [`Self::scrutinee_matches_str_literal`]).
+    /// (`other => …`), looking through `|`-alternatives and a trailing guard. When
+    /// a `.as_str()`-wrapped `String` match also carries such a bind, the bind is
+    /// `&str` and must be re-bound to an owned `String` in its arm body (see
+    /// [`Self::emit_match_scrutinee_prefix`]).
     fn arm_binds_scrutinee(arm: &AIRNode) -> bool {
         if let NodeKind::MatchArm { pattern, .. } = &arm.kind {
             Self::pattern_binds_scrutinee(pattern)
@@ -5496,26 +5573,6 @@ impl RsEmitCtx {
             NodeKind::GuardPat { pattern, .. } => Self::pattern_binds_scrutinee(pattern),
             _ => false,
         }
-    }
-
-    /// Whether this match should match on `(scrutinee).as_str()` rather than the
-    /// scrutinee directly. Bock's only string type is `String`, which lowers to
-    /// an owned Rust `String`; a string-literal pattern (`"foo"`) has type `&str`,
-    /// so matching a `String` scrutinee against it is `String` vs `&str` (E0308).
-    /// Matching `(s).as_str()` (a `&str`) against the `&str` literals lines the two
-    /// up.
-    ///
-    /// Fires only when (a) some arm carries a string-literal pattern, (b) no arm
-    /// carries a list pattern (those take `.as_slice()`, and string/list arms
-    /// cannot coexist on one scrutinee anyway), and (c) no arm binds the whole
-    /// scrutinee by name (`other => …`) — wrapping would retype such a binding from
-    /// owned `String` to `&str`, so it is left untouched. A scrutinee with only
-    /// bind/wildcard/constructor patterns (no string literal) is likewise left
-    /// alone, preserving an owned-`String` binding's type.
-    fn scrutinee_matches_str_literal(arms: &[AIRNode]) -> bool {
-        arms.iter().any(Self::arm_matches_str_literal)
-            && !arms.iter().any(Self::arm_matches_list)
-            && !arms.iter().any(Self::arm_binds_scrutinee)
     }
 
     fn emit_match_arm(&mut self, arm: &AIRNode) -> Result<(), CodegenError> {
@@ -5546,6 +5603,24 @@ impl RsEmitCtx {
                 self.emit_expr(g)?;
             }
             self.buf.push_str(" => ");
+            // Q-rust-str-mixed-binding: in a `.as_str()`-wrapped `String` match
+            // that mixes a `&str` literal arm with a whole-scrutinee bind, this
+            // arm's bind is `&str` but the Bock binding is a `String`. Re-bind it
+            // to an owned `String` at the top of the arm body. This forces the
+            // arm into a `{ … }` block (even a one-expression body), so the
+            // shadowing `let` precedes the body.
+            let rebinds: Vec<String> = if self.str_rebind_match_binds.is_empty() {
+                Vec::new()
+            } else {
+                let mut names = std::collections::HashSet::new();
+                Self::collect_scrutinee_bind_names(pattern, &mut names);
+                let mut v: Vec<String> = names
+                    .into_iter()
+                    .filter(|n| self.str_rebind_match_binds.contains(n))
+                    .collect();
+                v.sort(); // deterministic emission order
+                v
+            };
             // A statement-bodied arm (`break`/`continue`/`return`/assignment,
             // or a block whose tail is one) has no value. Rust `match` arms
             // accept statements directly, so route such a body through the
@@ -5553,6 +5628,7 @@ impl RsEmitCtx {
             if crate::generator::arm_body_is_statement(body) {
                 self.buf.push_str("{\n");
                 self.indent += 1;
+                self.emit_str_rebinds(&rebinds);
                 if let NodeKind::Block { .. } = &body.kind {
                     self.emit_block_body(body)?;
                 } else {
@@ -5563,24 +5639,34 @@ impl RsEmitCtx {
                 self.reused_match_bindings = prev_reused;
                 return Ok(());
             }
-            // Single-expression body → inline; otherwise block.
-            if let NodeKind::Block { stmts, tail } = &body.kind {
-                if stmts.is_empty() {
-                    if let Some(t) = tail {
-                        self.emit_expr(t)?;
-                        self.buf.push_str(",\n");
-                        self.reused_match_bindings = prev_reused;
-                        return Ok(());
+            // Single-expression body → inline; otherwise block. A re-bind forces
+            // the block form so the shadowing `let` can precede the value.
+            if rebinds.is_empty() {
+                if let NodeKind::Block { stmts, tail } = &body.kind {
+                    if stmts.is_empty() {
+                        if let Some(t) = tail {
+                            self.emit_expr(t)?;
+                            self.buf.push_str(",\n");
+                            self.reused_match_bindings = prev_reused;
+                            return Ok(());
+                        }
                     }
+                    self.buf.push_str("{\n");
+                    self.indent += 1;
+                    self.emit_block_body(body)?;
+                    self.indent -= 1;
+                    self.writeln("}");
+                } else {
+                    self.emit_expr(body)?;
+                    self.buf.push_str(",\n");
                 }
+            } else {
                 self.buf.push_str("{\n");
                 self.indent += 1;
+                self.emit_str_rebinds(&rebinds);
                 self.emit_block_body(body)?;
                 self.indent -= 1;
                 self.writeln("}");
-            } else {
-                self.emit_expr(body)?;
-                self.buf.push_str(",\n");
             }
             self.reused_match_bindings = prev_reused;
         }
@@ -7223,13 +7309,15 @@ mod tests {
         );
     }
 
-    /// A `String` match mixing string-literal arms with a top-level *binding* arm
-    /// (`other => other`) must NOT be `.as_str()`-wrapped: wrapping would retype
-    /// `other` from owned `String` to `&str` and break a body that returns it as a
-    /// `String`. The binding arm's presence suppresses the wrap (the literal arm is
-    /// left as-is — a separately-tracked residual, not made worse by this fix).
+    /// Q-rust-str-mixed-binding: a `String` match mixing string-literal arms with
+    /// a top-level *binding* arm (`other => other`) must still match on
+    /// `(s).as_str()` (so the `&str` literal arm typechecks), AND re-bind the
+    /// `&str` whole-scrutinee bind back to an owned `String` at the top of its arm
+    /// body (`let other = other.to_string();`) so the body keeps its `String`
+    /// binding. The whole module must compile (no E0308 on the literal arm, no
+    /// type mismatch on the returned `other`).
     #[test]
-    fn rust_str_literal_match_with_binding_arm_unwrapped() {
+    fn rust_str_literal_match_with_binding_arm_rebinds() {
         let f = str_match_fn(
             "describe_string",
             vec![
@@ -7247,10 +7335,18 @@ mod tests {
         );
         let out = gen(&module(vec![], vec![f]));
         assert!(
-            !out.contains(".as_str()"),
-            "binding arm must suppress the wrap: {out}"
+            out.contains("match (s).as_str()"),
+            "mixed literal/bind match must still wrap with .as_str(): {out}"
         );
-        assert!(out.contains("match s"), "got: {out}");
+        assert!(
+            out.contains("let other = other.to_string();"),
+            "bind arm must re-bind &str → String: {out}"
+        );
+        // And the whole module must compile (no E0308, no String/&str mismatch).
+        assert!(
+            check_rs_syntax(&out),
+            "generated rust did not compile: {out}"
+        );
     }
 
     /// The `.as_str()` wrapping must apply in expression position too (a `match`

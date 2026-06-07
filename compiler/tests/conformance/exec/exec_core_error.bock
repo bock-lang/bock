@@ -1,17 +1,20 @@
 // TEST: exec_core_error
-// EXPECT: output "boom;again: boom"
+// EXPECT: output "boom/boom;again: boom"
 //
 // THE PAYOFF FIXTURE for `core.error`: a user program that `use`s the embedded
 // `core.error` stdlib module, constructs a `SimpleError` via the `error(...)`
-// constructor, and reads its message back through the `message()` method —
-// compiled + run on ALL FIVE targets (no `// EXPECT: targets` restriction).
+// constructor, and reads its message back through BOTH the `message()` method
+// *and* the `message` field — compiled + run on ALL FIVE targets (no
+// `// EXPECT: targets` restriction).
 //
 // FIELD/METHOD NAME-COLLISION LOCK (all 5). `core.error` declares `record
 // SimpleError { message: String }` *and* `fn message(self) -> String` (the
 // `Error` trait method). Bock keeps a field (`self.message`) and a method
 // (`self.message()`) distinct, but most target object models collapse a field
 // and a same-named method onto one member slot. The codegen remedy renames the
-// *method* (the field keeps its name) at its declaration and every call site:
+// *method* (the field keeps its name) at its declaration and every call site,
+// so BOTH the field access (`e.message`) and the method call (`e.message()`)
+// stay reachable — this fixture reads each to lock that in:
 //
 //   - Go:     `Message` field + method ⇒ `go build` error ("has both field and
 //             method named Message"); method emitted as `MessageMethod()`.
@@ -42,7 +45,10 @@ fn read(e: SimpleError) -> String {
 
 fn main() -> Void {
   let e = error("boom")
+  // Method call: routes through the (possibly renamed) method member.
   let direct: String = e.message()
+  // Direct field access: must reach the field, which keeps its original name.
+  let field: String = e.message
   let again: String = read(error("boom"))
-  println("${direct};again: ${again}")
+  println("${direct}/${field};again: ${again}")
 }
