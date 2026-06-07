@@ -8,14 +8,14 @@
 //! method set does not cover, each driven by a `match r { Ok(x) => …; Err(e) =>
 //! … }`:
 //!
-//!   * [`and_then`] — monadic chaining (`Fn(T) -> Result[U, E]`), the
-//!     `Result` analogue of `Optional.flat_map`, which has no built-in method.
-//!   * [`unwrap_or_else`] — lazy fallback computed from the `Err` payload,
-//!     complementing the eager built-in `unwrap_or`.
-//!   * [`unwrap_err`] — extract the `Err` payload (the built-in `unwrap` only
-//!     extracts `Ok`); falls back to `fallback` on an `Ok`.
-//!   * [`ok`] / [`err`] — project a `Result` into an `Optional`, discarding the
-//!     other arm. `Optional` is prelude, so these return `Some`/`None` directly.
+//! * [`and_then`] — monadic chaining (`Fn(T) -> Result[U, E]`), the
+//! `Result` analogue of `Optional.flat_map`, which has no built-in method.
+//! * [`unwrap_or_else`] — lazy fallback computed from the `Err` payload,
+//! complementing the eager built-in `unwrap_or`.
+//! * [`unwrap_err`] — extract the `Err` payload (the built-in `unwrap` only
+//! extracts `Ok`); falls back to `fallback` on an `Ok`.
+//! * [`ok`] / [`err`] — project a `Result` into an `Optional`, discarding the
+//! other arm. `Optional` is prelude, so these return `Some`/`None` directly.
 //!
 //! The shapes that would duplicate a built-in method (`is_ok`/`is_err`/
 //! `unwrap`/`unwrap_or`/`map`/`map_err`) are intentionally **omitted** — call
@@ -32,8 +32,8 @@ module core.result
 /// on the first `Err`.
 public fn and_then[T, E, U](r: Result[T, E], f: Fn(T) -> Result[U, E]) -> Result[U, E] {
   match r {
-    Ok(x) => return f(x)
-    Err(e) => return Err(e)
+    Ok(x) => return f(x),
+    Err(e) => return Err(e),
   }
 }
 
@@ -46,8 +46,8 @@ public fn and_then[T, E, U](r: Result[T, E], f: Fn(T) -> Result[U, E]) -> Result
 /// when it is needed.
 public fn unwrap_or_else[T, E](r: Result[T, E], f: Fn(E) -> T) -> T {
   match r {
-    Ok(x) => return x
-    Err(e) => return f(e)
+    Ok(x) => return x,
+    Err(e) => return f(e),
   }
 }
 
@@ -58,8 +58,8 @@ public fn unwrap_or_else[T, E](r: Result[T, E], f: Fn(E) -> T) -> T {
 /// supplying a `fallback` for the `Ok` case rather than aborting.
 public fn unwrap_err[T, E](r: Result[T, E], fallback: E) -> E {
   match r {
-    Ok(_) => return fallback
-    Err(e) => return e
+    Ok(_) => return fallback,
+    Err(e) => return e,
   }
 }
 
@@ -71,8 +71,8 @@ public fn unwrap_err[T, E](r: Result[T, E], fallback: E) -> E {
 /// when the error is not needed.
 public fn ok[T, E](r: Result[T, E]) -> Optional[T] {
   match r {
-    Ok(x) => return Some(x)
-    Err(_) => return None
+    Ok(x) => return Some(x),
+    Err(_) => return None,
   }
 }
 
@@ -83,7 +83,7 @@ public fn ok[T, E](r: Result[T, E]) -> Optional[T] {
 /// `Optional` for the cases where the success value does not matter.
 public fn err[T, E](r: Result[T, E]) -> Optional[E] {
   match r {
-    Ok(_) => return None
-    Err(e) => return Some(e)
+    Ok(_) => return None,
+    Err(e) => return Some(e),
   }
 }

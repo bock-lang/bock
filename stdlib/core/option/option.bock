@@ -9,16 +9,16 @@
 //! ships only the free-function utilities that **complement** that method set
 //! rather than duplicate it:
 //!
-//!   * `or_else` — fall back to an alternative `Optional` (no method equivalent).
-//!   * `filter` — keep the payload only when a predicate holds (no method
-//!     equivalent on `Optional`; the built-in `filter` is a `List`/`Map`/`Set`
-//!     method).
-//!   * `to_list` — view an `Optional[T]` as a 0-or-1-element `List[T]`.
-//!   * `count` — `1` when present, `0` when empty.
-//!   * `get_or` — extract the payload or a supplied default (an *eager* default;
-//!     a free-function sibling of the built-in `unwrap_or` method, kept because
-//!     the method form is not always reachable on every expression position and
-//!     the free form composes uniformly with the rest of this module).
+//! * `or_else` — fall back to an alternative `Optional` (no method equivalent).
+//! * `filter` — keep the payload only when a predicate holds (no method
+//! equivalent on `Optional`; the built-in `filter` is a `List`/`Map`/`Set`
+//! method).
+//! * `to_list` — view an `Optional[T]` as a 0-or-1-element `List[T]`.
+//! * `count` — `1` when present, `0` when empty.
+//! * `get_or` — extract the payload or a supplied default (an *eager* default;
+//! a free-function sibling of the built-in `unwrap_or` method, kept because
+//! the method form is not always reachable on every expression position and
+//! the free form composes uniformly with the rest of this module).
 //!
 //! The duplicating utilities suggested for the v1 floor are intentionally
 //! **dropped** because they already exist as built-in methods that lower on
@@ -40,8 +40,8 @@ module core.option
 /// before a final extraction. Both operands are evaluated eagerly.
 public fn or_else[T](o: Optional[T], alt: Optional[T]) -> Optional[T] {
   match o {
-    Some(x) => Some(x)
-    None => alt
+    Some(x) => Some(x),
+    None => alt,
   }
 }
 
@@ -58,8 +58,8 @@ public fn filter[T](o: Optional[T], pred: Fn(T) -> Bool) -> Optional[T] {
       } else {
         None
       }
-    }
-    None => None
+    },
+    None => None,
   }
 }
 
@@ -70,8 +70,8 @@ public fn filter[T](o: Optional[T], pred: Fn(T) -> Bool) -> Optional[T] {
 /// DQ18), mirroring `core.iter`'s list construction.
 public fn to_list[T](o: Optional[T]) -> List[T] {
   match o {
-    Some(x) => [x]
-    None => []
+    Some(x) => [x],
+    None => [],
   }
 }
 
@@ -81,8 +81,8 @@ public fn to_list[T](o: Optional[T]) -> List[T] {
 /// across a collection of options by summing their counts.
 public fn count[T](o: Optional[T]) -> Int {
   match o {
-    Some(_) => 1
-    None => 0
+    Some(_) => 1,
+    None => 0,
   }
 }
 
@@ -100,7 +100,7 @@ public fn count[T](o: Optional[T]) -> Int {
 /// emitted source idiomatic on every target without relying on that escape.
 public fn get_or[T](o: Optional[T], fallback: T) -> T {
   match o {
-    Some(x) => x
-    None => fallback
+    Some(x) => x,
+    None => fallback,
   }
 }

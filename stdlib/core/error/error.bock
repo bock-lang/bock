@@ -25,7 +25,7 @@ public trait Error {
 /// error value but do not have a domain-specific error type.
 public record SimpleError {
   /// The human-readable message describing what went wrong.
-  message: String
+  message: String,
 }
 
 /// `SimpleError` satisfies `Error` by returning its stored message.
@@ -41,5 +41,7 @@ impl Error for SimpleError {
 /// This is the ergonomic way to create an error value:
 /// `error("file not found")`.
 public fn error(message: String) -> SimpleError {
-  SimpleError { message: message }
+  SimpleError {
+    message: message,
+  }
 }

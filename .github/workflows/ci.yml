@@ -155,6 +155,29 @@ jobs:
           BOCK_PROJECTMODE_REQUIRE: ${{ runner.os == 'Linux' && 'all' || '' }}
         run: cargo test --workspace --all-features
 
+  stdlib-fmt:
+    name: stdlib fmt-check
+    needs: detect
+    if: needs.detect.outputs.has_crates == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Build the formatter, then assert the embedded core stdlib stays
+      # `bock fmt`-clean. The gate script stages the gated stdlib files into a
+      # temp tree (bock fmt scans cwd) and runs `bock fmt --check`; it excludes
+      # two files that trip OPEN bock-fmt bugs (documented in the script). This is
+      # a BLOCKING check: the stdlib was normalised once, so any drift fails CI.
+      - name: Build bock
+        run: cargo build -p bock --bin bock
+      - name: stdlib fmt-check
+        run: ./tools/scripts/stdlib-fmt-check.sh
+
   doc:
     name: cargo doc
     needs: detect

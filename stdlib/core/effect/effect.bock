@@ -20,20 +20,20 @@
 //! ## Intentionally OUT of the v1 surface
 //!
 //! - **Ambient effects (`Panic`, `Allocate`, §10.5)** are compiler-intrinsic:
-//!   always available without declaration, so they need no stdlib surface.
+//! always available without declaration, so they need no stdlib surface.
 //! - **`Clock` (§10.2 / §18.3.1)** is owned by `core.time`, not this module;
-//!   `std.time` ships its default `SystemClock` handler. It is named here only to
-//!   point at its home.
+//! `std.time` ships its default `SystemClock` handler. It is named here only to
+//! point at its home.
 //! - **`Cancel` (§13.5)** — the ambient cancellation effect — is Reserved for
-//!   v1.x along with the broader cancellation surface.
+//! v1.x along with the broader cancellation surface.
 //! - **Adaptive effect handlers (`Effect.adaptive(...)`, §10.8)** — runtime
-//!   strategy selection via the AI provider — are Reserved for v1.x.
+//! strategy selection via the AI provider — are Reserved for v1.x.
 //! - **Lambda-based handler constructors (`Effect.handler(...)`, §10.4)** — the
-//!   stateless-handler shorthand — are Reserved for v1.x; the v1 handler form is
-//!   the record + `impl` form [`ConsoleLog`] demonstrates.
+//! stateless-handler shorthand — are Reserved for v1.x; the v1 handler form is
+//! the record + `impl` form [`ConsoleLog`] demonstrates.
 //! - **Layer-3 project-default handlers (`bock.project [effects]`, §10.3)** are
-//!   Reserved for v1.x; v1 resolves handlers through Layer 1 (`handling` blocks)
-//!   and Layer 2 (module-level `handle`) only.
+//! Reserved for v1.x; v1 resolves handlers through Layer 1 (`handling` blocks)
+//! and Layer 2 (module-level `handle`) only.
 
 module core.effect
 
@@ -61,7 +61,8 @@ public effect Log {
 /// `ConsoleLog` is the one v1 handler form — a stateless `record` paired with an
 /// `impl Log for ConsoleLog` (§10.4). Construct it with [`console_log`] and
 /// install it with a `handling (Log with console_log()) { ... }` block.
-public record ConsoleLog {}
+public record ConsoleLog {
+}
 
 /// `ConsoleLog` satisfies the [`Log`] effect by printing to standard output.
 impl Log for ConsoleLog {
