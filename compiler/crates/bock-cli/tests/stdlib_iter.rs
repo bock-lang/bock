@@ -7,19 +7,17 @@
 //!
 //! Type-checking (`bock check`) is exercised broadly: the traits, the concrete
 //! `ListIterator` record, the `list_iter` constructor, and every combinator
-//! type-check. The runtime smoke (`bock run`) is deliberately a SINGLE
-//! `it.next()` rather than a drive loop: the tree-walking interpreter does not
-//! persist `mut self` mutations across method calls, so a `loop { match
-//! it.next() }` over a cursor never advances and spins forever (a pre-existing
-//! interpreter gap that also affects the hand-written
-//! `generic_iter_concrete_match.bock` fixture; the *compiled* js/ts/python
-//! targets drive the loop correctly, as the `exec_iter_*` conformance fixtures
-//! prove). A single `next()` returns `Some(first)` and exits cleanly, which is
-//! enough to prove cross-module method dispatch into the embedded module at run
-//! time.
+//! type-check. The runtime smoke (`bock run`) now drives the full `loop { match
+//! it.next() }` shape: the tree-walking interpreter persists `mut self`
+//! mutations across method-call frames (Q-iter-interp-mutself), so the cursor
+//! advances and the loop terminates — matching the compiled js/ts/python
+//! targets that the `exec_iter_*` conformance fixtures prove. The drive test is
+//! wrapped in a wall-clock guard so a regression of the cursor write-back
+//! surfaces as a clean assertion rather than a wedged CI run.
 
 use std::io::Write;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
 
@@ -32,6 +30,37 @@ fn write_temp_file(content: &str) -> NamedTempFile {
     f.write_all(content.as_bytes()).unwrap();
     f.flush().unwrap();
     f
+}
+
+/// Run a prepared `bock` command with a hard wall-clock timeout, capturing
+/// output. Returns `None` (after killing the child) if the process hangs past
+/// `timeout` — a test-failure signal for a non-terminating iterator drive.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn bock");
+    let start = Instant::now();
+    loop {
+        match child.try_wait().expect("try_wait failed") {
+            Some(_status) => {
+                return Some(
+                    child
+                        .wait_with_output()
+                        .expect("wait_with_output after exit failed"),
+                );
+            }
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
 }
 
 fn assert_exit_code(output: &std::process::Output, expected: i32, ctx: &str) {
@@ -104,10 +133,49 @@ fn check_combinators_typecheck() {
     assert!(stdout.contains("no errors"), "stdout: {stdout}");
 }
 
+/// Runtime drive: constructing a `ListIterator` via `list_iter(...)` and
+/// driving it with the proven `loop { match it.next() { Some(x) => ...; None =>
+/// break } }` shape dispatches into the embedded `core.iter` impl at run time,
+/// advances the `mut self` cursor across calls, terminates, and accumulates the
+/// correct total. The wall-clock guard catches a regression of the cursor
+/// write-back as an assertion rather than a hang.
+#[test]
+fn run_drive_loop_accumulates_total() {
+    let f = write_temp_file(
+        "module main\n\
+         \n\
+         use core.iter.{ListIterator, list_iter}\n\
+         \n\
+         public fn main() {\n\
+         \x20\x20let mut it: ListIterator[Int] = list_iter([7, 8, 9])\n\
+         \x20\x20let mut total: Int = 0\n\
+         \x20\x20loop {\n\
+         \x20\x20\x20\x20match it.next() {\n\
+         \x20\x20\x20\x20\x20\x20Some(x) => {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20total = total + x\n\
+         \x20\x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20\x20\x20None => break\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20}\n\
+         \x20\x20println(\"total=${total}\")\n\
+         }\n",
+    );
+    let mut cmd = bock_bin();
+    cmd.arg("run").arg(f.path());
+    let output = run_with_timeout(cmd, Duration::from_secs(30))
+        .expect("`bock run` hung: core.iter ListIterator cursor did not advance");
+    assert_exit_code(&output, 0, "run core.iter drive loop");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("total=24"),
+        "expected `total=24` in stdout, got: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 /// Runtime smoke: constructing a `ListIterator` via `list_iter(...)` and calling
 /// `it.next()` once dispatches into the embedded `core.iter` impl at run time and
-/// yields `Some(first)`. A SINGLE `next()` (not a loop) is used deliberately —
-/// see the module docs for the interpreter `mut self` cursor limitation.
+/// yields `Some(first)`.
 #[test]
 fn run_single_next_yields_first() {
     let f = write_temp_file(

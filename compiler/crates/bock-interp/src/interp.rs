@@ -63,6 +63,29 @@ struct Closure {
     is_async: bool,
 }
 
+/// A registered user-defined `impl` method.
+#[derive(Debug, Clone)]
+struct MethodEntry {
+    /// The method's parameter names, in declaration order. For instance methods
+    /// the first entry is `"self"`.
+    params: Vec<String>,
+    /// True when the receiver was declared `mut self`. Mutations made to `self`
+    /// inside the body must then be written back to the caller's receiver
+    /// lvalue (e.g. an iterator cursor advanced by `next()`).
+    self_is_mut: bool,
+    /// The method body to evaluate.
+    body: AIRNode,
+}
+
+/// The result of dispatching a user-defined `impl` method.
+struct MethodOutcome {
+    /// The method's return value.
+    value: Value,
+    /// For `mut self` instance methods, the post-call `self` value to write
+    /// back to the receiver lvalue; `None` for static or non-`mut`-self methods.
+    updated_self: Option<Value>,
+}
+
 // ─── Interpreter ──────────────────────────────────────────────────────────────
 
 /// Tree-walking interpreter for Bock AIR.
@@ -80,8 +103,8 @@ pub struct Interpreter {
     fn_registry: HashMap<u64, Closure>,
     /// Built-in method and global function dispatch table.
     pub builtins: BuiltinRegistry,
-    /// User-defined impl methods: type_name → method_name → (param_names, body).
-    method_table: HashMap<String, HashMap<String, (Vec<String>, AIRNode)>>,
+    /// User-defined impl methods: type_name → method_name → [`MethodEntry`].
+    method_table: HashMap<String, HashMap<String, MethodEntry>>,
     /// Maps effect operation names to their parent effect name.
     /// Used to dispatch `log(msg)` → look up handler for `Logger` → call it.
     effect_operations: HashMap<String, String>,
@@ -290,18 +313,32 @@ impl Interpreter {
                 name, params, body, ..
             } = &method.kind
             {
-                let param_names: Vec<String> = params
-                    .iter()
-                    .filter_map(|p| {
-                        if let NodeKind::Param { pattern, .. } = &p.kind {
-                            if let NodeKind::BindPat { name, .. } = &pattern.kind {
-                                return Some(name.name.clone());
+                let mut param_names: Vec<String> = Vec::with_capacity(params.len());
+                let mut self_is_mut = false;
+                for p in params {
+                    if let NodeKind::Param { pattern, .. } = &p.kind {
+                        if let NodeKind::BindPat {
+                            name,
+                            is_mut: bind_is_mut,
+                        } = &pattern.kind
+                        {
+                            // The receiver's `mut` marker tells us whether self
+                            // mutations must be persisted back to the caller.
+                            if param_names.is_empty() && name.name == "self" {
+                                self_is_mut = *bind_is_mut;
                             }
+                            param_names.push(name.name.clone());
                         }
-                        None
-                    })
-                    .collect();
-                type_methods.insert(name.name.clone(), (param_names, *body.clone()));
+                    }
+                }
+                type_methods.insert(
+                    name.name.clone(),
+                    MethodEntry {
+                        params: param_names,
+                        self_is_mut,
+                        body: *body.clone(),
+                    },
+                );
             }
         }
     }
@@ -659,8 +696,10 @@ impl Interpreter {
                 if let Some(op_fn) = rec.fields.get(operation).cloned() {
                     return self.call_fn_value(&op_fn, args).await;
                 }
-                if let Some(result) = self.try_call_impl_method(handler, operation, args).await? {
-                    return Ok(result);
+                if let Some(outcome) = self.try_call_impl_method(handler, operation, args).await? {
+                    // The effect-handler value is a temporary; there is no
+                    // caller lvalue to write a mutated `self` back to.
+                    return Ok(outcome.value);
                 }
                 Err(RuntimeError::FieldNotFound {
                     field: operation.to_string(),
@@ -1152,6 +1191,27 @@ impl Interpreter {
                         .call_global(&qualified, &arg_values)
                         .expect("has_global check confirmed builtin exists");
                 }
+                // User-defined associated function on a named type, e.g. a
+                // trait-impl's `Target.from(source)`. The receiver names the
+                // *type* (not a value), so we dispatch by name through the
+                // method table. Only attempt this when the name is a registered
+                // type with a matching static method — otherwise fall through so
+                // genuine value receivers (a variable holding a record) still
+                // reach the desugared-method path below.
+                if self.method_table.contains_key(&type_name.name)
+                    && self.env.get(&type_name.name).is_none()
+                {
+                    let mut arg_values = Vec::with_capacity(args.len());
+                    for a in args {
+                        arg_values.push(self.eval_expr(&a.value).await?);
+                    }
+                    if let Some(result) = self
+                        .try_call_assoc_fn(&type_name.name, &field.name, arg_values)
+                        .await?
+                    {
+                        return Ok(result);
+                    }
+                }
             }
         }
 
@@ -1161,6 +1221,34 @@ impl Interpreter {
         if let NodeKind::FieldAccess { object, field } = &callee.kind {
             let recv = self.eval_expr(object).await?;
             let type_tag = TypeTag::of(&recv);
+            // For record receivers, a user-defined `impl` method shadows the
+            // universal record `to_string` builtin. The compiled targets
+            // dispatch the user method here (e.g. a `Displayable.to_string`
+            // impl), so the interpreter must too — checking the builtin first
+            // would silently call `universal_to_string` and diverge. The
+            // test-harness matchers (`to_equal`, …) are reserved (see
+            // `user_impl_may_shadow_record_builtin`).
+            if matches!(recv, Value::Record(_))
+                && user_impl_may_shadow_record_builtin(&field.name)
+                && self
+                    .method_table
+                    .get(record_type_name(&recv).unwrap_or(""))
+                    .is_some_and(|m| m.contains_key(&field.name))
+            {
+                let mut method_args = Vec::with_capacity(args.len().saturating_sub(1));
+                for a in args.iter().skip(1) {
+                    method_args.push(self.eval_expr(&a.value).await?);
+                }
+                if let Some(outcome) = self
+                    .try_call_impl_method(&recv, &field.name, method_args)
+                    .await?
+                {
+                    if let Some(updated) = outcome.updated_self {
+                        self.write_back_receiver(object, updated);
+                    }
+                    return Ok(outcome.value);
+                }
+            }
             if self.builtins.has_method(type_tag, &field.name) {
                 let mut builtin_args = Vec::with_capacity(args.len());
                 builtin_args.push(recv);
@@ -1182,11 +1270,15 @@ impl Interpreter {
             for a in args.iter().skip(1) {
                 method_args.push(self.eval_expr(&a.value).await?);
             }
-            if let Some(result) = self
+            if let Some(outcome) = self
                 .try_call_impl_method(&recv, &field.name, method_args)
                 .await?
             {
-                return Ok(result);
+                // Persist `mut self` mutations back to the receiver lvalue.
+                if let Some(updated) = outcome.updated_self {
+                    self.write_back_receiver(object, updated);
+                }
+                return Ok(outcome.value);
             }
             // Fallback: try inline collection method dispatch (contains, map,
             // filter, keys, first, etc.) which lives in eval_method_call.
@@ -1442,6 +1534,29 @@ impl Interpreter {
         let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
         for a in args {
             arg_values.push(self.eval_expr(&a.value).await?);
+        }
+
+        // For record receivers, a user-defined `impl` method shadows the
+        // universal record `to_string` builtin, matching the compiled targets.
+        // Check the method table before the builtin registry so a user
+        // `Displayable.to_string` impl wins. The test-harness matchers are
+        // reserved (see `user_impl_may_shadow_record_builtin`).
+        if matches!(recv, Value::Record(_))
+            && user_impl_may_shadow_record_builtin(&method)
+            && self
+                .method_table
+                .get(record_type_name(&recv).unwrap_or(""))
+                .is_some_and(|m| m.contains_key(&method))
+        {
+            if let Some(outcome) = self
+                .try_call_impl_method(&recv, &method, arg_values.clone())
+                .await?
+            {
+                if let Some(updated) = outcome.updated_self {
+                    self.write_back_receiver(receiver, updated);
+                }
+                return Ok(outcome.value);
+            }
         }
 
         // Check the builtin registry first.
@@ -2181,11 +2296,15 @@ impl Interpreter {
             // ── Fallback: check user-defined impl methods, then free functions
             (recv_val, _) => {
                 // Try user-defined impl methods from method_table.
-                if let Some(result) = self
+                if let Some(outcome) = self
                     .try_call_impl_method(recv_val, &method, arg_values.clone())
                     .await?
                 {
-                    return Ok(result);
+                    // Persist `mut self` mutations back to the receiver lvalue.
+                    if let Some(updated) = outcome.updated_self {
+                        self.write_back_receiver(receiver, updated);
+                    }
+                    return Ok(outcome.value);
                 }
                 if let Some(fn_val) = self.env.get(&method).cloned() {
                     let fn_id = match &fn_val {
@@ -2217,15 +2336,22 @@ impl Interpreter {
 
     /// Try to dispatch a method call via the user-defined method table.
     ///
-    /// Returns `Ok(Some(value))` if the method was found and called,
+    /// Returns `Ok(Some(outcome))` if the method was found and called,
     /// `Ok(None)` if no matching method exists, or `Err` on runtime error.
+    ///
+    /// The [`MethodOutcome`] carries the method's return value and, for
+    /// `mut self` instance methods, the post-call `self` value so the caller
+    /// can persist receiver mutations to the original lvalue. Without this
+    /// write-back, cursor-advancing methods (e.g. an iterator's `next(mut self)`)
+    /// would never make progress under the interpreter, hanging `loop`-driven
+    /// iteration that terminates fine on the compiled targets.
     #[async_recursion]
     async fn try_call_impl_method(
         &mut self,
         receiver: &Value,
         method: &str,
         args: Vec<Value>,
-    ) -> Result<Option<Value>, RuntimeError> {
+    ) -> Result<Option<MethodOutcome>, RuntimeError> {
         let type_name = match receiver {
             Value::Record(rv) => &rv.type_name,
             _ => return Ok(None),
@@ -2237,46 +2363,154 @@ impl Interpreter {
             .and_then(|methods| methods.get(method))
             .cloned();
 
-        let (param_names, body) = match entry {
+        let MethodEntry {
+            params: param_names,
+            self_is_mut,
+            body,
+        } = match entry {
             Some(e) => e,
             None => return Ok(None),
         };
 
-        // Check if first param is `self` — instance method.
-        //
-        // Method bodies run in a fresh env seeded with the program globals
-        // (top-level fns, constructors, `Some`/`None`/`Ok`/`Err`) so those
-        // names resolve inside the body — mirroring how top-level function
-        // calls clone the current env. Using a bare `Environment::new()` here
-        // hid every global from method bodies.
+        // Instance method (first param is `self`): bind the receiver as `self`.
+        // Anything else is a static / associated function reached through an
+        // instance receiver — bind args positionally with no `self`.
         if param_names.first().map(|s| s.as_str()) == Some("self") {
-            let method_env = Environment::with_globals(&self.env);
-            let saved_env = std::mem::replace(&mut self.env, method_env);
-            self.env.push_scope();
-            self.env.define("self", receiver.clone());
-            for (name, val) in param_names.iter().skip(1).zip(args) {
-                self.env.define(name.clone(), val);
-            }
-            let result = self.eval_expr(&body).await;
-            self.env = saved_env;
-            match result {
-                Err(RuntimeError::Return(v)) => Ok(Some(*v)),
-                other => other.map(Some),
-            }
+            let (value, updated_self) = self
+                .run_method_body(
+                    &param_names,
+                    &body,
+                    Some(receiver.clone()),
+                    self_is_mut,
+                    args,
+                )
+                .await?;
+            Ok(Some(MethodOutcome {
+                value,
+                updated_self,
+            }))
         } else {
-            // Static method — no self parameter.
-            let method_env = Environment::with_globals(&self.env);
-            let saved_env = std::mem::replace(&mut self.env, method_env);
-            self.env.push_scope();
-            for (name, val) in param_names.iter().zip(args) {
-                self.env.define(name.clone(), val);
+            let (value, _) = self
+                .run_method_body(&param_names, &body, None, false, args)
+                .await?;
+            Ok(Some(MethodOutcome {
+                value,
+                updated_self: None,
+            }))
+        }
+    }
+
+    /// Try to dispatch a `Type.method(args)` call against a user-defined
+    /// associated (static, no-`self`) function in the method table.
+    ///
+    /// Associated functions registered by `impl`/trait-`impl` blocks (e.g. a
+    /// user `From[Source] for Target`'s `from`) live in `method_table[Type]`
+    /// keyed by the implementing type, but with no `self` parameter. The
+    /// `Type.from(x)` call site names the *type* directly, so there is no
+    /// receiver value to drive [`try_call_impl_method`]; this dispatches by the
+    /// type *name* instead. Returns `Ok(None)` when no such associated function
+    /// exists (so the caller can fall through to other resolution paths).
+    #[async_recursion]
+    async fn try_call_assoc_fn(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let entry = self
+            .method_table
+            .get(type_name)
+            .and_then(|methods| methods.get(method))
+            .cloned();
+
+        let MethodEntry {
+            params: param_names,
+            body,
+            ..
+        } = match entry {
+            // Only treat it as an associated function when the first param is
+            // not `self`; an instance method named via the type is not a valid
+            // `Type.method(args)` static call.
+            Some(e) if e.params.first().map(|s| s.as_str()) != Some("self") => e,
+            _ => return Ok(None),
+        };
+
+        let (value, _) = self
+            .run_method_body(&param_names, &body, None, false, args)
+            .await?;
+        Ok(Some(value))
+    }
+
+    /// Evaluate a method/associated-function body in a fresh env seeded with the
+    /// program globals (top-level fns, constructors, `Some`/`None`/`Ok`/`Err`)
+    /// so those names resolve inside the body — mirroring how top-level function
+    /// calls clone the current env. A bare `Environment::new()` would hide every
+    /// global from the body.
+    ///
+    /// When `receiver` is `Some`, it is bound as `self` and `args` fill the
+    /// remaining params (instance method). When `None`, `args` fill all params
+    /// (static / associated function). Returns the body's value and, for
+    /// `self_is_mut`, the post-call `self` value for caller write-back.
+    #[async_recursion]
+    async fn run_method_body(
+        &mut self,
+        param_names: &[String],
+        body: &AIRNode,
+        receiver: Option<Value>,
+        self_is_mut: bool,
+        args: Vec<Value>,
+    ) -> Result<(Value, Option<Value>), RuntimeError> {
+        let method_env = Environment::with_globals(&self.env);
+        let saved_env = std::mem::replace(&mut self.env, method_env);
+        self.env.push_scope();
+        let is_instance = receiver.is_some();
+        if let Some(recv) = receiver {
+            self.env.define("self", recv);
+        }
+        let value_params: &[String] = if is_instance {
+            &param_names[1.min(param_names.len())..]
+        } else {
+            param_names
+        };
+        for (name, val) in value_params.iter().zip(args) {
+            self.env.define(name.clone(), val);
+        }
+        let result = self.eval_expr(body).await;
+        // For `mut self`, capture the post-body `self` binding *before*
+        // restoring the caller env so the caller can write it back.
+        let updated_self = if self_is_mut {
+            self.env.get("self").cloned()
+        } else {
+            None
+        };
+        self.env = saved_env;
+        let value = match result {
+            Err(RuntimeError::Return(v)) => *v,
+            other => other?,
+        };
+        Ok((value, updated_self))
+    }
+
+    /// Write a (possibly mutated) `self` value back to the receiver lvalue
+    /// after a `mut self` method call. Supports the assignable receiver shapes
+    /// the lowerer can produce for a method receiver: a plain variable and a
+    /// record field path. Non-assignable receivers (temporaries, literals,
+    /// call results) are silently ignored — mutating those has no observable
+    /// caller-side effect, matching the compiled targets.
+    fn write_back_receiver(&mut self, receiver: &AIRNode, updated: Value) {
+        match &receiver.kind {
+            NodeKind::Identifier { name } => {
+                self.env.assign(&name.name, updated);
             }
-            let result = self.eval_expr(&body).await;
-            self.env = saved_env;
-            match result {
-                Err(RuntimeError::Return(v)) => Ok(Some(*v)),
-                other => other.map(Some),
+            NodeKind::FieldAccess { object, field } => {
+                if let NodeKind::Identifier { name: obj_name } = &object.kind {
+                    if let Some(Value::Record(mut rv)) = self.env.get(&obj_name.name).cloned() {
+                        rv.fields.insert(field.name.clone(), updated);
+                        self.env.assign(&obj_name.name, Value::Record(rv));
+                    }
+                }
             }
+            _ => {}
         }
     }
 
@@ -3070,6 +3304,46 @@ impl Interpreter {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Builtin method names on `TypeTag::Record` that belong to the interpreter's
+/// test harness (`register_test_builtins`) and must NOT be shadowed by a
+/// user-defined `impl` method.
+///
+/// These matchers operate on the builtin-constructed `Expectation` /
+/// `BoolExpectation` values produced by the builtin `expect()` / `expect_bool()`
+/// (which store the captured value under the `actual` field). The `core.test`
+/// stdlib defines parallel *user* `Expectation`/`BoolExpectation` records (field
+/// `value`) with same-named matcher impls for the compiled targets; under
+/// `bock test` both are registered, so without this reservation the user impl
+/// would shadow the builtin and read a non-existent `value` field off the
+/// builtin-constructed record. Every *other* record builtin (notably the
+/// universal `to_string`) is overridable so a user `Displayable.to_string` impl
+/// wins, matching the compiled targets.
+const HARNESS_RESERVED_RECORD_METHODS: &[&str] = &[
+    "to_equal",
+    "to_be_ok",
+    "to_be_err",
+    "to_be_some",
+    "to_be_none",
+    "to_throw",
+    "to_be_true",
+    "to_be_false",
+];
+
+/// Whether a user `impl` method may shadow a same-named builtin on a record
+/// receiver. True for everything except the test-harness matchers.
+fn user_impl_may_shadow_record_builtin(method: &str) -> bool {
+    !HARNESS_RESERVED_RECORD_METHODS.contains(&method)
+}
+
+/// The type name of a record value, or `None` for non-records. Used to look up
+/// user `impl` methods in the method table for shadowing decisions.
+fn record_type_name(v: &Value) -> Option<&str> {
+    match v {
+        Value::Record(rv) => Some(&rv.type_name),
+        _ => None,
+    }
+}
 
 /// Materialise a Range into a `Vec<Value::Int>`.
 fn range_to_vec(start: i64, end: i64, inclusive: bool, step: i64) -> Vec<Value> {
@@ -5545,7 +5819,14 @@ mod tests {
         );
         interp.method_table.insert(
             "Holder".to_string(),
-            HashMap::from([("get_none".to_string(), (vec!["self".to_string()], body))]),
+            HashMap::from([(
+                "get_none".to_string(),
+                MethodEntry {
+                    params: vec!["self".to_string()],
+                    self_is_mut: false,
+                    body,
+                },
+            )]),
         );
 
         let receiver = Value::Record(RecordValue {
@@ -5553,10 +5834,13 @@ mod tests {
             fields: std::collections::BTreeMap::new(),
         });
 
-        let result = interp
+        let outcome = interp
             .try_call_impl_method(&receiver, "get_none", vec![])
-            .await;
-        assert_eq!(result, Ok(Some(Value::Optional(None))));
+            .await
+            .expect("method dispatch should not error")
+            .expect("method should be found");
+        assert_eq!(outcome.value, Value::Optional(None));
+        assert!(outcome.updated_self.is_none());
     }
 
     #[tokio::test]
