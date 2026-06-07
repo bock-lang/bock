@@ -63,7 +63,7 @@ public trait Displayable {
 /// be performed (e.g. an out-of-range value or an unparseable string).
 public record ConvertError {
   /// The human-readable message describing why the conversion failed.
-  message: String
+  message: String,
 }
 
 /// Constructs a `ConvertError` from a message string.
@@ -71,7 +71,9 @@ public record ConvertError {
 /// The ergonomic way to produce a conversion failure:
 /// `convert_error("value out of range")`.
 public fn convert_error(message: String) -> ConvertError {
-  ConvertError { message: message }
+  ConvertError {
+    message: message,
+  }
 }
 
 /// A temperature in degrees Celsius.
@@ -82,7 +84,7 @@ public fn convert_error(message: String) -> ConvertError {
 /// `Fahrenheit`.
 public record Celsius {
   /// The temperature value, in degrees Celsius.
-  degrees: Float
+  degrees: Float,
 }
 
 /// A temperature in degrees Fahrenheit.
@@ -90,7 +92,7 @@ public record Celsius {
 /// The target of the sample `From[Celsius]` conversion; see `Celsius`.
 public record Fahrenheit {
   /// The temperature value, in degrees Fahrenheit.
-  degrees: Float
+  degrees: Float,
 }
 
 /// `Fahrenheit` is constructed from a `Celsius` via the standard
@@ -102,6 +104,8 @@ public record Fahrenheit {
 impl From[Celsius] for Fahrenheit {
   /// Converts a `Celsius` reading into the equivalent `Fahrenheit` reading.
   public fn from(value: Celsius) -> Fahrenheit {
-    Fahrenheit { degrees: value.degrees * 1.8 + 32.0 }
+    Fahrenheit {
+      degrees: value.degrees * 1.8 + 32.0,
+    }
   }
 }

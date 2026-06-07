@@ -109,6 +109,52 @@ When you change codegen or the standard library, add or update a
 fixture that exercises the change and run the suite with the relevant
 targets required, so the cross-target behavior is pinned.
 
+## Other blocking CI gates
+
+Two further gates run on every PR and **block the merge** alongside the
+Rust gate above. Both have local scripts you can run before pushing.
+
+### stdlib fmt-check
+
+The `stdlib/core/**/*.bock` sources are compiled and embedded into the
+`bock` binary. They are normalised once with `bock fmt`, and this gate
+keeps them from drifting:
+
+```bash
+./tools/scripts/stdlib-fmt-check.sh
+```
+
+It builds `bock`, stages the gated stdlib files into a temp tree (`bock
+fmt` has no path flags — it scans the current directory), and runs
+`bock fmt --check`. A non-zero exit means a file would be reformatted;
+fix it by running `bock fmt` inside `stdlib/` and committing the result.
+Two files are currently excluded because they trip open `bock fmt` bugs
+(documented in the script header); re-include them once the formatter is
+fixed.
+
+### examples-exec
+
+Every example project under `examples/` is built and run on all five
+targets (js, ts, python, rust, go); the gate fails if any
+`(example, target)` pair regresses below its recorded baseline in
+`tools/examples-exec-baseline.txt`:
+
+```bash
+BOCK_EXAMPLES_REQUIRE=all ./tools/scripts/examples-exec-audit.sh
+```
+
+The strict ratchet can only **tighten** — when a codegen cluster lands
+that improves coverage, refresh the baseline in the same PR so the new
+floor is recorded:
+
+```bash
+BOCK_EXAMPLES_UPDATE_BASELINE=1 ./tools/scripts/examples-exec-audit.sh
+```
+
+The `ts` row gates on `tsc --noEmit` before the strip-and-run, so a
+global `tsc` (or one on `PATH`) must be present for the target to be
+fully verified rather than counted as a build only.
+
 ## Documentation sync
 
 Any change to user-facing behavior — CLI surface, language syntax or

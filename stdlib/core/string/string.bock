@@ -12,15 +12,15 @@
 //! ships only the utilities that **complement** that method set rather than
 //! duplicate it:
 //!
-//!   * `repeat` — concatenate `s` with itself `n` times (no built-in method).
-//!   * `pad_left` / `pad_right` — grow `s` to a minimum display width with a
-//!     `fill` prefix/suffix (no built-in method).
-//!   * `lines` — split on `"\n"`, a named convenience over the built-in
-//!     `split` for the common newline case.
-//!   * `is_blank` — `true` when `s` is empty *after trimming* surrounding
-//!     whitespace (composes the built-in `trim`/`is_empty` into a named
-//!     predicate).
-//!   * [`StringBuilder`] — a value-semantics accumulator (see below).
+//! * `repeat` — concatenate `s` with itself `n` times (no built-in method).
+//! * `pad_left` / `pad_right` — grow `s` to a minimum display width with a
+//! `fill` prefix/suffix (no built-in method).
+//! * `lines` — split on `"\n"`, a named convenience over the built-in
+//! `split` for the common newline case.
+//! * `is_blank` — `true` when `s` is empty *after trimming* surrounding
+//! whitespace (composes the built-in `trim`/`is_empty` into a named
+//! predicate).
+//! * [`StringBuilder`] — a value-semantics accumulator (see below).
 //!
 //! Duplicating helpers are intentionally **dropped** because they already exist
 //! as operations that lower on every target: a `join(parts, sep)` is the
@@ -140,7 +140,7 @@ public fn is_blank(s: String) -> Bool {
 /// `List[String]`).
 public record StringBuilder {
   /// The text accumulated so far.
-  buffer: String
+  buffer: String,
 }
 
 /// `StringBuilder` exposes its accumulated length, emptiness, and final text.
@@ -176,7 +176,9 @@ impl StringBuilder {
 ///
 /// The ergonomic starting point for accumulation: `append(builder(), "a")`.
 public fn builder() -> StringBuilder {
-  StringBuilder { buffer: "" }
+  StringBuilder {
+    buffer: "",
+  }
 }
 
 /// Returns a new [`StringBuilder`] whose buffer is `b`'s buffer followed by `s`.
@@ -185,5 +187,7 @@ public fn builder() -> StringBuilder {
 /// the same DQ18-sidestepping pattern as `core.iter`'s combinators), so appends
 /// chain as `append(append(builder(), "a"), "b")`.
 public fn append(b: StringBuilder, s: String) -> StringBuilder {
-  StringBuilder { buffer: "${b.buffer}${s}" }
+  StringBuilder {
+    buffer: "${b.buffer}${s}",
+  }
 }

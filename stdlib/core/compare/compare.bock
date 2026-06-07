@@ -20,7 +20,7 @@ public enum Ordering {
   /// The two values are equal.
   Equal,
   /// The first value is greater than the second.
-  Greater
+  Greater,
 }
 
 /// The interface for types whose values can be compared for equality.
@@ -52,7 +52,7 @@ public trait Comparable {
 /// resolves.
 public record Key {
   /// The integer this key orders and compares by.
-  value: Int
+  value: Int,
 }
 
 /// `Key` compares by its integer `value`.
@@ -81,7 +81,9 @@ impl Equatable for Key {
 ///
 /// This is the ergonomic way to create a comparable key: `key(3)`.
 public fn key(value: Int) -> Key {
-  Key { value: value }
+  Key {
+    value: value,
+  }
 }
 
 /// Returns the greater of two `Comparable` values, preferring `b` on a tie.
@@ -90,8 +92,8 @@ public fn key(value: Int) -> Key {
 /// `compare` impl.
 public fn max[T: Comparable](a: T, b: T) -> T {
   match a.compare(b) {
-    Greater => a
-    _ => b
+    Greater => a,
+    _ => b,
   }
 }
 
@@ -101,7 +103,7 @@ public fn max[T: Comparable](a: T, b: T) -> T {
 /// `compare` impl.
 public fn min[T: Comparable](a: T, b: T) -> T {
   match a.compare(b) {
-    Less => a
-    _ => b
+    Less => a,
+    _ => b,
   }
 }

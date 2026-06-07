@@ -25,13 +25,13 @@
 //! fluent `Expectation` method delegates to the matching free function. This
 //! keeps duplication minimal — the matcher methods are one-line forwarders.
 //!
-//!   * Free functions: `assert_true`, `assert_false`, `assert_eq`, `assert_ne`,
-//!     `assert_some`, `assert_none`, `assert_ok`, `assert_err`, `fail`.
-//!   * Fluent matchers: `expect(x).to_equal(y)` / `.to_not_equal(y)` (equality
-//!     over an `Equatable` `T`) and `expect_bool(b).to_be_true()` /
-//!     `.to_be_false()` (booleans) — `expect`/`expect_bool` wrap a value in an
-//!     [`Expectation`]/[`BoolExpectation`], whose matcher methods forward to the
-//!     free `assert_*` functions.
+//! * Free functions: `assert_true`, `assert_false`, `assert_eq`, `assert_ne`,
+//! `assert_some`, `assert_none`, `assert_ok`, `assert_err`, `fail`.
+//! * Fluent matchers: `expect(x).to_equal(y)` / `.to_not_equal(y)` (equality
+//! over an `Equatable` `T`) and `expect_bool(b).to_be_true()` /
+//! `.to_be_false()` (booleans) — `expect`/`expect_bool` wrap a value in an
+//! [`Expectation`]/[`BoolExpectation`], whose matcher methods forward to the
+//! free `assert_*` functions.
 //!
 //! ## Equality assertions dispatch through `Equatable` (not `==`)
 //!
@@ -64,12 +64,12 @@
 //! reject `bool: Equatable`). Rather than ship a matcher whose typing does not
 //! hold on every target, the conditional matchers are split:
 //!
-//!   * `Optional`/`Result` ⇒ the free functions `assert_some`/`assert_none`/
-//!     `assert_ok`/`assert_err`.
-//!   * Booleans ⇒ a **non-generic** [`BoolExpectation`] (concrete `Bool` field)
-//!     via [`expect_bool`], carrying `to_be_true`/`to_be_false`.
-//!   * Equality ⇒ the generic [`Expectation`] (`T: Equatable`) via [`expect`],
-//!     carrying `to_equal`/`to_not_equal`.
+//! * `Optional`/`Result` ⇒ the free functions `assert_some`/`assert_none`/
+//! `assert_ok`/`assert_err`.
+//! * Booleans ⇒ a **non-generic** [`BoolExpectation`] (concrete `Bool` field)
+//! via [`expect_bool`], carrying `to_be_true`/`to_be_false`.
+//! * Equality ⇒ the generic [`Expectation`] (`T: Equatable`) via [`expect`],
+//! carrying `to_equal`/`to_not_equal`.
 //!
 //! ## `assert` is called in statement position
 //!
@@ -84,7 +84,7 @@
 
 module core.test
 
-use core.compare.{Equatable}
+use core.compare.{ Equatable }
 
 /// Asserts that `cond` is `true`, failing the test otherwise.
 ///
@@ -143,11 +143,11 @@ public fn assert_some[T](o: Optional[T]) -> Void {
     Some(_) => {
       assert(true)
       return
-    }
+    },
     None => {
       assert(false)
       return
-    }
+    },
   }
 }
 
@@ -157,11 +157,11 @@ public fn assert_none[T](o: Optional[T]) -> Void {
     Some(_) => {
       assert(false)
       return
-    }
+    },
     None => {
       assert(true)
       return
-    }
+    },
   }
 }
 
@@ -171,11 +171,11 @@ public fn assert_ok[T, E](r: Result[T, E]) -> Void {
     Ok(_) => {
       assert(true)
       return
-    }
+    },
     Err(_) => {
       assert(false)
       return
-    }
+    },
   }
 }
 
@@ -185,11 +185,11 @@ public fn assert_err[T, E](r: Result[T, E]) -> Void {
     Ok(_) => {
       assert(false)
       return
-    }
+    },
     Err(_) => {
       assert(true)
       return
-    }
+    },
   }
 }
 
@@ -217,7 +217,7 @@ public fn fail(message: String) -> Void {
 /// boolean assertions use [`expect_bool`]. Construct via [`expect`].
 public record Expectation[T: Equatable] {
   /// The value under assertion.
-  value: T
+  value: T,
 }
 
 /// The equality matchers on an [`Expectation`], each forwarding to a free
@@ -262,7 +262,7 @@ impl Expectation {
 /// [`expect_bool`].
 public record BoolExpectation {
   /// The boolean under assertion.
-  value: Bool
+  value: Bool,
 }
 
 /// The boolean matchers on a [`BoolExpectation`], forwarding to the free
@@ -294,7 +294,9 @@ impl BoolExpectation {
 /// cannot be called on the non-addressable result of a function call. The other
 /// four targets accept the direct `expect(x).to_equal(y)` chain.
 public fn expect[T: Equatable](value: T) -> Expectation[T] {
-  Expectation { value: value }
+  Expectation {
+    value: value,
+  }
 }
 
 /// Captures a `Bool` for fluent boolean assertion, returning a [`BoolExpectation`].
@@ -304,5 +306,7 @@ public fn expect[T: Equatable](value: T) -> Expectation[T] {
 /// not `Equatable` behind a generic on the static targets (see [`BoolExpectation`]).
 /// The same Go let-binding note as [`expect`] applies.
 public fn expect_bool(value: Bool) -> BoolExpectation {
-  BoolExpectation { value: value }
+  BoolExpectation {
+    value: value,
+  }
 }

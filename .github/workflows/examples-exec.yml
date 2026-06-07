@@ -1,18 +1,21 @@
 name: examples-exec
 
-# INFORMATIONAL gate. Builds + runs every example project under examples/ on all
-# five targets (js, ts, python, rust, go) and prints a PASS/FAIL matrix to the job
-# log and the run summary. It is intentionally NON-BLOCKING: the job is marked
-# `continue-on-error: true` and the audit script exits 0 by default, so it never
-# reds a PR while the codegen clusters it surfaces are still open.
+# BLOCKING gate. Builds + runs every example project under examples/ on all five
+# targets (js, ts, python, rust, go) and prints a PASS/FAIL matrix to the job log
+# and the run summary. It runs in STRICT mode (BOCK_EXAMPLES_REQUIRE=all): the
+# audit script exits non-zero if any (example, target) pair regresses below its
+# recorded baseline status (tools/examples-exec-baseline.txt), failing the PR.
 #
-# RATCHET TO BLOCKING (later): once a cluster of example fixes lands and the
-# baseline (tools/examples-exec-baseline.txt) is refreshed, flip this gate to
-# required by (a) removing `continue-on-error`, and (b) setting
-# BOCK_EXAMPLES_REQUIRE to the certified target set (e.g. "js,python" or "all")
-# on the audit step. In strict mode the script exits non-zero on any regression
-# of a required (example, target) pair below its recorded baseline status — so the
-# ratchet can only tighten, never silently loosen.
+# The baseline is currently 100/100 non-red across all five targets (20 examples ×
+# 5 targets; fundamentals/guessing-game is a stub-showcase whose todo()-abort run
+# is the intended, non-red outcome). The gate was verified green vs baseline
+# before being flipped from informational to blocking.
+#
+# RATCHET DISCIPLINE: the strict ratchet can only TIGHTEN, never silently loosen —
+# a required pair dropping below baseline reds the PR. When a codegen cluster lands
+# that improves coverage, refresh the baseline
+# (BOCK_EXAMPLES_UPDATE_BASELINE=1 tools/scripts/examples-exec-audit.sh) in the
+# same PR so the new floor is recorded.
 
 on:
   push:
@@ -43,11 +46,10 @@ env:
 
 jobs:
   examples-exec:
-    name: examples build+run matrix (informational)
+    name: examples build+run matrix (blocking)
     runs-on: ubuntu-latest
-    # NON-BLOCKING: surfaces the matrix without failing the PR. Remove this line
-    # (and set BOCK_EXAMPLES_REQUIRE on the audit step) to ratchet to required.
-    continue-on-error: true
+    # BLOCKING: STRICT mode (BOCK_EXAMPLES_REQUIRE=all on the audit step) reds the
+    # PR on any regression vs baseline. Verified green vs baseline before flipping.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -65,6 +67,18 @@ jobs:
         with:
           node-version: '22'
 
+      # The audit's ts row gates on `tsc --noEmit` (type-check) BEFORE the
+      # strip-and-run — `node --experimental-strip-types` never type-checks, so
+      # without tsc a ts example would count only as a build, silently dropping
+      # below its baseline `pass` and under-verifying the target. Install tsc
+      # globally so the blocking gate genuinely type-checks every ts example
+      # (scaffolded projects pin `typescript` as a local devDep, but the audit
+      # invokes a global `tsc` and never runs `npm install`).
+      - name: Install TypeScript (global tsc for the ts gate)
+        run: |
+          npm install -g 'typescript@5'
+          tsc --version
+
       - name: Set up Go (go examples)
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
@@ -75,8 +89,9 @@ jobs:
       - name: Build bock
         run: cargo build -p bock --bin bock
 
-      - name: Run examples-exec audit (informational)
-        # The script exits 0 by default; continue-on-error above is belt-and-braces
-        # so an unexpected non-zero (e.g. setup error) still doesn't red the PR
-        # while this gate is informational.
+      - name: Run examples-exec audit (blocking, strict vs baseline)
+        # STRICT mode: the script exits non-zero if any (example, target) pair
+        # regresses below its recorded baseline status, failing the job.
+        env:
+          BOCK_EXAMPLES_REQUIRE: all
         run: ./tools/scripts/examples-exec-audit.sh
