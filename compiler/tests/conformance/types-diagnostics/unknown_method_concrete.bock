@@ -1,0 +1,18 @@
+// TEST: unknown_method_concrete
+// EXPECT: error E4013 at 16:23
+//
+// Q-checker-unknown-method-concrete: an unknown method on a CONCRETE receiver
+// is a checker error (`E4013`), not a silent resolution to a fresh type
+// variable (which would pass `bock check` yet emit no/garbage codegen — the
+// general form of the DQ22 `Map.contains` soundness hole). Here `List[Int]` is
+// a fully-resolved built-in receiver and `frobnicate` is in none of its method
+// sets, so the call is rejected. A near-name typo additionally gets a "did you
+// mean `…`?" note (see `xs.lenght()` in the checker unit tests); `frobnicate`
+// is far from every List method, so no suggestion is offered here.
+module main
+
+fn main() -> Void {
+  let xs: List[Int] = [1, 2, 3]
+  let n: Int = xs.frobnicate()
+  println("${n}")
+}

@@ -1,0 +1,17 @@
+// TEST: bare_module_import_rejected
+// EXPECT: error E4014 at 13:6
+//
+// Q-import-reject (§12.2 / DQ8): a `use` of a module path with NEITHER a
+// brace-list NOR a wildcard — a bare `use core.error` — is not a v1 import
+// form. The type checker rejects it with `E4014` and points at the braced form
+// (`use core.error.{ ... }`). Module-qualified access (referring to symbols as
+// `core.error.Error`) is deferred to v1.x alongside aliasing; the only two v1
+// import forms are the braced list and the discouraged wildcard. The braced and
+// wildcard forms keep working (see the `stdlib/` no_errors fixtures).
+module main
+
+use core.error
+
+fn main() -> Void {
+  println("unreachable past the rejected import")
+}

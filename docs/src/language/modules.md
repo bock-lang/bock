@@ -235,20 +235,38 @@ non-prelude symbol from the same module (e.g. `Key` from
 
 ## What Currently Works
 
-This page describes the working surface. A few module-system
-forms from the spec are not yet implemented:
+This page describes the working surface. The two v1 import forms
+are the **braced list** and the **wildcard**:
 
-- **`use module as alias`** — the spec describes an alias form
-  (e.g., `use geometry as geo`). The current parser does not
-  yet accept it. Use the braced form (`use geometry.{...}`)
-  for now.
-- **`use module.name`** — single dotted import without braces
-  (e.g., `use math.double_it`) is not yet resolved by the name
-  resolver. Use `use math.{double_it}` instead.
+```bock
+use core.collections.{List, Map}   // braced — the everyday form
+use app.services.*                 // wildcard — discouraged
+```
 
-Both forms are reserved syntax; their semantics will land in
-later compiler releases. The braced and wildcard forms cover
-every import scenario in the current implementation.
+A `use` of a module path with **neither** a brace-list **nor** a
+wildcard — a bare `use core.error` (or `use math.double_it`) — is
+**not a v1 import form.** The type checker rejects it with
+**`E4014`** and points you at the braced form:
+
+```text
+error[E4014]: `use core.error` is not a v1 import form: a `use`
+  must name what it imports with a brace-list or a wildcard
+  note: import the names you need with the braced form, e.g.
+        `use core.error.{ /* names */ }`
+```
+
+Two related spec forms are deferred to v1.x:
+
+- **`use module as alias`** — the aliased-import form
+  (e.g. `use geometry as geo`). Deferred to v1.x alongside
+  module-qualified access; use the braced form (`use
+  geometry.{...}`) for now.
+- **Module-qualified access** — referring to imported symbols as
+  `core.error.Error` (rather than bringing them into scope) is
+  deferred to v1.x. Import the symbol with the braced form and
+  name it directly.
+
+The braced and wildcard forms cover every import scenario in v1.
 
 For a comprehensive reference on cross-file resolution rules,
 re-exports, and visibility composition, see §12 of

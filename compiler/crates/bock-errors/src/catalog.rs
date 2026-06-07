@@ -255,6 +255,27 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             description: "Core traits (`Equatable`, `Comparable`, `Displayable`, `Hashable`) have sealed, compiler-provided conformances for primitive types. User code may not add its own `impl` of a core trait for a primitive (an orphan-rule violation). Wrap the primitive in a newtype and implement the trait for that instead.",
             spec_refs: &["§18.5"],
         },
+        DiagnosticCodeInfo {
+            code: "E4012",
+            severity: Severity::Error,
+            summary: "Conversion could not be resolved.",
+            description: "A `.into()` call (or `from`/`try_from`) could not be resolved: no `From`/`Into`/`TryFrom` impl relates the source and target types. For `.into()` the target comes from the expected type, so the call site must have a reachable annotation (a `let y: U =`, an `fn -> U` return position, or a typed argument).",
+            spec_refs: &["§18.4"],
+        },
+        DiagnosticCodeInfo {
+            code: "E4013",
+            severity: Severity::Error,
+            summary: "No such method on a concrete type.",
+            description: "A method that does not exist on the receiver's concrete type was called. The receiver resolved to a fully-known type (a primitive, a built-in collection, an `Optional`/`Result`, or a user record/class/enum in scope) and the method is in none of that type's method sets (intrinsic, canonical-trait, inherent/trait impl, or inherited trait default). When a near-miss name exists a \"did you mean `…`?\" suggestion is offered. Not raised for unresolved inference variables or §4.9 sketch-mode receivers.",
+            spec_refs: &["§18.3"],
+        },
+        DiagnosticCodeInfo {
+            code: "E4014",
+            severity: Severity::Error,
+            summary: "Bare module-qualified import.",
+            description: "A `use` declaration named a module path with neither a brace-list nor a wildcard (a bare `use core.error`). Per §12.2 this is not a v1 import form; module-qualified access is deferred to v1.x. Import the names you need with the braced form (`use core.error.{ Error }`) or the discouraged wildcard (`use core.error.*`).",
+            spec_refs: &["§12.2"],
+        },
         // ── Ownership (5xxx) ───────────────────────────────────────────
         DiagnosticCodeInfo {
             code: "E5001",

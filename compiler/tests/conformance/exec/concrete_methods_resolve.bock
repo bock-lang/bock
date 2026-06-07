@@ -1,0 +1,52 @@
+// TEST: exec_concrete_methods_resolve
+// EXPECT: output "3;HI;5;ok"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-checker-unknown-method-concrete regression guard: the unknown-method check
+// must reject ONLY genuinely-unknown methods on concrete receivers — every
+// real method on a fully-resolved receiver still resolves and runs. This
+// exercises a built-in collection (`List.len`), a primitive (`String.to_upper`),
+// a user record's inherent method (`Box.peek`), and a user type's inherited
+// trait DEFAULT method (`Eq.described` calling the required `same`), which is
+// the case that surfaced as a false positive during the soundness fix and is
+// resolved via the trait registry rather than the type's own method table.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the rationale).
+module main
+
+record Box {
+  v: Int
+}
+
+impl Box {
+  public fn peek(self) -> Int {
+    self.v
+  }
+}
+
+trait Eq {
+  fn same(self, other: Self) -> Bool
+
+  fn described(self, other: Self) -> String {
+    if (self.same(other)) {
+      return "ok"
+    }
+    return "no"
+  }
+}
+
+impl Eq for Box {
+  public fn same(self, other: Box) -> Bool {
+    self.v == other.v
+  }
+}
+
+fn main() -> Void {
+  let xs: List[Int] = [1, 2, 3]
+  let n: Int = xs.len()
+  let s: String = "hi".to_upper()
+  let b: Box = Box { v: 5 }
+  let c: Box = Box { v: 5 }
+  // `described` is a trait default method inherited by `Box`.
+  println("${n};${s};${b.peek()};${b.described(c)}")
+}
