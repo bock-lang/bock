@@ -66,15 +66,33 @@ const E_NO_CONVERSION: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 4012,
 };
-/// `E4013` — a method that does not exist on the receiver's built-in collection
-/// type was called, and the checker has a precise suggestion. Today this is
-/// DQ22's `Map.contains(...)` reject: `Map` membership is `contains_key` /
-/// `contains_value` (bare `contains` is `Set`-only), so a `m.contains(k)` is an
-/// error carrying a "did you mean `contains_key`?" suggestion rather than being
-/// silently resolved to a fresh type variable.
+/// `E4013` — a method that does not exist on the receiver's **concrete** type
+/// was called. This is the general "no such method" error: when the receiver
+/// resolves to a fully-known type (a primitive, a built-in collection, an
+/// `Optional`/`Result`, or a user record/class/enum whose definition is in
+/// scope) and the method is in none of that type's method sets (intrinsic,
+/// canonical-trait, inherent-impl, trait-impl, or bounded-trait), the call is
+/// rejected instead of being silently resolved to a fresh type variable (which
+/// would pass `bock check` yet emit no/garbage codegen — the DQ22 soundness
+/// hole). When a near-miss method name exists the diagnostic carries a "did you
+/// mean `…`?" suggestion (e.g. DQ22's `m.contains(k)` → `contains_key`).
+///
+/// The error is deliberately NOT raised for non-concrete receivers — inference
+/// variables (`Type::TypeVar`), §4.9 `Flexible`/sketch-mode types, the `Error`
+/// poison sentinel, function/tuple receivers, or user types whose definition
+/// is not in scope — so aggressive sketch-mode narrowing keeps resolving
+/// methods by design.
 const E_NO_SUCH_METHOD: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 4013,
+};
+/// `E4014` — a `use` declaration named a module path with **neither a
+/// brace-list nor a wildcard** (a bare `use core.error`). Per §12.2 / DQ8 this
+/// is not a v1 import form; module-qualified access is deferred to v1.x. The
+/// checker rejects it and points at the braced form (`use core.error.{…}`).
+const E_BARE_MODULE_IMPORT: DiagnosticCode = DiagnosticCode {
+    prefix: 'E',
+    number: 4014,
 };
 
 // ─── Receiver-type annotation (checker → codegen) ──────────────────────────────
@@ -877,10 +895,16 @@ impl TypeChecker {
     /// 2. **Check** — infer/check each top-level item.
     pub fn check_module(&mut self, module: &mut AIRNode) {
         // Clone children out to avoid simultaneous borrow of `module`.
-        let items = match &module.kind {
-            NodeKind::Module { items, .. } => items.clone(),
+        let (items, imports) = match &module.kind {
+            NodeKind::Module { items, imports, .. } => (items.clone(), imports.clone()),
             _ => return,
         };
+
+        // §12.2 / DQ8 (Q-import-reject): reject any `use` whose module path
+        // carries neither a brace-list nor a wildcard — a bare
+        // `use core.error`. Module-qualified access is deferred to v1.x; the
+        // only two v1 import forms are the braced list and the wildcard.
+        self.reject_bare_module_imports(&imports);
 
         // Build the trait-impl table from the module's `impl` blocks and wire
         // it into the checker so where-clause bounds are enforced at call
@@ -933,6 +957,45 @@ impl TypeChecker {
         }
 
         self.record(module, Type::Primitive(PrimitiveType::Void));
+    }
+
+    /// §12.2 / DQ8 (Q-import-reject): emit `E4014` for every import whose items
+    /// are [`ImportItems::Module`] — a `use` of a module path with neither a
+    /// brace-list nor a wildcard (e.g. `use core.error`). v1 accepts only the
+    /// braced form (`use core.error.{Error}`) and the discouraged wildcard
+    /// (`use core.error.*`); module-qualified access is deferred to v1.x.
+    fn reject_bare_module_imports(&mut self, imports: &[AIRNode]) {
+        for import in imports {
+            let NodeKind::ImportDecl { path, items } = &import.kind else {
+                continue;
+            };
+            if !matches!(items, bock_ast::ImportItems::Module) {
+                continue;
+            }
+            let path_str = path
+                .segments
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            self.diags
+                .error(
+                    E_BARE_MODULE_IMPORT,
+                    format!(
+                        "`use {path_str}` is not a v1 import form: a `use` must \
+                         name what it imports with a brace-list or a wildcard"
+                    ),
+                    import.span,
+                )
+                .note(format!(
+                    "import the names you need with the braced form, e.g. \
+                     `use {path_str}.{{ /* names */ }}`"
+                ))
+                .note(
+                    "module-qualified access (referring to symbols as \
+                     `module.Symbol`) is deferred to v1.x",
+                );
+        }
     }
 
     /// Collect a top-level function signature into `self.fn_sigs` and `self.env`.
@@ -2293,24 +2356,37 @@ impl TypeChecker {
                         // is unambiguous there). Reject `m.contains(...)` with a
                         // precise "did you mean `contains_key`?" suggestion rather
                         // than letting the unknown method resolve to a fresh type
-                        // variable. NOT aliased to `contains_key`.
-                        if field.name == "contains" {
-                            if let Type::Generic(g) = &recv_ty {
-                                if g.constructor == "Map" && g.args.len() == 2 {
-                                    self.diags
-                                        .error(
-                                            E_NO_SUCH_METHOD,
-                                            "`contains` is not a method on `Map`; \
-                                             did you mean `contains_key`?",
-                                            field.span,
-                                        )
-                                        .note(
-                                            "use `contains_key(k)` to test for a key \
-                                             or `contains_value(v)` for a value; bare \
-                                             `contains` is a `Set` method",
-                                        );
-                                }
-                            }
+                        // variable. NOT aliased to `contains_key`. Handled ahead of
+                        // the general unknown-method check so the Map-specific
+                        // wording (and the `contains_value` hint) wins.
+                        let map_contains = field.name == "contains"
+                            && matches!(&recv_ty, Type::Generic(g)
+                                if g.constructor == "Map" && g.args.len() == 2);
+                        if map_contains {
+                            self.diags
+                                .error(
+                                    E_NO_SUCH_METHOD,
+                                    "`contains` is not a method on `Map`; \
+                                     did you mean `contains_key`?",
+                                    field.span,
+                                )
+                                .note(
+                                    "use `contains_key(k)` to test for a key \
+                                     or `contains_value(v)` for a value; bare \
+                                     `contains` is a `Set` method",
+                                );
+                        } else {
+                            // Q-checker-unknown-method-concrete: a method that does
+                            // not resolve on a concrete, closed-method-set receiver
+                            // is an error (with a nearest-name suggestion) — not a
+                            // silent fresh type variable. A no-op for §4.9
+                            // `Flexible`/sketch receivers, inference vars, and user
+                            // types whose definition is not in scope.
+                            self.check_unknown_method_on_concrete(
+                                &recv_ty,
+                                &field.name,
+                                field.span,
+                            );
                         }
                         if !matches!(callee_ty, Type::Function(_)) {
                             if let Some(fn_ty) =
@@ -2387,6 +2463,7 @@ impl TypeChecker {
             // ── Method call ───────────────────────────────────────────────────
             NodeKind::MethodCall { method, .. } => {
                 let method_name = method.name.clone();
+                let method_span = method.span;
                 let receiver_ty =
                     if let NodeKind::MethodCall { receiver, args, .. } = &mut node.kind {
                         let rt = self.infer_node(receiver);
@@ -2402,6 +2479,11 @@ impl TypeChecker {
                 // form, but stamp a surviving `MethodCall` too so the annotation
                 // is comprehensive regardless of lowering shape.
                 self.stamp_recv_kind(node, &receiver_ty);
+                // Q-checker-unknown-method-concrete: flag an unknown method on a
+                // concrete receiver here too (mirrors the desugared `Call` path),
+                // so a surviving `MethodCall` shape is covered. A no-op for §4.9
+                // `Flexible`/sketch and other open receivers.
+                self.check_unknown_method_on_concrete(&receiver_ty, &method_name, method_span);
                 self.resolve_method_return_type(&receiver_ty, &method_name)
             }
 
@@ -3492,6 +3574,360 @@ impl TypeChecker {
                 })
             }),
             _ => None,
+        }
+    }
+
+    /// Conversion methods that are resolved by dedicated machinery (the
+    /// `.into()` inline hook and the `From`/`TryFrom` impl table), *not* the
+    /// per-receiver built-in method matches. The unknown-method check must
+    /// never flag these — they legitimately resolve on receivers whose closed
+    /// method set does not list them.
+    const CONVERSION_METHODS: &'static [&'static str] = &["into", "from", "try_from"];
+
+    /// Q-checker-unknown-method-concrete: returns `true` when `method` resolves
+    /// on `receiver_ty` through *any* path the checker knows — built-in
+    /// intrinsics, canonical primitive trait conformances, user inherent/trait
+    /// impls (`method_types`), record/class field-closures (a `field()` call),
+    /// or the conversion hooks. Used to decide whether an unknown-method
+    /// diagnostic is warranted on a concrete receiver.
+    fn method_is_resolvable(&self, receiver_ty: &Type, method: &str) -> bool {
+        let receiver_ty = self.subst.apply(receiver_ty);
+
+        // Conversion methods resolve through dedicated machinery.
+        if Self::CONVERSION_METHODS.contains(&method) {
+            return true;
+        }
+
+        // Built-in intrinsic method (List/Map/Set/String/Int/…/Optional/Result).
+        if self
+            .resolve_builtin_method_fn_type(&receiver_ty, method)
+            .is_some()
+        {
+            return true;
+        }
+
+        // Primitive canonical-trait conformance (`compare`/`eq`/`to_string`/…),
+        // gated on the trait actually being in scope.
+        if matches!(receiver_ty, Type::Primitive(_))
+            && self
+                .resolve_primitive_canonical_method_fn_type(&receiver_ty, method)
+                .is_some()
+        {
+            return true;
+        }
+
+        // User type: inherent/trait-impl method, or a same-named field-closure.
+        let user_name = match &receiver_ty {
+            Type::Named(nt) => Some(&nt.name),
+            Type::Generic(g) => Some(&g.constructor),
+            _ => None,
+        };
+        if let Some(name) = user_name {
+            if self
+                .method_types
+                .get(name)
+                .is_some_and(|m| m.contains_key(method))
+            {
+                return true;
+            }
+            if self
+                .record_field_types
+                .get(name)
+                .is_some_and(|fs| fs.iter().any(|(n, _)| n == method))
+            {
+                return true;
+            }
+        }
+
+        // Trait *default* methods: a concrete type that implements a trait
+        // inherits every default method the trait declares but the impl did not
+        // override. Such methods live in `trait_method_types` (the trait's
+        // signatures), not in the type's `method_types`, so check every trait
+        // the receiver implements — and that trait's supertraits — for a
+        // declaration of `method`. This keeps inherited defaults (e.g.
+        // `Eq::not_equals` calling the required `equals`) resolvable.
+        if self.type_implements_trait_method(&receiver_ty, method) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Q-checker-unknown-method-concrete: returns `true` when `receiver_ty`
+    /// implements some trait (directly, or via a supertrait of one it
+    /// implements) that declares `method` in [`Self::trait_method_types`]. This
+    /// covers inherited trait *default* methods, which are not registered in the
+    /// type's own `method_types`.
+    fn type_implements_trait_method(&self, receiver_ty: &Type, method: &str) -> bool {
+        let Some(table) = self.impl_table.as_ref() else {
+            return false;
+        };
+        let key = crate::traits::type_key(receiver_ty);
+        for entry in table.entries() {
+            if entry.type_key != key {
+                continue;
+            }
+            let Some(trait_ref) = &entry.trait_ref else {
+                continue;
+            };
+            // The directly-implemented trait, plus its supertraits.
+            if self
+                .trait_method_types
+                .get(&trait_ref.name)
+                .is_some_and(|m| m.contains_key(method))
+            {
+                return true;
+            }
+            for supertrait in table.all_supertraits(&trait_ref.name) {
+                if self
+                    .trait_method_types
+                    .get(&supertrait)
+                    .is_some_and(|m| m.contains_key(method))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Q-checker-unknown-method-concrete: the candidate method names for a
+    /// **concrete, closed-method-set** receiver — used both to gate the
+    /// unknown-method diagnostic (a `None` result means the receiver is not a
+    /// closed concrete type, so no diagnostic) and to compute a nearest-name
+    /// suggestion.
+    ///
+    /// Returns `None` for receivers whose method set is *open* or not fully
+    /// known at this point:
+    /// - `Type::TypeVar` — an unresolved inference variable; methods may resolve
+    ///   once it is unified (and bounded-trait methods apply).
+    /// - `Type::Flexible` — §4.9 sketch-mode narrowing resolves methods
+    ///   aggressively by design; the diagnostic must never leak here.
+    /// - `Type::Error` — poison; already diagnosed.
+    /// - `Type::Function` / `Type::Tuple` / `Type::Refined` — no method surface.
+    /// - a `Named`/`Generic` user type whose definition is not in scope (no
+    ///   `record_field_types`/`method_types` entry) — its method set is unknown,
+    ///   so suppress rather than risk a false positive.
+    fn concrete_closed_method_names(&self, receiver_ty: &Type) -> Option<Vec<String>> {
+        let receiver_ty = self.subst.apply(receiver_ty);
+        match &receiver_ty {
+            // Closed built-in receivers.
+            Type::Primitive(p) if !matches!(p, PrimitiveType::Void | PrimitiveType::Never) => {
+                let mut names = self.builtin_method_names(&receiver_ty);
+                // Canonical primitive trait methods that are in scope.
+                for methods in self.trait_method_types.values() {
+                    for m in methods.keys() {
+                        if self
+                            .resolve_primitive_canonical_method_fn_type(&receiver_ty, m)
+                            .is_some()
+                        {
+                            names.push(m.clone());
+                        }
+                    }
+                }
+                Some(names)
+            }
+            Type::Optional(_) | Type::Result(_, _) => Some(self.builtin_method_names(&receiver_ty)),
+            Type::Generic(g) if matches!(g.constructor.as_str(), "List" | "Map" | "Set") => {
+                let mut names = self.builtin_method_names(&receiver_ty);
+                // A user `impl` on a built-in generic (rare) contributes too.
+                if let Some(m) = self.method_types.get(&g.constructor) {
+                    names.extend(m.keys().cloned());
+                }
+                Some(names)
+            }
+            // Known user types (definition in scope): the closed set is the
+            // registered methods plus the record/class fields.
+            Type::Named(nt) => {
+                if !self.record_field_types.contains_key(&nt.name)
+                    && !self.method_types.contains_key(&nt.name)
+                {
+                    return None;
+                }
+                let mut names: Vec<String> = self
+                    .method_types
+                    .get(&nt.name)
+                    .map(|m| m.keys().cloned().collect())
+                    .unwrap_or_default();
+                if let Some(fs) = self.record_field_types.get(&nt.name) {
+                    names.extend(fs.iter().map(|(n, _)| n.clone()));
+                }
+                Some(names)
+            }
+            Type::Generic(g) => {
+                if !self.record_field_types.contains_key(&g.constructor)
+                    && !self.method_types.contains_key(&g.constructor)
+                {
+                    return None;
+                }
+                let mut names: Vec<String> = self
+                    .method_types
+                    .get(&g.constructor)
+                    .map(|m| m.keys().cloned().collect())
+                    .unwrap_or_default();
+                if let Some(fs) = self.record_field_types.get(&g.constructor) {
+                    names.extend(fs.iter().map(|(n, _)| n.clone()));
+                }
+                Some(names)
+            }
+            // Open / non-concrete receivers — never flag.
+            _ => None,
+        }
+    }
+
+    /// The built-in (intrinsic) method names for a closed built-in receiver,
+    /// drawn from the union of the two intrinsic resolution tables (some methods
+    /// live only in the return-type table — e.g. `display` — and some only in
+    /// the fn-type table — e.g. `map`/`fold`/`zip`).
+    fn builtin_method_names(&self, receiver_ty: &Type) -> Vec<String> {
+        const ALL_BUILTIN_METHODS: &[&str] = &[
+            // collections / iteration
+            "len",
+            "length",
+            "count",
+            "byte_len",
+            "is_empty",
+            "contains",
+            "contains_key",
+            "first",
+            "last",
+            "find",
+            "get",
+            "index_of",
+            "push",
+            "append",
+            "pop",
+            "insert",
+            "remove",
+            "concat",
+            "clear",
+            "reverse",
+            "sort",
+            "dedup",
+            "flatten",
+            "take",
+            "skip",
+            "slice",
+            "filter",
+            "map",
+            "map_values",
+            "flat_map",
+            "fold",
+            "reduce",
+            "for_each",
+            "any",
+            "all",
+            "enumerate",
+            "zip",
+            "join",
+            "to_set",
+            "to_list",
+            "keys",
+            "values",
+            "entries",
+            "set",
+            "delete",
+            "merge",
+            "add",
+            "union",
+            "intersection",
+            "difference",
+            "symmetric_difference",
+            "is_subset",
+            "is_superset",
+            "is_disjoint",
+            // string
+            "starts_with",
+            "ends_with",
+            "regex_match",
+            "to_upper",
+            "to_lower",
+            "trim",
+            "trim_start",
+            "trim_end",
+            "substring",
+            "replace",
+            "repeat",
+            "pad_start",
+            "pad_end",
+            "format",
+            "regex_replace",
+            "regex_find",
+            "split",
+            "chars",
+            "bytes",
+            "char_at",
+            // scalar
+            "abs",
+            "min",
+            "max",
+            "clamp",
+            "shift_left",
+            "shift_right",
+            "to_float",
+            "to_int",
+            "floor",
+            "ceil",
+            "round",
+            "sqrt",
+            "is_nan",
+            "is_infinite",
+            "negate",
+            "is_alpha",
+            "is_digit",
+            "is_whitespace",
+            "compare",
+            "hash_code",
+            "equals",
+            "to_string",
+            "display",
+            // optional / result
+            "is_some",
+            "is_none",
+            "unwrap",
+            "unwrap_or",
+            "is_ok",
+            "is_err",
+            "map_err",
+        ];
+        ALL_BUILTIN_METHODS
+            .iter()
+            .filter(|m| self.method_is_resolvable(receiver_ty, m))
+            .map(|m| (*m).to_string())
+            .collect()
+    }
+
+    /// Q-checker-unknown-method-concrete: emit `E4013` when `method` does not
+    /// resolve on a **concrete, closed-method-set** receiver, with a nearest-name
+    /// suggestion when one exists. A no-op for open / non-concrete receivers
+    /// (inference vars, §4.9 `Flexible` sketch types, the `Error` sentinel, and
+    /// user types whose definition is not in scope).
+    ///
+    /// `span` should be the method-name span so the diagnostic underlines the
+    /// offending method.
+    fn check_unknown_method_on_concrete(&mut self, receiver_ty: &Type, method: &str, span: Span) {
+        // Conversion methods resolve elsewhere; never flag.
+        if Self::CONVERSION_METHODS.contains(&method) {
+            return;
+        }
+        // Resolves through some path → fine.
+        if self.method_is_resolvable(receiver_ty, method) {
+            return;
+        }
+        // Only flag concrete, closed-method-set receivers.
+        let Some(candidates) = self.concrete_closed_method_names(receiver_ty) else {
+            return;
+        };
+
+        let receiver_ty = self.subst.apply(receiver_ty);
+        let recv_desc = describe_receiver_type(&receiver_ty);
+        let diag = self.diags.error(
+            E_NO_SUCH_METHOD,
+            format!("no method `{method}` on `{recv_desc}`"),
+            span,
+        );
+        if let Some(suggestion) = nearest_method_name(method, &candidates) {
+            diag.note(format!("did you mean `{suggestion}`?"));
         }
     }
 
@@ -4843,6 +5279,57 @@ fn type_path_to_name(path: &TypePath) -> String {
         .join(".")
 }
 
+/// Q-checker-unknown-method-concrete: a short, user-facing description of a
+/// receiver type for the "no method `m` on `<type>`" diagnostic. Reuses
+/// [`crate::traits::type_key`]'s human-readable encoding (e.g. `List[Int]`,
+/// `Map[String, Int]`, `String`, `Point`).
+fn describe_receiver_type(ty: &Type) -> String {
+    crate::traits::type_key(ty)
+}
+
+/// Q-checker-unknown-method-concrete: the nearest candidate method name to
+/// `target` by Levenshtein edit distance, used for the "did you mean `…`?"
+/// suggestion. Returns `None` when no candidate is close enough (distance must
+/// be at most a third of the longer name's length, and at most 3), so an
+/// unrelated typo does not produce a misleading suggestion.
+fn nearest_method_name(target: &str, candidates: &[String]) -> Option<String> {
+    let mut best: Option<(usize, &String)> = None;
+    for cand in candidates {
+        if cand == target {
+            continue;
+        }
+        let dist = levenshtein(target, cand);
+        if best.is_none_or(|(d, _)| dist < d) {
+            best = Some((dist, cand));
+        }
+    }
+    let (dist, cand) = best?;
+    let threshold = (target.len().max(cand.len()) / 3).clamp(1, 3);
+    if dist <= threshold {
+        Some(cand.clone())
+    } else {
+        None
+    }
+}
+
+/// Levenshtein edit distance between two ASCII-ish identifier strings. Used by
+/// [`nearest_method_name`] for the unknown-method suggestion.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr: Vec<usize> = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(curr[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
 /// Map a built-in type name to its [`PrimitiveType`] variant, if any.
 fn name_to_primitive(name: &str) -> Option<PrimitiveType> {
     match name {
@@ -5705,6 +6192,234 @@ mod tests {
         assert!(
             !checker.diags.iter().any(|d| d.code == E_NO_SUCH_METHOD),
             "contains_key must not be rejected"
+        );
+    }
+
+    // ── Q-checker-unknown-method-concrete ────────────────────────────────────
+
+    /// Build the desugared method call for `[1].method(...)` on a `List[Int]`.
+    fn desugared_list_method_call(gen: &NodeIdGen, method: &str, arg: Option<AIRNode>) -> AIRNode {
+        let list = make_node(
+            gen,
+            NodeKind::ListLiteral {
+                elems: vec![int_lit(gen)],
+            },
+        );
+        let list_self = list.clone();
+        let callee = make_node(
+            gen,
+            NodeKind::FieldAccess {
+                object: Box::new(list),
+                field: ident(method),
+            },
+        );
+        let mut args = vec![bock_air::AirArg {
+            label: None,
+            value: list_self,
+        }];
+        if let Some(a) = arg {
+            args.push(bock_air::AirArg {
+                label: None,
+                value: a,
+            });
+        }
+        make_node(
+            gen,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                type_args: vec![],
+                args,
+            },
+        )
+    }
+
+    /// An unknown method on a concrete built-in receiver (`List[Int]`) is an
+    /// `E4013` error, not a silent fresh type variable.
+    #[test]
+    fn list_unknown_method_is_rejected() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let call = desugared_list_method_call(&gen, "frobnicate", None);
+        let _ = checker.infer_expr(&call);
+        let err = checker
+            .diags
+            .iter()
+            .find(|d| d.code == E_NO_SUCH_METHOD)
+            .expect("expected an E4013 unknown-method rejection");
+        assert!(err.message.contains("frobnicate"));
+        assert!(err.message.contains("List[Int]"));
+    }
+
+    /// A near-name typo on a concrete receiver gets a "did you mean `…`?" note.
+    #[test]
+    fn list_unknown_method_suggests_nearest() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        // `lenght` is one transposition away from `length`.
+        let call = desugared_list_method_call(&gen, "lenght", None);
+        let _ = checker.infer_expr(&call);
+        let err = checker
+            .diags
+            .iter()
+            .find(|d| d.code == E_NO_SUCH_METHOD)
+            .expect("expected an E4013 unknown-method rejection");
+        assert!(
+            err.notes.iter().any(|n| n.contains("length")),
+            "expected a `did you mean `length`?` suggestion, got: {:?}",
+            err.notes
+        );
+    }
+
+    /// A real built-in method (List `map`) still resolves cleanly — the check
+    /// fires only for genuinely-unknown methods.
+    #[test]
+    fn list_known_method_not_rejected() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let lambda = make_node(
+            &gen,
+            NodeKind::Lambda {
+                params: vec![make_node(
+                    &gen,
+                    NodeKind::Param {
+                        pattern: Box::new(make_node(
+                            &gen,
+                            NodeKind::BindPat {
+                                name: ident("x"),
+                                is_mut: false,
+                            },
+                        )),
+                        ty: None,
+                        default: None,
+                    },
+                )],
+                body: Box::new(make_node(&gen, NodeKind::Identifier { name: ident("x") })),
+            },
+        );
+        let call = desugared_list_method_call(&gen, "map", Some(lambda));
+        let _ = checker.infer_expr(&call);
+        assert!(
+            !checker.diags.iter().any(|d| d.code == E_NO_SUCH_METHOD),
+            "a known List method (`map`) must not be rejected"
+        );
+    }
+
+    /// The `nearest_method_name` helper returns a suggestion only for a close
+    /// candidate, and `None` for an unrelated name.
+    #[test]
+    fn nearest_method_name_thresholds() {
+        let cands = vec!["length".to_string(), "len".to_string(), "push".to_string()];
+        assert_eq!(
+            nearest_method_name("lenght", &cands).as_deref(),
+            Some("length")
+        );
+        assert_eq!(nearest_method_name("frobnicate", &cands), None);
+    }
+
+    // ── Q-import-reject (§12.2 / DQ8) ────────────────────────────────────────
+
+    /// Build a `Module` node with a single `use <segments>` import carrying the
+    /// given [`ImportItems`].
+    fn module_with_import(
+        gen: &NodeIdGen,
+        segments: &[&str],
+        items: bock_ast::ImportItems,
+    ) -> AIRNode {
+        let dummy = bock_errors::Span {
+            file: bock_errors::FileId(0),
+            start: 0,
+            end: 0,
+        };
+        let import = make_node(
+            gen,
+            NodeKind::ImportDecl {
+                path: bock_ast::ModulePath {
+                    segments: segments
+                        .iter()
+                        .map(|s| bock_ast::Ident {
+                            name: (*s).to_string(),
+                            span: dummy,
+                        })
+                        .collect(),
+                    span: dummy,
+                },
+                items,
+            },
+        );
+        make_node(
+            gen,
+            NodeKind::Module {
+                path: None,
+                annotations: vec![],
+                imports: vec![import],
+                items: vec![],
+            },
+        )
+    }
+
+    /// A bare module import (`use core.error`, `ImportItems::Module`) is rejected
+    /// with `E4014` pointing at the braced form.
+    #[test]
+    fn bare_module_import_is_rejected() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let mut module =
+            module_with_import(&gen, &["core", "error"], bock_ast::ImportItems::Module);
+        checker.check_module(&mut module);
+        let err = checker
+            .diags
+            .iter()
+            .find(|d| d.code == E_BARE_MODULE_IMPORT)
+            .expect("expected an E4014 bare-module-import rejection");
+        assert!(err.message.contains("core.error"));
+        assert!(
+            err.notes.iter().any(|n| n.contains("{")),
+            "expected a braced-form suggestion note, got: {:?}",
+            err.notes
+        );
+    }
+
+    /// A braced import (`use core.error.{Error}`, `ImportItems::Named`) is NOT
+    /// rejected.
+    #[test]
+    fn braced_import_not_rejected() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let named = bock_ast::ImportItems::Named(vec![bock_ast::ImportedName {
+            name: bock_ast::Ident {
+                name: "Error".to_string(),
+                span: bock_errors::Span {
+                    file: bock_errors::FileId(0),
+                    start: 0,
+                    end: 0,
+                },
+            },
+            alias: None,
+            span: bock_errors::Span {
+                file: bock_errors::FileId(0),
+                start: 0,
+                end: 0,
+            },
+        }]);
+        let mut module = module_with_import(&gen, &["core", "error"], named);
+        checker.check_module(&mut module);
+        assert!(
+            !checker.diags.iter().any(|d| d.code == E_BARE_MODULE_IMPORT),
+            "a braced import must not be rejected"
+        );
+    }
+
+    /// A wildcard import (`use core.error.*`, `ImportItems::Glob`) is NOT
+    /// rejected.
+    #[test]
+    fn wildcard_import_not_rejected() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let mut module = module_with_import(&gen, &["core", "error"], bock_ast::ImportItems::Glob);
+        checker.check_module(&mut module);
+        assert!(
+            !checker.diags.iter().any(|d| d.code == E_BARE_MODULE_IMPORT),
+            "a wildcard import must not be rejected"
         );
     }
 
@@ -6856,8 +7571,12 @@ mod tests {
         assert_eq!(ty, Type::Primitive(PrimitiveType::Char));
     }
 
+    /// Q-checker-unknown-method-concrete: an unknown method on a *concrete*
+    /// receiver (here `Int`) is now an `E4013` error — the soundness hole where
+    /// it silently resolved to a fresh type variable is closed. The result type
+    /// is still a fresh var for error recovery, but the diagnostic fires.
     #[test]
-    fn method_call_unknown_method_returns_fresh_var() {
+    fn method_call_unknown_method_on_concrete_errors() {
         let gen = NodeIdGen::new();
         let mut checker = TypeChecker::new();
         let receiver = int_lit(&gen);
@@ -6870,9 +7589,61 @@ mod tests {
                 args: vec![],
             },
         );
-        let ty = checker.infer_expr(&method_call);
-        // Unknown method → fresh type variable
-        assert!(matches!(ty, Type::TypeVar(_)));
+        let _ = checker.infer_expr(&method_call);
+        assert!(
+            checker.diags.iter().any(|d| d.code == E_NO_SUCH_METHOD
+                && d.message.contains("nonexistent")
+                && d.message.contains("Int")),
+            "unknown method on a concrete `Int` receiver must raise E4013"
+        );
+    }
+
+    /// The new check must NOT fire when the receiver is an unresolved inference
+    /// variable — methods may resolve once it is unified, and §4.9 sketch-mode
+    /// narrowing resolves aggressively by design.
+    #[test]
+    fn method_call_unknown_method_on_typevar_does_not_error() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        // A bare identifier with no binding yields a fresh var receiver in
+        // inference; build a MethodCall whose receiver is an unresolved var via
+        // a lambda parameter (inferred to a fresh var, never unified).
+        let lambda = make_node(
+            &gen,
+            NodeKind::Lambda {
+                params: vec![make_node(
+                    &gen,
+                    NodeKind::Param {
+                        pattern: Box::new(make_node(
+                            &gen,
+                            NodeKind::BindPat {
+                                name: ident("x"),
+                                is_mut: false,
+                            },
+                        )),
+                        ty: None,
+                        default: None,
+                    },
+                )],
+                body: Box::new(make_node(
+                    &gen,
+                    NodeKind::MethodCall {
+                        receiver: Box::new(make_node(
+                            &gen,
+                            NodeKind::Identifier { name: ident("x") },
+                        )),
+                        method: ident("whatever"),
+                        type_args: vec![],
+                        args: vec![],
+                    },
+                )),
+            },
+        );
+        let _ = checker.infer_expr(&lambda);
+        assert!(
+            !checker.diags.iter().any(|d| d.code == E_NO_SUCH_METHOD),
+            "an unknown method on an unresolved type-var receiver must NOT error"
+        );
     }
 
     // ── Receiver-type annotation (checker → codegen) ─────────────────────────
