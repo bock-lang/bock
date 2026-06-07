@@ -1,0 +1,50 @@
+// TEST: exec_str_match_mixed_literal_bind
+// EXPECT: output "greeting;got:bye;maybe"
+//
+// STRING MATCH MIXING A `&str` LITERAL ARM WITH A WHOLE-SCRUTINEE BIND (all 5).
+//
+// `classify` matches a `String` scrutinee with three arm shapes at once:
+//   - a string-literal arm (`"hi" => …`),
+//   - a whole-scrutinee BIND arm whose body USES the bind (`other => "got:${other}"`),
+//   - a guarded bind arm (`g if (…) => …`).
+//
+// Q-rust-str-mixed-binding regression lock. Bock's `String` lowers to a Rust
+// owned `String`, but a `&str` literal pattern is `&str`, so matching a `String`
+// scrutinee against `"hi"` is `String` vs `&str` (E0308). The Rust backend
+// matches on `(s).as_str()` to line the literal arm up — but that retypes a
+// whole-scrutinee bind (`other`) from `String` to `&str`. #236 dodged this by
+// suppressing the `.as_str()` wrap whenever any arm bound the whole scrutinee,
+// which re-broke the literal arm (E0308 again). The fix keeps the `.as_str()`
+// wrap AND re-binds each whole-scrutinee bind back to an owned `String` at the
+// top of its arm body (`let other = other.to_string();`), so a `String` match
+// can freely mix `&str` literal arms with a bind arm. js/ts/python/go already
+// handle this (their string type is reference-like); this fixture locks the
+// mix on ALL FIVE.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn classify(s: String) -> String {
+  match s {
+    "hi" => "greeting"
+    g if (g == "secret") => "shh"
+    other => "got:${other}"
+  }
+}
+
+fn passthrough(s: String) -> String {
+  // A second match where the bind arm returns the bind unchanged — exercises the
+  // `other => other` shape whose body is a bare bind (forces the block re-bind).
+  match s {
+    "skip" => "skipped"
+    other => other
+  }
+}
+
+fn main() -> Void {
+  let a: String = classify("hi")
+  let b: String = classify("bye")
+  let c: String = passthrough("maybe")
+  println("${a};${b};${c}")
+}

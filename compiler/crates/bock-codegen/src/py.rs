@@ -789,7 +789,9 @@ fn quoted_token_count(rendered: &str, name: &str) -> usize {
 fn value_needs_stmt_form(value: &AIRNode) -> bool {
     match &value.kind {
         NodeKind::Match { arms, .. } => {
-            crate::generator::match_has_statement_arm(arms) || control_flow_has_raise_branch(value)
+            crate::generator::match_has_statement_arm(arms)
+                || control_flow_has_raise_branch(value)
+                || match_arm_drops_leading_stmts(arms)
         }
         NodeKind::Loop { .. } | NodeKind::While { .. } => true,
         NodeKind::If { .. } => {
@@ -952,6 +954,72 @@ fn match_value_needs_stmt_form(arms: &[AIRNode]) -> bool {
                     if matches!(pattern.kind, NodeKind::RecordPat { .. })
             )
         })
+        || match_arm_drops_leading_stmts(arms)
+}
+
+/// Whether any **value-position** `match` arm carries a leading statement that
+/// the `(lambda __v: …)` conditional chain cannot fold into an
+/// immediately-applied lambda and would therefore *silently drop*.
+///
+/// The chain lowers an arm body block with a *value* tail via
+/// [`PyEmitCtx::try_emit_block_stmts_as_expr`], which folds a leading simple
+/// immutable `let` (`lambda x: …`) or a bare expression statement
+/// (`lambda _: …`) into the expression. But a leading construct that has no
+/// Python *expression* form — a loop (`for`/`while`/`loop`), an assignment, a
+/// `return`/`break`/`continue`, a mutable or destructuring `let`, or a nested
+/// block — makes `try_emit_block_stmts_as_expr` bail; the caller then falls
+/// back to emitting just the block's tail, dropping the leading statement
+/// (e.g. `Ok(n) => { for i in 0..n { log(i) } "ok" }` lost the whole loop).
+///
+/// When this predicate is true the match is routed to the statement-form
+/// `match`/`case` ([`PyEmitCtx::emit_match`]), whose arm bodies recurse through
+/// [`PyEmitCtx::emit_block_body`] — emitting each leading statement and then
+/// `return`ing the tail — so the side effect runs *and* the value is produced.
+/// The check mirrors `try_emit_block_stmts_as_expr`'s bail conditions exactly,
+/// so the two stay in agreement (only arms the chain *can* express stay on it).
+fn match_arm_drops_leading_stmts(arms: &[AIRNode]) -> bool {
+    arms.iter().any(|arm| {
+        let NodeKind::MatchArm { body, .. } = &arm.kind else {
+            return false;
+        };
+        // Only a block with both leading statements *and* a value tail rides the
+        // lambda chain; a statement-tail / tail-less arm is already routed to
+        // statement form by `match_has_statement_arm`, and a tail-only block has
+        // nothing to drop.
+        let NodeKind::Block {
+            stmts,
+            tail: Some(_),
+        } = &body.kind
+        else {
+            return false;
+        };
+        stmts.iter().any(stmt_not_lambda_expressible)
+    })
+}
+
+/// Whether a leading block statement has no Python *expression* form and so
+/// cannot be folded into the `(lambda …: …)` chain by
+/// [`PyEmitCtx::try_emit_block_stmts_as_expr`]. Mirrors that method's bail set
+/// exactly (see [`match_arm_drops_leading_stmts`]).
+fn stmt_not_lambda_expressible(stmt: &AIRNode) -> bool {
+    match &stmt.kind {
+        // A mutable or non-simple-bind (tuple/record/destructuring) `let` cannot
+        // become a `lambda` parameter; a simple immutable `let` can.
+        NodeKind::LetBinding {
+            is_mut, pattern, ..
+        } => *is_mut || PyEmitCtx::simple_bind_name(pattern).is_none(),
+        // Statements with no expression form.
+        NodeKind::Assign { .. }
+        | NodeKind::While { .. }
+        | NodeKind::For { .. }
+        | NodeKind::Loop { .. }
+        | NodeKind::Return { .. }
+        | NodeKind::Break { .. }
+        | NodeKind::Continue
+        | NodeKind::Block { .. } => true,
+        // A bare expression statement is foldable via `lambda _: …`.
+        _ => false,
+    }
 }
 
 /// Compute the implicit cross-module imports for `module`: public symbols
@@ -9881,6 +9949,151 @@ mod tests {
     }
 
     // ── Effect declaration tests ────────────────────────────────────────────
+
+    /// Build a `MatchArm` with a wildcard pattern and the given body.
+    fn wildcard_arm(id: u32, body: AIRNode) -> AIRNode {
+        node(
+            id,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(id + 100, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(body),
+            },
+        )
+    }
+
+    /// A `Block` with the given leading statements and a string tail value.
+    fn block_with_tail(id: u32, stmts: Vec<AIRNode>, tail: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::Block {
+                stmts,
+                tail: Some(Box::new(str_lit(id + 1, tail))),
+            },
+        )
+    }
+
+    #[test]
+    fn valpos_arm_with_loop_leading_stmt_needs_stmt_form() {
+        // `_ => { for _ in xs { f() } "v" }` — the leading `for` loop has no
+        // Python expression form, so the lambda chain would drop it. The arm
+        // must be routed to statement form.
+        let loop_stmt = node(
+            10,
+            NodeKind::For {
+                pattern: Box::new(node(11, NodeKind::WildcardPat)),
+                iterable: Box::new(id_node(12, "xs")),
+                body: Box::new(node(
+                    13,
+                    NodeKind::Block {
+                        stmts: vec![],
+                        tail: None,
+                    },
+                )),
+            },
+        );
+        let arms = vec![wildcard_arm(1, block_with_tail(20, vec![loop_stmt], "v"))];
+        assert!(
+            match_arm_drops_leading_stmts(&arms),
+            "a value-tail arm with a leading `for` loop must route to statement form"
+        );
+        assert!(match_value_needs_stmt_form(&arms));
+        assert!(value_needs_stmt_form(&node(
+            30,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(31, "j")),
+                arms,
+            }
+        )));
+    }
+
+    #[test]
+    fn valpos_arm_with_assign_leading_stmt_needs_stmt_form() {
+        // `_ => { x = 1; "v" }` — a leading assignment is not lambda-expressible.
+        let assign = node(
+            10,
+            NodeKind::Assign {
+                target: Box::new(id_node(11, "x")),
+                op: AssignOp::Assign,
+                value: Box::new(int_lit(12, "1")),
+            },
+        );
+        let arms = vec![wildcard_arm(1, block_with_tail(20, vec![assign], "v"))];
+        assert!(match_arm_drops_leading_stmts(&arms));
+    }
+
+    #[test]
+    fn valpos_arm_with_mut_let_leading_stmt_needs_stmt_form() {
+        // `_ => { let mut x = 1; "v" }` — a mutable `let` cannot be a lambda
+        // parameter, so the chain would drop it.
+        let mut_let = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: true,
+                pattern: Box::new(node(
+                    11,
+                    NodeKind::BindPat {
+                        name: ident("x"),
+                        is_mut: true,
+                    },
+                )),
+                ty: None,
+                value: Box::new(int_lit(12, "1")),
+            },
+        );
+        let arms = vec![wildcard_arm(1, block_with_tail(20, vec![mut_let], "v"))];
+        assert!(match_arm_drops_leading_stmts(&arms));
+    }
+
+    #[test]
+    fn valpos_arm_with_simple_let_stays_on_lambda_chain() {
+        // `_ => { let x = 1; "v" }` — a simple immutable `let` folds into a
+        // `lambda x:` parameter, so the chain handles it and we must NOT force
+        // statement form (that would regress the proven lambda-chain path).
+        let simple_let = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(node(
+                    11,
+                    NodeKind::BindPat {
+                        name: ident("x"),
+                        is_mut: false,
+                    },
+                )),
+                ty: None,
+                value: Box::new(int_lit(12, "1")),
+            },
+        );
+        let arms = vec![wildcard_arm(1, block_with_tail(20, vec![simple_let], "v"))];
+        assert!(
+            !match_arm_drops_leading_stmts(&arms),
+            "a simple immutable `let` is lambda-expressible — keep it on the chain"
+        );
+    }
+
+    #[test]
+    fn valpos_arm_with_bare_call_stays_on_lambda_chain() {
+        // `_ => { f(); "v" }` — a bare expression statement folds into a
+        // `lambda _:` and stays on the chain.
+        let call = node(
+            10,
+            NodeKind::Call {
+                callee: Box::new(id_node(11, "f")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let arms = vec![wildcard_arm(1, block_with_tail(20, vec![call], "v"))];
+        assert!(!match_arm_drops_leading_stmts(&arms));
+    }
+
+    #[test]
+    fn valpos_arm_tail_only_block_stays_on_lambda_chain() {
+        // `_ => { "v" }` — no leading statements, nothing to drop.
+        let arms = vec![wildcard_arm(1, block_with_tail(20, vec![], "v"))];
+        assert!(!match_arm_drops_leading_stmts(&arms));
+    }
 
     #[test]
     fn effect_decl_becomes_abc() {
