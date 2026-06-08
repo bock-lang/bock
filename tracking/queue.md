@@ -12,7 +12,20 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-08 — main 8faf8d7, 0 open PRs, clean, CI green.** ★ PAIR FAN-OUT (bock-codegen ⨯ bock-types) — both
+_**Last reconciled 2026-06-08 — main 2b0f8c2, 1 open PR (#300 doc-only design-OPEN — PROPOSED close), clean, CI green.**
+★ FOLLOW-UP WAVE. The proposed "trio" (Q-user-comparison-codegen + Q-equatable-gating + Q-rust-host-sleep) could NOT run 3-way:
+all three collide on bock-codegen/bock-types (the rust scaffold is in bock-codegen, NOT bock-build; and the comparison lowering
+needs a checker stamp in `infer_binop`) — so it ran as **Cmp SOLO → Eq+Sleep PAIR**. **3 items CLOSED:** Q-user-comparison-codegen
+(**#299** — user-type `<`/`>`/`<=`/`>=` now lower through `compare()` ×5 via a new `USER_COMPARE_META_KEY` stamp; parked fixture
+flipped; conformance 814/0), Q-rust-host-sleep-tokio-dep (**#301** — rust scaffold adds `tokio` via a `tokio::`-content-scan
+trigger; bare-host `sleep` builds+runs ×5; 819/0), and with #299 the Q-list-operator-gating codegen half is complete. **1
+ESCALATED → Design:** Q-equatable-gating-user-types → **DQ29** (#300, doc-only investigation: records/enums have free structural
+`==` but NO checker-visible `Equatable`, and `@derive` is v1.x-reserved → a strict gate breaks idiomatic `record == record`;
+R1 auto-conform / R2 defer-to-derive / R3 strict[rejected]). **1 NEW filed:** Q-rust-enum-variant-import (#299 FOUND, LOW — rust
+`use core.compare.{Less,Equal,Greater}` lowers to a non-existent free import → E0432). Both compiler PRs were solo on an unchanged
+base → their own CI was the combined-tree check (green). **PROPOSED:** `gh pr close #300` (doc-only; content captured in DQ29 +
+escalations). ↓ —
+PRIOR: **Last reconciled 2026-06-08 — main 8faf8d7, 0 open PRs, clean, CI green.** ★ PAIR FAN-OUT (bock-codegen ⨯ bock-types) — both
 merged + combined tree re-verified on the octopus merge (fmt/clippy/**test 0 failed**/doc; conformance REQUIRE=all **0 failed**
 ×5; examples-exec 20/20 build, **no regressions**). PRs: **#297** codegen · **#296** types. **2 items CLOSED:**
 Q-clock-handler-routing (**#297** — `Instant.now`/`sleep`/`elapsed` now dispatch through the installed `Clock` handler when in
@@ -308,24 +321,35 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   regressions. `==`/`!=` (Equatable) gating deferred → Q-equatable-gating-user-types. **FOUND:** user-type comparison *lowering*
   is broken ×5 → Q-user-comparison-codegen (a `.skip` exec fixture is parked). ORIG: FOUND 2026-06-06 (DQ10 ratification, flagged
   out-of-scope by Design); §18.5's rule (implementing the trait gates the operator) worked for primitives only.
-- **[Q-user-comparison-codegen] user-type `<`/`>`/`<=`/`>=` lowering emits native operators (broken ×5)** — bug · ready ·
-  `compiler/crates/bock-codegen/` · — · links #296, Q-list-operator-gating-user-types, §18.5 · note: FOUND 2026-06-08 (#296). Now
-  that the checker accepts `a < b` on a user type WITH `impl Comparable` (#296), every backend still emits a NATIVE `<` →
-  Python `TypeError` at runtime, Go/Rust compile errors, JS silent-wrong. Must lower a user-`Comparable` comparison through
-  `compare()` (the `Ordering` path). Pre-existing (the checker previously also accepted it un-gated); a ready positive exec
-  fixture is PARKED at `compiler/tests/conformance/exec/opgate_comparison_user_type_impl.bock.skip` — flip `.bock.skip` →
-  `.bock` once codegen routes through `compare`. Codegen-only.
-- **[Q-rust-host-sleep-tokio-dep] rust no-handler host `sleep` needs a tokio scaffold dep** — bug · ready · LOW ·
-  `compiler/crates/bock-build/` (scaffold/toolchain) · — · links #297, Q-clock-handler-routing, Q-time-shim-path · note: FOUND
-  2026-06-08 (#297). The *no-handler* host async `sleep` path on rust emits `tokio::time::sleep` + `#[tokio::main]`, but the
-  scaffolded `Cargo.toml` has no `tokio` dependency, so a `with Clock` program using the bare host `sleep` fails `cargo check`.
-  Pre-existing (no exec fixture exercised bare host `sleep` on rust; `time/*.bock` are check-only); the #297 handler path does
-  NOT depend on tokio. Add the tokio dep to the rust scaffold (or shim host sleep without tokio). Outside codegen ownership.
-- **[Q-equatable-gating-user-types] gate `==`/`!=` on user types behind Equatable** — bug · ready · LOW ·
-  `compiler/crates/bock-types/` · — · links #296, §18.5, Q-list-operator-gating-user-types · note: FOUND 2026-06-08 (#296). #296
-  gated the comparison operators (Comparable) but intentionally left `==`/`!=` un-gated — records carry structural equality, so
-  gating risks broad fallout. Decide + wire Equatable-gating for `==`/`!=` on user types (or confirm structural-eq stays
-  ungated) once the records-equality interaction is scoped. Same `infer_binop` mechanism as #296.
+- **[Q-user-comparison-codegen] user-type `<`/`>`/`<=`/`>=` lowering emits native operators (broken ×5)** — bug · **DONE (#299)** ·
+  `compiler/crates/bock-codegen/` + `compiler/crates/bock-types/` · — · links #296, #299, Q-list-operator-gating-user-types,
+  Q-rust-enum-variant-import, §18.5 · note: **DONE 2026-06-08 (#299).** New `USER_COMPARE_META_KEY` checker stamp (on an ordering
+  `BinaryOp` whose operands are a user `Comparable` type — comparison arm only) + per-backend lowering routing through
+  `compare()` (`<`⇒`==Less`, `>`⇒`==Greater`, `<=`⇒`!=Greater`, `>=`⇒`!=Less`), reusing each target's `Ordering` rep. Parked
+  fixture flipped (`opgate_comparison_user_type_impl`) + 2 new; conformance 814/0 ×5. Primitives/`T: Comparable`/`==`/`!=`
+  untouched. **FOUND** → Q-rust-enum-variant-import (rust `use core.compare.{Less,Equal,Greater}` lowered to a non-existent free
+  import). ORIG: FOUND 2026-06-08 (#296) — the codegen half of the operator-gating story.
+- **[Q-rust-enum-variant-import] rust import lowering emits `use crate::…::{Variant}` for enum variants (E0432)** — bug · ready · LOW ·
+  `compiler/crates/bock-codegen/src/rs.rs` (import lowering) · — · links #299 · note: FOUND 2026-06-08 (#299). `use
+  core.compare.{Ordering, Less, Equal, Greater}` lowers on rust to `use crate::core::compare::{Less, Equal, Greater}` — but rust
+  enum VARIANTS aren't free-importable items → `E0432`. Worked around in #299 by importing only `{Ordering}` (variants reached as
+  `Ordering::Less`). Fix the rust import lowering to drop/redirect enum-variant imports (or emit `Ordering::Less` at use sites).
+  Pre-existing; only bites a program that braces enum variants in a `use`.
+- **[Q-rust-host-sleep-tokio-dep] rust no-handler host `sleep` needs a tokio scaffold dep** — bug · **DONE (#301)** ·
+  `compiler/crates/bock-codegen/src/scaffold.rs` · — · links #297, #301, Q-clock-handler-routing, Q-time-shim-path · note: **DONE
+  2026-06-08 (#301).** The rust scaffold's tokio trigger keyed only on `bock_runtime.rs` presence, so the host-sleep crate (which
+  emits `tokio::time::sleep` + `#[tokio::main]` into `main.rs` but no runtime file) got no `tokio` dep → `E0433`. Broadened to a
+  CONTENT scan of emitted `.rs` for `tokio::` (`rust_emits_tokio`) — one check covers both the concurrency runtime and host-sleep;
+  programs using neither stay dep-free. Features `["rt-multi-thread","macros","sync","time"]`, pinned `"1"`. New
+  `hostsleep_no_handler` fixture runs ×5; conformance 819/0. NOTE: the scaffold lives in **bock-codegen** (not bock-build as
+  originally filed). ORIG: FOUND 2026-06-08 (#297).
+- **[Q-equatable-gating-user-types] gate `==`/`!=` on user types behind Equatable** — bug · **blocked · escalated → Design (DQ29)** · LOW ·
+  `compiler/crates/bock-types/` · — · blocked-by DQ29 · links #296, #300, DQ29, §18.5, Q-list-operator-gating-user-types · note:
+  **ESCALATED 2026-06-08 (DQ29).** The wave-6 investigation (PR #300, doc-only — NOT merged) confirmed scenario (B): records/enums
+  have FREE structural `==` at codegen but NO checker-visible `Equatable` conformance (only primitives are registered), and
+  `@derive` is v1.x-reserved — so a strict `require_equatable_operand` gate would reject idiomatic `record == record` with no v1
+  escape. That's a design decision, not impl-completeness → **DQ29** (candidate resolutions R1 auto-conform / R2 defer-to-derive /
+  R3 strict-reject[rejected]). Un-block + implement once Design rules. Same `infer_binop` mechanism as #296 once ruled.
 - **[Q-list-mut-pop-insert-remove] `pop`/`insert`/`remove`/`reverse` mutating-method semantics** — impl · ready ·
   `compiler/crates/bock-types`, `compiler/crates/bock-codegen` · — · links DQ18, #269 · note: FOUND 2026-06-06 (#269). DQ18 did
   `push`/`append` (`mut self` Void); the other in-place mutators have distinct shapes (`pop` → `Optional[T]`, `insert`/`remove`

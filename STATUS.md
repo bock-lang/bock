@@ -6,16 +6,16 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 68
+- Ready: 69
 - v1-blocking: 2
 - Blocked: 22
 - Deferred: 1
 
-## Build status (as of main 8faf8d7, 2026-06-08)
+## Build status (as of main 2b0f8c2, 2026-06-08)
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (0 failed — pair #296 (operator-gating) / #297 (Clock-handler routing) atop #294 + wave-3 + wave-2; orchestrator re-verified each tree before merge) |
+| `cargo test --workspace` | passing (0 failed — #299 (user-type comparison codegen) + #301 (rust tokio scaffold) atop the #296/#297 pair + #294 + wave-3/2; conformance 819/0 ×5; orchestrator re-verified each tree before merge) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |
