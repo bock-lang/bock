@@ -110,7 +110,8 @@ impl CodeGenerator for JsGenerator {
         // Shared pre-pass: hoist value-position diverging control flow into
         // declare-then-assign temp blocks so the diverging arms emit as
         // statements rather than `/* unsupported */`.
-        let module = &crate::generator::hoist_value_cf(module.clone());
+        let module =
+            &crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(module.clone()));
         let mut ctx = EmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
@@ -177,7 +178,14 @@ impl CodeGenerator for JsGenerator {
         // emission, so all targets emit valid statement-form code.
         let hoisted: Vec<(AIRModule, &std::path::Path)> = modules
             .iter()
-            .map(|(m, p)| (crate::generator::hoist_value_cf((*m).clone()), *p))
+            .map(|(m, p)| {
+                (
+                    crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(
+                        (*m).clone(),
+                    )),
+                    *p,
+                )
+            })
             .collect();
         let modules: Vec<(&AIRModule, &std::path::Path)> =
             hoisted.iter().map(|(m, p)| (m, *p)).collect();
@@ -2403,8 +2411,22 @@ impl EmitCtx {
                         if let Some(ep) = effects_param {
                             all_params.push(ep);
                         }
+                        // An associated function (no `self` receiver, e.g. a
+                        // `From` impl's `from`) is a *static* method on the
+                        // class object, reached as `Type.method(...)`. An
+                        // instance method attaches to the prototype. Emitting an
+                        // associated fn on the prototype would make
+                        // `Type.method` undefined at the call site.
+                        let attach = if crate::generator::is_associated_impl_method(
+                            method,
+                            &self.effect_ops,
+                        ) {
+                            ""
+                        } else {
+                            ".prototype"
+                        };
                         self.writeln(&format!(
-                            "{target_name}.prototype.{} = {async_kw}function({}) {{",
+                            "{target_name}{attach}.{} = {async_kw}function({}) {{",
                             self.js_method_name(&name.name),
                             all_params.join(", "),
                         ));
@@ -3265,6 +3287,33 @@ impl EmitCtx {
                             self.current_handler_vars.get(&effect_name).cloned()
                         {
                             let _ = write!(self.buf, "{}.{}", handler_var, name.name);
+                            self.buf.push('(');
+                            for (i, arg) in args.iter().enumerate() {
+                                if i > 0 {
+                                    self.buf.push_str(", ");
+                                }
+                                self.emit_expr(&arg.value)?;
+                            }
+                            self.buf.push(')');
+                            return Ok(());
+                        }
+                    }
+                }
+                // An associated-function call (`Type.method(args)` — stamped by
+                // the lowerer, no `self` prepended) is a *static* method on the
+                // class object. Emit `Type.method(args)` with the type name
+                // preserved (JS class names are PascalCase, matching the Bock
+                // type name); the generic fall-through would camel-case the
+                // receiver identifier into a non-existent value (`typeValue`).
+                if crate::generator::is_associated_call(node) {
+                    if let NodeKind::FieldAccess { object, field } = &callee.kind {
+                        if let NodeKind::Identifier { name: type_name } = &object.kind {
+                            let _ = write!(
+                                self.buf,
+                                "{}.{}",
+                                type_name.name,
+                                self.js_method_name(&field.name)
+                            );
                             self.buf.push('(');
                             for (i, arg) in args.iter().enumerate() {
                                 if i > 0 {

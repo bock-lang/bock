@@ -175,7 +175,8 @@ impl CodeGenerator for TsGenerator {
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
         // Shared pre-pass: hoist value-position diverging control flow (see
         // `hoist_value_cf`) into declare-then-assign temp blocks.
-        let module = &crate::generator::hoist_value_cf(module.clone());
+        let module =
+            &crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(module.clone()));
         let mut ctx = TsEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
@@ -238,7 +239,14 @@ impl CodeGenerator for TsGenerator {
         // module before registry collection or emission (see `hoist_value_cf`).
         let hoisted: Vec<(AIRModule, &std::path::Path)> = modules
             .iter()
-            .map(|(m, p)| (crate::generator::hoist_value_cf((*m).clone()), *p))
+            .map(|(m, p)| {
+                (
+                    crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(
+                        (*m).clone(),
+                    )),
+                    *p,
+                )
+            })
             .collect();
         let modules: Vec<(&AIRModule, &std::path::Path)> =
             hoisted.iter().map(|(m, p)| (m, *p)).collect();
@@ -2888,6 +2896,12 @@ impl TsEmitCtx {
                 // error inside each method body.
                 let mut iface_sigs: Vec<String> = Vec::new();
                 for (method, _is_default) in &all_methods {
+                    // Associated functions (no `self`, e.g. a `From` impl's
+                    // `from`) are static members, declared via a merged
+                    // `namespace` below — not instance methods on the interface.
+                    if crate::generator::is_associated_impl_method(method, &self.effect_ops) {
+                        continue;
+                    }
                     if let NodeKind::FnDecl {
                         is_async,
                         name,
@@ -2952,19 +2966,34 @@ impl TsEmitCtx {
                             trait_args.iter().map(|a| self.type_to_ts(a)).collect();
                         format!("{trait_base}<{}>", arg_strs.join(", "))
                     };
-                    // Declaration merging: `extends Trait` keeps `new Target()`
-                    // assignable to the trait's interface type, while the
-                    // concrete signatures (with `self`) make `p.m(p)` resolve.
-                    self.writeln(&format!(
-                        "{iface_export}interface {target_name} extends {trait_name} {{"
-                    ));
-                    self.indent += 1;
-                    for sig in &iface_sigs {
-                        self.writeln(sig);
+                    // An impl whose methods are *all associated* (no instance
+                    // methods — e.g. `From`, whose only method `from(value)` takes
+                    // no `self`) contributes no merged-interface members, and its
+                    // trait carries no instance contract for `new Target()` to
+                    // satisfy. Skip the `interface … extends Trait` entirely: an
+                    // empty `extends Trait` body would still reference the trait
+                    // interface, which may not be in scope (a prelude trait like
+                    // `From` is not emitted into the consuming module).
+                    if iface_sigs.is_empty() {
+                        self.writeln(&format!("// impl {trait_name} for {target_name}"));
+                    } else {
+                        // Declaration merging: `extends Trait` keeps
+                        // `new Target()` assignable to the trait's interface
+                        // type, while the concrete signatures (with `self`) make
+                        // `p.m(p)` resolve.
+                        self.writeln(&format!(
+                            "{iface_export}interface {target_name} extends {trait_name} {{"
+                        ));
+                        self.indent += 1;
+                        for sig in &iface_sigs {
+                            self.writeln(sig);
+                        }
+                        self.indent -= 1;
+                        self.writeln("}");
+                        self.writeln(&format!("// impl {trait_name} for {target_name}"));
                     }
-                    self.indent -= 1;
-                    self.writeln("}");
-                    self.writeln(&format!("// impl {trait_name} for {target_name}"));
+                } else if iface_sigs.is_empty() {
+                    self.writeln(&format!("// impl {target_name}"));
                 } else {
                     self.writeln(&format!("{iface_export}interface {target_name} {{"));
                     self.indent += 1;
@@ -2976,6 +3005,11 @@ impl TsEmitCtx {
                     self.writeln(&format!("// impl {target_name}"));
                 }
                 for (method, _is_default) in &all_methods {
+                    // Associated functions are emitted as merged-`namespace`
+                    // static members below, not prototype instance methods.
+                    if crate::generator::is_associated_impl_method(method, &self.effect_ops) {
+                        continue;
+                    }
                     if let NodeKind::FnDecl {
                         is_async,
                         name,
@@ -3037,6 +3071,76 @@ impl TsEmitCtx {
                         // resolves to the concrete target.
                         self.trait_self_subst = prev_subst;
                     }
+                }
+                // Associated functions (`Type.method(...)`, no `self`) are static
+                // members. A merged `namespace Target { export function m(...) }`
+                // both declares the static on `typeof Target` (so `tsc` accepts
+                // the `Target.m(...)` call) and provides the implementation —
+                // unlike a bare `Target.m = function(...)` assignment, which tsc
+                // rejects (TS2339, the property is undeclared on the class type).
+                let assoc_methods: Vec<&AIRNode> = all_methods
+                    .iter()
+                    .filter(|(m, _)| {
+                        crate::generator::is_associated_impl_method(m, &self.effect_ops)
+                    })
+                    .map(|(m, _)| *m)
+                    .collect();
+                if !assoc_methods.is_empty() {
+                    let ns_export = if self.exported_types.contains(&target_base) {
+                        "export "
+                    } else {
+                        ""
+                    };
+                    self.writeln(&format!("{ns_export}namespace {target_base} {{"));
+                    self.indent += 1;
+                    for method in assoc_methods {
+                        if let NodeKind::FnDecl {
+                            is_async,
+                            name,
+                            generic_params,
+                            params,
+                            return_type,
+                            effect_clause,
+                            body,
+                            ..
+                        } = &method.kind
+                        {
+                            let prev_subst = self.trait_self_subst.take();
+                            self.trait_self_subst = Some(target_name.clone());
+                            let async_kw = if *is_async { "async " } else { "" };
+                            let generics =
+                                self.merge_generic_params_to_ts(&target_params, generic_params);
+                            let param_list = self.collect_impl_typed_params(params, &target_name);
+                            let effects_param = self.effects_param(effect_clause);
+                            let mut all_params = param_list;
+                            if let Some(ep) = effects_param {
+                                all_params.push(ep);
+                            }
+                            let ret_str = build_ts_return_type(
+                                *is_async,
+                                return_type.as_deref().map(|r| self.type_to_ts(r)),
+                            );
+                            self.writeln(&format!(
+                                "export {async_kw}function {}{generics}({}){ret_str} {{",
+                                self.ts_method_name(&name.name),
+                                all_params.join(", "),
+                            ));
+                            self.indent += 1;
+                            let old_handler_vars = self.current_handler_vars.clone();
+                            let expanded = self.expand_effect_names(effect_clause);
+                            for ename in &expanded {
+                                self.current_handler_vars
+                                    .insert(ename.clone(), to_camel_case(ename));
+                            }
+                            self.emit_block_body(body)?;
+                            self.current_handler_vars = old_handler_vars;
+                            self.indent -= 1;
+                            self.writeln("}");
+                            self.trait_self_subst = prev_subst;
+                        }
+                    }
+                    self.indent -= 1;
+                    self.writeln("}");
                 }
                 Ok(())
             }
@@ -4197,6 +4301,33 @@ impl TsEmitCtx {
                             self.current_handler_vars.get(&effect_name).cloned()
                         {
                             let _ = write!(self.buf, "{}.{}", handler_var, name.name);
+                            self.buf.push('(');
+                            for (i, arg) in args.iter().enumerate() {
+                                if i > 0 {
+                                    self.buf.push_str(", ");
+                                }
+                                self.emit_expr(&arg.value)?;
+                            }
+                            self.buf.push(')');
+                            return Ok(());
+                        }
+                    }
+                }
+                // An associated-function call (`Type.method(args)` — stamped by
+                // the lowerer, no `self` prepended) resolves to the merged
+                // `namespace Type { export function method(...) }` static member.
+                // Emit `Type.method(args)` with the type name preserved (it names
+                // the namespace/class, not a value); the generic fall-through
+                // would camel-case it into a non-existent value.
+                if crate::generator::is_associated_call(node) {
+                    if let NodeKind::FieldAccess { object, field } = &callee.kind {
+                        if let NodeKind::Identifier { name: type_name } = &object.kind {
+                            let _ = write!(
+                                self.buf,
+                                "{}.{}",
+                                type_name.name,
+                                self.ts_method_name(&field.name)
+                            );
                             self.buf.push('(');
                             for (i, arg) in args.iter().enumerate() {
                                 if i > 0 {
@@ -7905,7 +8036,14 @@ mod tests {
                         is_async: false,
                         name: ident("log"),
                         generic_params: vec![],
-                        params: vec![typed_param_node(13, "msg", "String")],
+                        // An instance method leads with `self` (as real lowering
+                        // produces). A method with no `self` is an associated
+                        // function, emitted as a `namespace` static, not an
+                        // instance member on the merged interface.
+                        params: vec![
+                            untyped_param_node(15, "self"),
+                            typed_param_node(13, "msg", "String"),
+                        ],
                         return_type: None,
                         effect_clause: vec![],
                         where_clause: vec![],

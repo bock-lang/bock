@@ -103,7 +103,8 @@ impl CodeGenerator for RsGenerator {
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
         // Shared pre-pass: hoist value-position diverging control flow (see
         // `hoist_value_cf`) into declare-then-assign temp blocks.
-        let module = &crate::generator::hoist_value_cf(module.clone());
+        let module =
+            &crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(module.clone()));
         let mut ctx = RsEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
@@ -181,7 +182,14 @@ impl CodeGenerator for RsGenerator {
         // module before registry collection or emission (see `hoist_value_cf`).
         let hoisted: Vec<(AIRModule, &std::path::Path)> = modules
             .iter()
-            .map(|(m, p)| (crate::generator::hoist_value_cf((*m).clone()), *p))
+            .map(|(m, p)| {
+                (
+                    crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(
+                        (*m).clone(),
+                    )),
+                    *p,
+                )
+            })
             .collect();
         let modules: Vec<(&AIRModule, &std::path::Path)> =
             hoisted.iter().map(|(m, p)| (m, *p)).collect();
@@ -3463,12 +3471,19 @@ impl RsEmitCtx {
             // The AIR keeps `self` as a leading `Param`; consume it to form the
             // native Rust receiver and emit the remaining params positionally.
             // Without this the method gets both `&self` and a `self: _` param.
+            //
+            // An *associated function* (no `self` receiver, e.g. a `From` impl's
+            // `from(value) -> Self`) is a native Rust associated fn — emit no
+            // receiver at all. Synthesizing `&self` here would not match the
+            // trait signature (`fn from(T) -> Self`) and Rust rejects it (E0185).
+            let is_assoc = crate::generator::is_associated_impl_method(method, &self.effect_ops);
             let (receiver, rest) = match params.first().map(crate::generator::param_binds_self) {
                 Some(Some(is_mut)) => {
                     let recv = if is_mut { "&mut self" } else { "&self" };
-                    (recv.to_string(), &params[1..])
+                    (Some(recv.to_string()), &params[1..])
                 }
-                _ => ("&self".to_string(), &params[..]),
+                _ if is_assoc => (None, &params[..]),
+                _ => (Some("&self".to_string()), &params[..]),
             };
             // A `Self`-operand trait method's impl borrows its operand to match
             // the trait signature (`fn compare(&self, other: &Key)`); the call
@@ -3476,7 +3491,7 @@ impl RsEmitCtx {
             let borrow_operands = self.self_operand_methods.contains(&name.name);
             let param_strs = self.collect_param_strs_inner(rest, borrow_operands, false);
             let effects = self.effects_params(effect_clause);
-            let mut all_params = vec![receiver];
+            let mut all_params: Vec<String> = receiver.into_iter().collect();
             all_params.extend(param_strs);
             all_params.extend(effects);
             let ret = return_type
@@ -4343,6 +4358,32 @@ impl RsEmitCtx {
                 }
                 if self.try_emit_container_method(node, callee, args)? {
                     return Ok(());
+                }
+                // Associated-function call (`Type.method(args)` — stamped by the
+                // lowerer, no `self` prepended) is a native Rust associated fn:
+                // emit `Type::method(args)` with the type name preserved (the
+                // `::` path syntax, not the value-receiver `.` form the generic
+                // fall-through would produce by snake-casing the type name).
+                if crate::generator::is_associated_call(node) {
+                    if let NodeKind::FieldAccess { object, field } = &callee.kind {
+                        if let NodeKind::Identifier { name: type_name } = &object.kind {
+                            let _ = write!(
+                                self.buf,
+                                "{}::{}",
+                                type_name.name,
+                                to_snake_case(&field.name)
+                            );
+                            self.buf.push('(');
+                            for (i, arg) in args.iter().enumerate() {
+                                if i > 0 {
+                                    self.buf.push_str(", ");
+                                }
+                                self.emit_call_arg(&arg.value, false)?;
+                            }
+                            self.buf.push(')');
+                            return Ok(());
+                        }
+                    }
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
                 // [recv, ...rest])`: emit `recv.m(rest)` so the receiver flows
@@ -6722,7 +6763,10 @@ mod tests {
                         is_async: false,
                         name: ident("print"),
                         generic_params: vec![],
-                        params: vec![],
+                        // An instance method leads with `self` (as real lowering
+                        // produces); a method with no `self` is an *associated*
+                        // function and emits with no receiver.
+                        params: vec![self_param(6)],
                         return_type: None,
                         effect_clause: vec![],
                         where_clause: vec![],
