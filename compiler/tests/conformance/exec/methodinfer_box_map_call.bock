@@ -1,0 +1,54 @@
+// TEST: exec_methodinfer_box_map_call
+// EXPECT: output "42;v21"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-checker-method-generic-call-infer — infer a METHOD's OWN type parameter at
+// a call site.
+//
+// `Box[T].map[U](f: Fn(T) -> U) -> Box[U]` introduces `U` as the method's own
+// type parameter. The receiver pins the type's own param `T`; `U` must be
+// inferred from the call ARGUMENT, exactly as a free function's type params are
+// (the checker now freshens a method's own type-param names per call site
+// instead of leaving them as a dangling `Named("U")`).
+//
+// Before the fix, the *declaration* of `map[U]` compiled (see
+// go_method_generics_freefn_lowering.bock), but a *call* `b.map(dbl)` failed
+// inference of `U` at check time on every target — which is why the type-zoo
+// exerciser only declared `Box.map` and never called it. This fixture exercises
+// the call on both inference shapes:
+//
+//   * `b.map(dbl)`    — `dbl: Fn(Int) -> Int`,    infers `U = Int`    → `Box[Int]`
+//   * `b.map(to_str)` — `to_str: Fn(Int) -> String`, infers `U = String` → `Box[String]`
+//
+// so the result is verified end-to-end on all five targets (not just a clean
+// compile). The second call confirms `U` is inferred to a type *distinct* from
+// the receiver's pinned `T`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Box[T] {
+  value: T
+}
+
+impl Box {
+  fn map[U](self, f: Fn(T) -> U) -> Box[U] {
+    Box { value: f(self.value) }
+  }
+}
+
+fn dbl(x: Int) -> Int {
+  x * 2
+}
+
+fn to_str(x: Int) -> String {
+  "v${x}"
+}
+
+fn main() -> Void {
+  let b = Box { value: 21 }
+  let doubled = b.map(dbl)
+  let labelled = b.map(to_str)
+  println("${doubled.value};${labelled.value}")
+}
