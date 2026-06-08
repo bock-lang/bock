@@ -6440,18 +6440,30 @@ impl GoEmitCtx {
                 params,
                 return_type,
                 effect_clause,
+                where_clause,
                 body,
                 ..
-            } => self.emit_fn_decl(
-                *visibility,
-                *is_async,
-                &name.name,
-                generic_params,
-                params,
-                return_type.as_deref(),
-                effect_clause,
-                body,
-            ),
+            } => {
+                // Fold any `where`-clause trait bounds onto the generic params so
+                // the `[T Constraint]` type-param constraint is emitted for a
+                // `where`-bounded fn — local or imported (the imported fn is
+                // emitted in its own module file with its reconstructed
+                // `where`-clause, PR #286).
+                let merged = crate::generator::merge_where_bounds_into_generics(
+                    generic_params,
+                    where_clause,
+                );
+                self.emit_fn_decl(
+                    *visibility,
+                    *is_async,
+                    &name.name,
+                    &merged,
+                    params,
+                    return_type.as_deref(),
+                    effect_clause,
+                    body,
+                )
+            }
             NodeKind::RecordDecl {
                 name,
                 generic_params,

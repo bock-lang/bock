@@ -1,6 +1,6 @@
 // TEST: exec_xmod_where_bound_dispatch
 // EXPECT: output "hi_beats_lo=yes"
-// EXPECT: targets js, python, rust
+// EXPECT: targets js, ts, python, rust, go
 //
 // Cross-module where-clause trait-bound enforcement + dispatch (Q-xmod-bounds).
 // A generic function declared in the imported module `ranking` carries a
@@ -16,11 +16,12 @@
 // SATISFIED (`Card: Ranked`, impl in `ranking`), so the program checks clean
 // and runs to produce real output, exercising the positive path end to end.
 //
-// Targets are restricted to js/python/rust: the *checker* now threads the bound
-// cross-module on every target, but the TS/Go backends do not yet re-emit the
-// `T extends Ranked` / `[T Ranked]` constraint for an *imported* generic fn
-// whose where-clause was reconstructed (a separate CODEGEN gap, not the checker
-// fix here). See the session PR `OPEN:` note (Q-xmod-bounds-codegen, ts/go).
+// Runs on all 5 targets. The checker threads the bound cross-module on every
+// target (Q-xmod-bounds), and the TS/Go backends now re-emit the generic-param
+// trait constraint (`<T extends Ranked>` / `[T Ranked[T]]`) for the
+// `where`-bounded fn (Q-xmod-bounds-codegen): the bound is folded onto the
+// generic param at codegen, so `outranks`'s body can dispatch `a.beats(b)` on
+// `T` and the target compiler (tsc / go build) accepts it.
 //
 // `main` is intentionally NOT `public` (see hello_world.bock for the Go
 // entry-point rationale). `ranking`'s items ARE `public`: cross-module `use`

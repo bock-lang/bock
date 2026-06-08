@@ -3839,6 +3839,48 @@ pub fn is_unimplemented_sealed_core_trait(
         && !trait_decls.contains_key(trait_name)
 }
 
+/// Fold a function/impl `where`-clause's trait bounds onto the matching generic
+/// params, returning an owned param list with the constraints attached inline.
+///
+/// A generic-param bound may be written two ways: inline (`fn f[T: Show]`),
+/// where it already lives on `GenericParam.bounds`, or via a `where`-clause
+/// (`fn f[T]() where (T: Show)`), where it lives in a separate `where_clause`
+/// keyed by the type-var name. The generic-param renderers
+/// (`generic_params_to_ts`, the Go type-param constraint emitter) only read
+/// `GenericParam.bounds`, so a `where`-clause bound would otherwise be dropped
+/// at codegen — emitting `<T>` instead of `<T extends Show>` / `[T any]` instead
+/// of `[T Show]`, which fails the target compiler when the body calls a trait
+/// method on `T`. This applies to a *locally* defined `where`-bounded fn and,
+/// because an imported generic fn is emitted in its own module file carrying its
+/// reconstructed `where`-clause (PR #286), to cross-module dispatch too.
+///
+/// Each constraint's bounds are appended to the param whose name matches
+/// `constraint.param`; an inline bound already present is preserved (no dedup is
+/// needed — a target's bound list tolerates repeats, and source cannot legally
+/// state the same bound both inline and in `where`). Params with no matching
+/// constraint are returned unchanged.
+#[must_use]
+pub fn merge_where_bounds_into_generics(
+    generic_params: &[bock_ast::GenericParam],
+    where_clause: &[bock_ast::TypeConstraint],
+) -> Vec<bock_ast::GenericParam> {
+    if where_clause.is_empty() {
+        return generic_params.to_vec();
+    }
+    generic_params
+        .iter()
+        .map(|p| {
+            let mut p = p.clone();
+            for constraint in where_clause {
+                if constraint.param.name == p.name.name {
+                    p.bounds.extend(constraint.bounds.iter().cloned());
+                }
+            }
+            p
+        })
+        .collect()
+}
+
 // ─── Optional / Result built-in method dispatch ──────────────────────────────
 //
 // `Optional[T]` and `Result[T, E]` expose a small set of built-in methods
@@ -4955,6 +4997,80 @@ mod tests {
         assert_eq!(
             disambiguate_method_name("message".to_string(), &fields, "_method"),
             "message_method"
+        );
+    }
+
+    #[test]
+    fn merge_where_bounds_folds_constraints_onto_matching_param() {
+        use bock_ast::{GenericParam, Ident, TypeConstraint, TypePath};
+        use bock_errors::{FileId, Span};
+
+        fn span() -> Span {
+            Span {
+                file: FileId(0),
+                start: 0,
+                end: 0,
+            }
+        }
+        fn ident(name: &str) -> Ident {
+            Ident {
+                span: span(),
+                name: name.to_string(),
+            }
+        }
+        fn type_path(name: &str) -> TypePath {
+            TypePath {
+                segments: vec![ident(name)],
+                span: span(),
+            }
+        }
+        fn param(name: &str, bounds: Vec<TypePath>) -> GenericParam {
+            GenericParam {
+                id: 0,
+                span: span(),
+                name: ident(name),
+                bounds,
+            }
+        }
+        fn constraint(param: &str, bounds: Vec<TypePath>) -> TypeConstraint {
+            TypeConstraint {
+                id: 0,
+                span: span(),
+                param: ident(param),
+                bounds,
+            }
+        }
+
+        // No where-clause: params pass through unchanged.
+        let params = vec![param("T", vec![])];
+        let merged = merge_where_bounds_into_generics(&params, &[]);
+        assert_eq!(merged, params);
+
+        // `where (T: Ranked)` folds onto T; the unconstrained U is untouched.
+        let params = vec![param("T", vec![]), param("U", vec![])];
+        let wc = vec![constraint("T", vec![type_path("Ranked")])];
+        let merged = merge_where_bounds_into_generics(&params, &wc);
+        assert_eq!(
+            merged[0]
+                .bounds
+                .iter()
+                .map(|b| &b.segments[0].name)
+                .collect::<Vec<_>>(),
+            vec!["Ranked"]
+        );
+        assert!(merged[1].bounds.is_empty());
+
+        // An inline bound is preserved and the where-clause bound is appended.
+        let params = vec![param("T", vec![type_path("Show")])];
+        let wc = vec![constraint("T", vec![type_path("Ranked")])];
+        let merged = merge_where_bounds_into_generics(&params, &wc);
+        assert_eq!(
+            merged[0]
+                .bounds
+                .iter()
+                .map(|b| &b.segments[0].name)
+                .collect::<Vec<_>>(),
+            vec!["Show", "Ranked"]
         );
     }
 
