@@ -12,7 +12,25 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-07 — main 09427b8, 0 open PRs, clean, CI green.** ★ BROAD BACKLOG FAN-OUT (wave 1) — 4
+_**Last reconciled 2026-06-08 — main 3bcaebb, 1 open PR (#285, blocked), clean.** ★ DEPENDABOT WAVE + WAVE-2 BACKLOG
+FAN-OUT. **Dependabot:** 9/10 routine bumps merged (#276–#284 — setup-go, checkout, chrono, @types/node, cloudflare, marked,
+astro, vsce, wrangler), merged round-robin across shared lockfiles (one per group, dependabot-recreate for the conflicting
+astro). **#285** (vscode-languageclient 9→10, major) is BLOCKED on an extension code migration — v10 dropped the
+`vscode-languageclient/node` subpath export → 5× `TS2307`, reddening the `vscode extension` CI job → filed Q-vscode-langclient-v10.
+**Wave-2:** 3 file-disjoint engineer lanes, all merged + integrated-state re-verified by the orchestrator on the COMBINED tree
+(octopus merge → fmt/clippy/**test 0 failed**/doc clean; conformance REQUIRE=all **772 passed / 0 failed / 0 skipped** ×5
+[go/js/python/rust/ts]). PRs: **#287** fmt · **#286** types · **#288** codegen. **5 items CLOSED:** Q-bockfmt-cfarm-comma +
+Q-bockfmt-utf8-panic (**#287** — both `bock fmt` bugs fixed: value-less cf-arm bodies drop the illegal trailing comma, line-wrap
+snaps to char boundaries; `iter.bock`+`collections.bock` folded into the stdlib-fmt gate → now **10/10, 0 excluded**),
+Q-xmod-bounds + Q-xmod-impl (**#286** — cross-module where-bounds now enforced + cross-module From/Into impl-table seeded,
+threaded via the existing exported-`TypeRef` channel + synthetic `__bock_impl__` markers since `ExportedSymbol` lives in
+bock-air), Q-blanket-into-codegen (**#288** — derived blanket `.into()` → `Target.from(self)` via a post-typecheck codegen
+pre-pass, exec-verified ×5). **NEW (filed Ready):** Q-vscode-langclient-v10 (#285's blocker), Q-xmod-bounds-codegen (OPEN from
+#286 — ts/go don't re-emit the generic-param constraint for an imported generic fn; the where-bound exec fixture is
+js/py/rust-only), Q-fmt-doccomment-indent (LOW, FOUND from #287 — the lexer `.trim()`s doc-comment lines so `bock fmt` can't
+reconstruct prose indentation; a lexer fix, not fmt). **Q-prim-assoc re-scoped:** #288 FOUND+fixed the USER-type associated-fn
+codegen half (`Type.from`/`Type.origin` ×5); the PRIMITIVE half (`Float.from(3)`) remains checker+codegen-coupled. ↓ —
+PRIOR: **Last reconciled 2026-06-07 — main 09427b8, 0 open PRs, clean, CI green.** ★ BROAD BACKLOG FAN-OUT (wave 1) — 4
 file-disjoint lanes, all merged + integrated-state gate re-verified by the orchestrator on the combined tree (octopus
 merge → fmt/clippy/**test 2730+/0**/doc clean; conformance REQUIRE=all **0 failed**; examples-exec **STRICT** 20/20 build ·
 19/20 ran (+1 STUB) ×5, **no regressions**; new stdlib-fmt-check). PRs: **#274** types · **#273** interp · **#272** CI ·
@@ -184,23 +202,48 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ## Ready
 
-- **[Q-bockfmt-cfarm-comma] `bock fmt` appends an illegal trailing comma after a control-flow match arm** — bug · ready ·
-  `compiler/crates/bock-fmt/` · — · links #272, Q-stdlib-fmtcheck · note: FOUND 2026-06-07 (#272). `bock fmt` rewrites a
+- **[Q-vscode-langclient-v10] migrate VS Code extension to vscode-languageclient v10 API** — chore/bug · ready ·
+  `extensions/vscode/src/` (`lsp.ts`, `features/{annotations,effects,errors,hover}.ts`) · — · links dependabot #285 · note:
+  FOUND 2026-06-08. Dependabot **#285** bumps `vscode-languageclient` 9.0.1→10.0.0 (major); v10 removed the
+  `vscode-languageclient/node` subpath export → 5× `TS2307 Cannot find module 'vscode-languageclient/node'`, so the `vscode
+  extension` CI job fails. Migrate the imports to v10's API (the LanguageClient/node entry moved), then re-land the bump — either
+  push the code fix onto #285's branch or land it on an equivalent branch and close #285 as superseded. Isolated to the
+  extension; no compiler impact.
+- **[Q-xmod-bounds-codegen] ts/go don't re-emit the generic-param trait constraint for an IMPORTED generic fn** — bug · ready ·
+  `compiler/crates/bock-codegen/` (ts + go emitters) · — · links #286, Q-xmod-bounds, §4.6/§6.5 · note: OPEN from #286
+  (2026-06-08). With cross-module where-bounds now reconstructed in the checker (#286), the TS/Go backends still don't re-emit
+  the param constraint (`<T extends Show>` / `[T Show]`) for an imported generic fn whose where-clause was threaded
+  cross-module — so the #286 exec fixture `xmod_where_bound_dispatch` is restricted to js/python/rust. Codegen-only follow-up
+  (the checker enforces the bound on all 5 targets regardless).
+- **[Q-fmt-doccomment-indent] `bock fmt` flattens doc-comment prose indentation** — bug · ready · LOW ·
+  `compiler/crates/bock-lexer/src/lexer.rs` (~:786) · — · links #287 · note: FOUND 2026-06-08 (#287). Reformatting flattens the
+  leading indentation of `//!`/`///` continuation lines (`//!   * **Go**` → `//! * **Go**`). Root cause is in the LEXER, not the
+  formatter: doc-comment content is `.trim()`'d per line at lex time, so the formatter can't reconstruct the original
+  indentation. Benign (comment prose only; byte-content preserved), independent of the #287 fixes; needs a lexer change
+  (preserve doc-comment leading whitespace) — outside bock-fmt ownership.
+- **[Q-bockfmt-cfarm-comma] `bock fmt` appends an illegal trailing comma after a control-flow match arm** — bug · **DONE (#287)** ·
+  `compiler/crates/bock-fmt/` · — · links #272, #287, Q-stdlib-fmtcheck · note: **DONE 2026-06-08 (#287)** — value-less
+  `break`/`continue`/`return` arm bodies no longer emit a trailing comma (value-bearing forms like `return f(x),` correctly
+  keep it); `iter.bock` now folds into the stdlib-fmt gate. ORIG FOUND 2026-06-07 (#272). `bock fmt` rewrote a
   control-flow match-arm body like `None => break` to `None => break,`; the parser then rejects the formatted file (`E2020
   expected expression, found ','`). Caught by the #272 stdlib-fmt behavior-equivalence check (it mangled `iter.bock`). Blocks
   folding `iter.bock` into the `stdlib-fmt` gate. Suppress the trailing comma when an arm body is a control-flow statement
   (`break`/`continue`/`return`/loop tail).
-- **[Q-bockfmt-utf8-panic] `bock fmt` panics on long multi-byte (UTF-8) comment lines** — bug · ready ·
-  `compiler/crates/bock-fmt/src/emit.rs` (`find_break_point`/`wrap_long_lines` ~:1736) · — · links #272, Q-stdlib-fmtcheck ·
-  note: FOUND 2026-06-07 (#272). A box-drawing divider comment (81 chars / 200+ bytes) panics the formatter — `end byte index
+- **[Q-bockfmt-utf8-panic] `bock fmt` panics on long multi-byte (UTF-8) comment lines** — bug · **DONE (#287)** ·
+  `compiler/crates/bock-fmt/src/emit.rs` (`find_break_point`/`wrap_long_lines`) · — · links #272, #287, Q-stdlib-fmtcheck ·
+  note: **DONE 2026-06-08 (#287)** — line-wrap now snaps to a char boundary via a `floor_char_boundary` polyfill (MSRV 1.82
+  predates std's method); `collections.bock` now folds into the stdlib-fmt gate. ORIG FOUND 2026-06-07 (#272). A box-drawing
+  divider comment (81 chars / 200+ bytes) panicked the formatter — `end byte index
   100 is not a char boundary` — the line-wrap slices at a byte offset that lands inside a multi-byte char. Blocks folding
   `collections.bock` into the `stdlib-fmt` gate. Slice on char boundaries (char indices / `floor_char_boundary`).
-- **[Q-blanket-into-codegen] derived blanket `.into()` is unexecutable on compiled targets (JS confirmed)** — bug · ready ·
-  `compiler/crates/bock-codegen/` + maybe `compiler/crates/bock-air/src/lower.rs` · — · links #273, Q-interp-enum,
-  Q-xmod-impl · note: FOUND 2026-06-07 (#273). A derived `Into[Target] for Source` (the bodyless blanket from an `impl From`)
-  lowers `m.into()` to `m.into(m)` on JS but only `Source.prototype.from` is defined → `m.into is not a function`. Codegen/AIR
-  gap, NOT interpreter-only (the #273 interp lane split it out for exactly this reason). Rewrite `.into()` → `Target.from(self)`
-  in the lowerer so every target resolves it. Pairs with Q-xmod-impl (cross-module `.into()` resolution).
+- **[Q-blanket-into-codegen] derived blanket `.into()` is unexecutable on compiled targets (JS confirmed)** — bug · **DONE (#288)** ·
+  `compiler/crates/bock-codegen/` + `compiler/crates/bock-air/src/lower.rs` · — · links #273, #288, Q-interp-enum,
+  Q-xmod-impl, Q-prim-assoc · note: **DONE 2026-06-08 (#288)** — a `.into()` resolving to a derived blanket is rewritten to
+  `Target.from(self)` in a **post-typecheck codegen pre-pass** (`generator.rs`, NOT the lowerer — a pre-typecheck rewrite
+  clobbered the `E4012` unrelated-target diagnostic); exec-verified ×5 (js/ts/py/rust/go). En route it FOUND+fixed user-type
+  associated-fn codegen (`Type.from`/`Type.origin`), broken on all 5 targets — the user-type half of Q-prim-assoc. ORIG FOUND
+  2026-06-07 (#273): the bodyless blanket lowered `m.into()` to `m.into(m)` on JS but only `Source.prototype.from` was defined →
+  `m.into is not a function`; codegen/AIR gap, not interpreter-only. Pairs with Q-xmod-impl (cross-module `.into()` resolution).
 - **[Q-list-mutation-dq18] List `push`/`append` mutation + Map `contains` reject** — impl/design · **DONE (#269 — DQ18 + DQ22)** ·
   `compiler/crates/bock-types`, `compiler/crates/bock-codegen`, `spec §18.3`, `docs/.../core-collections.md` · links DQ18, DQ22,
   #269 · note: DONE 2026-06-06. `push`/`append` → `mut self` Void mutators (mut-receiver enforced, `E5004`); codegen ×5 (rust/js/ts
@@ -274,18 +317,25 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   **VERIFIED 2026-06-07 (#274) — already resolved by #141.** `Self`→target substitution happens at impl-sig registration;
   `a.combine(b)` / `fn compare(self, other: Self)` check clean, covered by existing exec fixtures (`self_return`,
   `self_in_plain_impl`, `trait_self_typing`). No change needed. ORIG found #104.
-- **[Q-xmod-bounds] Cross-module where-bound enforcement** — bug · ready ·
-  `compiler/crates/bock-types/` (export ABI) · — · links #108 · note: where-clause
-  bounds on **imported** generic fns aren't enforced — `ExportedSymbol` carries no
-  trait bounds. Locally-defined bounds enforce (#108); thread bounds through the
-  export ABI. Pairs with Q-xmod-impl (DV7/DV8 cross-module-impl theme).
+- **[Q-xmod-bounds] Cross-module where-bound enforcement** — bug · **DONE (#286)** ·
+  `compiler/crates/bock-types/` (export ABI) · — · links #108, #286, Q-xmod-bounds-codegen · note: **DONE 2026-06-08 (#286).**
+  A generic fn's where-bounds are now encoded into its exported `TypeRef` (keyed by type-var id), decoded in `seed_imports`, and
+  reconstructed into `FnSig.where_clause` so `check_trait_bounds_at_call` enforces an imported bound exactly like a local one
+  (`ExportedSymbol`/`ExportDetail` live in bock-air → threaded via the existing TypeRef string channel, not new fields).
+  RESIDUAL → Q-xmod-bounds-codegen (ts/go don't re-emit the constraint for an imported generic fn). ORIG: bounds on imported
+  generic fns were dropped; locally-defined bounds enforce (#108). Paired with Q-xmod-impl (DV7/DV8 theme).
 - **[Q-xmod-impl] Cross-module trait-impl resolution for `.into()`** — bug ·
-  ready · `compiler/crates/bock-types/` · — · links #110, DV8 · note: `.into()`
-  resolves via the impl-table, not seeded across modules — an `impl From[A] for B`
-  in module X isn't visible to `.into()` in module Y. Seed the impl-table
-  cross-module. Pairs with Q-xmod-bounds.
-- **[Q-prim-assoc] Primitive associated calls (`Float.from(3)`)** — bug · ready · **RE-SCOPED: checker+codegen-COUPLED** ·
-  `compiler/crates/bock-types/` + `compiler/crates/bock-codegen/` (all 5) · — · links #110, #274 · note: **RE-SCOPED 2026-06-07
+  **DONE (#286)** · `compiler/crates/bock-types/` · — · links #110, DV8, #286, Q-blanket-into-codegen · note: **DONE 2026-06-08
+  (#286).** User trait-impls over `Named` targets are now exported as synthetic `__bock_impl__` marker symbols; `seed_imports`
+  scans every imported module for them (coherence is module-scoped, not name-gated) and `check_module` folds them into the
+  impl-table (local+canonical first, local wins) + re-runs blanket-`Into` synthesis — so an `impl From[A] for B` in module X is
+  visible to `.into()` in module Y at CHECK time. Canonical/primitive-target impls excluded. The CODEGEN/runtime side is
+  Q-blanket-into-codegen (#288). ORIG: the impl-table wasn't seeded across modules. Paired with Q-xmod-bounds.
+- **[Q-prim-assoc] Primitive associated calls (`Float.from(3)`)** — bug · ready · **RE-SCOPED: PRIMITIVE half only (user-type half DONE #288)** ·
+  `compiler/crates/bock-types/` + `compiler/crates/bock-codegen/` (all 5) · — · links #110, #274, #288 · note: **UPDATE 2026-06-08
+  (#288):** the USER-type associated-fn codegen half (`Type.from(x)`/`Type.origin()` — a no-`self` impl method was emitted as an
+  instance method, and `Type.method(..)` calls lower/camel-cased the type name into a non-existent value) was FOUND+fixed ×5 in
+  #288. The PRIMITIVE half (`Float.from(3)`/`Int.try_from(s)`) REMAINS — still checker+codegen-coupled. **RE-SCOPED 2026-06-07
   (#274).** The checker fix is straightforward, but #274 implemented it and confirmed `Float.from(3)`/`Int.try_from(s)` then
   emit BROKEN codegen on all 5 (`float.from(3)` JS; `from`-keyword Python; no-such-type Rust/Go) — the associated
   primitive-conversion lowering isn't wired in bock-codegen, so enabling the check alone converts a clean `E4002` into garbage
