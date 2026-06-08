@@ -8,5 +8,18 @@
     "noEmit": true,
     "types": ["node", "mocha"]
   },
+  // ts-node runs the suite in plain Node (no Extension Host), which is a
+  // CommonJS context. The root tsconfig uses `module: preserve` (required so
+  // `tsc` honours the `exports` map of vscode-languageclient v10), but that
+  // makes ts-node emit ESM, which then rejects the extension-less
+  // `./vscode-stub` require in register-vscode.ts. Override ts-node's
+  // transpilation back to CommonJS — the standalone `tsc -p` typecheck above
+  // still uses the inherited bundler resolution, so type safety is unchanged.
+  "ts-node": {
+    "compilerOptions": {
+      "module": "commonjs",
+      "moduleResolution": "node"
+    }
+  },
   "include": ["./**/*.ts", "../src/**/*.ts"]
 }
