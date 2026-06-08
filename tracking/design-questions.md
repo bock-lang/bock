@@ -41,6 +41,25 @@ decided→link)`
 > `20260606-stdlib-surface-ratification`), **DQ17 CLOSED** (Optional repr left non-normative), and **DQ21 → impl backlog** (no
 > language decision). **DQ1** (`bock check` default strictness) stays the non-core CLI track (orchestrator + operator). Remaining
 > work is implementation + the v1.x deferrals recorded in the entries below, not open decisions.
+>
+> **★ NEW 2026-06-08 — DQ29** reopens one core-spec decision (Equatable `==`/`!=` operator-gating for user types). Board is no
+> longer fully clear: DQ29 needs a Design ruling; DQ10/DQ11 remain ratification-pending.
+
+### DQ29 — does structural record/enum equality satisfy `Equatable` for `==`/`!=` operator-gating?
+- **Question:** §18.5's rule is "implementing the trait gates the operator." It landed for `Comparable` →
+  `<`/`>`/`<=`/`>=` on user types (#296 checker gate + #299 codegen). Should `==`/`!=` likewise be gated behind
+  `Equatable` for user types? The blocker: records/enums get **free structural `==`** at the codegen level (e.g.
+  Python `@dataclass.__eq__`) but have **NO checker-visible `Equatable` conformance** — only primitives are
+  registered (`traits.rs register_canonical_conformances`); there is no structural auto-derive, and `@derive` is
+  **v1.x-reserved**. So a strict `require_equatable_operand` gate (mirroring #296) would **reject idiomatic
+  `record == record`** with no v1 escape hatch.
+- **§:** §18.5 · **context:** #296 deferred `==`/`!=` gating for exactly this reason; the wave-6 investigation
+  (**PR #300**, doc-only, not merged) confirmed scenario (B) empirically (record/enum `==` type-checks + runs today
+  with no `impl Equatable`). Candidate resolutions: **(R1)** structurally auto-conform records/enums to `Equatable`
+  then gate; **(R2)** defer `==`/`!=` gating to the v1.x `@derive` era; **(R3)** strict gate requiring explicit
+  `impl Equatable` — **rejected** (breaks idiomatic record equality, no v1 escape). Impl is ready to wire (same
+  `infer_binop` mechanism as #296) the moment Design rules. Unblocks queue item Q-equatable-gating-user-types.
+- **Status:** escalated → Design (escalations.md)
 
 ### DQ10 — normative primitive-conformance matrix
 - **Question:** which (primitive × core-trait) conformances are **normative** for

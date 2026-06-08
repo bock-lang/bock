@@ -383,3 +383,14 @@ react-components fixed to an empty `impl Component for Button {}` + spec §6.4/6
 free-fn lowering). **react-components now runs on all 5**; type-zoo/go's method-generics blocker cleared. Residual filed:
 **Q-checker-method-generic-call-infer** (checker can't infer `U` for a `b.map(dbl)` call). Design also handed a Tier A–D
 prioritization for the rest of the open queue (folded into design-questions.md; **DQ23** + **DQ20** are next-highest leverage).
+
+## [2026-06-08 22:52 UTC] DQ29 — Equatable `==`/`!=` operator-gating for user types
+
+**Type:** scope
+**Severity:** low
+**Trigger:** wave-6 follow-up tried to gate `==`/`!=` behind `Equatable` for user types (mirror of #296's `Comparable` gate). The engineer investigated and STOPPED (PR #300, doc-only): records/enums get free structural `==` at codegen but have NO checker-visible `Equatable` conformance, and `@derive` is v1.x-reserved — a strict gate would reject idiomatic `record == record` with no v1 escape. That's a design decision, not impl-completeness.
+**Context:** §18.5 says implementing the trait gates the operator. For `Comparable` this landed clean (#296/#299). For `Equatable` it collides with the undefined "does structural record/enum equality count as `Equatable` conformance?" question (the `(core trait, user type)` quadrant §18.5 leaves unspecified).
+**Options:** **(R1)** structurally auto-conform records/enums to `Equatable`, then gate `==`/`!=`; **(R2)** defer `==`/`!=` gating to the v1.x `@derive` era (leave `==`/`!=` ungated for now); **(R3)** strict gate requiring explicit `impl Equatable` — **rejected** (breaks idiomatic record equality, no v1 escape hatch).
+**Recommendation:** none on the merits (Design's call). Note R1 and R2 both keep current code working; R1 also enables the gate now. The impl is ready to wire (same `infer_binop` mechanism as #296) once ruled. Non-blocking — `==`/`!=` stays ungated meanwhile (status quo), so nothing regresses.
+**Awaiting:** Design ruling on DQ29 (R1 / R2 / other).
+**Status:** pending
