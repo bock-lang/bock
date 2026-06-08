@@ -11,11 +11,11 @@ changes.
 
 ---
 
-## Build status (as of main 52061ff, 2026-06-08)
+## Build status (as of main 8faf8d7, 2026-06-08)
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (0 failed — Q-prim-assoc #294 atop wave-3 #290/#291/#292 + wave-2 #286/#287/#288; orchestrator re-verified each tree before merge) |
+| `cargo test --workspace` | passing (0 failed — pair #296 (operator-gating) / #297 (Clock-handler routing) atop #294 + wave-3 + wave-2; orchestrator re-verified each tree before merge) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |

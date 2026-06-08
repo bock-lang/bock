@@ -12,7 +12,20 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-08 — main 52061ff, 0 open PRs, clean, CI green.** ★ Q-prim-assoc COMPLETE (solo session). **#294**
+_**Last reconciled 2026-06-08 — main 8faf8d7, 0 open PRs, clean, CI green.** ★ PAIR FAN-OUT (bock-codegen ⨯ bock-types) — both
+merged + combined tree re-verified on the octopus merge (fmt/clippy/**test 0 failed**/doc; conformance REQUIRE=all **0 failed**
+×5; examples-exec 20/20 build, **no regressions**). PRs: **#297** codegen · **#296** types. **2 items CLOSED:**
+Q-clock-handler-routing (**#297** — `Instant.now`/`sleep`/`elapsed` now dispatch through the installed `Clock` handler when in
+scope [host primitive stays the no-handler default]; interception verified ×5 with a self-contained user handler → §18.4 virtual
+time is now achievable), Q-list-operator-gating-user-types (**#296** — `<`/`>`/`<=`/`>=` now require `impl Comparable` on user
+operands [**E4005** + suggestion], also enforces "Bool is not Comparable"; conservative, no false-positives, examples 20/20 ×5
+no-regression). **3 NEW filed (all non-blocking):** Q-user-comparison-codegen (#296 FOUND — a user-`Comparable` comparison still
+lowers to a NATIVE `<`, broken ×5 [py TypeError, go/rust compile errors, js silent-wrong]; must route through `compare()`; a
+`.skip` exec fixture is parked → the natural next codegen lane), Q-rust-host-sleep-tokio-dep (#297 FOUND, LOW — rust bare-host
+`sleep` needs a tokio scaffold dep; bock-build), Q-equatable-gating-user-types (#296, LOW — `==`/`!=` Equatable gating deferred;
+records carry structural equality). **Remaining backlog:** Q-user-comparison-codegen, Q-rust-host-sleep-tokio-dep,
+Q-equatable-gating-user-types, Q-list-mut-pop-insert-remove, Q-fmt-doccomment-indent (LOW). ↓ —
+PRIOR: **Last reconciled 2026-06-08 — main 52061ff, 0 open PRs, clean, CI green.** ★ Q-prim-assoc COMPLETE (solo session). **#294**
 lands the PRIMITIVE half of Q-prim-assoc (the user-type half was #288): `Float.from`/`Int.from`/`String.from` +
 `Int.try_from`/`Float.try_from` (→ `Result[_, ConvertError]`) now check AND execute ×5 — the already-registered canonical
 conversion matrix, NO new semantics (lossy/narrowing still `E4012`); coupled checker resolution + per-target lowering (py
@@ -286,10 +299,33 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   EXEMPT. The fix surfaced + closed a trait-default-method false-positive (`Eq::not_equals` inherited by a concrete type).
   Verified: full conformance REQUIRE=all 0 failed + examples-exec 100/100 non-red. ORIG: FOUND 2026-06-06 (DQ22) — the general
   form of the DQ22 Map-`contains` trap.
-- **[Q-list-operator-gating-user-types] §18.5 operator-gating for user types not wired** — bug · ready ·
-  `compiler/crates/bock-types/` · — · links DQ10, §18.5 · note: FOUND 2026-06-06 (DQ10 ratification, flagged out-of-scope by
-  Design). §18.5's rule (implementing the trait gates the operator) works for primitives; wiring it so a USER type without `impl
-  Comparable` is rejected for `<` is an impl-completeness item, not a design question.
+- **[Q-list-operator-gating-user-types] §18.5 operator-gating for user types not wired** — bug · **DONE (#296)** ·
+  `compiler/crates/bock-types/` · — · links DQ10, §18.5, #296, Q-user-comparison-codegen, Q-equatable-gating-user-types · note:
+  **DONE 2026-06-08 (#296)** — `<`/`>`/`<=`/`>=` now require `impl Comparable` on a user (Named) operand (**E4005** + suggestion
+  when absent; accepted when present) via a `require_comparable_operand` probe in `infer_binop`; also enforces §18.5's "Bool is
+  not Comparable" (`true < false` now errors). Conservative — bounded generics (`T: Comparable`), inference/Flexible/Error
+  skipped; no false-positives. No stdlib/example impls needed (well-written code already had them); examples 20/20 ×5, no
+  regressions. `==`/`!=` (Equatable) gating deferred → Q-equatable-gating-user-types. **FOUND:** user-type comparison *lowering*
+  is broken ×5 → Q-user-comparison-codegen (a `.skip` exec fixture is parked). ORIG: FOUND 2026-06-06 (DQ10 ratification, flagged
+  out-of-scope by Design); §18.5's rule (implementing the trait gates the operator) worked for primitives only.
+- **[Q-user-comparison-codegen] user-type `<`/`>`/`<=`/`>=` lowering emits native operators (broken ×5)** — bug · ready ·
+  `compiler/crates/bock-codegen/` · — · links #296, Q-list-operator-gating-user-types, §18.5 · note: FOUND 2026-06-08 (#296). Now
+  that the checker accepts `a < b` on a user type WITH `impl Comparable` (#296), every backend still emits a NATIVE `<` →
+  Python `TypeError` at runtime, Go/Rust compile errors, JS silent-wrong. Must lower a user-`Comparable` comparison through
+  `compare()` (the `Ordering` path). Pre-existing (the checker previously also accepted it un-gated); a ready positive exec
+  fixture is PARKED at `compiler/tests/conformance/exec/opgate_comparison_user_type_impl.bock.skip` — flip `.bock.skip` →
+  `.bock` once codegen routes through `compare`. Codegen-only.
+- **[Q-rust-host-sleep-tokio-dep] rust no-handler host `sleep` needs a tokio scaffold dep** — bug · ready · LOW ·
+  `compiler/crates/bock-build/` (scaffold/toolchain) · — · links #297, Q-clock-handler-routing, Q-time-shim-path · note: FOUND
+  2026-06-08 (#297). The *no-handler* host async `sleep` path on rust emits `tokio::time::sleep` + `#[tokio::main]`, but the
+  scaffolded `Cargo.toml` has no `tokio` dependency, so a `with Clock` program using the bare host `sleep` fails `cargo check`.
+  Pre-existing (no exec fixture exercised bare host `sleep` on rust; `time/*.bock` are check-only); the #297 handler path does
+  NOT depend on tokio. Add the tokio dep to the rust scaffold (or shim host sleep without tokio). Outside codegen ownership.
+- **[Q-equatable-gating-user-types] gate `==`/`!=` on user types behind Equatable** — bug · ready · LOW ·
+  `compiler/crates/bock-types/` · — · links #296, §18.5, Q-list-operator-gating-user-types · note: FOUND 2026-06-08 (#296). #296
+  gated the comparison operators (Comparable) but intentionally left `==`/`!=` un-gated — records carry structural equality, so
+  gating risks broad fallout. Decide + wire Equatable-gating for `==`/`!=` on user types (or confirm structural-eq stays
+  ungated) once the records-equality interaction is scoped. Same `infer_binop` mechanism as #296.
 - **[Q-list-mut-pop-insert-remove] `pop`/`insert`/`remove`/`reverse` mutating-method semantics** — impl · ready ·
   `compiler/crates/bock-types`, `compiler/crates/bock-codegen` · — · links DQ18, #269 · note: FOUND 2026-06-06 (#269). DQ18 did
   `push`/`append` (`mut self` Void); the other in-place mutators have distinct shapes (`pop` → `Optional[T]`, `insert`/`remove`
@@ -603,11 +639,13 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   already ran unrestricted ×5; #271 confirmed BOTH the field (`e.message`) and the renamed method (`e.message()`) are reachable
   on every target and STRENGTHENED `exec_core_error.bock` to read both (output `boom/boom;again: boom`), locking the invariant.
   No js/ts/py source change was warranted. ORIG FOUND in S6b.
-- **[Q-clock-handler-routing] `Instant.now`/`sleep` bypass the Clock effect handler** — bug · ready · `bock-codegen` ·
-  — · links #160 · note: the time host primitives are inlined per-target and bypass the installed `Clock` handler, so
-  `std.testing.MockClock` virtual-time (§18.4) is not achievable — `sleep` always hits real host. Route now/sleep/
-  elapsed through the `Clock` handler. Codegen change; the time SURFACE works ×5 (core.time done) — this is the
-  testability gap. Pairs with Q-time-shim-path.
+- **[Q-clock-handler-routing] `Instant.now`/`sleep` bypass the Clock effect handler** — bug · **DONE (#297)** · `bock-codegen` ·
+  — · links #160, #297, Q-rust-host-sleep-tokio-dep, Q-time-shim-path · note: **DONE 2026-06-08 (#297)** —
+  `Instant.now`/`sleep`/`elapsed` now dispatch through the installed `Clock` handler (`current_handler_vars["Clock"]`) when one
+  is in scope, falling through to the host primitive as the no-handler default; verified ×5 with a self-contained user `Clock`
+  handler (interception confirmed) + a no-handler default fixture. So `MockClock`-style virtual time (§18.4) is now achievable.
+  FOUND (pre-existing, orthogonal) → Q-rust-host-sleep-tokio-dep. ORIG: the time host primitives were inlined per-target and
+  bypassed the installed `Clock` handler, so `sleep` always hit the real host. Pairs with Q-time-shim-path.
 - **[Q-conformance-clean-rebuild] Conformance harness doesn't force a clean `bock` rebuild** — chore/test-infra ·
   **DONE (#175)** · note: `run-conformance.sh` now `touch`es `compiler/crates/bock-cli/build.rs` + runs
   `cargo build -p bock --bin bock` before the tests, forcing a stdlib re-embed so `execution.rs::bock_binary()` can't
