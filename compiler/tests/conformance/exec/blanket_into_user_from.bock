@@ -1,0 +1,35 @@
+// TEST: exec_blanket_into_user_from
+// EXPECT: output "feet=32.8"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-blanket-into-codegen regression guard: a derived blanket `Into[Target] for
+// Source` — the bodyless reverse impl the compiler synthesizes from a user
+// `impl From[Source] for Target` — must EXECUTE on every compiled target, not
+// just type-check. Before the fix, `m.into()` lowered to `m.into(m)`, but only
+// `Target.from(...)` is emitted, so the program crashed at runtime with
+// "into is not a function" (js/ts) / equivalents on the other backends. The
+// lowerer now rewrites a derived-blanket `recv.into()` to `Target.from(recv)`,
+// the form every backend already resolves.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the rationale).
+module main
+
+record Meter {
+  value: Float
+}
+
+record Foot {
+  value: Float
+}
+
+impl From[Meter] for Foot {
+  public fn from(value: Meter) -> Foot {
+    Foot { value: value.value * 3.28 }
+  }
+}
+
+fn main() -> Void {
+  let m: Meter = Meter { value: 10.0 }
+  let f: Foot = m.into()
+  println("feet=${f.value}")
+}

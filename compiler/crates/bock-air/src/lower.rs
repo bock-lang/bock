@@ -23,6 +23,21 @@ use crate::{
     AirRecordPatternField, EnumVariantPayload, NodeIdGen, NodeKind,
 };
 
+// ─── Metadata keys (lowering → codegen lynchpins) ────────────────────────────────
+
+/// Metadata key stamped on a `Call` node that the lowerer recognised as an
+/// **associated-function call** (`Type.method(args)` — no `self` prepended).
+///
+/// The lowerer alone can classify the receiver as a *type name* (via the
+/// resolver's [`NameKind::Type`]/[`NameKind::Builtin`] classification); the
+/// codegen backends, which run after the type side-table is dropped, cannot.
+/// So the lowerer records the classification here. Backends read it to emit a
+/// static / free-function call keyed by the type name (`Type.method(args)`)
+/// instead of the value-receiver method form the generic fall-through would
+/// produce — which camel-cases the type name into a non-existent value
+/// (`typeValue.method(...)`). The value is [`Value::Bool`]`(true)`.
+pub const ASSOC_CALL_META_KEY: &str = "assoc_call";
+
 // ─── Public entry point ────────────────────────────────────────────────────────
 
 /// Lower a parsed [`Module`] into an S-AIR tree.
@@ -1165,7 +1180,12 @@ impl<'a> Lowerer<'a> {
     /// `Call { callee: FieldAccess(Type, method), args }`.
     ///
     /// Unlike [`make_desugared_method_call`](Self::make_desugared_method_call),
-    /// the receiver is NOT prepended as `self`.
+    /// the receiver is NOT prepended as `self`. The `Call` node is stamped with
+    /// [`ASSOC_CALL_META_KEY`] so the codegen backends emit a *static / free
+    /// function* call (`Type.method(args)`) keyed by the type name, rather than
+    /// the value-receiver method form (`typeValue.method(...)`) the generic
+    /// fall-through would otherwise produce by camel-casing the type name into a
+    /// non-existent value.
     fn make_associated_fn_call(
         &mut self,
         receiver: AIRNode,
@@ -1182,7 +1202,7 @@ impl<'a> Lowerer<'a> {
             },
             scope,
         );
-        self.make_node(
+        let mut call = self.make_node(
             span,
             NodeKind::Call {
                 callee: Box::new(field_access),
@@ -1190,7 +1210,10 @@ impl<'a> Lowerer<'a> {
                 type_args: vec![],
             },
             scope,
-        )
+        );
+        call.metadata
+            .insert(ASSOC_CALL_META_KEY.to_string(), Value::Bool(true));
+        call
     }
 
     /// Desugar pipe: `left |> right`.

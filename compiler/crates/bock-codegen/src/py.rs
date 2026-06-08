@@ -1155,7 +1155,8 @@ impl CodeGenerator for PyGenerator {
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
         // Shared pre-pass: hoist value-position diverging control flow (see
         // `hoist_value_cf`) into declare-then-assign temp blocks.
-        let module = &crate::generator::hoist_value_cf(module.clone());
+        let module =
+            &crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(module.clone()));
         let mut ctx = PyEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
@@ -1215,7 +1216,14 @@ impl CodeGenerator for PyGenerator {
         // module before registry collection or emission (see `hoist_value_cf`).
         let hoisted: Vec<(AIRModule, &std::path::Path)> = modules
             .iter()
-            .map(|(m, p)| (crate::generator::hoist_value_cf((*m).clone()), *p))
+            .map(|(m, p)| {
+                (
+                    crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(
+                        (*m).clone(),
+                    )),
+                    *p,
+                )
+            })
             .collect();
         let modules: Vec<(&AIRModule, &std::path::Path)> =
             hoisted.iter().map(|(m, p)| (m, *p)).collect();
@@ -1849,8 +1857,23 @@ impl PyEmitCtx {
     /// identically at the method definition and every call site (shared policy
     /// with go/js/ts — see [`crate::generator::disambiguate_method_name`]).
     fn py_method_name(&self, name: &str) -> String {
+        // A method/associated-fn whose snake-cased name is a Python *keyword*
+        // (e.g. a `From` impl's `from`) cannot be a `def` name or an attribute
+        // access — `def from()` and `Type.from(...)` are both syntax errors. Such
+        // names are escaped with a trailing `_` (`from` → `from_`), applied
+        // identically at the definition and every call site. Ordinary member
+        // names (`default`, etc.) are legal Python attributes and are not
+        // escaped; only true keywords are.
+        let snake = to_snake_case(name);
+        let escaped =
+            if crate::generator::is_target_keyword(&snake, crate::generator::KeywordTarget::Python)
+            {
+                format!("{snake}_")
+            } else {
+                snake
+            };
         crate::generator::disambiguate_method_name(
-            to_snake_case(name),
+            escaped,
             &self.field_method_collisions,
             "_method",
         )
@@ -3599,7 +3622,19 @@ impl PyEmitCtx {
                             ..
                         } = &im.kind
                         {
-                            tp.segments.last().map(|s| s.name.clone())
+                            let trait_name = tp.segments.last().map(|s| s.name.clone())?;
+                            // An impl with no instance methods (e.g. `From`, whose
+                            // only method `from` is associated) carries no
+                            // instance contract and is often a prelude trait not
+                            // emitted here, so it must not be a Python base class
+                            // (`class Foot(From)` would raise `NameError`). Its
+                            // `from` static method is emitted directly on the
+                            // class.
+                            if crate::generator::impl_has_instance_method(im, &self.effect_ops) {
+                                Some(trait_name)
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
@@ -4156,6 +4191,10 @@ impl PyEmitCtx {
                 self.needs_asyncio_import = true;
             }
             let async_kw = if *is_async { "async " } else { "" };
+            // An associated function (no `self` receiver, e.g. a `From` impl's
+            // `from`) is a `@staticmethod`: it is called as `Type.method(...)`
+            // and takes no implicit `self`. A regular method takes `self`.
+            let is_assoc = crate::generator::is_associated_impl_method(method, &self.effect_ops);
             // The AIR keeps `self` as a leading `Param`; Python methods need
             // exactly one explicit `self`. Skip the bound `self` param if
             // present so it isn't emitted twice (`def m(self, self)`).
@@ -4165,7 +4204,11 @@ impl PyEmitCtx {
             };
             let param_strs = self.collect_param_strs(rest);
             let effects = self.effects_params(effect_clause);
-            let mut all_params = vec!["self".to_string()];
+            let mut all_params = if is_assoc {
+                Vec::new()
+            } else {
+                vec!["self".to_string()]
+            };
             all_params.extend(param_strs);
             all_params.extend(effects);
             let ret = return_type
@@ -4176,6 +4219,9 @@ impl PyEmitCtx {
             // → `message_method`); the dataclass field would otherwise overwrite
             // the method attribute. Renamed identically at every call site.
             let fn_name = self.py_method_name(&name.name);
+            if is_assoc {
+                self.writeln("@staticmethod");
+            }
             self.writeln(&format!(
                 "{async_kw}def {fn_name}({}){}:",
                 all_params.join(", "),
@@ -4188,9 +4234,14 @@ impl PyEmitCtx {
                 self.current_handler_vars
                     .insert(ename.clone(), to_snake_case(ename));
             }
-            // Seed the body frame with `self` + the method params (see
-            // `emit_fn_decl`).
-            let mut seed = vec!["self".to_string()];
+            // Seed the body frame with `self` (regular methods only) + the
+            // method params (see `emit_fn_decl`). An associated `@staticmethod`
+            // has no `self`.
+            let mut seed = if is_assoc {
+                Vec::new()
+            } else {
+                vec!["self".to_string()]
+            };
             seed.extend(Self::param_value_names(rest));
             self.pending_scope_seed = seed;
             // A method body's tail is its return value — clear any enclosing
@@ -4949,6 +5000,34 @@ impl PyEmitCtx {
                 }
                 if self.try_emit_container_method(node, callee, args)? {
                     return Ok(());
+                }
+                // Associated-function call (`Type.method(args)` — stamped by the
+                // lowerer, no `self` prepended) resolves to the `@staticmethod`
+                // on the class. Emit `Type.method(args)` with the type name
+                // preserved and the method name run through `py_method_name` (so a
+                // keyword like `from` → `from_`, matching the `@staticmethod`
+                // definition); the generic fall-through would snake-case the type
+                // identifier into a non-existent value.
+                if crate::generator::is_associated_call(node) {
+                    if let NodeKind::FieldAccess { object, field } = &callee.kind {
+                        if let NodeKind::Identifier { name: type_name } = &object.kind {
+                            let _ = write!(
+                                self.buf,
+                                "{}.{}",
+                                type_name.name,
+                                self.py_method_name(&field.name)
+                            );
+                            self.buf.push('(');
+                            for (i, arg) in args.iter().enumerate() {
+                                if i > 0 {
+                                    self.buf.push_str(", ");
+                                }
+                                self.emit_expr(&arg.value)?;
+                            }
+                            self.buf.push(')');
+                            return Ok(());
+                        }
+                    }
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
                 // [recv, ...rest])`: emit `recv.m(rest)` so the receiver binds
@@ -8676,7 +8755,9 @@ mod tests {
                 is_async: false,
                 name: ident("greet"),
                 generic_params: vec![],
-                params: vec![],
+                // Instance method leads with `self` (real lowering); a no-`self`
+                // method is an associated `@staticmethod`.
+                params: vec![param_node(6, "self")],
                 return_type: None,
                 effect_clause: vec![],
                 where_clause: vec![],

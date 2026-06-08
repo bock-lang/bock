@@ -523,7 +523,8 @@ impl CodeGenerator for GoGenerator {
     fn generate_module(&self, module: &AIRModule) -> Result<GeneratedCode, CodegenError> {
         // Shared pre-pass: hoist value-position diverging control flow (see
         // `hoist_value_cf`) into declare-then-assign temp blocks.
-        let module = &crate::generator::hoist_value_cf(module.clone());
+        let module =
+            &crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(module.clone()));
         let mut ctx = GoEmitCtx::new();
         ctx.enum_variants =
             crate::generator::collect_enum_variants(&[(module, std::path::Path::new(""))]);
@@ -593,7 +594,14 @@ impl CodeGenerator for GoGenerator {
         // module before registry collection or emission (see `hoist_value_cf`).
         let hoisted: Vec<(AIRModule, &std::path::Path)> = modules
             .iter()
-            .map(|(m, p)| (crate::generator::hoist_value_cf((*m).clone()), *p))
+            .map(|(m, p)| {
+                (
+                    crate::generator::hoist_value_cf(crate::generator::lower_blanket_into(
+                        (*m).clone(),
+                    )),
+                    *p,
+                )
+            })
             .collect();
         let modules: Vec<(&AIRModule, &std::path::Path)> =
             hoisted.iter().map(|(m, p)| (m, *p)).collect();
@@ -7199,6 +7207,22 @@ impl GoEmitCtx {
                 || matches!(visibility, Visibility::Public)
                 || self.public_methods.contains(&name.name);
             let method_name = self.go_method_name(&name.name, is_public_method);
+            // An associated function (no `self` receiver, e.g. a `From` impl's
+            // `from`) has no Go-static equivalent: emit a free function named
+            // `<Type>_<Method>` (reusing the DQ28 free-function naming) with no
+            // receiver. The call site (`is_associated_call`) rewrites
+            // `Type.method(args)` to the same `Type_Method(args)`.
+            let receiver_base = receiver_type
+                .split_once('[')
+                .map_or(receiver_type, |(b, _)| b);
+            if crate::generator::is_associated_impl_method(method, &self.effect_ops) {
+                return self.emit_associated_fn(
+                    receiver_base,
+                    target_generics,
+                    method,
+                    is_public_method,
+                );
+            }
             // The AIR keeps `self` as a leading `Param` and method bodies refer
             // to `self.Field`. Name the Go receiver `self` and drop the leading
             // `self` param so the body resolves with no rewrite — otherwise the
@@ -7318,6 +7342,104 @@ impl GoEmitCtx {
             self.indent -= 1;
             self.writeln("}");
         }
+        Ok(())
+    }
+
+    /// Emit an impl/trait **associated function** (no `self` receiver) as a Go
+    /// free function `func <Type>_<Method>(params) ret { ... }`.
+    ///
+    /// Go has no static methods, so an associated function — e.g. a `From` impl's
+    /// `from(value) -> Self` — cannot attach to the type. It is emitted as a free
+    /// function whose name carries the type prefix (`Foot_From`), matching the
+    /// `Type.method(args)` → `Type_Method(args)` rewrite at the call site
+    /// (`is_associated_call`). The `<Type>_` prefix keeps the name collision-free
+    /// across types sharing a method name.
+    fn emit_associated_fn(
+        &mut self,
+        receiver_base: &str,
+        target_generics: &[bock_ast::GenericParam],
+        method: &AIRNode,
+        is_public_method: bool,
+    ) -> Result<(), CodegenError> {
+        let NodeKind::FnDecl {
+            name,
+            generic_params,
+            params,
+            return_type,
+            effect_clause,
+            body,
+            ..
+        } = &method.kind
+        else {
+            return Ok(());
+        };
+        let fn_name = self.freefn_lowered_name(receiver_base, &name.name, is_public_method);
+        // Combine the target's type params with the method's own onto the free
+        // function (Go forbids method type params, but a free function may carry
+        // both — mirrors the DQ28 free-function lowering).
+        let mut combined = target_generics.to_vec();
+        combined.extend(generic_params.iter().cloned());
+        let type_params = self.format_generic_params(&combined);
+        let param_strs = self.collect_param_strs(params);
+        let effects = self.effects_params(effect_clause);
+        let mut all_params = param_strs;
+        all_params.extend(effects);
+        let is_void = return_type.as_deref().is_some_and(Self::is_void_type);
+        let ret = if is_void {
+            String::new()
+        } else {
+            return_type
+                .as_deref()
+                .map(|t| format!(" {}", self.type_to_go(t)))
+                .unwrap_or_default()
+        };
+        self.writeln(&format!(
+            "func {fn_name}{type_params}({}){ret} {{",
+            all_params.join(", "),
+        ));
+        self.indent += 1;
+        let old_handler_vars = self.current_handler_vars.clone();
+        let expanded = self.expand_effect_names(effect_clause);
+        for ename in &expanded {
+            self.current_handler_vars
+                .insert(ename.clone(), to_camel_case(ename));
+        }
+        let saved_record_args = self.var_record_type_args.clone();
+        let saved_decl_type = self.var_decl_type_node.clone();
+        let (
+            saved_opt_scope,
+            saved_list_scope,
+            saved_result_scope,
+            saved_map_scope,
+            saved_set_scope,
+        ) = self.enter_param_optional_scope(params);
+        self.pending_scope_seed = Some(self.param_binding_names(params));
+        if return_type.is_some() && !is_void {
+            let prev_ret = self.current_fn_ret_type.take();
+            let prev_ret_coll = self.current_fn_ret_collection_elem.take();
+            let prev_ret_node = self.current_fn_ret_type_node.take();
+            self.current_fn_ret_type = return_type.as_deref().map(|t| self.type_to_go(t));
+            self.current_fn_ret_collection_elem = return_type
+                .as_deref()
+                .and_then(|t| self.collection_elem_go_types(t));
+            self.current_fn_ret_type_node = Self::fn_type_ret_node(return_type.as_deref());
+            self.emit_block_body_return(body)?;
+            self.current_fn_ret_type = prev_ret;
+            self.current_fn_ret_collection_elem = prev_ret_coll;
+            self.current_fn_ret_type_node = prev_ret_node;
+        } else {
+            self.emit_block_body(body)?;
+        }
+        self.var_optional_elem = saved_opt_scope;
+        self.var_list_elem = saved_list_scope;
+        self.var_result_elem = saved_result_scope;
+        self.var_map_kv = saved_map_scope;
+        self.var_set_elem = saved_set_scope;
+        self.var_record_type_args = saved_record_args;
+        self.var_decl_type_node = saved_decl_type;
+        self.current_handler_vars = old_handler_vars;
+        self.indent -= 1;
+        self.writeln("}");
         Ok(())
     }
 
@@ -8422,6 +8544,31 @@ impl GoEmitCtx {
                 }
                 if self.try_emit_container_method(node, callee, args)? {
                     return Ok(());
+                }
+                // Associated-function call (`Type.method(args)` — stamped by the
+                // lowerer, no `self` prepended). Go has no static methods, so the
+                // definition is a free function `Type_Method(...)`
+                // (`emit_associated_fn`); emit the matching free-function call.
+                // The `public_methods` check picks the same Pascal/camel casing
+                // the definition used (trait-impl associated fns are always
+                // exported).
+                if crate::generator::is_associated_call(node) {
+                    if let NodeKind::FieldAccess { object, field } = &callee.kind {
+                        if let NodeKind::Identifier { name: type_name } = &object.kind {
+                            let is_public = self.public_methods.contains(&field.name);
+                            let fn_name =
+                                self.freefn_lowered_name(&type_name.name, &field.name, is_public);
+                            let _ = write!(self.buf, "{fn_name}(");
+                            for (i, arg) in args.iter().enumerate() {
+                                if i > 0 {
+                                    self.buf.push_str(", ");
+                                }
+                                self.emit_expr(&arg.value)?;
+                            }
+                            self.buf.push(')');
+                            return Ok(());
+                        }
+                    }
                 }
                 // Desugared instance method call `Call(FieldAccess(recv, m),
                 // [recv, ...rest])`: emit `recv.M(rest)` using Go method casing
@@ -13128,7 +13275,8 @@ mod tests {
                         is_async: false,
                         name: ident("increment"),
                         generic_params: vec![],
-                        params: vec![],
+                        // Instance method leads with `self` (real lowering).
+                        params: vec![param_node(4, "self")],
                         return_type: None,
                         effect_clause: vec![],
                         where_clause: vec![],
@@ -13141,7 +13289,10 @@ mod tests {
         assert!(out.contains("type Counter struct {"), "got: {out}");
         assert!(out.contains("Count\tint64"), "got: {out}");
         assert!(out.contains("func NewCounter("), "got: {out}");
-        assert!(out.contains("func (c *Counter) Increment()"), "got: {out}");
+        assert!(
+            out.contains("func (self *Counter) Increment()"),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -13192,7 +13343,9 @@ mod tests {
                         is_async: false,
                         name: ident("distance"),
                         generic_params: vec![],
-                        params: vec![],
+                        // Instance method leads with `self`; a no-`self` method is
+                        // an associated function (emitted as a free function).
+                        params: vec![param_node(7, "self")],
                         return_type: Some(Box::new(node(
                             4,
                             NodeKind::TypeNamed {
@@ -13209,7 +13362,7 @@ mod tests {
         );
         let out = gen(&module(vec![], vec![imp]));
         assert!(
-            out.contains("func (p *Point) Distance() float64 {"),
+            out.contains("func (self *Point) Distance() float64 {"),
             "got: {out}"
         );
     }
@@ -13244,7 +13397,8 @@ mod tests {
                         is_async: false,
                         name: ident("clone"),
                         generic_params: vec![],
-                        params: vec![],
+                        // Instance method leads with `self` (real lowering).
+                        params: vec![param_node(6, "self")],
                         return_type: Some(Box::new(node(4, NodeKind::TypeSelf))),
                         effect_clause: vec![],
                         where_clause: vec![],
@@ -13255,7 +13409,7 @@ mod tests {
         );
         let out = gen(&module(vec![], vec![imp]));
         assert!(
-            out.contains("func (p *Point) Clone() Point {"),
+            out.contains("func (self *Point) Clone() Point {"),
             "Self should resolve to the receiver type Point, got: {out}"
         );
         assert!(
@@ -15117,7 +15271,12 @@ mod tests {
                 is_async: false,
                 name: ident("log"),
                 generic_params: vec![],
-                params: vec![typed_param_node(11, "msg", "String")],
+                // Instance method leads with `self` (real lowering); a no-`self`
+                // method is an associated function (free function, no receiver).
+                params: vec![
+                    param_node(14, "self"),
+                    typed_param_node(11, "msg", "String"),
+                ],
                 return_type: Some(Box::new(type_named_node(12, "Void"))),
                 effect_clause: vec![],
                 where_clause: vec![],
@@ -15138,11 +15297,11 @@ mod tests {
         );
         let out = gen(&module(vec![], vec![record_decl, impl_block]));
         assert!(
-            out.contains("func (s StdoutLogger) Log("),
+            out.contains("func (self StdoutLogger) Log("),
             "impl method should use value receiver, got: {out}"
         );
         assert!(
-            !out.contains("func (s *StdoutLogger) Log("),
+            !out.contains("func (self *StdoutLogger) Log("),
             "impl method should NOT use pointer receiver, got: {out}"
         );
     }

@@ -2088,6 +2088,455 @@ fn call_is_diverging_intrinsic(node: &AIRNode) -> bool {
 /// control-flow node), and to keep the interpreter and semantic analyses out of
 /// the blast radius.
 #[must_use]
+/// Codegen pre-pass: rewrite every derived-blanket `recv.into()` call in
+/// `module` into the resolvable associated call `Target.from(recv)`.
+///
+/// A derived blanket `Into[Target] for Source` is the bodyless reverse impl the
+/// compiler synthesizes from a user `impl From[Source] for Target`. It is
+/// *unexecutable* if emitted as an ordinary method call — the AIR lowers
+/// `recv.into()` to `Call(FieldAccess(recv, "into"), [recv])`, which dispatches
+/// to a non-existent `into` method on every compiled target (JS `recv.into is
+/// not a function`, etc.). The executable form is `Target.from(recv)` — the
+/// `from` associated function each backend emits for the `From` impl.
+///
+/// Run **after** type-checking (in each backend's `generate_*`), so a `.into()`
+/// that reaches this pass has already resolved to a valid `Into` target: an
+/// unrelated-target `.into()` was rejected at check time (`E4012`) and never
+/// arrives here. The pass fires only when the module declares exactly one
+/// distinct `From` target, making the rewrite's target unambiguous (the
+/// documented v1 single-conversion scope). With zero or several `From` impls it
+/// is a no-op, leaving the call to its existing lowering. The rewritten `Call`
+/// is stamped [`bock_air::lower::ASSOC_CALL_META_KEY`] so the backends emit the
+/// static / free-function `from` call.
+pub fn lower_blanket_into(module: AIRNode) -> AIRNode {
+    let targets = collect_from_targets(&module);
+    // Unambiguous only with exactly one distinct `From` target.
+    let [target] = targets.as_slice() else {
+        return module;
+    };
+    let mut rewriter = BlanketIntoRewriter {
+        next_id: max_node_id(&module) + 1,
+        target: target.clone(),
+    };
+    rewriter.rewrite(module)
+}
+
+/// The base name of every `impl From[Source] for Target`'s target type, deduped.
+fn collect_from_targets(module: &AIRNode) -> Vec<String> {
+    let NodeKind::Module { items, .. } = &module.kind else {
+        return Vec::new();
+    };
+    let mut targets: Vec<String> = items
+        .iter()
+        .filter_map(|item| {
+            let NodeKind::ImplBlock {
+                trait_path: Some(tp),
+                target,
+                ..
+            } = &item.kind
+            else {
+                return None;
+            };
+            if tp.segments.last().map(|s| s.name.as_str()) != Some("From") {
+                return None;
+            }
+            type_node_base_name(target)
+        })
+        .collect();
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+/// The base name of a `TypeNamed` AIR node (`Foot` from `Foot` / `Foot[T]`).
+fn type_node_base_name(ty: &AIRNode) -> Option<String> {
+    if let NodeKind::TypeNamed { path, .. } = &ty.kind {
+        path.segments.last().map(|s| s.name.clone())
+    } else {
+        None
+    }
+}
+
+struct BlanketIntoRewriter {
+    next_id: bock_air::NodeId,
+    target: String,
+}
+
+impl BlanketIntoRewriter {
+    fn fresh_id(&mut self) -> bock_air::NodeId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn rewrite(&mut self, mut node: AIRNode) -> AIRNode {
+        // Rewrite a desugared `recv.into()` call: `Call(FieldAccess(recv,
+        // "into"), [recv])` → `Call(FieldAccess(Identifier(Target), "from"),
+        // [recv])` stamped as an associated call. `desugared_self_call` confirms
+        // the receiver is re-passed as the lone `self` arg (so this is the
+        // blanket `.into()`, never an associated `Type.into()` or a 1-arg method
+        // named `into`).
+        if let NodeKind::Call { callee, args, .. } = &node.kind {
+            if let Some((recv, method, rest)) = desugared_self_call(callee, args) {
+                if method.name == "into" && rest.is_empty() {
+                    let span = node.span;
+                    let recv = recv.clone();
+                    let target_id =
+                        AIRNode::new(self.fresh_id(), span, ident_node(&self.target, span));
+                    let field = AIRNode::new(
+                        self.fresh_id(),
+                        span,
+                        NodeKind::FieldAccess {
+                            object: Box::new(target_id),
+                            field: bock_ast::Ident {
+                                name: "from".to_string(),
+                                span,
+                            },
+                        },
+                    );
+                    let mut call = AIRNode::new(
+                        self.fresh_id(),
+                        span,
+                        NodeKind::Call {
+                            callee: Box::new(field),
+                            args: vec![AirArg {
+                                label: None,
+                                value: self.rewrite(recv),
+                            }],
+                            type_args: vec![],
+                        },
+                    );
+                    call.metadata.insert(
+                        bock_air::lower::ASSOC_CALL_META_KEY.to_string(),
+                        bock_air::Value::Bool(true),
+                    );
+                    return call;
+                }
+            }
+        }
+        node.kind = self.rewrite_kind(node.kind);
+        node
+    }
+
+    fn rewrite_box(&mut self, node: Box<AIRNode>) -> Box<AIRNode> {
+        Box::new(self.rewrite(*node))
+    }
+
+    fn rewrite_vec(&mut self, nodes: Vec<AIRNode>) -> Vec<AIRNode> {
+        nodes.into_iter().map(|n| self.rewrite(n)).collect()
+    }
+
+    fn rewrite_args(&mut self, args: Vec<AirArg>) -> Vec<AirArg> {
+        args.into_iter()
+            .map(|a| AirArg {
+                label: a.label,
+                value: self.rewrite(a.value),
+            })
+            .collect()
+    }
+
+    /// Recurse into every child that can contain an expression. Mirrors the
+    /// structure [`ValueCfHoister`] walks; any arm not listed has no nested
+    /// expression a `.into()` could hide in.
+    fn rewrite_kind(&mut self, kind: NodeKind) -> NodeKind {
+        match kind {
+            NodeKind::Module {
+                path,
+                annotations,
+                imports,
+                items,
+            } => NodeKind::Module {
+                path,
+                annotations,
+                imports,
+                items: self.rewrite_vec(items),
+            },
+            NodeKind::FnDecl {
+                annotations,
+                visibility,
+                is_async,
+                name,
+                generic_params,
+                params,
+                return_type,
+                effect_clause,
+                where_clause,
+                body,
+            } => NodeKind::FnDecl {
+                annotations,
+                visibility,
+                is_async,
+                name,
+                generic_params,
+                params,
+                return_type,
+                effect_clause,
+                where_clause,
+                body: self.rewrite_box(body),
+            },
+            NodeKind::ImplBlock {
+                annotations,
+                generic_params,
+                trait_path,
+                trait_args,
+                target,
+                where_clause,
+                methods,
+            } => NodeKind::ImplBlock {
+                annotations,
+                generic_params,
+                trait_path,
+                trait_args,
+                target,
+                where_clause,
+                methods: self.rewrite_vec(methods),
+            },
+            NodeKind::ClassDecl {
+                annotations,
+                visibility,
+                name,
+                generic_params,
+                base,
+                traits,
+                fields,
+                methods,
+            } => NodeKind::ClassDecl {
+                annotations,
+                visibility,
+                name,
+                generic_params,
+                base,
+                traits,
+                fields,
+                methods: self.rewrite_vec(methods),
+            },
+            NodeKind::Block { stmts, tail } => NodeKind::Block {
+                stmts: self.rewrite_vec(stmts),
+                tail: tail.map(|t| self.rewrite_box(t)),
+            },
+            NodeKind::LetBinding {
+                pattern,
+                ty,
+                value,
+                is_mut,
+            } => NodeKind::LetBinding {
+                pattern,
+                ty,
+                value: self.rewrite_box(value),
+                is_mut,
+            },
+            NodeKind::Assign { target, op, value } => NodeKind::Assign {
+                target: self.rewrite_box(target),
+                op,
+                value: self.rewrite_box(value),
+            },
+            NodeKind::Call {
+                callee,
+                args,
+                type_args,
+            } => NodeKind::Call {
+                callee: self.rewrite_box(callee),
+                args: self.rewrite_args(args),
+                type_args,
+            },
+            NodeKind::MethodCall {
+                receiver,
+                method,
+                args,
+                type_args,
+            } => NodeKind::MethodCall {
+                receiver: self.rewrite_box(receiver),
+                method,
+                args: self.rewrite_args(args),
+                type_args,
+            },
+            NodeKind::FieldAccess { object, field } => NodeKind::FieldAccess {
+                object: self.rewrite_box(object),
+                field,
+            },
+            NodeKind::Index { object, index } => NodeKind::Index {
+                object: self.rewrite_box(object),
+                index: self.rewrite_box(index),
+            },
+            NodeKind::BinaryOp { op, left, right } => NodeKind::BinaryOp {
+                op,
+                left: self.rewrite_box(left),
+                right: self.rewrite_box(right),
+            },
+            NodeKind::UnaryOp { op, operand } => NodeKind::UnaryOp {
+                op,
+                operand: self.rewrite_box(operand),
+            },
+            NodeKind::Propagate { expr } => NodeKind::Propagate {
+                expr: self.rewrite_box(expr),
+            },
+            NodeKind::Await { expr } => NodeKind::Await {
+                expr: self.rewrite_box(expr),
+            },
+            NodeKind::Move { expr } => NodeKind::Move {
+                expr: self.rewrite_box(expr),
+            },
+            NodeKind::Borrow { expr } => NodeKind::Borrow {
+                expr: self.rewrite_box(expr),
+            },
+            NodeKind::MutableBorrow { expr } => NodeKind::MutableBorrow {
+                expr: self.rewrite_box(expr),
+            },
+            NodeKind::Return { value } => NodeKind::Return {
+                value: value.map(|v| self.rewrite_box(v)),
+            },
+            NodeKind::Lambda { params, body } => NodeKind::Lambda {
+                params,
+                body: self.rewrite_box(body),
+            },
+            NodeKind::If {
+                let_pattern,
+                condition,
+                then_block,
+                else_block,
+            } => NodeKind::If {
+                let_pattern,
+                condition: self.rewrite_box(condition),
+                then_block: self.rewrite_box(then_block),
+                else_block: else_block.map(|e| self.rewrite_box(e)),
+            },
+            NodeKind::Match { scrutinee, arms } => NodeKind::Match {
+                scrutinee: self.rewrite_box(scrutinee),
+                arms: self.rewrite_vec(arms),
+            },
+            NodeKind::MatchArm {
+                pattern,
+                guard,
+                body,
+            } => NodeKind::MatchArm {
+                pattern,
+                guard: guard.map(|g| self.rewrite_box(g)),
+                body: self.rewrite_box(body),
+            },
+            NodeKind::Guard {
+                let_pattern,
+                condition,
+                else_block,
+            } => NodeKind::Guard {
+                let_pattern,
+                condition: self.rewrite_box(condition),
+                else_block: self.rewrite_box(else_block),
+            },
+            NodeKind::While { condition, body } => NodeKind::While {
+                condition: self.rewrite_box(condition),
+                body: self.rewrite_box(body),
+            },
+            NodeKind::Loop { body } => NodeKind::Loop {
+                body: self.rewrite_box(body),
+            },
+            NodeKind::For {
+                pattern,
+                iterable,
+                body,
+            } => NodeKind::For {
+                pattern,
+                iterable: self.rewrite_box(iterable),
+                body: self.rewrite_box(body),
+            },
+            NodeKind::ListLiteral { elems } => NodeKind::ListLiteral {
+                elems: self.rewrite_vec(elems),
+            },
+            NodeKind::SetLiteral { elems } => NodeKind::SetLiteral {
+                elems: self.rewrite_vec(elems),
+            },
+            NodeKind::TupleLiteral { elems } => NodeKind::TupleLiteral {
+                elems: self.rewrite_vec(elems),
+            },
+            NodeKind::Pipe { left, right } => NodeKind::Pipe {
+                left: self.rewrite_box(left),
+                right: self.rewrite_box(right),
+            },
+            NodeKind::Compose { left, right } => NodeKind::Compose {
+                left: self.rewrite_box(left),
+                right: self.rewrite_box(right),
+            },
+            NodeKind::Range { lo, hi, inclusive } => NodeKind::Range {
+                lo: self.rewrite_box(lo),
+                hi: self.rewrite_box(hi),
+                inclusive,
+            },
+            NodeKind::RecordConstruct {
+                path,
+                fields,
+                spread,
+            } => NodeKind::RecordConstruct {
+                path,
+                fields: fields
+                    .into_iter()
+                    .map(|f| bock_air::AirRecordField {
+                        name: f.name,
+                        value: f.value.map(|v| self.rewrite_box(v)),
+                    })
+                    .collect(),
+                spread: spread.map(|s| self.rewrite_box(s)),
+            },
+            NodeKind::MapLiteral { entries } => NodeKind::MapLiteral {
+                entries: entries
+                    .into_iter()
+                    .map(|e| bock_air::AirMapEntry {
+                        key: self.rewrite(e.key),
+                        value: self.rewrite(e.value),
+                    })
+                    .collect(),
+            },
+            NodeKind::Interpolation { parts } => NodeKind::Interpolation {
+                parts: parts
+                    .into_iter()
+                    .map(|p| match p {
+                        bock_air::AirInterpolationPart::Expr(e) => {
+                            bock_air::AirInterpolationPart::Expr(self.rewrite_box(e))
+                        }
+                        lit @ bock_air::AirInterpolationPart::Literal(_) => lit,
+                    })
+                    .collect(),
+            },
+            NodeKind::ResultConstruct { variant, value } => NodeKind::ResultConstruct {
+                variant,
+                value: value.map(|v| self.rewrite_box(v)),
+            },
+            NodeKind::Break { value } => NodeKind::Break {
+                value: value.map(|v| self.rewrite_box(v)),
+            },
+            NodeKind::EffectOp {
+                effect,
+                operation,
+                args,
+            } => NodeKind::EffectOp {
+                effect,
+                operation,
+                args: self.rewrite_args(args),
+            },
+            NodeKind::HandlingBlock { handlers, body } => NodeKind::HandlingBlock {
+                handlers: handlers
+                    .into_iter()
+                    .map(|h| bock_air::AirHandlerPair {
+                        effect: h.effect,
+                        handler: self.rewrite_box(h.handler),
+                    })
+                    .collect(),
+                body: self.rewrite_box(body),
+            },
+            // No nested expression position a `.into()` could occupy.
+            other => other,
+        }
+    }
+}
+
+/// Build an [`bock_air::NodeKind::Identifier`] holding `name` at `span`.
+fn ident_node(name: &str, span: bock_errors::Span) -> NodeKind {
+    NodeKind::Identifier {
+        name: bock_ast::Ident {
+            name: name.to_string(),
+            span,
+        },
+    }
+}
+
 pub fn hoist_value_cf(module: AIRNode) -> AIRNode {
     let mut hoister = ValueCfHoister {
         next_id: max_node_id(&module) + 1,
@@ -2953,6 +3402,67 @@ pub fn raw_recv_kind(node: &AIRNode) -> Option<&str> {
         return None;
     };
     Some(tag.as_str())
+}
+
+/// True when `node` is a `Call` the lowerer classified as an
+/// **associated-function call** (`Type.method(args)` — no `self` prepended), via
+/// the [`bock_air::lower::ASSOC_CALL_META_KEY`] stamp.
+///
+/// Backends use this to emit a static / free-function call keyed by the type
+/// name (`Type.method(args)`) instead of the value-receiver method form their
+/// generic fall-through would produce — which camel-cases the type name into a
+/// non-existent value (`typeValue.method(...)`). The companion to
+/// [`assoc_fn_def`], which recognises the matching *definition* shape.
+#[must_use]
+pub fn is_associated_call(node: &AIRNode) -> bool {
+    matches!(
+        node.metadata.get(bock_air::lower::ASSOC_CALL_META_KEY),
+        Some(bock_air::Value::Bool(true))
+    )
+}
+
+/// True when an impl/trait `method` (an [`bock_air::NodeKind::FnDecl`]) is an
+/// **associated function** — it does not bind a leading `self` receiver, so it
+/// is reached as `Type.method(...)` rather than `value.method(...)`.
+///
+/// Such a method must be emitted as a static / free function (no synthesized
+/// receiver, no spurious `self` parameter) on every backend; otherwise the
+/// generic impl-method path attaches it as an instance method and the
+/// associated call cannot resolve it. The companion to [`is_associated_call`],
+/// which recognises the matching *call* shape.
+#[must_use]
+pub fn assoc_fn_def(method: &AIRNode) -> bool {
+    let NodeKind::FnDecl { params, .. } = &method.kind else {
+        return false;
+    };
+    match params.first() {
+        Some(first) => param_binds_self(first).is_none(),
+        // A zero-parameter impl method (`fn origin() -> T`) binds no `self`.
+        None => true,
+    }
+}
+
+/// True when an impl/trait `method` should be emitted as an associated function
+/// — [`assoc_fn_def`] holds **and** the method is not an effect operation.
+///
+/// An **effect** operation (`effect Log { fn log(message: String) }`) also lacks
+/// a `self` receiver, but a handler's `impl Log for ConsoleLog { fn log(...) }`
+/// is an *instance* method: it is dispatched as `handler.log(...)` and must
+/// satisfy the effect's interface, so it cannot be a static / free function.
+/// `effect_ops` maps each known effect operation name to its effect (seeded
+/// from every `EffectDecl` before emission), so a method whose name is a key is
+/// an effect op and is kept as an instance method.
+#[must_use]
+pub fn is_associated_impl_method(method: &AIRNode, effect_ops: &HashMap<String, String>) -> bool {
+    if !assoc_fn_def(method) {
+        return false;
+    }
+    if let NodeKind::FnDecl { name, .. } = &method.kind {
+        if effect_ops.contains_key(&name.name) {
+            return false;
+        }
+    }
+    true
 }
 
 /// True when a `BinaryOp { op: Add, left, right }` is **list concatenation** and
@@ -4297,6 +4807,32 @@ pub fn inherited_default_methods(
         .filter(|m| fn_decl_name(m).is_some_and(|n| !overridden.contains(n)))
         .cloned()
         .collect()
+}
+
+/// True when an `impl` block (an [`bock_air::NodeKind::ImplBlock`]) declares at
+/// least one **instance** method — one that binds `self`, **or** an effect
+/// operation (which is dispatched on a handler instance despite taking no
+/// `self`; see [`is_associated_impl_method`]).
+///
+/// An impl whose methods are *all* associated functions (e.g. `impl From[A] for
+/// B` with only `from(value)`) contributes no instance contract: implementing it
+/// adds only static members. Backends that model trait conformance through
+/// instance inheritance / structural interfaces (Python base class, TS
+/// `interface … extends Trait`) must wire the trait in only when this returns
+/// `true`; otherwise the base/`extends` reference points at a trait with no
+/// instance members — often a prelude trait not even emitted into the consuming
+/// module, so the reference would be undefined.
+#[must_use]
+pub fn impl_has_instance_method(
+    impl_block: &AIRNode,
+    effect_ops: &HashMap<String, String>,
+) -> bool {
+    let NodeKind::ImplBlock { methods, .. } = &impl_block.kind else {
+        return false;
+    };
+    methods
+        .iter()
+        .any(|m| !is_associated_impl_method(m, effect_ops))
 }
 
 // ─── Field/method name-collision disambiguation ───────────────────────────────
