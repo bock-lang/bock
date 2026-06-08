@@ -18,7 +18,8 @@ use bock_air::stubs::TypeRef;
 use bock_ast::{ImportDecl, ImportItems};
 
 use crate::checker::TypeChecker;
-use crate::{EffectRef, FnType, GenericType, NamedType, PrimitiveType, Type};
+use crate::exports::{FN_BOUNDS_SEP, IMPL_MARKER_PREFIX, IMPL_MARKER_SEP};
+use crate::{EffectRef, FnType, GenericType, NamedType, PrimitiveType, Type, TypeVarId};
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -53,6 +54,33 @@ pub fn seed_imports(checker: &mut TypeChecker, imports: &[ImportDecl], registry:
                 // Module-level imports (qualified access) are not yet supported
                 // in the type checker. Skip for now.
             }
+        }
+
+        // Q-xmod-impl: trait impls are module-scoped, not name-gated — importing
+        // a module (in any of the import forms above) makes its trait impls
+        // visible for coherent resolution. Scan the whole imported module for
+        // its synthetic impl markers regardless of which names were imported.
+        seed_imported_impls(checker, &module_id, registry);
+    }
+}
+
+/// Scans an imported module for its synthetic trait-impl marker symbols
+/// (Q-xmod-impl) and records each one on the checker, so it is folded into the
+/// impl table in [`TypeChecker::check_module`].
+///
+/// Trait impls are global/coherent: importing a module brings in *all* of its
+/// impls regardless of which value/type names the `use` selected, so this scans
+/// the module's full symbol set rather than only the imported names.
+fn seed_imported_impls(checker: &mut TypeChecker, module_id: &str, registry: &ModuleRegistry) {
+    let Some(exports) = registry.get_module(module_id) else {
+        return;
+    };
+    for (name, sym) in &exports.symbols {
+        if !name.starts_with(IMPL_MARKER_PREFIX) {
+            continue;
+        }
+        if let Some((trait_name, trait_args, target)) = decode_impl_marker(&sym.ty.0) {
+            checker.register_imported_trait_impl(trait_name, trait_args, target);
         }
     }
 }
@@ -126,21 +154,43 @@ pub fn seed_prelude(checker: &mut TypeChecker, registry: &ModuleRegistry) {
             seed_symbol(checker, name, sym);
         }
     }
+    // Q-xmod-impl: also pull any user-declared trait impls from the embedded
+    // core modules whose symbols we seed, mirroring the per-module impl scan in
+    // `seed_imports`. (Canonical primitive conversions are excluded from export
+    // and re-registered locally, so this is a no-op for them but keeps the core
+    // path consistent with the user-import path.)
+    let mut seen_modules: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (module_id, _name) in PRELUDE_FROM_CORE {
+        if seen_modules.insert(module_id) {
+            seed_imported_impls(checker, module_id, registry);
+        }
+    }
 }
 
 // ─── Symbol seeding ─────────────────────────────────────────────────────────
 
 /// Seeds a single exported symbol into the type checker.
 fn seed_symbol(checker: &mut TypeChecker, local_name: &str, sym: &ExportedSymbol) {
-    // Define the symbol's type in the checker's environment.
-    let ty = type_ref_to_type(&sym.ty);
+    // Q-xmod-impl: synthetic impl-marker symbols are not real values — they are
+    // consumed by `seed_imported_impls`'s per-module scan, never seeded as a
+    // value/type here. Skip them so they never land in the env.
+    if local_name.starts_with(IMPL_MARKER_PREFIX) {
+        return;
+    }
+
+    // Q-xmod-bounds: a generic function's `ty` may carry an encoded
+    // where-clause-bound suffix (`Fn(?5) -> Bool where ?5: Comparable`). Split
+    // it off the base type string before parsing, and decode the bounds so the
+    // reconstructed `FnSig` enforces them at call sites.
+    let (base_ty_str, fn_bounds) = decode_fn_bounds(&sym.ty.0);
+    let ty = type_ref_to_type(&TypeRef(base_ty_str));
     match sym.kind {
         ExportKind::Function => {
             // For generic functions (those whose type contains TypeVars),
             // seed an FnSig so each call site gets fresh instantiation.
             // (FC-28: without this, the first call binds TypeVars permanently.)
             if let Type::Function(ref fn_ty) = ty {
-                checker.seed_imported_generic_fn(local_name, fn_ty);
+                checker.seed_imported_generic_fn_with_bounds(local_name, fn_ty, &fn_bounds);
             } else {
                 checker.env.define(local_name, ty.clone());
             }
@@ -482,6 +532,81 @@ fn parse_primitive(s: &str) -> Option<PrimitiveType> {
     }
 }
 
+// ─── Where-bound / impl-marker decoding (Q-xmod-bounds / Q-xmod-impl) ────────
+
+/// Split a generic function's exported type string into its base type string
+/// and its decoded where-clause bounds.
+///
+/// Inverse of [`crate::exports::encode_fn_bounds`]. Returns
+/// `(base_type_string, [(type_var_id, [trait_name, …])])`. When no bound suffix
+/// is present the bounds vec is empty and the input is returned verbatim.
+///
+/// The bound suffix is `<base> where ?<id>: T1 + T2; ?<id2>: T3`. The separator
+/// (` where `) cannot occur inside a base function type string (which is
+/// `Fn(...) -> R [with E]`), so the first occurrence delimits the suffix.
+#[must_use]
+pub(crate) fn decode_fn_bounds(s: &str) -> (String, Vec<(TypeVarId, Vec<String>)>) {
+    let Some(idx) = s.find(FN_BOUNDS_SEP) else {
+        return (s.to_string(), vec![]);
+    };
+    let base = s[..idx].to_string();
+    let suffix = &s[idx + FN_BOUNDS_SEP.len()..];
+
+    let mut bounds: Vec<(TypeVarId, Vec<String>)> = Vec::new();
+    for entry in suffix.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        // Each entry is `?<id>: T1 + T2`.
+        let Some((var_part, traits_part)) = entry.split_once(':') else {
+            continue;
+        };
+        let var_part = var_part.trim();
+        let Some(id_str) = var_part.strip_prefix('?') else {
+            continue;
+        };
+        let Ok(id) = id_str.trim().parse::<TypeVarId>() else {
+            continue;
+        };
+        let traits: Vec<String> = traits_part
+            .split('+')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if !traits.is_empty() {
+            bounds.push((id, traits));
+        }
+    }
+    (base, bounds)
+}
+
+/// Decode a synthetic impl-marker `TypeRef` into `(trait_name, trait_args,
+/// target)`.
+///
+/// Inverse of [`crate::exports::encode_impl_marker`]. Returns `None` when the
+/// string is not a well-formed marker payload.
+#[must_use]
+pub(crate) fn decode_impl_marker(s: &str) -> Option<(String, Vec<Type>, Type)> {
+    let mut parts = s.split(IMPL_MARKER_SEP);
+    let trait_name = parts.next()?.to_string();
+    let args_str = parts.next()?;
+    let target_str = parts.next()?;
+    if trait_name.is_empty() {
+        return None;
+    }
+    let trait_args: Vec<Type> = if args_str.trim().is_empty() {
+        vec![]
+    } else {
+        split_top_level(args_str, ',')
+            .iter()
+            .map(|a| parse_type(a))
+            .collect()
+    };
+    let target = parse_type(target_str);
+    Some((trait_name, trait_args, target))
+}
+
 /// Converts a `ModulePath` to a dot-separated string.
 fn module_path_to_id(path: &bock_ast::ModulePath) -> String {
     path.segments
@@ -691,5 +816,116 @@ mod tests {
         let tr = type_to_type_ref(&ty);
         assert_eq!(tr.0, "Fn(Int) -> String?");
         assert_eq!(type_ref_to_type(&tr), ty);
+    }
+
+    // ── Q-xmod-bounds: where-bound encode/decode roundtrip ──────────────────
+
+    #[test]
+    fn decode_fn_bounds_no_suffix_is_identity() {
+        let (base, bounds) = decode_fn_bounds("Fn(?5) -> Bool");
+        assert_eq!(base, "Fn(?5) -> Bool");
+        assert!(bounds.is_empty());
+    }
+
+    #[test]
+    fn fn_bounds_roundtrip_single() {
+        use crate::exports::encode_fn_bounds;
+        let encoded = encode_fn_bounds("Fn(?5) -> Bool", &[(5, vec!["Comparable".into()])]);
+        assert_eq!(encoded, "Fn(?5) -> Bool where ?5: Comparable");
+        let (base, bounds) = decode_fn_bounds(&encoded);
+        assert_eq!(base, "Fn(?5) -> Bool");
+        assert_eq!(bounds, vec![(5u32, vec!["Comparable".to_string()])]);
+    }
+
+    #[test]
+    fn fn_bounds_roundtrip_multi_param_multi_trait() {
+        use crate::exports::encode_fn_bounds;
+        let encoded = encode_fn_bounds(
+            "Fn(?5, ?6) -> Void",
+            &[
+                (5, vec!["Comparable".into(), "Displayable".into()]),
+                (6, vec!["Into".into()]),
+            ],
+        );
+        let (base, bounds) = decode_fn_bounds(&encoded);
+        assert_eq!(base, "Fn(?5, ?6) -> Void");
+        assert_eq!(
+            bounds,
+            vec![
+                (
+                    5u32,
+                    vec!["Comparable".to_string(), "Displayable".to_string()]
+                ),
+                (6u32, vec!["Into".to_string()]),
+            ]
+        );
+    }
+
+    /// A dotted trait path (`a.b.Trait`) must survive the bound encoding so the
+    /// reconstructed `TypeConstraint` keeps its segments.
+    #[test]
+    fn fn_bounds_roundtrip_dotted_trait() {
+        use crate::exports::encode_fn_bounds;
+        let encoded = encode_fn_bounds(
+            "Fn(?0) -> ?0",
+            &[(0, vec!["core.compare.Comparable".into()])],
+        );
+        let (_base, bounds) = decode_fn_bounds(&encoded);
+        assert_eq!(
+            bounds,
+            vec![(0u32, vec!["core.compare.Comparable".to_string()])]
+        );
+    }
+
+    // ── Q-xmod-impl: impl-marker encode/decode roundtrip ────────────────────
+
+    #[test]
+    fn impl_marker_roundtrip_parameterized() {
+        use crate::exports::encode_impl_marker;
+        let celsius = Type::Named(NamedType {
+            name: "Celsius".into(),
+        });
+        let fahr = Type::Named(NamedType {
+            name: "Fahrenheit".into(),
+        });
+        let encoded = encode_impl_marker("From", std::slice::from_ref(&celsius), &fahr);
+        let (trait_name, args, target) = decode_impl_marker(&encoded).expect("well-formed marker");
+        assert_eq!(trait_name, "From");
+        assert_eq!(args, vec![celsius]);
+        assert_eq!(target, fahr);
+    }
+
+    #[test]
+    fn impl_marker_roundtrip_plain_trait() {
+        use crate::exports::encode_impl_marker;
+        let widget = Type::Named(NamedType {
+            name: "Widget".into(),
+        });
+        let encoded = encode_impl_marker("Show", &[], &widget);
+        let (trait_name, args, target) = decode_impl_marker(&encoded).expect("well-formed marker");
+        assert_eq!(trait_name, "Show");
+        assert!(args.is_empty());
+        assert_eq!(target, widget);
+    }
+
+    #[test]
+    fn impl_marker_roundtrip_generic_arg() {
+        use crate::exports::encode_impl_marker;
+        let list_int = Type::Generic(GenericType {
+            constructor: "List".into(),
+            args: vec![Type::Primitive(PrimitiveType::Int)],
+        });
+        let target = Type::Named(NamedType { name: "Bag".into() });
+        let encoded = encode_impl_marker("From", std::slice::from_ref(&list_int), &target);
+        let (trait_name, args, decoded_target) =
+            decode_impl_marker(&encoded).expect("well-formed marker");
+        assert_eq!(trait_name, "From");
+        assert_eq!(args, vec![list_int]);
+        assert_eq!(decoded_target, target);
+    }
+
+    #[test]
+    fn impl_marker_malformed_returns_none() {
+        assert!(decode_impl_marker("not-a-marker").is_none());
     }
 }

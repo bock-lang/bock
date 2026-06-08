@@ -109,6 +109,76 @@ fn format_primitive(p: &PrimitiveType) -> String {
     .to_string()
 }
 
+// ─── Generic-fn where-bound encoding (Q-xmod-bounds) ─────────────────────────
+
+/// Sentinel that separates a generic function's base type string from its
+/// encoded where-clause bounds in the export ABI. Chosen so it can never occur
+/// inside a base type string (which uses `Fn(...) -> R [with E]` and never the
+/// literal ` where ?`).
+pub(crate) const FN_BOUNDS_SEP: &str = " where ";
+
+/// Append an encoded where-clause-bound suffix to a generic function's base
+/// type string.
+///
+/// `bounds` is `(type_var_id, [trait_name, …])` — the var id is the same
+/// `?<id>` that appears in `base`. The encoding is:
+///
+/// ```text
+/// <base> where ?<id1>: Trait1 + Trait2; ?<id2>: Trait3
+/// ```
+///
+/// Decoded by [`crate::seed_imports::decode_fn_bounds`] in the importing
+/// module. Entries with no traits are skipped; an empty `bounds` yields `base`
+/// unchanged (the caller already special-cases this).
+#[must_use]
+pub(crate) fn encode_fn_bounds(base: &str, bounds: &[(crate::TypeVarId, Vec<String>)]) -> String {
+    let parts: Vec<String> = bounds
+        .iter()
+        .filter(|(_, traits)| !traits.is_empty())
+        .map(|(id, traits)| format!("?{id}: {}", traits.join(" + ")))
+        .collect();
+    if parts.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}{FN_BOUNDS_SEP}{}", parts.join("; "))
+    }
+}
+
+// ─── Cross-module trait-impl marker encoding (Q-xmod-impl) ───────────────────
+
+/// Reserved name prefix for the synthetic symbols that carry an exported
+/// module's trait impls across the export ABI. No user identifier can begin
+/// with `__bock_impl__` (Bock identifiers do not start with this sequence), so
+/// these markers never collide with a real export and are invisible to name
+/// resolution. The importing module's `seed_imports` scans an imported module's
+/// symbols for this prefix.
+pub(crate) const IMPL_MARKER_PREFIX: &str = "__bock_impl__";
+
+/// Field separator inside an impl marker's encoded `TypeRef`. The ASCII unit
+/// separator (`0x1f`) cannot appear in a formatted type string, so it cleanly
+/// delimits `trait_name`, the trait-arg list, and the target type.
+pub(crate) const IMPL_MARKER_SEP: char = '\u{1f}';
+
+/// Encode a trait impl `(trait_name, trait_args, target)` for transport in a
+/// synthetic marker symbol's `TypeRef`.
+///
+/// Layout: `trait_name <SEP> arg1, arg2, … <SEP> target`. The arg segment is
+/// empty for a plain (non-parameterized) trait impl. Decoded by
+/// [`crate::seed_imports::decode_impl_marker`].
+#[must_use]
+pub(crate) fn encode_impl_marker(trait_name: &str, trait_args: &[Type], target: &Type) -> String {
+    let args = trait_args
+        .iter()
+        .map(format_type)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{trait_name}{sep}{args}{sep}{target}",
+        sep = IMPL_MARKER_SEP,
+        target = format_type(target),
+    )
+}
+
 // ─── Export collection ──────────────────────────────────────────────────────
 
 /// Collects exports from a fully-compiled module.
@@ -145,12 +215,28 @@ pub fn collect_exports(
                     .cloned()
                     .unwrap_or(Type::Error);
 
+                // Q-xmod-bounds: thread the generic fn's where-clause trait
+                // bounds through the export ABI. The base type string already
+                // encodes each generic parameter as `?<var_id>`; we append a
+                // parseable bound suffix keyed by the same var ids so the
+                // importing module reconstructs the `where`-clause and enforces
+                // it at the call site. Without this, an imported generic fn's
+                // bounds are silently dropped and a bound-violating call is
+                // wrongly accepted.
+                let base = type_to_type_ref(&ty);
+                let bounds = checker.fn_where_bounds(&name.name);
+                let ty_ref = if bounds.is_empty() {
+                    base
+                } else {
+                    TypeRef(encode_fn_bounds(&base.0, &bounds))
+                };
+
                 exports.add_symbol(
                     name.name.clone(),
                     ExportedSymbol {
                         kind: ExportKind::Function,
                         visibility: *visibility,
-                        ty: type_to_type_ref(&ty),
+                        ty: ty_ref,
                         detail: ExportDetail::None,
                     },
                 );
@@ -367,6 +453,31 @@ pub fn collect_exports(
             }
 
             _ => {}
+        }
+    }
+
+    // Q-xmod-impl: export the module's user-declared trait impls as synthetic
+    // marker symbols so a module that imports this one can re-register them and
+    // resolve `.into()` / `From` / `Into` and cross-module where-bounds. The
+    // markers use a reserved name prefix (`__bock_impl__…`) that no user
+    // identifier can produce, are marked `Public` so they survive `get_module`
+    // / glob scans, and carry the impl encoded in the `ty` `TypeRef`. They are
+    // ignored by ordinary name resolution (no user `use` names them) and are
+    // only consumed by `seed_imports`'s impl-marker scan.
+    if let Some(table) = checker.impl_table.as_ref() {
+        for (i, (trait_name, trait_args, target)) in
+            table.exportable_trait_impls().iter().enumerate()
+        {
+            let marker_name = format!("{IMPL_MARKER_PREFIX}{i}");
+            exports.add_symbol(
+                marker_name,
+                ExportedSymbol {
+                    kind: ExportKind::Function,
+                    visibility: bock_ast::Visibility::Public,
+                    ty: TypeRef(encode_impl_marker(trait_name, trait_args, target)),
+                    detail: ExportDetail::None,
+                },
+            );
         }
     }
 

@@ -693,6 +693,45 @@ impl ImplTable {
         id
     }
 
+    /// Fold trait impls collected from imported modules into this table
+    /// (Q-xmod-impl), then re-run blanket-`Into` synthesis.
+    ///
+    /// Each `(trait_name, trait_args, target)` is registered the same way a
+    /// local impl would be: parameterized when `trait_args` is non-empty
+    /// (`From[A] for B`), plain otherwise (`Comparable for B`). An entry is
+    /// skipped when its slot is already occupied (a local impl, a canonical
+    /// conformance, or another imported impl already covers it), so importing
+    /// never clobbers a local registration and re-importing is idempotent.
+    ///
+    /// After registering the imported `From` impls, the blanket-`Into`
+    /// synthesis runs again so an imported `From[A] for B` yields the blanket
+    /// `Into[B] for A` needed by `a.into()` in the importing module.
+    pub fn fold_imported_impls(&mut self, impls: &[(String, Vec<Type>, Type)]) {
+        for (trait_name, trait_args, target) in impls {
+            let key = type_key(target);
+            if trait_args.is_empty() {
+                if self
+                    .trait_impl_index
+                    .contains_key(&(trait_name.clone(), key.clone()))
+                {
+                    continue; // already covered locally/canonically.
+                }
+                self.register_trait_impl(trait_name.clone(), target);
+            } else {
+                let arg_key = trait_arg_key(trait_args);
+                if self
+                    .param_trait_impl_index
+                    .contains_key(&(trait_name.clone(), arg_key, key))
+                {
+                    continue;
+                }
+                self.register_param_trait_impl(trait_name.clone(), trait_args, target, false);
+            }
+        }
+        // An imported `From[A] for B` must yield the blanket `Into[B] for A`.
+        self.synthesize_blanket_into();
+    }
+
     /// Register an associated type binding for a given impl block.
     ///
     /// Overrides any existing binding for `(impl_id, name)`.
@@ -750,6 +789,53 @@ impl ImplTable {
     /// Iterate over all registered entries.
     pub fn entries(&self) -> impl Iterator<Item = &ImplEntry> {
         self.entries.values()
+    }
+
+    /// Collect the user-declared trait impls that should be visible to a module
+    /// importing this one (Q-xmod-impl).
+    ///
+    /// Each entry is `(trait_name, trait_args, target_type)`. Only impls that a
+    /// downstream module needs to *re-register* are returned:
+    ///
+    /// * **canonical** entries (compiler-provided primitive conformances) are
+    ///   excluded — every module re-adds them via
+    ///   [`register_canonical_conformances`] / [`register_canonical_conversions`];
+    /// * **derived** entries (e.g. the blanket `Into[U]` synthesized from a
+    ///   `From[T] for U`) are excluded — they are re-synthesized locally by the
+    ///   blanket-`Into` synthesis from the re-registered `From`;
+    /// * **generic** impls are excluded — cross-module generic-impl
+    ///   instantiation is out of scope for v1.
+    ///
+    /// Both parameterized impls (`From[A] for B`) and plain trait impls
+    /// (`Comparable for B`) are returned, so a cross-module `.into()` resolves
+    /// and an imported generic fn's `T: Comparable` bound is satisfiable by an
+    /// imported `impl Comparable for B`.
+    ///
+    /// Impls whose **target type is a primitive** are excluded: the compiler's
+    /// canonical primitive conversions (`From[Int] for Float`, …) register
+    /// without the `is_canonical` flag set and would otherwise leak into the
+    /// export, and a primitive's conformances are re-registered locally in every
+    /// module anyway (and sealing forbids user core-trait impls on primitives).
+    /// The cross-module impls that matter target user-defined (`Named`) types.
+    #[must_use]
+    pub fn exportable_trait_impls(&self) -> Vec<(String, Vec<Type>, Type)> {
+        let mut out: Vec<(String, Vec<Type>, Type)> = Vec::new();
+        for entry in self.entries.values() {
+            if entry.is_canonical || entry.is_derived || entry.is_generic {
+                continue;
+            }
+            let Some(tr) = &entry.trait_ref else {
+                continue; // inherent impl — nothing to export here
+            };
+            let Some(target) = &entry.target_type else {
+                continue; // unresolved target — cannot re-register precisely
+            };
+            if matches!(target, Type::Primitive(_)) {
+                continue; // canonical/primitive conformance — not a user export
+            }
+            out.push((tr.name.clone(), entry.trait_args.clone(), target.clone()));
+        }
+        out
     }
 
     // ── Internal lookup helpers ────────────────────────────────────────────────
