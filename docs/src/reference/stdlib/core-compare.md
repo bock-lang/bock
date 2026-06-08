@@ -15,6 +15,25 @@ use core.compare.{max, min, key}
 Implementing these traits opts a type into operator syntax: `Equatable`
 enables `==`/`!=`, and `Comparable` enables `<`/`>`/`<=`/`>=` (§18.5).
 
+This gating is enforced at type-check time. Using an ordering operator
+(`<`, `>`, `<=`, `>=`) on a user type that does **not** `impl Comparable`
+is rejected with an `E4005` diagnostic suggesting the missing impl:
+
+```bock
+record Point { x: Int, y: Int }
+
+let a: Point = Point { x: 1, y: 2 }
+let b: Point = Point { x: 3, y: 4 }
+let _ = a < b
+//      ^ error[E4005]: type `Point` does not implement `Comparable`; the
+//        `<`/`>`/`<=`/`>=` operators require it — implement `Comparable` for `Point`
+```
+
+Adding `impl Comparable for Point` (a `compare(self, other: Point) -> Ordering`)
+makes the same expression check clean. The primitive conformances (`Int`,
+`Float`, `String`, `Char`, the sized numerics — **not `Bool`**) are gated the
+same way through `core`'s sealed conformances.
+
 ## Enums
 
 ### `Ordering`

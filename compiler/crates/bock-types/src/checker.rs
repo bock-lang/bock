@@ -5091,6 +5091,65 @@ impl TypeChecker {
 
     // ── Binary / unary op typing ─────────────────────────────────────────────
 
+    /// §18.5 operator gating: require a `<`/`>`/`<=`/`>=` operand to be
+    /// `Comparable`.
+    ///
+    /// The gate fires only for a **user** (`Type::Named`) operand whose type is
+    /// resolved and provably *not* `Comparable` in the current `impl_table`. It
+    /// is intentionally conservative everywhere else:
+    ///
+    /// - **No `impl_table`** (e.g. a unit-test checker, or pre-module setup):
+    ///   skipped, mirroring the `where`-clause bound check, which cannot prove
+    ///   non-conformance without the table.
+    /// - **Inference variables / `Flexible` / `Error`:** skipped — the operand
+    ///   type is not yet concrete, so a bounded generic param (`T: Comparable`)
+    ///   reaches `compare` via its where-clause obligation, not this gate.
+    /// - **Primitives / generics / tuples / functions:** the canonical
+    ///   conformances registered in `impl_table` decide; a primitive that *is*
+    ///   `Comparable` (Int, Float, String, Char, sized numerics) passes, and one
+    ///   that is not (e.g. `Bool`) is rejected here, matching §18.5's matrix.
+    ///
+    /// On failure it emits [`E_WHERE_CLAUSE`] — the trait-bound error code —
+    /// with a message suggesting `impl Comparable`.
+    fn require_comparable_operand(&mut self, operand: &Type, span: Span) {
+        let resolved = self.subst.apply(operand);
+        // Only gate concrete operands; leave inference vars / sketch types /
+        // poison untouched so bounded generics and error recovery are unharmed.
+        match &resolved {
+            Type::TypeVar(_) | Type::Flexible(_) | Type::Error => return,
+            _ => {}
+        }
+        let impl_table = match self.impl_table.as_ref() {
+            Some(t) => t,
+            None => return, // no table → cannot prove non-conformance.
+        };
+        let trait_ref = TraitRef::new("Comparable");
+        if resolve_impl(&trait_ref, &resolved, impl_table).is_none() {
+            let key = crate::traits::type_key(&resolved);
+            // A primitive that is not `Comparable` (only `Bool`, per the §18.5
+            // sealed-conformance matrix) cannot be given an `impl` — core trait
+            // conformances for primitives are sealed — so point at the newtype
+            // escape hatch instead of suggesting an impossible `impl`.
+            let suggestion = if matches!(resolved, Type::Primitive(_)) {
+                format!(
+                    "`{key}` is not `Comparable` (the `(core trait, primitive)` \
+                     conformances are sealed); wrap it in a newtype with its own \
+                     `impl Comparable`"
+                )
+            } else {
+                format!("implement `Comparable` for `{key}`")
+            };
+            self.diags.error(
+                E_WHERE_CLAUSE,
+                format!(
+                    "type `{key}` does not implement `Comparable`; the \
+                     `<`/`>`/`<=`/`>=` operators require it — {suggestion}"
+                ),
+                span,
+            );
+        }
+    }
+
     fn infer_binop(&mut self, op: BinOp, lt: &Type, rt: &Type, span: Span) -> Type {
         match op {
             // Arithmetic: operands and result are numeric
@@ -5099,9 +5158,29 @@ impl TypeChecker {
                 self.subst.apply(lt)
             }
 
-            // Comparison: operands must unify; result is Bool
+            // Comparison: operands must unify; result is Bool.
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 self.unify_or_error(lt, rt, span, "comparison operands");
+                // §18.5 trait-language integration: the ordering operators
+                // (`<`, `>`, `<=`, `>=`) require `impl Comparable` for a
+                // *user* (Named) operand. Primitives are gated by the canonical
+                // conformances in `impl_table`; generic type variables are gated
+                // by their `where`-clause bounds. `==`/`!=` (Equatable) are NOT
+                // gated here — records carry structural equality (see the
+                // §18.5 Equatable follow-up).
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+                    // `unify_or_error` above already required the operands to
+                    // share a type, so a single gate check on the (post-unify)
+                    // left operand covers both sides without double-reporting.
+                    // Fall back to the right operand only when the left stayed
+                    // an inference variable (e.g. an open var unified *into* a
+                    // concrete right-hand type).
+                    let probe = match self.subst.apply(lt) {
+                        Type::TypeVar(_) => rt,
+                        _ => lt,
+                    };
+                    self.require_comparable_operand(probe, span);
+                }
                 Type::Primitive(PrimitiveType::Bool)
             }
 
@@ -5957,6 +6036,182 @@ mod tests {
         );
         let ty = checker.infer_expr(&node);
         assert_eq!(ty, Type::Primitive(PrimitiveType::Bool));
+    }
+
+    // ── Operator gating: comparison on user types (§18.5, Q-list-operator-
+    //    gating-user-types) ──────────────────────────────────────────────────
+
+    /// A `<` on a user (Named) type whose definition does NOT `impl Comparable`
+    /// must be rejected: §18.5 gates the comparison operators behind the trait.
+    #[test]
+    fn comparison_on_user_type_without_comparable_errors() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        // Impl table present, but `Point` does not implement Comparable.
+        checker.impl_table = Some(make_impl_table(&[(
+            "Comparable",
+            Type::Primitive(PrimitiveType::Int),
+        )]));
+
+        checker.env.define(
+            "a",
+            Type::Named(crate::NamedType {
+                name: "Point".into(),
+            }),
+        );
+        checker.env.define(
+            "b",
+            Type::Named(crate::NamedType {
+                name: "Point".into(),
+            }),
+        );
+        let left = make_node(&gen, NodeKind::Identifier { name: ident("a") });
+        let right = make_node(&gen, NodeKind::Identifier { name: ident("b") });
+        let node = make_node(
+            &gen,
+            NodeKind::BinaryOp {
+                op: BinOp::Lt,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        checker.infer_expr(&node);
+        assert!(
+            checker.diags.has_errors(),
+            "expected error: Point does not implement Comparable"
+        );
+    }
+
+    /// The same user type WITH `impl Comparable` checks clean under `<`.
+    #[test]
+    fn comparison_on_user_type_with_comparable_ok() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let point = Type::Named(crate::NamedType {
+            name: "Point".into(),
+        });
+        checker.impl_table = Some(make_impl_table(&[("Comparable", point.clone())]));
+
+        checker.env.define("a", point.clone());
+        checker.env.define("b", point);
+        let left = make_node(&gen, NodeKind::Identifier { name: ident("a") });
+        let right = make_node(&gen, NodeKind::Identifier { name: ident("b") });
+        let node = make_node(
+            &gen,
+            NodeKind::BinaryOp {
+                op: BinOp::Gt,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        let ty = checker.infer_expr(&node);
+        assert!(
+            !checker.diags.has_errors(),
+            "expected no errors: Point implements Comparable"
+        );
+        assert_eq!(ty, Type::Primitive(PrimitiveType::Bool));
+    }
+
+    /// Each of the four ordering operators is gated identically.
+    #[test]
+    fn all_ordering_operators_gated_on_user_types() {
+        for op in [BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge] {
+            let gen = NodeIdGen::new();
+            let mut checker = TypeChecker::new();
+            checker.impl_table = Some(make_impl_table(&[(
+                "Comparable",
+                Type::Primitive(PrimitiveType::Int),
+            )]));
+            checker.env.define(
+                "a",
+                Type::Named(crate::NamedType {
+                    name: "Widget".into(),
+                }),
+            );
+            checker.env.define(
+                "b",
+                Type::Named(crate::NamedType {
+                    name: "Widget".into(),
+                }),
+            );
+            let left = make_node(&gen, NodeKind::Identifier { name: ident("a") });
+            let right = make_node(&gen, NodeKind::Identifier { name: ident("b") });
+            let node = make_node(
+                &gen,
+                NodeKind::BinaryOp {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            );
+            checker.infer_expr(&node);
+            assert!(
+                checker.diags.has_errors(),
+                "expected error for {op:?} on a non-Comparable user type"
+            );
+        }
+    }
+
+    /// Comparison on primitives still works without explicit gating fallout:
+    /// `Int < Int` with the canonical conformances registered is accepted, and
+    /// — to mirror the existing `infer_comparison_returns_bool` test — with no
+    /// impl table at all the gate is skipped (cannot prove non-conformance).
+    #[test]
+    fn comparison_on_primitive_not_gated_when_conformant() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let mut table = ImplTable::new();
+        crate::traits::register_canonical_conformances(&mut table);
+        checker.impl_table = Some(table);
+
+        let left = int_lit(&gen);
+        let right = int_lit(&gen);
+        let node = make_node(
+            &gen,
+            NodeKind::BinaryOp {
+                op: BinOp::Lt,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        let ty = checker.infer_expr(&node);
+        assert!(
+            !checker.diags.has_errors(),
+            "Int is Comparable; `<` must be accepted"
+        );
+        assert_eq!(ty, Type::Primitive(PrimitiveType::Bool));
+    }
+
+    /// A bounded generic param (`T: Comparable`) compared with `<` must NOT be
+    /// flagged: the operand type is a `TypeVar`/`TraitBound`, not a Named type,
+    /// so the user-type gate does not apply (the where-clause check covers it).
+    #[test]
+    fn comparison_on_bounded_generic_param_not_gated() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        checker.impl_table = Some(make_impl_table(&[(
+            "Comparable",
+            Type::Primitive(PrimitiveType::Int),
+        )]));
+        // A fresh inference variable stands in for the bounded generic param.
+        let tv = checker.fresh_var();
+        checker.env.define("a", tv.clone());
+        checker.env.define("b", tv);
+        let left = make_node(&gen, NodeKind::Identifier { name: ident("a") });
+        let right = make_node(&gen, NodeKind::Identifier { name: ident("b") });
+        let node = make_node(
+            &gen,
+            NodeKind::BinaryOp {
+                op: BinOp::Lt,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        checker.infer_expr(&node);
+        assert!(
+            !checker.diags.has_errors(),
+            "comparison on an inference variable must not trigger the user-type gate"
+        );
     }
 
     #[test]

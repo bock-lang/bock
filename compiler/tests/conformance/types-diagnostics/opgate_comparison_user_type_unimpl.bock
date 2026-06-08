@@ -1,0 +1,25 @@
+// TEST: opgate_comparison_user_type_unimpl
+// EXPECT: error E4005 at 23:21
+//
+// Q-list-operator-gating-user-types (§18.5): the ordering operators
+// (`<`, `>`, `<=`, `>=`) require `impl Comparable` for a USER (record/class)
+// operand. `Point` declares no `impl Comparable`, so `a < b` is rejected at
+// type-check time — mirroring how the canonical primitive conformances gate the
+// operator for primitives and how `where (T: Comparable)` gates it for generics.
+//
+// The diagnostic reuses the trait-bound error code (`E4005`) and suggests
+// implementing `Comparable` for the type. The location points at the `a < b`
+// comparison expression (the `let` initializer at 23:21).
+module main
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+fn main() -> Void {
+  let a: Point = Point { x: 1, y: 2 }
+  let b: Point = Point { x: 3, y: 4 }
+  let lt: Bool = a < b
+  println("${lt}")
+}

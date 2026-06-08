@@ -1,0 +1,53 @@
+// TEST: opgate_comparison_user_type_impl
+// EXPECT: output "true;false;true;false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// SKIP REASON (known-broken, codegen): the §18.5 *type-level* gate for the
+// comparison operators on user types (Q-list-operator-gating-user-types) is
+// implemented in bock-types — `a < b` on a `Point` WITH `impl Comparable`
+// checks clean (and WITHOUT it is rejected `E4005`, see
+// types-diagnostics/opgate_comparison_user_type_unimpl.bock). But every backend
+// currently lowers `a < b` (two user-type operands) to a NATIVE `<`:
+//   * Python: `TypeError: '<' not supported between instances of 'Point'`
+//   * Go / Rust: compile error (structs / non-PartialOrd types are not ordered)
+//   * JS: object coercion to NaN — silently wrong
+// The operator must instead lower through the type's `compare(self, other)`
+// (e.g. `a.compare(b) == Less`), the way generic `T: Comparable` bounds already
+// lower `a.compare(b)` to native ordering for primitives.
+//
+// This fixture is the ready-made positive exec test for the codegen follow-up
+// (FOUND: codegen — comparison-operator lowering on user Comparable types).
+// Flip `.bock.skip` → `.bock` once bock-codegen routes user-type `<`/`>`/`<=`/
+// `>=` through `compare`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Ordering, Less, Equal, Greater}
+
+record Point {
+  rank: Int,
+}
+
+impl Comparable for Point {
+  public fn compare(self, other: Point) -> Ordering {
+    if (self.rank < other.rank) {
+      Less
+    } else if (self.rank == other.rank) {
+      Equal
+    } else {
+      Greater
+    }
+  }
+}
+
+fn main() -> Void {
+  let a: Point = Point { rank: 1 }
+  let b: Point = Point { rank: 3 }
+  let lt: Bool = a < b
+  let gt: Bool = a > b
+  let le: Bool = a <= b
+  let ge: Bool = a >= b
+  println("${lt};${gt};${le};${ge}")
+}
