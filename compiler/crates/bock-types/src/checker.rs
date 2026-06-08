@@ -357,6 +357,16 @@ pub struct TypeChecker {
     imported_trait_impls: Vec<(String, Vec<Type>, Type)>,
     /// Methods from inherent impl blocks: type_name → method_name → fn_type.
     method_types: HashMap<String, HashMap<String, Type>>,
+    /// A method's OWN generic type-parameter names, keyed
+    /// type_name → method_name → \[param_name, …\]. Populated during
+    /// `collect_sig` for `ImplBlock`/`ClassDecl` methods that declare their own
+    /// `[U, …]` params (distinct from the type's params, which live in
+    /// `record_generic_params`). At a call site these names are substituted with
+    /// fresh inference variables so the method's own params are inferred from the
+    /// arguments — the method-level analogue of free-function call inference
+    /// (Q-checker-method-generic-call-infer). The type's own params stay as
+    /// `Named(_)` placeholders pinned by the receiver via `record_generic_params`.
+    method_generic_params: HashMap<String, HashMap<String, Vec<String>>>,
     /// Effect operation types: effect_name → [(op_name, fn_type)].
     /// Populated during `collect_sig` for `EffectDecl` nodes.
     effect_op_types: HashMap<String, Vec<(String, Type)>>,
@@ -411,6 +421,7 @@ impl TypeChecker {
             impl_table: None,
             imported_trait_impls: Vec::new(),
             method_types: HashMap::new(),
+            method_generic_params: HashMap::new(),
             effect_op_types: HashMap::new(),
             effect_components: HashMap::new(),
             record_field_types: HashMap::new(),
@@ -1351,10 +1362,26 @@ impl TypeChecker {
                         name,
                         params,
                         return_type,
+                        generic_params: method_gps,
                         ..
                     } = &method.kind
                     {
                         let gp_map: HashMap<String, Type> = HashMap::new();
+
+                        // Record the method's OWN type-param names (e.g. the `U`
+                        // in `fn map[U](...)`) so the call site can substitute
+                        // them with fresh inference vars
+                        // (Q-checker-method-generic-call-infer). The type's own
+                        // params (`T`) are pinned by the receiver and are NOT
+                        // listed here.
+                        let method_gp_names: Vec<String> =
+                            method_gps.iter().map(|g| g.name.name.clone()).collect();
+                        if !method_gp_names.is_empty() {
+                            self.method_generic_params
+                                .entry(target_name.clone())
+                                .or_default()
+                                .insert(name.name.clone(), method_gp_names);
+                        }
 
                         let param_types: Vec<Type> = params
                             .iter()
@@ -1533,10 +1560,24 @@ impl TypeChecker {
                         name: method_name,
                         params,
                         return_type,
+                        generic_params: method_gps,
                         ..
                     } = &method.kind
                     {
                         let gp_map: HashMap<String, Type> = HashMap::new();
+
+                        // Record the method's OWN type-param names so the call
+                        // site can substitute them with fresh inference vars
+                        // (Q-checker-method-generic-call-infer); see the
+                        // `ImplBlock` branch for the rationale.
+                        let method_gp_names: Vec<String> =
+                            method_gps.iter().map(|g| g.name.name.clone()).collect();
+                        if !method_gp_names.is_empty() {
+                            self.method_generic_params
+                                .entry(class_name.clone())
+                                .or_default()
+                                .insert(method_name.name.clone(), method_gp_names);
+                        }
 
                         let param_types: Vec<Type> = params
                             .iter()
@@ -2313,10 +2354,18 @@ impl TypeChecker {
                             }
                         }
                         // Look up method on the named type from inherent impls.
-                        if let Some(methods) = self.method_types.get(&nt.name) {
-                            if let Some(fn_ty) = methods.get(&field_name) {
-                                return self.record(node, fn_ty.clone());
-                            }
+                        // Freshen the method's OWN type params per call site so
+                        // they infer from the arguments
+                        // (Q-checker-method-generic-call-infer).
+                        if let Some(fn_ty) = self
+                            .method_types
+                            .get(&nt.name)
+                            .and_then(|methods| methods.get(&field_name))
+                            .cloned()
+                        {
+                            let resolved =
+                                self.freshen_method_type_params(&nt.name, &field_name, fn_ty);
+                            return self.record(node, resolved);
                         }
                         self.fresh_var()
                     }
@@ -2339,17 +2388,29 @@ impl TypeChecker {
                                 return self.record(node, resolved);
                             }
                         }
-                        if let Some(methods) = self.method_types.get(&g.constructor) {
-                            if let Some(fn_ty) = methods.get(&field_name) {
-                                let resolved = if let Some(params) =
-                                    self.record_generic_params.get(&g.constructor)
-                                {
-                                    substitute_type_params(fn_ty, params, &g.args)
-                                } else {
-                                    fn_ty.clone()
-                                };
-                                return self.record(node, resolved);
-                            }
+                        if let Some(fn_ty) = self
+                            .method_types
+                            .get(&g.constructor)
+                            .and_then(|methods| methods.get(&field_name))
+                            .cloned()
+                        {
+                            // Pin the type's own params (`T`) to the receiver's
+                            // concrete args, then freshen the method's OWN params
+                            // (`U`) per call site so they infer from the
+                            // arguments (Q-checker-method-generic-call-infer).
+                            let resolved = if let Some(params) =
+                                self.record_generic_params.get(&g.constructor)
+                            {
+                                substitute_type_params(&fn_ty, params, &g.args)
+                            } else {
+                                fn_ty
+                            };
+                            let resolved = self.freshen_method_type_params(
+                                &g.constructor,
+                                &field_name,
+                                resolved,
+                            );
+                            return self.record(node, resolved);
                         }
                         // Fall through to built-in methods.
                         if let Some(fn_ty) =
@@ -3691,25 +3752,67 @@ impl TypeChecker {
     /// same-named record field still resolves the method (the `FieldAccess`
     /// handler prefers the field in bare value position; this restores the
     /// method type when the FieldAccess is a call callee).
+    ///
+    /// The method's OWN type parameters (e.g. the `U` in
+    /// `Box[T].map[U](f: Fn(T) -> U) -> Box[U]`) are replaced with *fresh*
+    /// inference variables per call site, so they are inferred from the call
+    /// arguments — the method-level analogue of free-function call inference
+    /// (Q-checker-method-generic-call-infer). The receiver pins the type's own
+    /// params (`T`); only the method's own params (`U`) are freshened here.
     fn resolve_user_method_fn_type(&self, receiver_ty: &Type, method: &str) -> Option<Type> {
         let receiver_ty = self.subst.apply(receiver_ty);
-        match &receiver_ty {
-            Type::Named(nt) => self
-                .method_types
-                .get(&nt.name)
-                .and_then(|m| m.get(method))
-                .cloned(),
-            Type::Generic(g) => self.method_types.get(&g.constructor).and_then(|m| {
-                m.get(method).map(|fn_ty| {
-                    if let Some(params) = self.record_generic_params.get(&g.constructor) {
-                        substitute_type_params(fn_ty, params, &g.args)
-                    } else {
-                        fn_ty.clone()
-                    }
-                })
-            }),
-            _ => None,
+        let (type_name, fn_ty) = match &receiver_ty {
+            Type::Named(nt) => {
+                let fn_ty = self
+                    .method_types
+                    .get(&nt.name)
+                    .and_then(|m| m.get(method))
+                    .cloned()?;
+                (nt.name.clone(), fn_ty)
+            }
+            Type::Generic(g) => {
+                let fn_ty = self
+                    .method_types
+                    .get(&g.constructor)
+                    .and_then(|m| m.get(method))
+                    .cloned()?;
+                // Pin the type's own params (`T`) to the receiver's concrete args.
+                let fn_ty = if let Some(params) = self.record_generic_params.get(&g.constructor) {
+                    substitute_type_params(&fn_ty, params, &g.args)
+                } else {
+                    fn_ty
+                };
+                (g.constructor.clone(), fn_ty)
+            }
+            _ => return None,
+        };
+        Some(self.freshen_method_type_params(&type_name, method, fn_ty))
+    }
+
+    /// Replace a method's OWN generic type parameters with fresh inference
+    /// variables (Q-checker-method-generic-call-infer).
+    ///
+    /// A method like `fn map[U](...)` registers its own param names (`["U"]`) in
+    /// `method_generic_params`. Those names survive in the stored method type as
+    /// `Named("U")` placeholders. At each call site they must become *fresh*
+    /// inference variables so the method's own params unify against the call
+    /// arguments independently per call — exactly as `instantiate_and_check`
+    /// freshens a free function's type params. The receiver has already pinned
+    /// the type's own params before this runs, so only the method's own params
+    /// remain to be freshened.
+    fn freshen_method_type_params(&self, type_name: &str, method: &str, fn_ty: Type) -> Type {
+        let Some(names) = self
+            .method_generic_params
+            .get(type_name)
+            .and_then(|m| m.get(method))
+        else {
+            return fn_ty;
+        };
+        if names.is_empty() {
+            return fn_ty;
         }
+        let fresh: Vec<Type> = names.iter().map(|_| self.fresh_var()).collect();
+        substitute_type_params(&fn_ty, names, &fresh)
     }
 
     /// Conversion methods that are resolved by dedicated machinery (the
