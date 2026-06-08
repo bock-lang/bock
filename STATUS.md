@@ -11,11 +11,11 @@ Live summary derived from `tracking/queue.md` (items per section):
 - Blocked: 22
 - Deferred: 1
 
-## Build status (as of main d79ae4c, 2026-06-08)
+## Build status (as of main 52061ff, 2026-06-08)
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (0 failed — wave-3 backlog fan-out #290/#291/#292 atop wave-2 #286/#287/#288; orchestrator re-verified each combined tree before merge) |
+| `cargo test --workspace` | passing (0 failed — Q-prim-assoc #294 atop wave-3 #290/#291/#292 + wave-2 #286/#287/#288; orchestrator re-verified each tree before merge) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |

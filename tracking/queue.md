@@ -12,7 +12,18 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-08 — main d79ae4c, 0 open PRs, clean, CI green.** ★ WAVE-3 BACKLOG FAN-OUT — 3 file-disjoint
+_**Last reconciled 2026-06-08 — main 52061ff, 0 open PRs, clean, CI green.** ★ Q-prim-assoc COMPLETE (solo session). **#294**
+lands the PRIMITIVE half of Q-prim-assoc (the user-type half was #288): `Float.from`/`Int.from`/`String.from` +
+`Int.try_from`/`Float.try_from` (→ `Result[_, ConvertError]`) now check AND execute ×5 — the already-registered canonical
+conversion matrix, NO new semantics (lossy/narrowing still `E4012`); coupled checker resolution + per-target lowering (py
+`float(..)`/`int(..)`, rust `i64::try_from`, go native casts). **FOUND+fixed a pre-existing Rust bug:** `core.convert`'s
+`From`/`TryFrom` trait decls emitted associated methods with a spurious `&self` (`E0186`), so ANY Rust program importing
+`core.convert` failed to build (now omits the receiver + adds `where Self: Sized`). Verified: 4-gate clean + conformance
+REQUIRE=all **789/0** ×5; PR CI green on the unchanged base (solo PR → its own CI is the combined-tree check). **OPEN §18.3**
+primitive-conversion-matrix RATIFICATION is the pre-existing Design item (design-questions.md, parallels DQ10) — #294 shipped the
+floor, did not ratify/extend. **Remaining backlog (all non-blocking):** Q-clock-handler-routing, Q-list-mut-pop-insert-remove,
+Q-list-operator-gating-user-types, Q-fmt-doccomment-indent (LOW). ↓ —
+PRIOR: **Last reconciled 2026-06-08 — main d79ae4c, 0 open PRs, clean, CI green.** ★ WAVE-3 BACKLOG FAN-OUT — 3 file-disjoint
 lanes (extensions/vscode ⨯ bock-types ⨯ bock-codegen), all merged + the combined COMPILER tree re-verified on the octopus
 merge (fmt/clippy/**test 0 failed**/doc; conformance REQUIRE=all **0 failed** ×5). PRs: **#290** vscode · **#292** types ·
 **#291** codegen. **3 items CLOSED:** Q-vscode-langclient-v10 (**#290** — migrated to `vscode-languageclient` v10; root cause
@@ -351,8 +362,16 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   impl-table (local+canonical first, local wins) + re-runs blanket-`Into` synthesis — so an `impl From[A] for B` in module X is
   visible to `.into()` in module Y at CHECK time. Canonical/primitive-target impls excluded. The CODEGEN/runtime side is
   Q-blanket-into-codegen (#288). ORIG: the impl-table wasn't seeded across modules. Paired with Q-xmod-bounds.
-- **[Q-prim-assoc] Primitive associated calls (`Float.from(3)`)** — bug · ready · **RE-SCOPED: PRIMITIVE half only (user-type half DONE #288)** ·
-  `compiler/crates/bock-types/` + `compiler/crates/bock-codegen/` (all 5) · — · links #110, #274, #288 · note: **UPDATE 2026-06-08
+- **[Q-prim-assoc] Primitive associated calls (`Float.from(3)`)** — bug · **DONE (#294 — primitive half; user-type half #288)** ·
+  `compiler/crates/bock-types/` + `compiler/crates/bock-codegen/` (all 5) · — · links #110, #274, #288, #294 · note: **DONE
+  2026-06-08 (#294).** Primitive associated conversions now check + execute ×5: `Float.from(Int|Float32)`, `Int.from(<sized
+  signed>)`, `String.from(Char)`, `Int.try_from(String)`/`Float.try_from(String)` → `Result[_, ConvertError]` — the
+  already-registered `register_canonical_conversions` matrix (NO new semantics; lossy/narrowing still `E4012`). Coupled checker
+  resolution + per-target lowering (py `float(..)`/`int(..)`, not `.from`; rust `f64::from`/`i64::try_from`; go native casts).
+  FOUND+fixed a pre-existing Rust bug: `core.convert`'s `From`/`TryFrom` trait decls emitted associated methods with a spurious
+  `&self` (`E0186`) → any Rust program importing `core.convert` was uncompilable (now omits the receiver + `where Self: Sized`).
+  **OPEN §18.3** (normative primitive-conversion *matrix* ratification) is the EXISTING Design item (design-questions.md,
+  parallels DQ10) — #294 implemented the floor, did not ratify/extend. ORIG history ↓ — **UPDATE 2026-06-08
   (#288):** the USER-type associated-fn codegen half (`Type.from(x)`/`Type.origin()` — a no-`self` impl method was emitted as an
   instance method, and `Type.method(..)` calls lower/camel-cased the type name into a non-existent value) was FOUND+fixed ×5 in
   #288. The PRIMITIVE half (`Float.from(3)`/`Int.try_from(s)`) REMAINS — still checker+codegen-coupled. **RE-SCOPED 2026-06-07
