@@ -410,6 +410,9 @@ dependencies = [
  "bock-air",
  "bock-ast",
  "bock-errors",
+ "bock-lexer",
+ "bock-parser",
+ "bock-source",
 ]
 
 [[package]]

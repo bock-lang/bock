@@ -1,0 +1,64 @@
+// TEST: exec_xmod_where_bound_dispatch
+// EXPECT: output "hi_beats_lo=yes"
+// EXPECT: targets js, python, rust
+//
+// Cross-module where-clause trait-bound enforcement + dispatch (Q-xmod-bounds).
+// A generic function declared in the imported module `ranking` carries a
+// `where (T: Ranked)` bound and dispatches `a.beats(b)` through it. The entry
+// module `main` imports `outranks` and the `Card` record and calls
+// `outranks(hi, lo)`.
+//
+// Before the export-ABI threading, an imported generic fn's where-clause bounds
+// were dropped at import (`ExportedSymbol` carried no bounds), so a
+// bound-violating call would be wrongly accepted; the fix encodes the bounds in
+// the export `TypeRef` and reconstructs the `where`-clause when seeding the
+// imported signature, so the bound is enforced cross-module. Here the bound is
+// SATISFIED (`Card: Ranked`, impl in `ranking`), so the program checks clean
+// and runs to produce real output, exercising the positive path end to end.
+//
+// Targets are restricted to js/python/rust: the *checker* now threads the bound
+// cross-module on every target, but the TS/Go backends do not yet re-emit the
+// `T extends Ranked` / `[T Ranked]` constraint for an *imported* generic fn
+// whose where-clause was reconstructed (a separate CODEGEN gap, not the checker
+// fix here). See the session PR `OPEN:` note (Q-xmod-bounds-codegen, ts/go).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale). `ranking`'s items ARE `public`: cross-module `use`
+// only resolves exported items.
+module main
+
+use ranking.{Card, outranks}
+
+fn yesno(b: Bool) -> String {
+  if (b) {
+    return "yes"
+  }
+  return "no"
+}
+
+fn main() -> Void {
+  let lo: Card = Card { rank: 1 }
+  let hi: Card = Card { rank: 2 }
+  println("hi_beats_lo=${yesno(outranks(hi, lo))}")
+}
+
+// FILE: ranking.bock
+module ranking
+
+public trait Ranked {
+  fn beats(self, other: Self) -> Bool
+}
+
+public record Card {
+  rank: Int
+}
+
+impl Ranked for Card {
+  public fn beats(self, other: Card) -> Bool {
+    self.rank > other.rank
+  }
+}
+
+public fn outranks[T](a: T, b: T) -> Bool where (T: Ranked) {
+  a.beats(b)
+}

@@ -17,3 +17,8 @@ readme.workspace = true
 bock-air.workspace = true
 bock-ast.workspace = true
 bock-errors.workspace = true
+
+[dev-dependencies]
+bock-source.workspace = true
+bock-lexer.workspace = true
+bock-parser.workspace = true

@@ -348,6 +348,13 @@ pub struct TypeChecker {
     /// Trait impl table for checking where-clause bounds at call sites.
     /// When `None`, trait-bound checking is skipped.
     pub impl_table: Option<ImplTable>,
+    /// Trait impls pulled in from imported modules (Q-xmod-impl), as
+    /// `(trait_name, trait_args, target_type)`. Populated by `seed_imports`
+    /// before `check_module`, then folded into the freshly-built `impl_table`
+    /// in `check_module` so cross-module `.into()` (and `From`/`Into`
+    /// resolution) and cross-module where-clause bounds see impls declared in
+    /// other modules.
+    imported_trait_impls: Vec<(String, Vec<Type>, Type)>,
     /// Methods from inherent impl blocks: type_name → method_name → fn_type.
     method_types: HashMap<String, HashMap<String, Type>>,
     /// Effect operation types: effect_name → [(op_name, fn_type)].
@@ -402,6 +409,7 @@ impl TypeChecker {
             fn_sigs: HashMap::new(),
             return_ty_stack: Vec::new(),
             impl_table: None,
+            imported_trait_impls: Vec::new(),
             method_types: HashMap::new(),
             effect_op_types: HashMap::new(),
             effect_components: HashMap::new(),
@@ -753,6 +761,53 @@ impl TypeChecker {
         &self.type_aliases
     }
 
+    /// Where-clause trait bounds on a generic function's type parameters,
+    /// keyed by the [`TypeVarId`] the parameter was assigned during signature
+    /// collection.
+    ///
+    /// Returns `(var_id, [trait_name, …])` pairs — one entry per generic
+    /// parameter that carries at least one bound. The `var_id` is the same id
+    /// that appears as `?<id>` in the function's exported [`Type`] string, so
+    /// the export ABI can encode the bound against the right type variable
+    /// (Q-xmod-bounds). Returns an empty vec for an unknown or non-generic
+    /// function, or one with no where-clause bounds.
+    #[must_use]
+    pub fn fn_where_bounds(&self, name: &str) -> Vec<(TypeVarId, Vec<String>)> {
+        let Some(sig) = self.fn_sigs.get(name) else {
+            return vec![];
+        };
+        // Map generic-param name → its TypeVarId (positional zip).
+        let name_to_id: HashMap<&str, TypeVarId> = sig
+            .generic_params
+            .iter()
+            .zip(sig.generic_var_ids.iter())
+            .map(|(n, id)| (n.as_str(), *id))
+            .collect();
+
+        let mut out: Vec<(TypeVarId, Vec<String>)> = Vec::new();
+        for clause in &sig.where_clause {
+            let Some(&var_id) = name_to_id.get(clause.param.name.as_str()) else {
+                continue; // bound on an unknown param — already diagnosed
+            };
+            let traits: Vec<String> = clause.bounds.iter().map(type_path_to_name).collect();
+            if traits.is_empty() {
+                continue;
+            }
+            // Merge bounds for the same param (multiple where-clauses or
+            // inline + where) so the export carries the full set.
+            if let Some(existing) = out.iter_mut().find(|(id, _)| *id == var_id) {
+                for t in traits {
+                    if !existing.1.contains(&t) {
+                        existing.1.push(t);
+                    }
+                }
+            } else {
+                out.push((var_id, traits));
+            }
+        }
+        out
+    }
+
     // ── Setters for import seeding ──────────────────────────────────────────
 
     /// Insert record field types for an imported record.
@@ -780,6 +835,23 @@ impl TypeChecker {
         self.effect_components.insert(name, components);
     }
 
+    /// Record a trait impl declared in an imported module (Q-xmod-impl).
+    ///
+    /// `trait_args` is empty for a plain trait impl (`impl Comparable for B`)
+    /// and non-empty for a parameterized one (`impl From[A] for B`). The
+    /// recorded impls are folded into the freshly-built `impl_table` in
+    /// [`TypeChecker::check_module`], so cross-module `.into()` resolution and
+    /// cross-module where-clause bound satisfaction see them.
+    pub fn register_imported_trait_impl(
+        &mut self,
+        trait_name: String,
+        trait_args: Vec<Type>,
+        target: Type,
+    ) {
+        self.imported_trait_impls
+            .push((trait_name, trait_args, target));
+    }
+
     /// Insert a type alias for an imported type alias.
     pub fn insert_type_alias(&mut self, name: String, underlying: Type) {
         self.type_aliases.insert(name, underlying);
@@ -802,6 +874,24 @@ impl TypeChecker {
     /// type, stores the remapped type in `env`, and inserts a matching
     /// `FnSig` into `fn_sigs`.
     pub fn seed_imported_generic_fn(&mut self, name: &str, fn_ty: &FnType) -> Type {
+        self.seed_imported_generic_fn_with_bounds(name, fn_ty, &[])
+    }
+
+    /// Like [`Self::seed_imported_generic_fn`] but also reconstructs the
+    /// imported function's where-clause trait bounds so they are enforced at
+    /// call sites in the importing module (Q-xmod-bounds).
+    ///
+    /// `bounds` is `(original_type_var_id, [trait_name, …])`, where the var id
+    /// is the one encoded in the export ABI (the `?<id>` that appears in the
+    /// exported type string). Each id is matched to the synthetic generic
+    /// parameter (`T<position>`) created for it here, and a [`TypeConstraint`]
+    /// is built so the call-site trait-bound check can enforce it.
+    pub fn seed_imported_generic_fn_with_bounds(
+        &mut self,
+        name: &str,
+        fn_ty: &FnType,
+        bounds: &[(TypeVarId, Vec<String>)],
+    ) -> Type {
         // Collect unique TypeVarIds from the function type in order of first
         // appearance, so the mapping is deterministic.
         let mut original_ids = Vec::new();
@@ -842,9 +932,46 @@ impl TypeChecker {
         // Store remapped type in env.
         self.env.define(name, remapped.clone());
 
-        // Create synthetic generic param names.
+        // Create synthetic generic param names. Synthetic param `T<i>`
+        // corresponds to `original_ids[i]`.
         let generic_params: Vec<String> =
             (0..original_ids.len()).map(|i| format!("T{i}")).collect();
+
+        // Reconstruct the where-clause: map each encoded `(original_var_id,
+        // traits)` to the synthetic param name that the same id became, and
+        // build a `TypeConstraint` keyed on that name. `check_trait_bounds_at_call`
+        // pairs `clause.param.name` with `generic_params`/`generic_var_ids` by
+        // name, so the constraint reaches the right fresh call-site var.
+        let where_clause: Vec<TypeConstraint> = bounds
+            .iter()
+            .filter_map(|(orig_id, traits)| {
+                let pos = original_ids.iter().position(|id| id == orig_id)?;
+                if traits.is_empty() {
+                    return None;
+                }
+                Some(TypeConstraint {
+                    id: 0,
+                    span: Span::dummy(),
+                    param: bock_ast::Ident {
+                        name: generic_params[pos].clone(),
+                        span: Span::dummy(),
+                    },
+                    bounds: traits
+                        .iter()
+                        .map(|t| TypePath {
+                            segments: t
+                                .split('.')
+                                .map(|seg| bock_ast::Ident {
+                                    name: seg.to_string(),
+                                    span: Span::dummy(),
+                                })
+                                .collect(),
+                            span: Span::dummy(),
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
 
         // Extract param types and return type from remapped function.
         if let Type::Function(ref f) = remapped {
@@ -855,7 +982,7 @@ impl TypeChecker {
                     generic_var_ids: fresh_ids,
                     param_types: f.params.clone(),
                     return_type: (*f.ret).clone(),
-                    where_clause: vec![],
+                    where_clause,
                 },
             );
         }
@@ -922,6 +1049,14 @@ impl TypeChecker {
         // registered after conformances so `(5).into()`, `Float.from(3)`, and
         // `Int.try_from(s)` resolve uniformly with user conversions.
         crate::traits::register_canonical_conversions(&mut impl_table);
+        // Q-xmod-impl: fold in trait impls declared in imported modules so
+        // cross-module `.into()` (and `From`/`Into` resolution) and
+        // cross-module where-clause bounds see them. Runs after the local +
+        // canonical registration so a local impl always wins; the fold then
+        // re-synthesizes the blanket `Into` from any imported `From`.
+        if !self.imported_trait_impls.is_empty() {
+            impl_table.fold_imported_impls(&self.imported_trait_impls);
+        }
         // Surface coherence (`E4010`) and sealing (`E4011`) diagnostics
         // produced during table construction.
         self.diags.absorb(&impl_table.diags);
