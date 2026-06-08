@@ -11,31 +11,25 @@
 # WHY A SCRIPT (NOT JUST `bock fmt --check`)
 # ------------------------------------------
 # `bock fmt` has no path/include/exclude flags — it recursively scans the current
-# directory. Two facts force the staging dance below:
+# directory. Run from the repo root it would also walk `examples/`, conformance
+# fixtures, etc. — far more than the stdlib we want to gate. So we stage exactly
+# the gated files into a temp tree (preserving the relative layout `bock fmt`
+# reports) and run the check there.
 #
-#   1. Run from the repo root it would also walk `examples/`, conformance
-#      fixtures, etc. — far more than the stdlib we want to gate.
-#   2. Two stdlib files currently trip OPEN `bock-fmt` bugs (see EXCLUDED below),
-#      so a naive `cd stdlib && bock fmt --check` would either *panic* or rewrite
-#      them into source the parser rejects. They must be skipped until bock-fmt is
-#      fixed, at which point they get reformatted and folded back into the gate.
+# EXCLUDED FILES
+# --------------
+#   (none)
 #
-# So we stage exactly the gated files into a temp tree (preserving the relative
-# layout `bock fmt` reports) and run the check there.
-#
-# EXCLUDED FILES (OPEN bock-fmt bugs — re-include once fixed)
-# ----------------------------------------------------------
+# Historically two files were excluded for OPEN `bock-fmt` bugs:
 #   stdlib/core/collections/collections.bock
 #   stdlib/core/iter/iter.bock
-#
-# Both contain `match` arms whose body is a bare `break` (e.g. `None => break`).
-# `bock fmt` rewrites those to `None => break,` — a trailing comma after a
-# control-flow arm that the Bock parser rejects with E2020 "expected expression,
-# found `,`", so the reformatted file no longer compiles (and the embedded-stdlib
-# build/tests fail). `collections.bock` additionally panics the formatter outright
-# on its long box-drawing divider comments (a UTF-8 byte-vs-char-boundary slice
-# bug in `wrap_long_lines`/`find_break_point`). Until bock-fmt fixes both, these
-# two files stay hand-authored and out of the gate.
+# Both contain `match` arms whose body is a bare control-flow statement (e.g.
+# `None => break`); `bock fmt` used to rewrite those to `None => break,` — a
+# trailing comma the Bock parser rejected with E2020 "expected expression,
+# found `,`". `collections.bock` additionally panicked the formatter on its long
+# box-drawing divider comments (a UTF-8 byte-vs-char-boundary slice bug in
+# `wrap_long_lines`/`find_break_point`). Both bugs are fixed (Q-bockfmt-cfarm-comma,
+# Q-bockfmt-utf8-panic); the files were reformatted and folded back into the gate.
 #
 # ENVIRONMENT
 #   BOCK_BIN   Path to a prebuilt `bock` binary (skips `cargo build`).
@@ -53,14 +47,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 STDLIB_DIR="$REPO_ROOT/stdlib"
 
 # Files excluded from the gate (OPEN bock-fmt bugs — see header). Paths are
-# relative to the repo root.
-EXCLUDE=(
-  "stdlib/core/collections/collections.bock"
-  "stdlib/core/iter/iter.bock"
-)
+# relative to the repo root. Currently empty: the two previously-excluded files
+# (iter.bock, collections.bock) are fixed and folded back into the gate.
+EXCLUDE=()
 is_excluded() {
   local rel="$1"
-  for e in "${EXCLUDE[@]}"; do
+  # `${EXCLUDE[@]+...}` guards against `set -u` tripping on an empty array
+  # (bash < 4.4 treats an unset-or-empty array expansion as an unbound var).
+  for e in ${EXCLUDE[@]+"${EXCLUDE[@]}"}; do
     [[ "$rel" == "$e" ]] && return 0
   done
   return 1

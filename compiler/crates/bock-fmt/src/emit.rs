@@ -1432,9 +1432,18 @@ impl<'a> Formatter<'a> {
                 self.format_block(block);
                 self.push_char(',');
             }
-            _ => {
-                self.format_expr(&arm.body);
-                self.push_char(',');
+            body => {
+                self.format_expr(body);
+                // A trailing comma after a value-less control-flow arm body
+                // (bare `break`/`continue`/`return`) is rejected by the parser:
+                // it reads the `,` as the start of the statement's optional
+                // value expression and fails with E2020 "expected expression,
+                // found `,`". Suppress the comma only for those forms; every
+                // other arm body (including `break expr` / `return expr`) keeps
+                // its trailing comma. (Q-bockfmt-cfarm-comma)
+                if !arm_body_rejects_trailing_comma(body) {
+                    self.push_char(',');
+                }
             }
         }
         self.newline();
@@ -1573,6 +1582,25 @@ impl<'a> Formatter<'a> {
 
 // ─── Helper functions ─────────────────────────────────────────────────────
 
+/// Returns `true` if a `match` arm whose body is `body` must NOT be followed by
+/// a trailing comma, because the comma would be rejected by the parser.
+///
+/// A `match` arm like `None => break` is valid Bock, but emitting it as
+/// `None => break,` makes the parser read the `,` as the start of `break`'s
+/// *optional value expression*, then fail with E2020 "expected expression,
+/// found `,`". The same applies to a bare `continue` and a value-less `return`.
+///
+/// Crucially this only affects the *value-less* forms: `break expr`,
+/// `return expr` (and any other arm body) already absorb the expression and
+/// stop at the comma, so `Ok(x) => return f(x),` parses fine and keeps its
+/// trailing comma. (Q-bockfmt-cfarm-comma)
+fn arm_body_rejects_trailing_comma(body: &Expr) -> bool {
+    matches!(
+        body,
+        Expr::Break { value: None, .. } | Expr::Continue { .. } | Expr::Return { value: None, .. }
+    )
+}
+
 fn binop_str(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
@@ -1653,6 +1681,10 @@ fn import_path_str(import: &ImportDecl) -> String {
 /// For each line longer than `HARD_LIMIT`, finds the best natural break point
 /// (after commas, before operators, before `.`) and wraps there. Continuation
 /// lines are indented by the original line's indentation plus 4 extra spaces.
+///
+/// `HARD_LIMIT` is a *byte* budget; all slicing below is kept on UTF-8 char
+/// boundaries so multi-byte content (e.g. box-drawing divider comments) never
+/// panics the wrapper. (Q-bockfmt-utf8-panic)
 fn wrap_long_lines(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     for line in input.lines() {
@@ -1664,6 +1696,18 @@ fn wrap_long_lines(input: &str) -> String {
         }
     }
     output
+}
+
+/// Return the largest byte index `<= idx` that is a UTF-8 char boundary of `s`.
+///
+/// A polyfill for `str::floor_char_boundary`, which is not available on the
+/// crate's MSRV. Slicing `s` at the returned index never panics.
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Wrap a single line that exceeds the hard limit.
@@ -1703,8 +1747,10 @@ fn find_break_point(line: &str, limit: usize) -> Option<usize> {
     }
 
     // Search window: look backwards from limit to find natural break points.
-    // We look within the line up to `limit` chars.
-    let search_end = limit.min(line.len());
+    // `limit` is a byte budget; snap it down to a UTF-8 char boundary so the
+    // `line[start..search_end]` slices below cannot land inside a multi-byte
+    // char and panic. (Q-bockfmt-utf8-panic)
+    let search_end = floor_char_boundary(line, limit);
 
     // Track the best candidate break position
     let mut best: Option<usize> = None;
@@ -1761,9 +1807,11 @@ fn find_break_point(line: &str, limit: usize) -> Option<usize> {
         }
     }
 
-    // Only accept break if it's past the indentation
+    // Only accept break if it's past the indentation and on a char boundary
+    // (defensive: all candidates above sit next to ASCII delimiters, but the
+    // boundary check guarantees `split_at_break` can never slice mid-char).
     let content_start = line.len() - line.trim_start().len();
-    best.filter(|&pos| pos > content_start)
+    best.filter(|&pos| pos > content_start && line.is_char_boundary(pos))
 }
 
 /// Split a line at a break position, trimming trailing whitespace from the
