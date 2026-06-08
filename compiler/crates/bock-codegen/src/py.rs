@@ -2244,10 +2244,16 @@ impl PyEmitCtx {
                 format!("_BockErr({a})")
             }
             "sleep" => {
-                self.needs_asyncio_import = true;
                 let a = arg_strs.first().map_or(String::new(), |s| s.clone());
-                // Duration is ns → asyncio.sleep takes seconds.
-                format!("asyncio.sleep(({a}) / 1_000_000_000)")
+                // Route through an installed `Clock` handler if one is in scope;
+                // otherwise fall through to the host primitive (default).
+                if let Some(handler) = self.clock_handler_var() {
+                    format!("{handler}.{}({a})", to_snake_case("sleep"))
+                } else {
+                    self.needs_asyncio_import = true;
+                    // Duration is ns → asyncio.sleep takes seconds.
+                    format!("asyncio.sleep(({a}) / 1_000_000_000)")
+                }
             }
             _ => return Ok(None),
         };
@@ -3282,8 +3288,14 @@ impl PyEmitCtx {
             ("Duration", "minutes") => format!("(({}) * 60_000_000_000)", arg0()),
             ("Duration", "hours") => format!("(({}) * 3_600_000_000_000)", arg0()),
             ("Instant", "now") => {
-                self.needs_time_import = true;
-                "time.monotonic_ns()".to_string()
+                // Route through an installed `Clock` handler's `now_monotonic`
+                // op if one is in scope; otherwise emit the host primitive.
+                if let Some(handler) = self.clock_handler_var() {
+                    format!("{handler}.{}()", to_snake_case("now_monotonic"))
+                } else {
+                    self.needs_time_import = true;
+                    "time.monotonic_ns()".to_string()
+                }
             }
             _ => return Ok(false),
         };
@@ -3390,8 +3402,18 @@ impl PyEmitCtx {
             "is_negative" => format!("(({recv_str}) < 0)"),
             "abs" => format!("abs({recv_str})"),
             "elapsed" => {
-                self.needs_time_import = true;
-                format!("(time.monotonic_ns() - ({recv_str}))")
+                // `instant.elapsed()` is derived: `now - instant`. Route the
+                // "now" read through an installed `Clock` handler if in scope;
+                // otherwise read the host monotonic clock (default).
+                if let Some(handler) = self.clock_handler_var() {
+                    format!(
+                        "({handler}.{}() - ({recv_str}))",
+                        to_snake_case("now_monotonic")
+                    )
+                } else {
+                    self.needs_time_import = true;
+                    format!("(time.monotonic_ns() - ({recv_str}))")
+                }
             }
             "duration_since" => {
                 let other = arg_strs.first().cloned().unwrap_or_default();
@@ -4474,6 +4496,19 @@ impl PyEmitCtx {
             result.push(format!("{param_name}: {name}"));
         }
         result
+    }
+
+    /// The in-scope `Clock` effect handler variable, if one is installed.
+    ///
+    /// Returns the emitted name of the handler bound for the `Clock` effect at
+    /// the current point (a `with Clock` parameter such as `clock`, or a
+    /// `handling (Clock with ...)` block's synthesised `__clock_hN`). When this
+    /// is `Some`, the `Clock` time operations (`Instant.now`, `sleep`, `elapsed`)
+    /// are routed through the handler instead of inlining the host primitive
+    /// (Q-clock-handler-routing, §18.3.1/§18.4); when `None`, no handler is in
+    /// scope and the default host primitive is emitted.
+    fn clock_handler_var(&self) -> Option<&str> {
+        self.current_handler_vars.get("Clock").map(String::as_str)
     }
 
     /// Build `effect=handler_var, ...` keyword arguments for calling an effectful function.
@@ -7903,6 +7938,124 @@ mod tests {
             "got: {out}"
         );
         assert!(out.contains("log.info(msg)"), "got: {out}");
+    }
+
+    /// Q-clock-handler-routing: inside a `with Clock` function (where the
+    /// `clock` handler is in scope), the §18.3.1 time builtins must route
+    /// through the handler — `Instant.now()` → `clock.now_monotonic()`,
+    /// `sleep(d)` → `clock.sleep(d)`, `start.elapsed()` → `clock.now_monotonic()
+    /// - start` — NOT the inlined host primitives (`time.monotonic_ns()` /
+    /// `asyncio.sleep`).
+    #[test]
+    fn clock_time_ops_route_through_handler() {
+        let out = gen(&module(vec![], vec![clock_timed_fn()]));
+        assert!(out.contains("clock.now_monotonic()"), "got: {out}");
+        assert!(out.contains("clock.sleep("), "got: {out}");
+        assert!(
+            !out.contains("time.monotonic_ns()"),
+            "host clock primitive leaked past the handler: {out}"
+        );
+        assert!(
+            !out.contains("asyncio.sleep("),
+            "host sleep primitive leaked past the handler: {out}"
+        );
+    }
+
+    /// Builds `fn timed() with Clock { let start = Instant.now(); sleep(
+    /// Duration.millis(1)); let d = start.elapsed() }`. The `with Clock` clause
+    /// puts the `clock` handler in scope so the time builtins route through it.
+    fn clock_timed_fn() -> AIRNode {
+        let instant_now = node(
+            40,
+            NodeKind::Call {
+                callee: Box::new(node(
+                    41,
+                    NodeKind::FieldAccess {
+                        object: Box::new(id_node(42, "Instant")),
+                        field: ident("now"),
+                    },
+                )),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let duration_millis = node(
+            50,
+            NodeKind::Call {
+                callee: Box::new(node(
+                    51,
+                    NodeKind::FieldAccess {
+                        object: Box::new(id_node(52, "Duration")),
+                        field: ident("millis"),
+                    },
+                )),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(53, "1"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let sleep_call = node(
+            60,
+            NodeKind::Call {
+                callee: Box::new(id_node(61, "sleep")),
+                args: vec![AirArg {
+                    label: None,
+                    value: duration_millis,
+                }],
+                type_args: vec![],
+            },
+        );
+        let elapsed_call = node(
+            70,
+            NodeKind::MethodCall {
+                receiver: Box::new(id_node(71, "start")),
+                method: ident("elapsed"),
+                type_args: vec![],
+                args: vec![],
+            },
+        );
+        let body = block(
+            30,
+            vec![
+                node(
+                    31,
+                    NodeKind::LetBinding {
+                        is_mut: false,
+                        pattern: Box::new(bind_pat(32, "start")),
+                        ty: None,
+                        value: Box::new(instant_now),
+                    },
+                ),
+                sleep_call,
+                node(
+                    33,
+                    NodeKind::LetBinding {
+                        is_mut: false,
+                        pattern: Box::new(bind_pat(34, "d")),
+                        ty: None,
+                        value: Box::new(elapsed_call),
+                    },
+                ),
+            ],
+            None,
+        );
+        node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("timed"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![type_path(&["Clock"])],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
     }
 
     #[test]

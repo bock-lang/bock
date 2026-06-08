@@ -124,3 +124,29 @@ code.
 > behind the `Clock` effect and its installed handler. The deterministic
 > `Duration` surface (constructors, methods, and `+`/`-`/`*` operators)
 > needs no effect.
+
+When a `Clock` handler is in scope, these operations dispatch **through
+the handler**, not the host clock: `Instant.now()` and the "now" read
+inside `instant.elapsed()` resolve to the handler's `now_monotonic`, and
+`sleep` resolves to the handler's `sleep`. This is what lets a mock clock
+intercept time — install one with a `handling` block and the
+`sleep`/`now_monotonic` ops run your handler's bodies instead of the host
+primitives:
+
+```bock
+record MockClock {}
+
+impl Clock for MockClock {
+  fn now_monotonic() -> Instant { Instant.now() }
+  fn sleep(duration: Duration) -> Void {
+    // virtual time: record the request, return immediately — no real wait
+  }
+}
+
+handling (Clock with MockClock {}) {
+  sleep(Duration.seconds(60))  // runs MockClock.sleep, does not block 60s
+}
+```
+
+When **no** handler is installed, the operations fall through to the
+target's native monotonic clock and sleep primitive (the default).

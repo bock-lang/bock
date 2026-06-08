@@ -4772,11 +4772,18 @@ impl GoEmitCtx {
             "todo" => "panic(\"not implemented\")".to_string(),
             "unreachable" => "panic(\"unreachable\")".to_string(),
             "sleep" => {
-                // sleep(d) returns a chan struct{} so `await` (= `<-ch`) works
-                // uniformly. The goroutine holds for `d` nanos, then closes ch.
-                self.needs_time_import = true;
                 let a = arg_strs.first().map_or(String::new(), |s| s.clone());
-                format!("(func() <-chan struct{{}} {{ __ch := make(chan struct{{}}); go func() {{ time.Sleep(time.Duration({a})); close(__ch) }}(); return __ch }})()")
+                // Route through an installed `Clock` handler if one is in scope;
+                // otherwise fall through to the host primitive (default).
+                if let Some(handler) = self.clock_handler_var() {
+                    format!("{handler}.{}({a})", to_pascal_case("sleep"))
+                } else {
+                    // sleep(d) returns a chan struct{} so `await` (= `<-ch`)
+                    // works uniformly. The goroutine holds for `d` nanos, then
+                    // closes ch.
+                    self.needs_time_import = true;
+                    format!("(func() <-chan struct{{}} {{ __ch := make(chan struct{{}}); go func() {{ time.Sleep(time.Duration({a})); close(__ch) }}(); return __ch }})()")
+                }
             }
             // Optional constructors → tagged runtime struct.
             "Some" => {
@@ -5786,8 +5793,14 @@ impl GoEmitCtx {
             ("Duration", "minutes") => format!("(int64({}) * 60000000000)", arg0()),
             ("Duration", "hours") => format!("(int64({}) * 3600000000000)", arg0()),
             ("Instant", "now") => {
-                self.needs_time_import = true;
-                "time.Now()".to_string()
+                // Route through an installed `Clock` handler's `now_monotonic`
+                // op if one is in scope; otherwise emit the host primitive.
+                if let Some(handler) = self.clock_handler_var() {
+                    format!("{handler}.{}()", to_pascal_case("now_monotonic"))
+                } else {
+                    self.needs_time_import = true;
+                    "time.Now()".to_string()
+                }
             }
             _ => return Ok(false),
         };
@@ -6358,8 +6371,20 @@ impl GoEmitCtx {
                 format!("(func(__d int64) int64 {{ if __d < 0 {{ return -__d }}; return __d }}({recv_str}))")
             }
             "elapsed" => {
-                self.needs_time_import = true;
-                format!("int64(time.Since({recv_str}))")
+                // `instant.elapsed()` is derived: time-since-`recv`. Route the
+                // "now" read through an installed `Clock` handler if in scope —
+                // `NowMonotonic()` yields a `time.Time`, so the span is
+                // `now.Sub(recv)` as nanoseconds; otherwise read the host
+                // monotonic clock via `time.Since(recv)` (default).
+                if let Some(handler) = self.clock_handler_var() {
+                    format!(
+                        "int64({handler}.{}().Sub({recv_str}))",
+                        to_pascal_case("now_monotonic")
+                    )
+                } else {
+                    self.needs_time_import = true;
+                    format!("int64(time.Since({recv_str}))")
+                }
             }
             "duration_since" => {
                 let other = arg_strs.first().cloned().unwrap_or_default();
@@ -7568,6 +7593,16 @@ impl GoEmitCtx {
             }
         }
         result
+    }
+
+    /// The in-scope `Clock` effect handler variable, if one is installed.
+    ///
+    /// When `Some`, the `Clock` time operations (`Instant.now`, `sleep`,
+    /// `elapsed`) are routed through the handler instead of inlining the host
+    /// primitive (Q-clock-handler-routing, §18.3.1/§18.4); when `None`, no
+    /// handler is in scope and the default host primitive is emitted.
+    fn clock_handler_var(&self) -> Option<&str> {
+        self.current_handler_vars.get("Clock").map(String::as_str)
     }
 
     /// Effects → interface parameters: `log Log, clock Clock`.
@@ -11389,6 +11424,16 @@ impl GoEmitCtx {
             // `[T, E]` args are dropped — `is_mapped_runtime` in the callers
             // suppresses the generic suffix), mirroring `Optional`.
             "Result" => "__bockResult".into(),
+            // §18.3.1 builtin time types: a `Duration` value lowers to a
+            // signed-nanosecond `int64`, and an `Instant` to `time.Time`
+            // (`time.Now()`). They are NOT user-defined types, so as annotations
+            // (e.g. on a `Clock` handler's `now_monotonic() -> Instant` /
+            // `sleep(duration: Duration)`) they must render their concrete Go
+            // forms, not the undefined identifiers. (The `time` import is driven
+            // by the value sites — `time.Now()` / `time.Since(...)` — that any
+            // `Instant`-typed program also exercises.)
+            "Duration" => "int64".into(),
+            "Instant" => "time.Time".into(),
             other => other.into(),
         }
     }
@@ -12711,6 +12756,155 @@ mod tests {
             "got: {out}"
         );
         assert!(out.contains("log.Info(msg)"), "got: {out}");
+    }
+
+    /// Q-clock-handler-routing: inside a `with Clock` function the §18.3.1 time
+    /// builtins route through the in-scope `clock` handler — `Instant.now()` →
+    /// `clock.NowMonotonic()`, `sleep(d)` → `clock.Sleep(d)`, and the derived
+    /// `start.elapsed()` via `clock.NowMonotonic().Sub(start)` — NOT the inlined
+    /// host primitives (`time.Now()` / `time.Sleep`).
+    #[test]
+    fn clock_time_ops_route_through_handler() {
+        let out = gen(&module(vec![], vec![clock_timed_fn()]));
+        assert!(out.contains("clock.NowMonotonic()"), "got: {out}");
+        assert!(out.contains("clock.Sleep("), "got: {out}");
+        assert!(
+            !out.contains("time.Now()"),
+            "host clock primitive leaked past the handler: {out}"
+        );
+        assert!(
+            !out.contains("time.Sleep"),
+            "host sleep primitive leaked past the handler: {out}"
+        );
+    }
+
+    /// `Duration` / `Instant` used as type annotations must render their Go
+    /// value representations (`int64` / `time.Time`), not the undefined
+    /// identifiers, so a `Clock` handler impl compiles (Q-clock-handler-routing
+    /// supporting fix).
+    #[test]
+    fn builtin_time_types_map_to_go() {
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("span"),
+                generic_params: vec![],
+                params: vec![typed_param_node(2, "d", "Duration")],
+                return_type: Some(Box::new(node(
+                    3,
+                    NodeKind::TypeNamed {
+                        path: type_path(&["Instant"]),
+                        args: vec![],
+                    },
+                ))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(10, vec![], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(out.contains("d int64"), "Duration annotation: {out}");
+        assert!(out.contains("time.Time"), "Instant annotation: {out}");
+    }
+
+    /// Builds `fn timed() with Clock { let start = Instant.now(); sleep(
+    /// Duration.millis(1)); let d = start.elapsed() }` — the `with Clock` clause
+    /// puts the `clock` handler in scope so the time builtins route through it.
+    fn clock_timed_fn() -> AIRNode {
+        let instant_now = node(
+            40,
+            NodeKind::Call {
+                callee: Box::new(node(
+                    41,
+                    NodeKind::FieldAccess {
+                        object: Box::new(id_node(42, "Instant")),
+                        field: ident("now"),
+                    },
+                )),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let duration_millis = node(
+            50,
+            NodeKind::Call {
+                callee: Box::new(node(
+                    51,
+                    NodeKind::FieldAccess {
+                        object: Box::new(id_node(52, "Duration")),
+                        field: ident("millis"),
+                    },
+                )),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(53, "1"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let sleep_call = node(
+            60,
+            NodeKind::Call {
+                callee: Box::new(id_node(61, "sleep")),
+                args: vec![AirArg {
+                    label: None,
+                    value: duration_millis,
+                }],
+                type_args: vec![],
+            },
+        );
+        let elapsed_call = node(
+            70,
+            NodeKind::MethodCall {
+                receiver: Box::new(id_node(71, "start")),
+                method: ident("elapsed"),
+                type_args: vec![],
+                args: vec![],
+            },
+        );
+        let body = block(
+            30,
+            vec![
+                node(
+                    31,
+                    NodeKind::LetBinding {
+                        is_mut: false,
+                        pattern: Box::new(bind_pat(32, "start")),
+                        ty: None,
+                        value: Box::new(instant_now),
+                    },
+                ),
+                sleep_call,
+                node(
+                    33,
+                    NodeKind::LetBinding {
+                        is_mut: false,
+                        pattern: Box::new(bind_pat(34, "d")),
+                        ty: None,
+                        value: Box::new(elapsed_call),
+                    },
+                ),
+            ],
+            None,
+        );
+        node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("timed"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![type_path(&["Clock"])],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
     }
 
     #[test]
