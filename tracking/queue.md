@@ -12,7 +12,21 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-08 — main 3bcaebb, 1 open PR (#285, blocked), clean.** ★ DEPENDABOT WAVE + WAVE-2 BACKLOG
+_**Last reconciled 2026-06-08 — main d79ae4c, 0 open PRs, clean, CI green.** ★ WAVE-3 BACKLOG FAN-OUT — 3 file-disjoint
+lanes (extensions/vscode ⨯ bock-types ⨯ bock-codegen), all merged + the combined COMPILER tree re-verified on the octopus
+merge (fmt/clippy/**test 0 failed**/doc; conformance REQUIRE=all **0 failed** ×5). PRs: **#290** vscode · **#292** types ·
+**#291** codegen. **3 items CLOSED:** Q-vscode-langclient-v10 (**#290** — migrated to `vscode-languageclient` v10; root cause
+was tsconfig `moduleResolution` [v10 added an `exports` map that node10 resolution ignores], NOT the imports — no `.ts` source
+changed; the `vscode extension` CI job now passes; **dependabot #285 auto-closed**. ⚠ **USER-FACING:** required `engines.vscode`
+^1.75→^1.91 [VS Code Jun-2024, v10's floor]), Q-checker-method-generic-call-infer (**#292** — a method's own type param `U` in
+`Box[T].map[U]` is now inferred from the call args [freshened per-call] at both method-resolution paths; `b.map(dbl)` checks AND
+**executes ×5** — no codegen gap; the receiver still pins `T`), Q-xmod-bounds-codegen (**#291** — ts/go now fold a `where`-clause
+bound onto the generic param [`<T extends Show>` / `[T Show]`]; `xmod_where_bound_dispatch` runs on all 5. **FOUND
+broader-than-#286's-note:** the bound was dropped for LOCALLY-defined `where (T: Ranked)` fns too [inline `[T: Ranked]` already
+worked — it lands on `GenericParam.bounds`; the `where`-clause lands in a separate field the ts/go renderers never read]; one
+`merge_where_bounds_into_generics` fold helper fixes both local + imported). **Q-fmt-doccomment-indent** (LOW, lexer) is now the
+only open wave-2/3 follow-up. ↓ —
+PRIOR: **Last reconciled 2026-06-08 — main 3bcaebb, 1 open PR (#285, blocked), clean.** ★ DEPENDABOT WAVE + WAVE-2 BACKLOG
 FAN-OUT. **Dependabot:** 9/10 routine bumps merged (#276–#284 — setup-go, checkout, chrono, @types/node, cloudflare, marked,
 astro, vsce, wrangler), merged round-robin across shared lockfiles (one per group, dependabot-recreate for the conflicting
 astro). **#285** (vscode-languageclient 9→10, major) is BLOCKED on an extension code migration — v10 dropped the
@@ -202,19 +216,22 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ## Ready
 
-- **[Q-vscode-langclient-v10] migrate VS Code extension to vscode-languageclient v10 API** — chore/bug · ready ·
-  `extensions/vscode/src/` (`lsp.ts`, `features/{annotations,effects,errors,hover}.ts`) · — · links dependabot #285 · note:
-  FOUND 2026-06-08. Dependabot **#285** bumps `vscode-languageclient` 9.0.1→10.0.0 (major); v10 removed the
-  `vscode-languageclient/node` subpath export → 5× `TS2307 Cannot find module 'vscode-languageclient/node'`, so the `vscode
-  extension` CI job fails. Migrate the imports to v10's API (the LanguageClient/node entry moved), then re-land the bump — either
-  push the code fix onto #285's branch or land it on an equivalent branch and close #285 as superseded. Isolated to the
-  extension; no compiler impact.
-- **[Q-xmod-bounds-codegen] ts/go don't re-emit the generic-param trait constraint for an IMPORTED generic fn** — bug · ready ·
-  `compiler/crates/bock-codegen/` (ts + go emitters) · — · links #286, Q-xmod-bounds, §4.6/§6.5 · note: OPEN from #286
-  (2026-06-08). With cross-module where-bounds now reconstructed in the checker (#286), the TS/Go backends still don't re-emit
-  the param constraint (`<T extends Show>` / `[T Show]`) for an imported generic fn whose where-clause was threaded
-  cross-module — so the #286 exec fixture `xmod_where_bound_dispatch` is restricted to js/python/rust. Codegen-only follow-up
-  (the checker enforces the bound on all 5 targets regardless).
+- **[Q-vscode-langclient-v10] migrate VS Code extension to vscode-languageclient v10 API** — chore/bug · **DONE (#290)** ·
+  `extensions/vscode/` (`tsconfig.json`, `test/tsconfig.json`, `package.json`, lockfile) · — · links #285, #290 · note: **DONE
+  2026-06-08 (#290).** Root cause was NOT the imports — v10 added an `exports` map and the extension's `module:commonjs` tsconfig
+  defaulted to `node10` resolution (ignores `exports`), so `vscode-languageclient/node` stopped resolving (5× `TS2307`). Fix:
+  `module: preserve` (⇒ `moduleResolution: bundler`) in `tsconfig.json` + a `ts-node` `commonjs` override in `test/tsconfig.json`;
+  **no `.ts` source changed**. Bumped the dep to ^10; `npm run compile`/`lint`/`test` clean; the `vscode extension` CI job passes;
+  **dependabot #285 auto-closed**. ⚠ **USER-FACING:** required `engines.vscode` ^1.75→^1.91 (v10's floor, VS Code Jun-2024) —
+  a modest, well-justified minimum-version bump. ORIG FOUND 2026-06-08 (#285's blocker).
+- **[Q-xmod-bounds-codegen] ts/go don't re-emit the generic-param trait constraint for an IMPORTED generic fn** — bug · **DONE (#291)** ·
+  `compiler/crates/bock-codegen/` (generator.rs fold helper + ts/go emitters) · — · links #286, #291, Q-xmod-bounds, §4.6/§6.5 ·
+  note: **DONE 2026-06-08 (#291).** New `merge_where_bounds_into_generics` helper folds a `where`-clause bound onto the generic
+  param at the `FnDecl` emission site, so ts emits `<T extends Ranked>` and go `[T Ranked[T]]`; `xmod_where_bound_dispatch` now
+  runs on all 5. **FOUND broader than #286's note:** the bound was dropped for LOCALLY-defined `where (T: Ranked)` fns too —
+  inline `[T: Ranked]` worked (lands on `GenericParam.bounds`) but `where`-clause bounds land in a separate field the ts/go
+  renderers never read; the one helper fixes both local + imported. ORIG: OPEN from #286 (checker enforces the bound on all 5;
+  only ts/go codegen dropped it).
 - **[Q-fmt-doccomment-indent] `bock fmt` flattens doc-comment prose indentation** — bug · ready · LOW ·
   `compiler/crates/bock-lexer/src/lexer.rs` (~:786) · — · links #287 · note: FOUND 2026-06-08 (#287). Reformatting flattens the
   leading indentation of `//!`/`///` continuation lines (`//!   * **Go**` → `//! * **Go**`). Root cause is in the LEXER, not the
@@ -271,10 +288,13 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   surfaced (not caused) by #259 — the py statement-`match` fix de-masked type-zoo py, which then hits `keys = list(map.keys())`
   → `TypeError: 'list' object is not callable` because the example binds locals `list`/`map`/`set`. Rename in the example, or
   guard builtin-shadowing in py codegen for collection lowering. Blocks type-zoo py (run-FAIL).
-- **[Q-checker-method-generic-call-infer] checker can't infer a method's own type param at a call (`b.map(dbl)` for `Box[T].map[U]`)** — bug · ready ·
-  `compiler/crates/bock-types/` · — · links #256, DQ28 · note: FOUND 2026-06-05 (#256). With DQ28's go free-fn lowering landed,
-  the remaining type-zoo/go gap is that a *call* `b.map(dbl)` fails inference of `U` at check time on ALL targets (which is why
-  type-zoo only *declares* `Box.map`, never calls it). Infer method-level type params from the argument types.
+- **[Q-checker-method-generic-call-infer] checker can't infer a method's own type param at a call (`b.map(dbl)` for `Box[T].map[U]`)** — bug · **DONE (#292)** ·
+  `compiler/crates/bock-types/` · — · links #256, DQ28, #292 · note: **DONE 2026-06-08 (#292).** A new `method_generic_params`
+  map (type → method → param names, populated in `collect_sig`) + a shared `freshen_method_type_params` helper substitutes the
+  method's own params with fresh inference vars at both method-resolution paths (the `Call(FieldAccess)` desugar and the
+  FieldAccess-callee inference for `Named`/`Generic` receivers); the receiver still pins the type's own params (`T`), only the
+  method's own (`U`) are freshened. `b.map(dbl)` (`U=Int`) and `b.map(to_str)` (`U=String`) check AND **execute ×5** — checker-only,
+  no codegen gap. ORIG FOUND 2026-06-05 (#256): the call failed `U` inference on all targets, so type-zoo only declared `Box.map`.
 - **[Q-calculator-ts-eval] calculator ts emits `TS1215: Invalid use of 'eval'`** — bug · **DONE (#262 — ts.rs `ts_value_ident` escapes `eval`/`arguments`)** · LOW ·
   `compiler/crates/bock-codegen/src/ts.rs` · — · links #260 · note: FOUND 2026-06-05 (honest audit). Pre-existing (not a
   regression): `calculator` fails `bock build -t ts` with TS1215. Blocks calculator ts (build FAIL). Low (one example/target).
