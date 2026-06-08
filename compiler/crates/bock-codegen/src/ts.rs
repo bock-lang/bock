@@ -4294,6 +4294,24 @@ impl TsEmitCtx {
                     self.buf.push(')');
                     return Ok(());
                 }
+                // Ordering operators on a user `Comparable` type lower through
+                // `compare` (TS rejects `<` on two objects at compile time, and the
+                // runtime would coerce to `NaN`). Reads the tagged `Ordering` off
+                // `._tag`, mirroring how a hand-written `a.compare(b)` lowers (the
+                // receiver is passed as both the method receiver and the explicit
+                // `self` argument).
+                if crate::generator::is_user_compare(node) {
+                    if let Some((tag, is_eq)) = crate::generator::user_compare_variant(*op) {
+                        let recv = self.expr_to_string(left)?;
+                        let other = self.expr_to_string(right)?;
+                        let eq = if is_eq { "===" } else { "!==" };
+                        let _ = write!(
+                            self.buf,
+                            "(({recv}).compare({recv}, {other})._tag {eq} \"{tag}\")"
+                        );
+                        return Ok(());
+                    }
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {

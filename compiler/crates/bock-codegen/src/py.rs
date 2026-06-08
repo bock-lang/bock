@@ -4986,6 +4986,25 @@ impl PyEmitCtx {
                     self.buf.push(')');
                     return Ok(());
                 }
+                // Ordering operators on a user `Comparable` type lower through the
+                // type's `compare` (Python's `<` on two instances raises
+                // `TypeError` unless they define `__lt__`). The returned `Ordering`
+                // is one of the `_BockOrdering*` runtime singletons, tested with
+                // `isinstance`: `a < b` ⇒ `isinstance(a.compare(b), …Less)`,
+                // `a <= b` ⇒ `not isinstance(a.compare(b), …Greater)`, etc.
+                if crate::generator::is_user_compare(node) {
+                    if let Some((tag, is_eq)) = crate::generator::user_compare_variant(*op) {
+                        let recv = self.expr_to_string(left)?;
+                        let other = self.expr_to_string(right)?;
+                        let class = ordering_class_py(tag);
+                        let neg = if is_eq { "" } else { "not " };
+                        let _ = write!(
+                            self.buf,
+                            "({neg}isinstance(({recv}).compare({other}), {class}))"
+                        );
+                        return Ok(());
+                    }
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {

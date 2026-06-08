@@ -1,0 +1,44 @@
+// TEST: usercmp_class_ordering
+// EXPECT: output "true;false;true;false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §18.5 ordering operators on a user `Comparable` *class* (not a record),
+// confirming the `compare`-routing codegen (Q-user-comparison-codegen) is
+// independent of whether the user type is a `record` or a `class`. A `class`
+// emits a positional constructor on js/ts but the comparison lowering is
+// identical (it reads the `Ordering` the `compare` method returns).
+//
+// `a.cents = 50`, `b.cents = 90`: `a < b` true, `a > b` false, `a <= b` true,
+// `a >= b` false ⇒ `true;false;true;false`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Ordering}
+
+class Money {
+  cents: Int,
+}
+
+impl Comparable for Money {
+  public fn compare(self, other: Money) -> Ordering {
+    if (self.cents < other.cents) {
+      Less
+    } else if (self.cents == other.cents) {
+      Equal
+    } else {
+      Greater
+    }
+  }
+}
+
+fn main() -> Void {
+  let a: Money = Money { cents: 50 }
+  let b: Money = Money { cents: 90 }
+  let lt: Bool = a < b
+  let gt: Bool = a > b
+  let le: Bool = a <= b
+  let ge: Bool = a >= b
+  println("${lt};${gt};${le};${ge}")
+}

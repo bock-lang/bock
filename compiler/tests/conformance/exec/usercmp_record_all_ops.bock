@@ -1,0 +1,58 @@
+// TEST: usercmp_record_all_ops
+// EXPECT: output "lt:F,F,T;gt:T,F,F;le:F,T,T;ge:T,T,F"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §18.5 ordering operators on a user `Comparable` record, exercising all four
+// operators (`<`/`>`/`<=`/`>=`) against operands that make the fixed left (5)
+// compare Greater / Equal / Less to the right (2, 5, 8) in turn — so every
+// variant of the per-target `compare` lowering is covered
+// (Q-user-comparison-codegen).
+//
+// For the fixed left `mid = 5` against `{lo=2, eq=5, hi=8}` (printed in that
+// order):
+//   * `5 < y`  ⇒ F (vs 2), F (vs 5), T (vs 8)   — `compare == Less`
+//   * `5 > y`  ⇒ T, F, F                          — `compare == Greater`
+//   * `5 <= y` ⇒ F, T, T                          — `compare != Greater`
+//   * `5 >= y` ⇒ T, T, F                          — `compare != Less`
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Ordering}
+
+record Cell {
+  v: Int,
+}
+
+impl Comparable for Cell {
+  public fn compare(self, other: Cell) -> Ordering {
+    if (self.v < other.v) {
+      Less
+    } else if (self.v == other.v) {
+      Equal
+    } else {
+      Greater
+    }
+  }
+}
+
+fn b(x: Bool) -> String {
+  if (x) {
+    "T"
+  } else {
+    "F"
+  }
+}
+
+fn main() -> Void {
+  let mid: Cell = Cell { v: 5 }
+  let lo: Cell = Cell { v: 2 }
+  let eq: Cell = Cell { v: 5 }
+  let hi: Cell = Cell { v: 8 }
+  let lt: String = "lt:${b(mid < lo)},${b(mid < eq)},${b(mid < hi)}"
+  let gt: String = "gt:${b(mid > lo)},${b(mid > eq)},${b(mid > hi)}"
+  let le: String = "le:${b(mid <= lo)},${b(mid <= eq)},${b(mid <= hi)}"
+  let ge: String = "ge:${b(mid >= lo)},${b(mid >= eq)},${b(mid >= hi)}"
+  println("${lt};${gt};${le};${ge}")
+}

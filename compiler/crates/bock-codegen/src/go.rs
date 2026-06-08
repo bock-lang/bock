@@ -8521,6 +8521,26 @@ impl GoEmitCtx {
                     }
                     return Ok(());
                 }
+                // Ordering operators on a user `Comparable` type lower through the
+                // type's `Compare` (Go structs are not ordered, so native `<` is a
+                // compile error). `Compare` returns the sealed `Ordering` interface;
+                // a type assertion against the variant struct yields the boolean,
+                // wrapped in an IIFE (Go's comma-ok assertion is statement-only):
+                // `a < b` ⇒ `… .(OrderingLess); return __ok`, `a <= b` ⇒
+                // `… .(OrderingGreater); return !__ok`, etc.
+                if crate::generator::is_user_compare(node) {
+                    if let Some((tag, is_eq)) = crate::generator::user_compare_variant(*op) {
+                        let recv = self.expr_to_string(left)?;
+                        let other = self.expr_to_string(right)?;
+                        let method = self.go_method_name("compare", true);
+                        let neg = if is_eq { "" } else { "!" };
+                        let _ = write!(
+                            self.buf,
+                            "func() bool {{ _, __ok := ({recv}.{method}({other})).(Ordering{tag}); return {neg}__ok }}()"
+                        );
+                        return Ok(());
+                    }
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {

@@ -175,6 +175,35 @@ pub const INT_ARITH_META_KEY: &str = "int_arith";
 /// The value is a `Value::Bool(true)`.
 pub const BOOL_STRINGIFY_META_KEY: &str = "bool_stringify";
 
+/// Metadata key stamped on a `BinaryOp { op: Lt | Le | Gt | Ge, .. }` node whose
+/// two operands resolve to a **user** (`Named` record / class) type that
+/// implements `Comparable` (§18.5). It marks the ordering operator as a
+/// *user-type* comparison that must be lowered through the type's
+/// `compare(self, other) -> Ordering` method rather than the target's native
+/// `<` / `<=` / `>` / `>=`:
+///
+/// - `a < b`  ⇒ `a.compare(b) == Less`
+/// - `a > b`  ⇒ `a.compare(b) == Greater`
+/// - `a <= b` ⇒ `a.compare(b) != Greater`
+/// - `a >= b` ⇒ `a.compare(b) != Less`
+///
+/// Every backend lowers native `<` on two user values to a broken form — Python
+/// raises `TypeError`, Rust/Go fail to compile (structs are not ordered), and JS
+/// coerces the objects to `NaN` and silently yields `false`. Reusing the
+/// per-target `Ordering` representation the stdlib already emits (`{ _tag: … }`
+/// in JS/TS, the `_bock_*` singletons in Python, the `Ordering::*` variants in
+/// Rust, the `Ordering*` structs in Go) keeps the lowering aligned with how a
+/// hand-written `a.compare(b)` call already lowers.
+///
+/// The checker is the only pass that can see that two bare identifiers
+/// (`a < b`) are a user `Comparable` type, so it records the marker here; codegen
+/// reads the operator off the node itself. The value is a `Value::Bool(true)`.
+/// Only the *ordering* operators are stamped — `==` / `!=` (Equatable) are a
+/// separate lane and are never stamped here. Primitive comparisons and bounded
+/// generic (`T: Comparable`) comparisons are likewise untouched: they already
+/// lower correctly through the native operator / the trait-bound bridge.
+pub const USER_COMPARE_META_KEY: &str = "user_compare";
+
 /// Base node id for AIR nodes the checker synthesizes (the `for`-over-`Iterable`
 /// desugar). Chosen high enough to sit far above the dense, zero-based ids the
 /// lowerer assigns to real nodes, so synthesized nodes never collide with real
@@ -2309,6 +2338,25 @@ impl TypeChecker {
                     if is_int(&lt) && is_int(&rt) {
                         node.metadata
                             .insert(INT_ARITH_META_KEY.to_string(), Value::Bool(true));
+                    }
+                }
+                // `<`/`>`/`<=`/`>=` on two **user** (`Named`) operands that
+                // implement `Comparable` must be lowered through the type's
+                // `compare(self, other)` rather than the target's native ordering
+                // operator (which is broken on every backend for user values, see
+                // `USER_COMPARE_META_KEY`). `infer_binop` already accepted the
+                // comparison (`require_comparable_operand`); stamp the node so
+                // codegen routes it through `compare`. Probe the left operand,
+                // falling back to the right only when the left stayed an inference
+                // variable — mirroring the gate's post-unify probe.
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+                    let probe = match self.subst.apply(&lt) {
+                        Type::TypeVar(_) => &rt,
+                        _ => &lt,
+                    };
+                    if self.is_user_comparable(probe) {
+                        node.metadata
+                            .insert(USER_COMPARE_META_KEY.to_string(), Value::Bool(true));
                     }
                 }
                 result
@@ -5150,6 +5198,31 @@ impl TypeChecker {
         }
     }
 
+    /// True when `operand` resolves to a **user** (`Named` record / class) type
+    /// that implements `Comparable` in the current `impl_table`.
+    ///
+    /// This is the codegen-routing companion of [`require_comparable_operand`]:
+    /// once the gate has accepted an ordering comparison, this answers whether the
+    /// operands are a *user* `Comparable` type, so the body pass can stamp the
+    /// `BinaryOp` node with [`USER_COMPARE_META_KEY`] (the operator must be lowered
+    /// through `compare`, not the broken native `<`). Primitives — which the
+    /// canonical `impl_table` also marks `Comparable` — are intentionally excluded:
+    /// their native ordering operator already works on every target. Inference
+    /// variables / flexible / poison types and the absence of an `impl_table`
+    /// likewise return `false` (a bounded generic `T: Comparable` lowers through
+    /// the trait-bound bridge, not this stamp).
+    fn is_user_comparable(&self, operand: &Type) -> bool {
+        let resolved = self.subst.apply(operand);
+        let Type::Named(_) = &resolved else {
+            return false;
+        };
+        let Some(impl_table) = self.impl_table.as_ref() else {
+            return false;
+        };
+        let trait_ref = TraitRef::new("Comparable");
+        resolve_impl(&trait_ref, &resolved, impl_table).is_some()
+    }
+
     fn infer_binop(&mut self, op: BinOp, lt: &Type, rt: &Type, span: Span) -> Type {
         match op {
             // Arithmetic: operands and result are numeric
@@ -6211,6 +6284,101 @@ mod tests {
         assert!(
             !checker.diags.has_errors(),
             "comparison on an inference variable must not trigger the user-type gate"
+        );
+    }
+
+    // ── User-comparison codegen stamp (USER_COMPARE_META_KEY,
+    //    Q-user-comparison-codegen) ─────────────────────────────────────────────
+
+    /// Build a `BinaryOp` over two operands both bound to `operand_ty`, run the
+    /// body pass over it (`infer_node`, which mutates `node.metadata`), and return
+    /// the node so a test can inspect its stamps.
+    fn infer_binop_node(checker: &mut TypeChecker, op: BinOp, operand_ty: Type) -> AIRNode {
+        let gen = NodeIdGen::new();
+        checker.env.define("a", operand_ty.clone());
+        checker.env.define("b", operand_ty);
+        let left = make_node(&gen, NodeKind::Identifier { name: ident("a") });
+        let right = make_node(&gen, NodeKind::Identifier { name: ident("b") });
+        let mut node = make_node(
+            &gen,
+            NodeKind::BinaryOp {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        checker.infer_node(&mut node);
+        node
+    }
+
+    /// Each ordering operator on a user `Comparable` type stamps the node so
+    /// codegen routes the operator through `compare`.
+    #[test]
+    fn user_comparison_stamps_ordering_ops() {
+        let point = Type::Named(crate::NamedType {
+            name: "Point".into(),
+        });
+        for op in [BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge] {
+            let mut checker = TypeChecker::new();
+            checker.impl_table = Some(make_impl_table(&[("Comparable", point.clone())]));
+            let node = infer_binop_node(&mut checker, op, point.clone());
+            assert_eq!(
+                node.metadata.get(USER_COMPARE_META_KEY),
+                Some(&bock_air::Value::Bool(true)),
+                "{op:?} on a user Comparable type must be stamped"
+            );
+        }
+    }
+
+    /// A primitive ordering comparison is NOT stamped — native `<` already works
+    /// on every target, so codegen must keep emitting it.
+    #[test]
+    fn primitive_comparison_not_stamped() {
+        let mut checker = TypeChecker::new();
+        let mut table = ImplTable::new();
+        crate::traits::register_canonical_conformances(&mut table);
+        checker.impl_table = Some(table);
+        let node = infer_binop_node(&mut checker, BinOp::Lt, Type::Primitive(PrimitiveType::Int));
+        assert!(
+            !node.metadata.contains_key(USER_COMPARE_META_KEY),
+            "primitive `<` must not carry the user-compare stamp"
+        );
+    }
+
+    /// Equality (`==`) on a user type is the sibling Equatable lane — it must NOT
+    /// be stamped by the comparison arm.
+    #[test]
+    fn user_equality_not_stamped_by_comparison_arm() {
+        let point = Type::Named(crate::NamedType {
+            name: "Point".into(),
+        });
+        let mut checker = TypeChecker::new();
+        checker.impl_table = Some(make_impl_table(&[("Comparable", point.clone())]));
+        let node = infer_binop_node(&mut checker, BinOp::Eq, point);
+        assert!(
+            !node.metadata.contains_key(USER_COMPARE_META_KEY),
+            "`==` is the Equatable lane and must not carry the user-compare stamp"
+        );
+    }
+
+    /// A user type that does NOT implement `Comparable` is not stamped (the
+    /// comparison is also rejected by the gate; codegen never sees it, but the
+    /// stamp must be absent regardless).
+    #[test]
+    fn non_comparable_user_type_not_stamped() {
+        let point = Type::Named(crate::NamedType {
+            name: "Point".into(),
+        });
+        let mut checker = TypeChecker::new();
+        // Impl table present, but `Point` does NOT implement Comparable.
+        checker.impl_table = Some(make_impl_table(&[(
+            "Comparable",
+            Type::Primitive(PrimitiveType::Int),
+        )]));
+        let node = infer_binop_node(&mut checker, BinOp::Lt, point);
+        assert!(
+            !node.metadata.contains_key(USER_COMPARE_META_KEY),
+            "a non-Comparable user type must not be stamped"
         );
     }
 
