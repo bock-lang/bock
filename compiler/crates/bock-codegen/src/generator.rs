@@ -3571,6 +3571,60 @@ pub fn is_int_arith(node: &AIRNode) -> bool {
     )
 }
 
+/// True when a `BinaryOp { op: Lt | Le | Gt | Ge, .. }` is an **ordering
+/// comparison on a user `Comparable` type** and must be lowered through the
+/// type's `compare(self, other)` method rather than the target's native
+/// `<` / `<=` / `>` / `>=`.
+///
+/// The signal is the checker's [`bock_types::checker::USER_COMPARE_META_KEY`]
+/// stamp, set on an ordering operator whose operands resolved to a `Named`
+/// (record / class) type implementing `Comparable`. A purely syntactic codegen
+/// check cannot see that bare identifiers (`a < b`) are a user `Comparable` type,
+/// so — like [`is_int_arith`] — the stamp is the sole signal: there is no
+/// syntactic fallback.
+///
+/// Every backend consults this from its `NodeKind::BinaryOp` arm: native `<` on
+/// two user values is broken on all five targets (Python `TypeError`, Rust/Go
+/// non-comparable structs, JS `NaN`-coercion). Mapping the operator onto the
+/// `compare` result (`<` ⇒ `== Less`, `>` ⇒ `== Greater`, `<=` ⇒ `!= Greater`,
+/// `>=` ⇒ `!= Less`) reuses the per-target `Ordering` representation the stdlib
+/// already emits. See the metadata key's docs for the rationale.
+#[must_use]
+pub fn is_user_compare(node: &AIRNode) -> bool {
+    matches!(
+        node.metadata
+            .get(bock_types::checker::USER_COMPARE_META_KEY),
+        Some(bock_air::Value::Bool(true))
+    )
+}
+
+/// Map an ordering [`BinOp`](bock_ast::BinOp) (`<` / `<=` / `>` / `>=`) onto the `Ordering`
+/// variant name and whether the comparison is an *equality* (`true`) or
+/// *inequality* (`false`) against it, for lowering a user-`Comparable`
+/// comparison through `compare`:
+///
+/// | op   | variant     | equality |
+/// |------|-------------|----------|
+/// | `<`  | `"Less"`    | `true`   |
+/// | `>`  | `"Greater"` | `true`   |
+/// | `<=` | `"Greater"` | `false`  |
+/// | `>=` | `"Less"`    | `false`  |
+///
+/// `a < b` ⇒ `compare == Less`, `a <= b` ⇒ `compare != Greater`, etc. Returns
+/// `None` for any non-ordering operator (the caller only invokes it after
+/// [`is_user_compare`], which already restricts to the four ordering ops).
+#[must_use]
+pub fn user_compare_variant(op: bock_ast::BinOp) -> Option<(&'static str, bool)> {
+    use bock_ast::BinOp;
+    match op {
+        BinOp::Lt => Some(("Less", true)),
+        BinOp::Gt => Some(("Greater", true)),
+        BinOp::Le => Some(("Greater", false)),
+        BinOp::Ge => Some(("Less", false)),
+        _ => None,
+    }
+}
+
 /// True when an expression node is a `Bool` value that must stringify to the
 /// canonical lowercase `"true"` / `"false"` (§3.5) — the checker stamped it with
 /// [`bock_types::checker::BOOL_STRINGIFY_META_KEY`] because it appears as an

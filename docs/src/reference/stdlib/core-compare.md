@@ -30,9 +30,12 @@ let _ = a < b
 ```
 
 Adding `impl Comparable for Point` (a `compare(self, other: Point) -> Ordering`)
-makes the same expression check clean. The primitive conformances (`Int`,
-`Float`, `String`, `Char`, the sized numerics — **not `Bool`**) are gated the
-same way through `core`'s sealed conformances.
+makes the same expression check clean and run correctly on every target: each
+ordering operator lowers through the type's `compare`, mapping `a < b` to
+`compare == Less`, `a > b` to `== Greater`, `a <= b` to `!= Greater`, and
+`a >= b` to `!= Less`. The primitive conformances (`Int`, `Float`, `String`,
+`Char`, the sized numerics — **not `Bool`**) are gated the same way through
+`core`'s sealed conformances (and use the target's native ordering operator).
 
 ## Enums
 

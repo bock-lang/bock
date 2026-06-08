@@ -4335,6 +4335,27 @@ impl RsEmitCtx {
                     }
                     return Ok(());
                 }
+                // Ordering operators on a user `Comparable` type lower through the
+                // type's `compare` (Rust structs are not `PartialOrd`, so native
+                // `<` is E0369). Emit `matches!(a.compare(&b), Ordering::Less)` —
+                // `matches!` recognises the returned variant without requiring the
+                // `Ordering` enum to derive `PartialEq` (an `==` would be E0369),
+                // mirroring how the enum's `match` arms already work. The operand
+                // is borrowed exactly as a hand-written `a.compare(b)` would
+                // (`compare` is a `Self`-operand method).
+                if crate::generator::is_user_compare(node) {
+                    if let Some((tag, is_eq)) = crate::generator::user_compare_variant(*op) {
+                        let neg = if is_eq { "" } else { "!" };
+                        let _ = write!(self.buf, "{neg}matches!(");
+                        self.emit_expr(left)?;
+                        self.buf.push_str(".compare(");
+                        // `compare` takes its operand by shared reference; borrow it
+                        // the same way the desugared self-call path does.
+                        self.emit_call_arg(right, true)?;
+                        let _ = write!(self.buf, "), Ordering::{tag})");
+                        return Ok(());
+                    }
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {

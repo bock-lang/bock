@@ -1,0 +1,53 @@
+// TEST: opgate_comparison_user_type_impl
+// EXPECT: output "true;false;true;false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §18.5 ordering operators (`<`/`>`/`<=`/`>=`) on a USER type that
+// `impl Comparable` (Q-user-comparison-codegen). The checker accepts the
+// comparison (the type-level gate, see
+// types-diagnostics/opgate_comparison_user_type_unimpl.bock for the rejection
+// WITHOUT the impl) and stamps the `BinaryOp` node; codegen then routes the
+// operator through the type's `compare(self, other) -> Ordering` rather than the
+// target's native `<` — which is broken on every backend for user values
+// (Python `TypeError`, Rust/Go non-ordered structs, JS `NaN`-coercion). The
+// operator maps onto the `compare` result: `a < b` ⇒ `compare == Less`,
+// `a > b` ⇒ `== Greater`, `a <= b` ⇒ `!= Greater`, `a >= b` ⇒ `!= Less`.
+//
+// With `a.rank == 1` and `b.rank == 3`: `a < b` is true, `a > b` false,
+// `a <= b` true, `a >= b` false ⇒ `true;false;true;false`.
+//
+// The `Ordering` variants `Less`/`Equal`/`Greater` are referenced in the impl
+// body as enum constructors and resolve without an explicit `use` of each
+// variant (only the `Ordering` type is imported).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Ordering}
+
+record Point {
+  rank: Int,
+}
+
+impl Comparable for Point {
+  public fn compare(self, other: Point) -> Ordering {
+    if (self.rank < other.rank) {
+      Less
+    } else if (self.rank == other.rank) {
+      Equal
+    } else {
+      Greater
+    }
+  }
+}
+
+fn main() -> Void {
+  let a: Point = Point { rank: 1 }
+  let b: Point = Point { rank: 3 }
+  let lt: Bool = a < b
+  let gt: Bool = a > b
+  let le: Bool = a <= b
+  let ge: Bool = a >= b
+  println("${lt};${gt};${le};${ge}")
+}

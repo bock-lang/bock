@@ -3265,6 +3265,23 @@ impl EmitCtx {
                     self.buf.push(')');
                     return Ok(());
                 }
+                // Ordering operators on a user `Comparable` type lower through
+                // `compare` (native `<` on two objects coerces to `NaN`). The
+                // tagged `Ordering` is read off `._tag`, matching how a
+                // hand-written `a.compare(b)` lowers — the receiver is passed both
+                // as the JS method receiver and as the explicit `self` argument.
+                if crate::generator::is_user_compare(node) {
+                    if let Some((tag, is_eq)) = crate::generator::user_compare_variant(*op) {
+                        let recv = self.expr_to_string(left)?;
+                        let other = self.expr_to_string(right)?;
+                        let eq = if is_eq { "===" } else { "!==" };
+                        let _ = write!(
+                            self.buf,
+                            "(({recv}).compare({recv}, {other})._tag {eq} \"{tag}\")"
+                        );
+                        return Ok(());
+                    }
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {
