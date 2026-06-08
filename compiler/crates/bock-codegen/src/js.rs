@@ -1035,9 +1035,15 @@ impl EmitCtx {
             "todo" => "throw new Error(\"not implemented\")".to_string(),
             "unreachable" => "throw new Error(\"unreachable\")".to_string(),
             "sleep" => {
-                // Duration is ns → setTimeout takes ms.
                 let a = arg_strs.first().map_or(String::new(), |s| s.clone());
-                format!("new Promise((__r) => setTimeout(__r, Math.floor(({a}) / 1e6)))")
+                // Route through an installed `Clock` handler if one is in scope;
+                // otherwise fall through to the host primitive (default).
+                if let Some(handler) = self.clock_handler_var() {
+                    format!("{handler}.sleep({a})")
+                } else {
+                    // Duration is ns → setTimeout takes ms.
+                    format!("new Promise((__r) => setTimeout(__r, Math.floor(({a}) / 1e6)))")
+                }
             }
             _ => return Ok(None),
         };
@@ -1137,7 +1143,15 @@ impl EmitCtx {
             ("Duration", "seconds") => format!("(({}) * 1000000000)", arg0()),
             ("Duration", "minutes") => format!("(({}) * 60000000000)", arg0()),
             ("Duration", "hours") => format!("(({}) * 3600000000000)", arg0()),
-            ("Instant", "now") => "(performance.now() * 1000000)".to_string(),
+            ("Instant", "now") => {
+                // Route through an installed `Clock` handler's `now_monotonic`
+                // op if one is in scope; otherwise emit the host primitive.
+                if let Some(handler) = self.clock_handler_var() {
+                    format!("{handler}.now_monotonic()")
+                } else {
+                    "(performance.now() * 1000000)".to_string()
+                }
+            }
             _ => return Ok(false),
         };
         self.buf.push_str(&code);
@@ -1198,7 +1212,16 @@ impl EmitCtx {
             "is_zero" => format!("(({recv_str}) === 0)"),
             "is_negative" => format!("(({recv_str}) < 0)"),
             "abs" => format!("Math.abs({recv_str})"),
-            "elapsed" => format!("((performance.now() * 1000000) - ({recv_str}))"),
+            "elapsed" => {
+                // `instant.elapsed()` is derived: `now - instant`. Route the
+                // "now" read through an installed `Clock` handler if in scope;
+                // otherwise read the host monotonic clock (default).
+                if let Some(handler) = self.clock_handler_var() {
+                    format!("({handler}.now_monotonic() - ({recv_str}))")
+                } else {
+                    format!("((performance.now() * 1000000) - ({recv_str}))")
+                }
+            }
             "duration_since" => {
                 let other = arg_strs.first().cloned().unwrap_or_default();
                 format!("(({recv_str}) - ({other}))")
@@ -2754,6 +2777,16 @@ impl EmitCtx {
             }
         }
         result
+    }
+
+    /// The in-scope `Clock` effect handler variable, if one is installed.
+    ///
+    /// When `Some`, the `Clock` time operations (`Instant.now`, `sleep`,
+    /// `elapsed`) are routed through the handler instead of inlining the host
+    /// primitive (Q-clock-handler-routing, §18.3.1/§18.4); when `None`, no
+    /// handler is in scope and the default host primitive is emitted.
+    fn clock_handler_var(&self) -> Option<&str> {
+        self.current_handler_vars.get("Clock").map(String::as_str)
     }
 
     /// Effects → destructured parameter object: `{ log, clock }`.
@@ -5513,6 +5546,123 @@ mod tests {
         let out = gen(&module(vec![], vec![f]));
         assert!(out.contains("function process(data, { log, clock })"));
         assert!(out.contains("log.info(msg)"));
+    }
+
+    /// Q-clock-handler-routing: inside a `with Clock` function the §18.3.1 time
+    /// builtins route through the in-scope `clock` handler — `Instant.now()` →
+    /// `clock.now_monotonic()`, `sleep(d)` → `clock.sleep(d)`,
+    /// `start.elapsed()` → `clock.now_monotonic() - start` — NOT the inlined
+    /// host primitives (`performance.now()` / `setTimeout`).
+    #[test]
+    fn clock_time_ops_route_through_handler() {
+        let out = gen(&module(vec![], vec![clock_timed_fn()]));
+        assert!(out.contains("clock.now_monotonic()"), "got: {out}");
+        assert!(out.contains("clock.sleep("), "got: {out}");
+        assert!(
+            !out.contains("performance.now()"),
+            "host clock primitive leaked past the handler: {out}"
+        );
+        assert!(
+            !out.contains("setTimeout"),
+            "host sleep primitive leaked past the handler: {out}"
+        );
+    }
+
+    /// Builds `fn timed() with Clock { let start = Instant.now(); sleep(
+    /// Duration.millis(1)); let d = start.elapsed() }` — the `with Clock` clause
+    /// puts the `clock` handler in scope so the time builtins route through it.
+    fn clock_timed_fn() -> AIRNode {
+        let instant_now = node(
+            40,
+            NodeKind::Call {
+                callee: Box::new(node(
+                    41,
+                    NodeKind::FieldAccess {
+                        object: Box::new(id_node(42, "Instant")),
+                        field: ident("now"),
+                    },
+                )),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        let duration_millis = node(
+            50,
+            NodeKind::Call {
+                callee: Box::new(node(
+                    51,
+                    NodeKind::FieldAccess {
+                        object: Box::new(id_node(52, "Duration")),
+                        field: ident("millis"),
+                    },
+                )),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(53, "1"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let sleep_call = node(
+            60,
+            NodeKind::Call {
+                callee: Box::new(id_node(61, "sleep")),
+                args: vec![AirArg {
+                    label: None,
+                    value: duration_millis,
+                }],
+                type_args: vec![],
+            },
+        );
+        let elapsed_call = node(
+            70,
+            NodeKind::MethodCall {
+                receiver: Box::new(id_node(71, "start")),
+                method: ident("elapsed"),
+                type_args: vec![],
+                args: vec![],
+            },
+        );
+        let body = block(
+            30,
+            vec![
+                node(
+                    31,
+                    NodeKind::LetBinding {
+                        is_mut: false,
+                        pattern: Box::new(bind_pat(32, "start")),
+                        ty: None,
+                        value: Box::new(instant_now),
+                    },
+                ),
+                sleep_call,
+                node(
+                    33,
+                    NodeKind::LetBinding {
+                        is_mut: false,
+                        pattern: Box::new(bind_pat(34, "d")),
+                        ty: None,
+                        value: Box::new(elapsed_call),
+                    },
+                ),
+            ],
+            None,
+        );
+        node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("timed"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![type_path(&["Clock"])],
+                where_clause: vec![],
+                body: Box::new(body),
+            },
+        )
     }
 
     #[test]

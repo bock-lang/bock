@@ -1,0 +1,67 @@
+// TEST: clock_handler_intercepts
+// EXPECT: output "clock-handler: sleep intercepted"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-clock-handler-routing (§18.3.1 / §18.4): the `Clock` effect's time
+// operations — `Instant.now()`, `sleep(...)`, and the derived
+// `instant.elapsed()` — must dispatch through the INSTALLED `Clock` handler, not
+// inline the host monotonic-clock / sleep primitives. Before the fix every
+// backend emitted the host primitive directly (py `time.monotonic_ns()` /
+// `asyncio.sleep`, js/ts `performance.now()` / `setTimeout`, rust
+// `std::time::Instant::now()` / `tokio::time::sleep`, go `time.Now()` /
+// `time.Sleep`), so a `handling (Clock with ...)` block could never intercept
+// time — defeating virtual-time test clocks (the §18.4 `MockClock` use case).
+//
+// This fixture installs a self-contained `MockClock` handler (NOT
+// `std.testing.MockClock`, to prove the routing independently of stdlib). `work`
+// invokes all three time builtins as the bare §18.3.1 surface; each routes to
+// the handler:
+//   * `Instant.now()`   -> clock.now_monotonic()
+//   * `sleep(60s)`      -> clock.sleep(..)   (returns IMMEDIATELY — no real
+//                          60-second block; this is the headline virtual-time
+//                          benefit, and is the observable line below)
+//   * `start.elapsed()` -> clock.now_monotonic()  (elapsed is derived as
+//                          now-minus-instant)
+// The mock's `sleep` is the only thing that prints, so a successful run emits
+// exactly "clock-handler: sleep intercepted" on every target — which can only
+// happen if the bare `sleep(...)` dispatched to the handler rather than the host
+// primitive. (A single `println` line is used because the harness `output`
+// directive is single-line and TS validates emitted source with `tsc --noEmit`,
+// where the no-newline `print` builtin lowers to an untyped `process.stdout`.)
+// `now_monotonic` / `elapsed` routing is additionally asserted structurally by
+// the per-backend codegen unit tests (`clock_*_routes_through_handler`).
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale, see
+// hello_world.bock). `Duration`/`Instant` are compiler builtins (no `use`); the
+// `Clock` effect is declared here so a concrete handler can be installed.
+module main
+
+effect Clock {
+  fn now_monotonic() -> Instant
+  fn sleep(duration: Duration) -> Void
+}
+
+record MockClock {}
+
+impl Clock for MockClock {
+  fn now_monotonic() -> Instant {
+    Instant.now()
+  }
+  fn sleep(duration: Duration) -> Void {
+    println("clock-handler: sleep intercepted")
+  }
+}
+
+fn work() -> Void
+  with Clock
+{
+  let start = Instant.now()
+  sleep(Duration.seconds(60))
+  let d = start.elapsed()
+}
+
+fn main() -> Void {
+  handling (Clock with MockClock {}) {
+    work()
+  }
+}

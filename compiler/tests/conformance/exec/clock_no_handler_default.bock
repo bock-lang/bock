@@ -1,0 +1,34 @@
+// TEST: clock_no_handler_default
+// EXPECT: output "host-clock: ok"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-clock-handler-routing regression guard, default side: when NO `Clock`
+// handler is installed, the §18.3.1 time builtins must STILL fall through to the
+// host monotonic-clock primitive (the long-standing default), unchanged by the
+// handler-routing fix. `Instant.now()` reads the host monotonic clock and
+// `instant.elapsed()` reports a non-negative span against it on every target:
+//   * py  -> time.monotonic_ns()      / (now - start)
+//   * js  -> performance.now()*1e6    / (now - start)
+//   * ts  -> performance.now()*1e6    / (now - start)
+//   * rust-> std::time::Instant::now()/ start.elapsed()
+//   * go  -> time.Now()               / time.Since(start)
+// The output is value-independent (only that elapsed is >= 0), so it is fixed at
+// "host-clock: ok" on every target. (The host async `sleep` primitive is
+// intentionally NOT exercised here — on rust it lowers to `tokio::time::sleep`,
+// whose runtime dependency is a pre-existing gap orthogonal to this routing
+// work; the handler path that the companion `clock_handler_intercepts` fixture
+// exercises does not depend on tokio.)
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale, see
+// hello_world.bock).
+module main
+
+fn main() -> Void {
+  let start = Instant.now()
+  let d = start.elapsed()
+  if (d.as_nanos() >= 0) {
+    println("host-clock: ok")
+  } else {
+    println("host-clock: bad")
+  }
+}
