@@ -1,0 +1,25 @@
+// TEST: stdlib_primassoc_from_check
+// EXPECT: no_errors
+//
+// The associated-function form of the canonical primitive `From` conversions
+// resolves on a primitive type-name callee and type-checks to the target
+// primitive. This is the `Type.from(x)` counterpart of the return-type-driven
+// `(x).into()` direction (`convert_primitive_conversions`):
+//   * `Float.from(Int)`   (numeric widening Int -> Float)
+//   * `Int.from(Int8)`    (signed widening, sized -> unsized Int)
+//   * `String.from(Char)` (Char -> String)
+// Each resolves the canonical `From[Source] for Target` impl from the impl
+// table and yields exactly the target primitive type.
+module userapp
+
+public fn int_to_float() -> Float {
+  Float.from(5)
+}
+
+public fn widen(x: Int8) -> Int {
+  Int.from(x)
+}
+
+public fn char_to_string() -> String {
+  String.from('a')
+}

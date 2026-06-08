@@ -1357,6 +1357,47 @@ impl TsEmitCtx {
         Ok(true)
     }
 
+    /// Q-prim-assoc: lower a primitive associated-conversion call
+    /// (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`) to TS's native
+    /// conversion. `from` is an infallible value coercion; `try_from` parses a
+    /// `String` and returns the Bock `Result` tagged-object shape
+    /// (`{ _tag: "Ok"/"Err" as const, _0: … }`), the `Err` payload a
+    /// `ConvertError` (in scope via the `Result[T, ConvertError]` return-type
+    /// import). The parse IIFE annotates its `string` param for strict mode.
+    /// Returns `true` when handled.
+    fn try_emit_primitive_conversion(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((target, method, arg)) =
+            crate::generator::primitive_conversion_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let arg_str = self.expr_to_string(arg)?;
+        let code = match (target, method) {
+            ("Float" | "Int" | "String", "from") => format!("({arg_str})"),
+            ("Int", "try_from") => format!(
+                "((__s: string) => /^[+-]?[0-9]+$/.test(__s.trim()) \
+                 ? {{ _tag: \"Ok\" as const, _0: Number.parseInt(__s.trim(), 10) }} \
+                 : {{ _tag: \"Err\" as const, _0: new ConvertError({{ message: \
+                 `cannot parse '${{__s}}' as Int` }}) }})({arg_str})"
+            ),
+            ("Float", "try_from") => format!(
+                "((__s: string) => {{ const __t = __s.trim(); const __n = Number(__t); \
+                 return (__t.length > 0 && !Number.isNaN(__n)) \
+                 ? {{ _tag: \"Ok\" as const, _0: __n }} \
+                 : {{ _tag: \"Err\" as const, _0: new ConvertError({{ message: \
+                 `cannot parse '${{__s}}' as Float` }}) }}; }})({arg_str})"
+            ),
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Emit a built-in `Optional`/`Result` method call to its TS form.
     ///
     /// Recognised via the checker's `recv_kind` annotation
@@ -4324,6 +4365,13 @@ impl TsEmitCtx {
                             return Ok(());
                         }
                     }
+                }
+                // Q-prim-assoc: a primitive associated-conversion call
+                // (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`)
+                // lowers to TS's native conversion, NOT the static-member form
+                // below (`Float.from` is undefined on the host `number`).
+                if self.try_emit_primitive_conversion(node, callee, args)? {
+                    return Ok(());
                 }
                 // An associated-function call (`Type.method(args)` — stamped by
                 // the lowerer, no `self` prepended) resolves to the merged

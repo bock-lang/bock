@@ -149,6 +149,21 @@ class _BockErr:
         self._0 = _0
     def __repr__(self):
         return f'Err({self._0!r})'
+
+def _bock_parse_int(s, mk_err):
+    try:
+        return _BockOk(int(s.strip()))
+    except (ValueError, TypeError):
+        return _BockErr(mk_err(f\"cannot parse {s!r} as Int\"))
+
+def _bock_parse_float(s, mk_err):
+    try:
+        t = s.strip()
+        if t == '':
+            raise ValueError()
+        return _BockOk(float(t))
+    except (ValueError, TypeError):
+        return _BockErr(mk_err(f\"cannot parse {s!r} as Float\"))
 ";
 
 /// Runtime for the `?` propagate operator in Python. `expr?` lowers to
@@ -1354,7 +1369,12 @@ impl CodeGenerator for PyGenerator {
             if runtime_result {
                 content.push_str(RESULT_RUNTIME_PY);
                 content.push('\n');
-                all_names.extend(["_BockOk", "_BockErr"]);
+                all_names.extend([
+                    "_BockOk",
+                    "_BockErr",
+                    "_bock_parse_int",
+                    "_bock_parse_float",
+                ]);
             }
             if runtime_ordering {
                 content.push_str(ORDERING_RUNTIME_PY);
@@ -3004,6 +3024,46 @@ impl PyEmitCtx {
                 format!(
                     "(lambda __s, __p: (lambda __b: _BockSome(__b) if __b >= 0 else _bock_none)(__s.find(__p)))({recv_str}, {p})"
                 )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
+    /// Q-prim-assoc: lower a primitive associated-conversion call
+    /// (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`) to Python's
+    /// native conversion. CRITICAL on Python: `from` is a keyword, so the
+    /// generic associated-call form would emit `Float.from_(...)` (an undefined
+    /// name and the wrong shape). `from` becomes `float(...)`/`int(...)`/
+    /// `str(...)`; `try_from` calls the self-contained `_bock_parse_int` /
+    /// `_bock_parse_float` runtime helpers (which return `_BockOk`/`_BockErr`),
+    /// passing a `ConvertError`-factory lambda so the helper need not import the
+    /// stdlib type (`ConvertError` is in scope at the call site via the
+    /// `Result[T, ConvertError]` return type). Returns `true` when handled.
+    fn try_emit_primitive_conversion(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((target, method, arg)) =
+            crate::generator::primitive_conversion_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let arg_str = self.expr_to_string(arg)?;
+        let code = match (target, method) {
+            ("Float", "from") => format!("float({arg_str})"),
+            ("Int", "from") => format!("int({arg_str})"),
+            ("String", "from") => format!("str({arg_str})"),
+            ("Int", "try_from") => {
+                self.needs_runtime_result = true;
+                format!("_bock_parse_int({arg_str}, lambda __m: ConvertError(message=__m))")
+            }
+            ("Float", "try_from") => {
+                self.needs_runtime_result = true;
+                format!("_bock_parse_float({arg_str}, lambda __m: ConvertError(message=__m))")
             }
             _ => return Ok(false),
         };
@@ -4999,6 +5059,14 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_container_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // Q-prim-assoc: a primitive associated-conversion call
+                // (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`)
+                // lowers to Python's native conversion. CRITICAL: `from` is a
+                // Python keyword, so the static-member form below would emit
+                // `Float.from_(...)` against an undefined `Float` — a hard error.
+                if self.try_emit_primitive_conversion(node, callee, args)? {
                     return Ok(());
                 }
                 // Associated-function call (`Type.method(args)` — stamped by the

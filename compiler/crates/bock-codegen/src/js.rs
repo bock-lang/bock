@@ -1233,6 +1233,53 @@ impl EmitCtx {
         Ok(true)
     }
 
+    /// Q-prim-assoc: lower a primitive associated-conversion call
+    /// (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`) to JS's native
+    /// conversion. `from` is an infallible value coercion; `try_from` parses a
+    /// `String` and returns the Bock `Result` tagged-object shape
+    /// (`{ _tag: "Ok"/"Err", _0: … }`), the `Err` payload a `ConvertError`
+    /// (in scope via the `Result[T, ConvertError]` return-type import). Returns
+    /// `true` when handled.
+    fn try_emit_primitive_conversion(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((target, method, arg)) =
+            crate::generator::primitive_conversion_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let arg_str = self.expr_to_string(arg)?;
+        let code = match (target, method) {
+            // `from`: infallible coercion. Int/sized-int -> Float and
+            // sized-int -> Int are identity on a JS `number`; Char -> String is
+            // already a single-char string, kept parenthesised for safety.
+            ("Float" | "Int" | "String", "from") => format!("({arg_str})"),
+            // `Int.try_from(s)`: strict integer parse. Reject anything that is
+            // not an optionally-signed run of digits (JS `parseInt` is lenient).
+            ("Int", "try_from") => format!(
+                "((__s) => /^[+-]?[0-9]+$/.test(__s.trim()) \
+                 ? {{ _tag: \"Ok\", _0: Number.parseInt(__s.trim(), 10) }} \
+                 : {{ _tag: \"Err\", _0: new ConvertError({{ message: \
+                 `cannot parse '${{__s}}' as Int` }}) }})({arg_str})"
+            ),
+            // `Float.try_from(s)`: parse a float; reject empty / non-numeric
+            // (`Number("")` is 0, so guard the empty/whitespace case explicitly).
+            ("Float", "try_from") => format!(
+                "((__s) => {{ const __t = __s.trim(); const __n = Number(__t); \
+                 return (__t.length > 0 && !Number.isNaN(__n)) \
+                 ? {{ _tag: \"Ok\", _0: __n }} \
+                 : {{ _tag: \"Err\", _0: new ConvertError({{ message: \
+                 `cannot parse '${{__s}}' as Float` }}) }}; }})({arg_str})"
+            ),
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Emit a built-in `Optional`/`Result` method call to its JS form.
     ///
     /// Recognised via the checker's `recv_kind` annotation
@@ -3298,6 +3345,13 @@ impl EmitCtx {
                             return Ok(());
                         }
                     }
+                }
+                // Q-prim-assoc: a primitive associated-conversion call
+                // (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`)
+                // lowers to JS's native conversion, NOT the static-member form
+                // below (`Float.from` is undefined on the host `number`).
+                if self.try_emit_primitive_conversion(node, callee, args)? {
+                    return Ok(());
                 }
                 // An associated-function call (`Type.method(args)` — stamped by
                 // the lowerer, no `self` prepended) is a *static* method on the

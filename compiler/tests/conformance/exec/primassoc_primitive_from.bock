@@ -1,0 +1,30 @@
+// TEST: exec_primassoc_primitive_from
+// EXPECT: output "s=a;g=2.5"
+// EXPECT: targets js, ts, python, rust, go
+//
+// The associated-function form of the canonical primitive `From` conversions
+// (`Type.from(x)`) must EXECUTE on every compiled target, producing the same
+// value as the return-type-driven `(x).into()` direction:
+//   * `String.from(Char)` — Char -> String (prints `a`)
+//   * `Float.from(Int)`   — numeric widening Int -> Float, then `/`-by-2 gives a
+//     fractional `2.5` (a *fractional* result is used because whole-number
+//     Float stringification differs across targets — `5` vs `5.0` — which is a
+//     separate, pre-existing Bock float-formatting concern, not part of this
+//     conversion fix).
+// Before the fix the backends emitted garbage on every target (`float.from(5)`
+// on JS, `from` is a Python keyword, no-such-type on Rust/Go). The codegen now
+// lowers each `Prim.from(x)` to the target's native conversion.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the rationale).
+module main
+
+fn double_half(n: Int) -> Float {
+  let f: Float = Float.from(n)
+  f / 2.0
+}
+
+fn main() -> Void {
+  let s: String = String.from('a')
+  let g: Float = double_half(5)
+  println("s=${s};g=${g}")
+}

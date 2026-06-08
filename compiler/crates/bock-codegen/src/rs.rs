@@ -2287,6 +2287,49 @@ impl RsEmitCtx {
         Ok(true)
     }
 
+    /// Q-prim-assoc: lower a primitive associated-conversion call
+    /// (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`) to Rust's native
+    /// conversion. `from` is an `as` cast (`x as f64` / `x as i64`; `f64::from`
+    /// has no `i64` impl) or `char::to_string`. `try_from` parses with
+    /// `str::parse` inside a `match` expression that maps `Ok`/`Err` to the Bock
+    /// `Result` (native `Result<T, ConvertError>` on Rust), the `Err` payload a
+    /// `ConvertError` struct literal (in scope via the `Result[T, ConvertError]`
+    /// return-type import). Returns `true` when handled.
+    fn try_emit_primitive_conversion(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((target, method, arg)) =
+            crate::generator::primitive_conversion_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let arg_str = self.expr_to_string(arg)?;
+        let code = match (target, method) {
+            // Widening casts: `i64 as f64` / sized-int `as i64`. `as` is the
+            // only spelling that covers i64 -> f64 (no `f64::from(i64)`).
+            ("Float", "from") => format!("(({arg_str}) as f64)"),
+            ("Int", "from") => format!("(({arg_str}) as i64)"),
+            // Char -> String. A Bock `Char` is a Rust `char`.
+            ("String", "from") => format!("(({arg_str}).to_string())"),
+            ("Int", "try_from") => format!(
+                "(match ({arg_str}).trim().parse::<i64>() {{ \
+                 Ok(__v) => Ok(__v), \
+                 Err(_) => Err(ConvertError {{ message: format!(\"cannot parse {{:?}} as Int\", ({arg_str})) }}) }})"
+            ),
+            ("Float", "try_from") => format!(
+                "(match ({arg_str}).trim().parse::<f64>() {{ \
+                 Ok(__v) => Ok(__v), \
+                 Err(_) => Err(ConvertError {{ message: format!(\"cannot parse {{:?}} as Float\", ({arg_str})) }}) }})"
+            ),
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Lower a desugared numeric/`Char`/`Bool` primitive method (`recv_kind =
     /// "Primitive:Int" | "Primitive:Float" | "Primitive:Char" | "Primitive:Bool"`)
     /// to its native Rust form. Covers the conversion and math methods the checker
@@ -3552,20 +3595,31 @@ impl RsEmitCtx {
         {
             let async_kw = if *is_async { "async " } else { "" };
             let generics = self.generic_params_to_rs(generic_params);
-            let (receiver, rest) = match params.first().map(crate::generator::param_binds_self) {
-                Some(Some(is_mut)) => {
-                    let recv = if is_mut { "&mut self" } else { "&self" };
-                    (recv.to_string(), &params[1..])
-                }
-                _ => ("&self".to_string(), &params[..]),
-            };
+            // Q-prim-assoc: an *associated function* trait method (no `self`
+            // receiver — `From::from(value: T) -> Self`, `TryFrom::try_from`)
+            // must be declared WITHOUT a receiver. The previous `_ =>` arm
+            // injected a spurious `&self` on every receiver-less method, which
+            // made `core.convert`'s `From`/`TryFrom` traits uncompilable on Rust
+            // (`E0186`: impl has no `&self` to match). Effect operations also
+            // lack a `self` param but ARE instance methods on a handler, so
+            // `is_associated_impl_method` excludes them and keeps their `&self`.
+            let is_assoc = crate::generator::is_associated_impl_method(method, &self.effect_ops);
+            let (receiver, rest): (Option<String>, &[AIRNode]) =
+                match params.first().map(crate::generator::param_binds_self) {
+                    Some(Some(is_mut)) => {
+                        let recv = if is_mut { "&mut self" } else { "&self" };
+                        (Some(recv.to_string()), &params[1..])
+                    }
+                    _ if is_assoc => (None, &params[..]),
+                    _ => (Some("&self".to_string()), &params[..]),
+                };
             // A `Self`-operand trait method (`compare`/`eq`/…) takes its operand
             // by shared reference, so the bound value can be reused after the
             // call (Bock value semantics) — see `self_operand_methods`.
             let borrow_operands = self.self_operand_methods.contains(&name.name);
             let param_strs = self.collect_param_strs_inner(rest, borrow_operands, false);
             let effects = self.effects_params(effect_clause);
-            let mut all_params = vec![receiver];
+            let mut all_params: Vec<String> = receiver.into_iter().collect();
             all_params.extend(param_strs);
             all_params.extend(effects);
             let ret = return_type
@@ -3580,7 +3634,16 @@ impl RsEmitCtx {
             // `Self` is `?Sized`). A borrowed operand (`other: &Self`) is always
             // sized, so the bound is unnecessary there.
             let has_body = crate::generator::is_default_method(method);
-            if has_body && !borrow_operands && rest.iter().any(Self::param_type_is_self) {
+            // Q-prim-assoc: an associated function (no `self` receiver) that
+            // *returns* a `Self`-bearing type by value — `From::from -> Self`,
+            // `TryFrom::try_from -> Result<Self, ConvertError>` — likewise needs
+            // `where Self: Sized` (inside a trait `Self` is `?Sized`, so a
+            // by-value `Self` return is otherwise `E0277`-rejected).
+            let assoc_returns_self = is_assoc && ret.contains("Self");
+            let needs_sized =
+                (has_body && !borrow_operands && rest.iter().any(Self::param_type_is_self))
+                    || assoc_returns_self;
+            if needs_sized {
                 if where_cl.is_empty() {
                     where_cl = " where Self: Sized".to_string();
                 } else {
@@ -4357,6 +4420,14 @@ impl RsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_container_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // Q-prim-assoc: a primitive associated-conversion call
+                // (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`)
+                // lowers to Rust's native conversion, NOT `Float::from(...)`
+                // (`f64::from(i64)` does not exist — it is lossy and unimpl'd; a
+                // primitive type-name path like `Float::from` is also wrong).
+                if self.try_emit_primitive_conversion(node, callee, args)? {
                     return Ok(());
                 }
                 // Associated-function call (`Type.method(args)` — stamped by the
@@ -6724,7 +6795,12 @@ mod tests {
                         is_async: false,
                         name: ident("print"),
                         generic_params: vec![],
-                        params: vec![],
+                        // An *instance* trait method leads with an explicit `self`
+                        // param (as real lowering produces) and emits `&self`. A
+                        // method with no `self` is an *associated* function (e.g.
+                        // `From::from`) and emits with no receiver — see
+                        // `trait_declaration_associated_fn`.
+                        params: vec![self_param(4)],
                         return_type: None,
                         effect_clause: vec![],
                         where_clause: vec![],
@@ -6736,6 +6812,48 @@ mod tests {
         let out = gen(&module(vec![], vec![t]));
         assert!(out.contains("pub trait Printable {"), "got: {out}");
         assert!(out.contains("fn print(&self);"), "got: {out}");
+    }
+
+    /// Q-prim-assoc: an *associated function* trait method (no `self` receiver,
+    /// e.g. `From::from(value: T) -> Self`) must be declared with NO receiver and
+    /// — when it returns a `Self`-bearing type by value — a `where Self: Sized`
+    /// bound. The previous codegen injected a spurious `&self`, which made
+    /// `core.convert`'s `From`/`TryFrom` traits uncompilable on Rust (`E0186`).
+    #[test]
+    fn trait_declaration_associated_fn() {
+        let t = node(
+            1,
+            NodeKind::TraitDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_platform: false,
+                name: ident("MakeSelf"),
+                generic_params: vec![],
+                associated_types: vec![],
+                methods: vec![node(
+                    2,
+                    NodeKind::FnDecl {
+                        annotations: vec![],
+                        visibility: Visibility::Public,
+                        is_async: false,
+                        name: ident("make"),
+                        generic_params: vec![],
+                        // No `self` param → associated function.
+                        params: vec![],
+                        return_type: Some(Box::new(node(3, NodeKind::TypeSelf))),
+                        effect_clause: vec![],
+                        where_clause: vec![],
+                        body: Box::new(block(5, vec![], None)),
+                    },
+                )],
+            },
+        );
+        let out = gen(&module(vec![], vec![t]));
+        assert!(
+            out.contains("fn make() -> Self where Self: Sized;"),
+            "got: {out}"
+        );
+        assert!(!out.contains("&self"), "must not inject a receiver: {out}");
     }
 
     #[test]
