@@ -51,9 +51,9 @@ public trait Iterable[T] {
 /// [`list_iter`] rather than by hand.
 public record ListIterator[T] {
   /// The backing list being iterated.
-  xs: List[T]
+  xs: List[T],
   /// The index of the next element to yield.
-  cursor: Int
+  cursor: Int,
 }
 
 /// `ListIterator` advances an `Int` cursor over its backing list, yielding each
@@ -70,8 +70,8 @@ impl ListIterator {
       Some(v) => {
         self.cursor = self.cursor + 1
         return Some(v)
-      }
-      None => return None
+      },
+      None => return None,
     }
   }
 }
@@ -81,7 +81,10 @@ impl ListIterator {
 /// This is the ergonomic way to obtain an iterator over a list:
 /// `list_iter([1, 2, 3]).next()`.
 public fn list_iter[T](xs: List[T]) -> ListIterator[T] {
-  ListIterator { xs: xs, cursor: 0 }
+  ListIterator {
+    xs: xs,
+    cursor: 0,
+  }
 }
 
 /// Drains `it` into a `List[T]`, preserving order.
@@ -95,7 +98,7 @@ public fn to_list[T](it: ListIterator[T]) -> List[T] {
     match cur.next() {
       Some(x) => {
         out = out.concat([x])
-      }
+      },
       None => break
     }
   }
@@ -110,7 +113,7 @@ public fn count[T](it: ListIterator[T]) -> Int {
     match cur.next() {
       Some(_) => {
         n = n + 1
-      }
+      },
       None => break
     }
   }
@@ -128,7 +131,7 @@ public fn fold[T, A](it: ListIterator[T], init: A, f: Fn(A, T) -> A) -> A {
     match cur.next() {
       Some(x) => {
         acc = f(acc, x)
-      }
+      },
       None => break
     }
   }
@@ -144,7 +147,7 @@ public fn map[T, U](it: ListIterator[T], f: Fn(T) -> U) -> List[U] {
     match cur.next() {
       Some(x) => {
         out = out.concat([f(x)])
-      }
+      },
       None => break
     }
   }
@@ -162,7 +165,7 @@ public fn filter[T](it: ListIterator[T], pred: Fn(T) -> Bool) -> List[T] {
         if (pred(x)) {
           out = out.concat([x])
         }
-      }
+      },
       None => break
     }
   }
@@ -183,7 +186,7 @@ public fn take[T](it: ListIterator[T], n: Int) -> List[T] {
       Some(x) => {
         out = out.concat([x])
         taken = taken + 1
-      }
+      },
       None => break
     }
   }

@@ -1,0 +1,47 @@
+// TEST: parse_success_fmt_cfarm_no_trailing_comma
+// EXPECT: no_errors
+//
+// Locks in the canonical form `bock fmt` emits for value-less control-flow
+// match arms (Q-bockfmt-cfarm-comma): a bare `break` / `continue` / `return`
+// arm body must NOT be followed by a trailing comma. A trailing comma there is
+// read as the start of the statement's optional value expression and rejected
+// with E2020 "expected expression, found `,`". Value-bearing arms (e.g. an
+// assignment `Go => total = total + 1,`) and block-style match arms (`},`)
+// keep their trailing comma. This whole file is both check-clean and already
+// in canonical `bock fmt` form (idempotent under the formatter).
+enum Step {
+  Go,
+  Halt,
+  Skip,
+}
+
+fn count_go(steps: List[Step]) -> Int {
+  let mut total = 0
+  let mut i = 0
+  loop {
+    match steps.get(i) {
+      Some(s) => match s {
+        Go => total = total + 1,
+        Halt => break
+        Skip => continue
+      },
+      None => break
+    }
+    i = i + 1
+  }
+  total
+}
+
+fn first_halt(steps: List[Step]) {
+  let mut i = 0
+  loop {
+    match steps.get(i) {
+      Some(s) => match s {
+        Halt => return
+        Go => i = i + 1,
+        Skip => i = i + 1,
+      },
+      None => return
+    }
+  }
+}

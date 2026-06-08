@@ -731,6 +731,117 @@ fn format_impl_preserves_trait_type_args() {
     assert_parses(&out);
 }
 
+// ─── Control-flow match arms (Q-bockfmt-cfarm-comma) ──────────────────────
+
+#[test]
+fn format_cf_arm_break_no_trailing_comma() {
+    // A value-less control-flow arm body (bare `break`) must NOT gain a trailing
+    // comma: the parser reads the `,` as the start of `break`'s optional value
+    // expression and rejects it with E2020 "expected expression, found `,`".
+    // The formatted output must re-parse cleanly.
+    let src =
+        "fn f() {\n  loop {\n    match next() {\n      Some(x) => take(x),\n      None => break\n    }\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        !out.contains("break,"),
+        "bare `break` arm gained an illegal trailing comma:\n{out}"
+    );
+    assert!(out.contains("None => break"), "break arm mangled:\n{out}");
+    assert_parses(&out);
+}
+
+#[test]
+fn format_cf_arm_continue_no_trailing_comma() {
+    let src =
+        "fn f() {\n  loop {\n    match next() {\n      Some(x) => take(x),\n      None => continue\n    }\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        !out.contains("continue,"),
+        "`continue` arm gained an illegal trailing comma:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_cf_arm_return_bare_no_trailing_comma() {
+    // A value-less `return` is illegal with a trailing comma, same as `break`.
+    let src = "fn f() {\n  match opt() {\n    Some(x) => take(x),\n    None => return\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        !out.contains("return,"),
+        "bare `return` arm gained an illegal trailing comma:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_cf_arm_return_value_keeps_trailing_comma() {
+    // `return expr` (value-bearing) already absorbs the expression and stops at
+    // the comma, so `=> return 0,` parses fine and KEEPS its trailing comma —
+    // only the value-less form must drop it.
+    let src = "fn f() -> Int {\n  match opt() {\n    Some(x) => x,\n    None => return 0\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        out.contains("return 0,"),
+        "value-bearing `return` arm lost its trailing comma:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_cf_arm_break_value_keeps_trailing_comma() {
+    // `break expr` (value-bearing) likewise keeps its trailing comma.
+    let src =
+        "fn f() -> Int {\n  loop {\n    match next() {\n      Some(x) => break x,\n      None => 0,\n    }\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(
+        out.contains("break x,"),
+        "value-bearing `break` arm lost its trailing comma:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_value_arm_keeps_trailing_comma() {
+    // Regression guard: ordinary value arms must STILL get the trailing comma.
+    let src = "fn f(n: Int) -> Int {\n  match n {\n    1 => 10,\n    _ => 0,\n  }\n}\n";
+    let out = format_source(src, "t.bock").output;
+    assert!(out.contains("1 => 10,"), "value arm lost its comma:\n{out}");
+    assert!(out.contains("_ => 0,"), "value arm lost its comma:\n{out}");
+    assert_parses(&out);
+}
+
+// ─── Long multi-byte comment lines (Q-bockfmt-utf8-panic) ──────────────────
+
+#[test]
+fn format_long_utf8_comment_no_panic() {
+    // A box-drawing divider comment longer than the hard limit (100) whose
+    // bytes do not align to char boundaries must NOT panic the line-wrapper.
+    // Each `─` is 3 bytes; 90 of them is 270 bytes but only 90 chars, so a
+    // naive byte-offset slice at 100 lands inside a multi-byte char.
+    let divider: String = "─".repeat(90);
+    let src = format!("// {divider}\nfn f() {{}}\n");
+    // Must not panic.
+    let out = format_source(&src, "t.bock").output;
+    // The divider comment must be preserved intact (formatter leaves comments
+    // alone; the wrapper must not corrupt or split mid-char).
+    assert!(
+        out.contains(&divider),
+        "long multi-byte comment was corrupted:\n{out}"
+    );
+    assert_parses(&out);
+}
+
+#[test]
+fn format_long_utf8_code_line_char_boundary() {
+    // A long code line with multi-byte identifiers/strings must wrap on a char
+    // boundary, never panicking and never producing invalid UTF-8 splits.
+    let s: String = "α".repeat(80); // 80 chars, 160 bytes
+    let src = format!("fn f() {{\n  let x = \"{s}\" + \"tail value that pushes this line well past the hard limit here\"\n}}\n");
+    // Must not panic on the multi-byte slice.
+    let _out = format_source(&src, "t.bock").output;
+}
+
 /// Helper: assert that `src` parses with no lexer or parser errors.
 fn assert_parses(src: &str) {
     use bock_lexer::Lexer;
