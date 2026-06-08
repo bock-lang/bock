@@ -1,0 +1,45 @@
+// TEST: exec_primassoc_try_from
+// EXPECT: output "ok=42;bad=err;fok=3.5"
+// EXPECT: targets js, ts, python, rust, go
+//
+// The canonical fallible primitive conversions `TryFrom[String] for Int` and
+// `TryFrom[String] for Float`, in associated-function form
+// (`Int.try_from(s)` / `Float.try_from(s)`), must EXECUTE on every target,
+// returning the Bock `Result[T, ConvertError]` shape:
+//   * `Int.try_from("42")`   -> `Ok(42)`            (prints `ok=42`)
+//   * `Int.try_from("nope")` -> `Err(ConvertError)` (prints `bad=err`)
+//   * `Float.try_from("3.5")`-> `Ok(3.5)`           (prints `fok=3.5`)
+// The `Err` payload is a `core.convert.ConvertError`, matching the trait's
+// declared `try_from(value) -> Result[Self, ConvertError]` return type.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+use core.convert.{ConvertError}
+
+fn parse_int(s: String) -> Result[Int, ConvertError] {
+  Int.try_from(s)
+}
+
+fn parse_float(s: String) -> Result[Float, ConvertError] {
+  Float.try_from(s)
+}
+
+fn main() -> Void {
+  let good: Result[Int, ConvertError] = parse_int("42")
+  let okstr: String = match good {
+    Ok(v) => "ok=${v}"
+    Err(e) => "ok-err"
+  }
+  let bad: Result[Int, ConvertError] = parse_int("nope")
+  let badstr: String = match bad {
+    Ok(v) => "bad-ok"
+    Err(e) => "bad=err"
+  }
+  let fgood: Result[Float, ConvertError] = parse_float("3.5")
+  let fstr: String = match fgood {
+    Ok(v) => "fok=${v}"
+    Err(e) => "fok-err"
+  }
+  println("${okstr};${badstr};${fstr}")
+}

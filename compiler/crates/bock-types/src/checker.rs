@@ -2505,6 +2505,15 @@ impl TypeChecker {
 
             // ── Function call ─────────────────────────────────────────────────
             NodeKind::Call { .. } => {
+                // Q-prim-assoc: a primitive associated-conversion call
+                // (`Float.from(3)`, `Int.try_from(s)`) resolves against the
+                // canonical primitive conversions, not the ordinary callee path
+                // (the primitive type name is not a value binding). Handle it
+                // first; `None` means "not such a call", so fall through.
+                if let Some(result_ty) = self.try_resolve_primitive_conversion_call(node) {
+                    return self.record(node, result_ty);
+                }
+
                 // Clone callee/args to avoid borrow issues; rewrite below.
                 let (callee_clone, args_clone, _type_args_clone) = if let NodeKind::Call {
                     callee,
@@ -3787,6 +3796,120 @@ impl TypeChecker {
             _ => return None,
         };
         Some(self.freshen_method_type_params(&type_name, method, fn_ty))
+    }
+
+    /// Q-prim-assoc: resolve the **primitive** associated-conversion call form
+    /// `Prim.from(x)` / `Prim.try_from(x)` (e.g. `Float.from(3)`,
+    /// `Int.try_from(s)`), returning the call's result type when it resolves
+    /// against a canonical primitive conversion.
+    ///
+    /// The lowerer represents `Type.method(args)` as a `Call` whose callee is
+    /// `FieldAccess(Identifier(Type), method)` stamped with
+    /// [`bock_air::lower::ASSOC_CALL_META_KEY`] (no `self` prepended). For a
+    /// *user* type the `Identifier(Type)` infers to a `Named` type and the
+    /// `FieldAccess`/`method_types` path resolves the impl's `from`/`try_from`.
+    /// A *primitive* type name (`Int`/`Float`/`String`/`Char`/…) is not bound
+    /// in the value env, so that path would emit `E4002 undefined variable`.
+    /// This hook intercepts those calls and resolves them against the canonical
+    /// primitive conversions registered by
+    /// [`crate::traits::register_canonical_conversions`]:
+    ///
+    /// - `Prim.from(x)` resolves `From[typeof(x)] for Prim` and yields `Prim`.
+    /// - `Prim.try_from(x)` resolves `TryFrom[typeof(x)] for Prim` and yields
+    ///   `Result[Prim, ConvertError]`.
+    ///
+    /// Returns `Some(result_ty)` on a successful resolution (after inferring the
+    /// argument so its node is typed for codegen). Returns `None` when the call
+    /// is not a primitive associated `from`/`try_from` (let the ordinary Call
+    /// path handle it). When the callee *is* a primitive `from`/`try_from` but
+    /// no canonical conversion relates the argument type to the target, emits
+    /// `E4012` and returns `Some(Type::Error)` so the call is not double-reported
+    /// by the generic path.
+    fn try_resolve_primitive_conversion_call(&mut self, node: &mut AIRNode) -> Option<Type> {
+        if !is_associated_call_node(node) {
+            return None;
+        }
+        // Destructure the callee shape: FieldAccess(Identifier(P), method).
+        let (target_prim, method, method_span) = {
+            let NodeKind::Call { callee, .. } = &node.kind else {
+                return None;
+            };
+            let NodeKind::FieldAccess { object, field } = &callee.kind else {
+                return None;
+            };
+            let NodeKind::Identifier { name } = &object.kind else {
+                return None;
+            };
+            let prim = name_to_primitive(&name.name)?;
+            let method = field.name.clone();
+            if method != "from" && method != "try_from" {
+                return None;
+            }
+            (prim, method, field.span)
+        };
+        let target_ty = Type::Primitive(target_prim);
+
+        // Infer the sole conversion argument (its node must be typed for codegen).
+        let arg_ty = {
+            let NodeKind::Call { args, .. } = &mut node.kind else {
+                return None;
+            };
+            if args.len() != 1 {
+                // A primitive `from`/`try_from` takes exactly one source value.
+                return None;
+            }
+            self.infer_node(&mut args[0].value)
+        };
+        let arg_ty = self.subst.apply(&arg_ty);
+
+        // An unresolved / error argument can't key the impl table; defer to the
+        // generic path rather than risk a spurious E4012.
+        if matches!(arg_ty, Type::TypeVar(_) | Type::Error) {
+            return None;
+        }
+
+        let trait_name = if method == "from" { "From" } else { "TryFrom" };
+        let resolves = self
+            .impl_table
+            .as_ref()
+            .map(|table| {
+                let trait_ref = TraitRef::parameterized(trait_name, vec![arg_ty.clone()]);
+                resolve_impl(&trait_ref, &target_ty, table).is_some()
+            })
+            .unwrap_or(false);
+
+        if resolves {
+            let result_ty = if method == "from" {
+                target_ty
+            } else {
+                // `TryFrom::try_from` returns `Result[Self, ConvertError]`.
+                Type::Result(
+                    Box::new(target_ty),
+                    Box::new(Type::Named(crate::NamedType {
+                        name: "ConvertError".to_string(),
+                    })),
+                )
+            };
+            return Some(result_ty);
+        }
+
+        // The callee is a primitive `from`/`try_from`, but no canonical
+        // conversion relates the argument type to the target primitive. Reject
+        // cleanly with `E4012` (mirrors the `.into()` no-conversion diagnostic).
+        self.diags.error(
+            E_NO_CONVERSION,
+            format!(
+                "cannot convert `{}` to `{}` via `{}.{}()`: no canonical `{}` \
+                 conversion relates these types",
+                crate::traits::type_key(&arg_ty),
+                crate::traits::type_key(&target_ty),
+                crate::traits::type_key(&target_ty),
+                method,
+                trait_name,
+            ),
+            method_span,
+        );
+        Some(Type::Error)
     }
 
     /// Replace a method's OWN generic type parameters with fresh inference
@@ -5569,6 +5692,19 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// Map a built-in type name to its [`PrimitiveType`] variant, if any.
+/// Q-prim-assoc: `true` when `node` is a `Call` the lowerer classified as an
+/// **associated-function call** (`Type.method(args)` — no `self` prepended), via
+/// the [`bock_air::lower::ASSOC_CALL_META_KEY`] stamp. The checker-side mirror of
+/// `bock_codegen`'s `is_associated_call` (codegen is downstream, so the helper
+/// cannot be shared); used to recognise the primitive `Prim.from`/`Prim.try_from`
+/// conversion call shape.
+fn is_associated_call_node(node: &AIRNode) -> bool {
+    matches!(
+        node.metadata.get(bock_air::lower::ASSOC_CALL_META_KEY),
+        Some(Value::Bool(true))
+    )
+}
+
 fn name_to_primitive(name: &str) -> Option<PrimitiveType> {
     match name {
         "Int" => Some(PrimitiveType::Int),

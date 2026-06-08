@@ -75,6 +75,50 @@ counterpart to a `toString`/`Display` trait. `to_string` returns this
 value's `String` representation. Implementing `Displayable` enables
 `${expr}` string interpolation for the type (§18.5).
 
+## Canonical primitive conversions
+
+The compiler registers a fixed matrix of **lossless** primitive
+conversions (plus the two fallible string-parsing ones), reachable in
+**both** directions — the return-type-driven `(x).into()` form and the
+associated-function `Prim.from(x)` / `Prim.try_from(s)` form:
+
+| Conversion | `.into()` form | associated-call form |
+|------------|----------------|----------------------|
+| `Int → Float` | `let f: Float = (5).into()` | `Float.from(5)` |
+| sized-int → wider / `Int` | `let n: Int = i8val.into()` | `Int.from(i8val)` |
+| `Float32 → Float` | `let f: Float = f32val.into()` | `Float.from(f32val)` |
+| `Char → String` | `let s: String = c.into()` | `String.from(c)` |
+| `String → Int` (parse) | — | `Int.try_from(s)` |
+| `String → Float` (parse) | — | `Float.try_from(s)` |
+
+```bock
+let pi: Float = Float.from(3)            // Int -> Float, == 3.0
+let label: String = String.from('x')     // Char -> String, == "x"
+
+use core.convert.{ConvertError}
+fn parse(s: String) -> Result[Int, ConvertError] {
+  Int.try_from(s)                        // Ok(42) for "42", Err(...) otherwise
+}
+```
+
+`Prim.from(x)` yields the target primitive; `Prim.try_from(s)` yields
+`Result[Prim, ConvertError]` (the `Err` payload is a
+[`ConvertError`](#converterror) with a `message`). These conversions are
+always available — no import is required for the `from`/`try_from`
+themselves; only `ConvertError` (used in the `try_from` return type) is
+imported.
+
+**Lossy / narrowing conversions are excluded.** A narrowing direction
+(e.g. `Int → Int8`) is rejected at compile time (`E4012`); express it
+through a `TryFrom` instead. A `Prim.from`/`Prim.try_from` whose source
+type has no canonical conversion to the target is likewise rejected with
+`E4012`.
+
+> The associated-call callees reachable in v1 are `Int`, `Float`, and
+> `String` (the unsized primitive type names the resolver admits as bare
+> type names); the sized targets (`Int64`, …) participate as `.into()`
+> targets and as `from` *sources*.
+
 ## Functions
 
 ### `convert_error`
@@ -106,6 +150,6 @@ public record Fahrenheit { degrees: Float }
 ```
 
 A paired, ready-to-use sample conversion: `impl From[Celsius] for
-Fahrenheit` lets both `c.into()` and `Fahrenheit::from(c)` produce a
+Fahrenheit` lets both `c.into()` and `Fahrenheit.from(c)` produce a
 `Fahrenheit`. They demonstrate the parameterized-trait conversion
 pattern you would mirror on your own types.

@@ -3421,6 +3421,61 @@ pub fn is_associated_call(node: &AIRNode) -> bool {
     )
 }
 
+/// The set of primitive type names that can appear as the *callee* of a
+/// canonical primitive associated conversion (`Prim.from(x)` / `Prim.try_from`).
+///
+/// Restricted to the conversion *targets* the canonical matrix defines
+/// (`register_canonical_conversions`): `Int`/`Float` (numeric widening +
+/// `TryFrom[String]`), `String` (`From[Char]`). Sized primitives (`Int64`, …)
+/// are conversion targets too, but are not in the resolver's type-name vocab,
+/// so they never reach codegen as an associated-call callee; `Int`/`Float`/
+/// `String` are the v1-reachable callees.
+pub const PRIMITIVE_CONVERSION_TARGETS: &[&str] = &["Int", "Float", "String"];
+
+/// Q-prim-assoc: when `node` is a **primitive** associated-conversion call
+/// (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`), returns
+/// `(target_prim_name, method, arg)`, where `method` is `"from"` or
+/// `"try_from"` and `arg` is the single source-value argument.
+///
+/// Such a call is stamped [`is_associated_call`] and has the callee shape
+/// `FieldAccess(Identifier(Prim), method)` where `Prim` is a
+/// [`PRIMITIVE_CONVERSION_TARGETS`] name. Backends emit each target's native
+/// conversion rather than the generic associated-call form (`Float.from(x)`),
+/// which references a non-existent member on the host primitive (`float.from` is
+/// a syntax error in Python; `Float`/`Float_from` are undefined in JS/Go/Rust).
+/// Returns `None` for any other call, including user-type associated calls
+/// (`Fahrenheit.from(c)`) and non-conversion methods, which keep their existing
+/// lowering.
+#[must_use]
+pub fn primitive_conversion_call<'a>(
+    node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a str, &'a str, &'a AIRNode)> {
+    if !is_associated_call(node) {
+        return None;
+    }
+    let NodeKind::FieldAccess { object, field } = &callee.kind else {
+        return None;
+    };
+    let NodeKind::Identifier { name } = &object.kind else {
+        return None;
+    };
+    let target = PRIMITIVE_CONVERSION_TARGETS
+        .iter()
+        .copied()
+        .find(|&p| p == name.name)?;
+    let method = match field.name.as_str() {
+        m @ ("from" | "try_from") => m,
+        _ => return None,
+    };
+    let arg = args.first().map(|a| &a.value)?;
+    if args.len() != 1 {
+        return None;
+    }
+    Some((target, method, arg))
+}
+
 /// True when an impl/trait `method` (an [`bock_air::NodeKind::FnDecl`]) is an
 /// **associated function** — it does not bind a leading `self` receiver, so it
 /// is reached as `Type.method(...)` rather than `value.method(...)`.

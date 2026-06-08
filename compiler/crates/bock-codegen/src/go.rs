@@ -799,6 +799,9 @@ impl CodeGenerator for GoGenerator {
         if needs.fmt {
             imports.push("\"fmt\"");
         }
+        if needs.strconv {
+            imports.push("\"strconv\"");
+        }
         if needs.strings {
             imports.push("\"strings\"");
         }
@@ -986,6 +989,9 @@ struct GoEmitCtx {
     /// Track whether we need `"unicode"` import (`Char`/`trim_start`/`trim_end`
     /// predicates via `unicode.IsSpace`/`IsLetter`/`IsDigit`).
     needs_unicode_import: bool,
+    /// Track whether we need `"strconv"` import (`Int.try_from`/`Float.try_from`
+    /// string parsing via `strconv.ParseInt`/`strconv.ParseFloat`).
+    needs_strconv_import: bool,
     /// Package name (defaults to "main").
     package_name: String,
     /// Maps effect operation name → effect type name (e.g., "log" → "Logger").
@@ -1492,6 +1498,7 @@ struct GoImportNeeds {
     utf8: bool,
     math: bool,
     unicode: bool,
+    strconv: bool,
 }
 
 impl GoImportNeeds {
@@ -1506,6 +1513,9 @@ impl GoImportNeeds {
         }
         if self.math {
             imports.push("\"math\"");
+        }
+        if self.strconv {
+            imports.push("\"strconv\"");
         }
         if self.strings {
             imports.push("\"strings\"");
@@ -1556,6 +1566,7 @@ impl GoEmitCtx {
             needs_utf8_import: false,
             needs_math_import: false,
             needs_unicode_import: false,
+            needs_strconv_import: false,
             package_name: "main".into(),
             effect_ops: HashMap::new(),
             current_handler_vars: HashMap::new(),
@@ -1647,6 +1658,7 @@ impl GoEmitCtx {
         c.needs_utf8_import = false;
         c.needs_math_import = false;
         c.needs_unicode_import = false;
+        c.needs_strconv_import = false;
         c.concurrency_runtime_emitted = false;
         c.optional_runtime_emitted = false;
         c.result_runtime_emitted = false;
@@ -4611,6 +4623,7 @@ impl GoEmitCtx {
                 utf8: self.needs_utf8_import,
                 math: self.needs_math_import,
                 unicode: self.needs_unicode_import,
+                strconv: self.needs_strconv_import,
             },
         )
     }
@@ -4625,6 +4638,7 @@ impl GoEmitCtx {
             utf8: self.needs_utf8_import,
             math: self.needs_math_import,
             unicode: self.needs_unicode_import,
+            strconv: self.needs_strconv_import,
         };
         header.push_str(&needs.render_block());
         header.push('\n');
@@ -5951,6 +5965,55 @@ impl GoEmitCtx {
                 self.needs_utf8_import = true;
                 format!(
                     "func(__s, __p string) __bockOption {{ __b := strings.Index(__s, __p); if __b < 0 {{ return __bockNone }}; return __bockSome(int64(utf8.RuneCountInString(__s[:__b]))) }}({recv_str}, {p})"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
+    /// Q-prim-assoc: lower a primitive associated-conversion call
+    /// (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`) to Go's native
+    /// conversion. `from` is a Go type conversion (`float64(x)` / `int64(x)` /
+    /// `string(x)`; a Bock `Char` is a `rune`, so `string(rune)` yields the
+    /// single-character string). `try_from` parses via `strconv.Parse{Int,Float}`
+    /// inside an IIFE returning the `__bockResult` runtime struct, the `Err`
+    /// payload built with the in-package `ConvertErrorFn` constructor (Go emits
+    /// everything into `package main`, so it is always visible). Returns `true`
+    /// when handled.
+    fn try_emit_primitive_conversion(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((target, method, arg)) =
+            crate::generator::primitive_conversion_call(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let arg_str = self.expr_to_string(arg)?;
+        let code = match (target, method) {
+            ("Float", "from") => format!("float64({arg_str})"),
+            ("Int", "from") => format!("int64({arg_str})"),
+            ("String", "from") => format!("string({arg_str})"),
+            ("Int", "try_from") => {
+                self.needs_strconv_import = true;
+                self.needs_strings_import = true;
+                format!(
+                    "func(__s string) __bockResult {{ __v, __err := strconv.ParseInt(strings.TrimSpace(__s), 10, 64); \
+                     if __err != nil {{ return __bockErr(ConvertErrorFn(\"cannot parse \\\"\" + __s + \"\\\" as Int\")) }}; \
+                     return __bockOk(__v) }}({arg_str})"
+                )
+            }
+            ("Float", "try_from") => {
+                self.needs_strconv_import = true;
+                self.needs_strings_import = true;
+                format!(
+                    "func(__s string) __bockResult {{ __v, __err := strconv.ParseFloat(strings.TrimSpace(__s), 64); \
+                     if __err != nil {{ return __bockErr(ConvertErrorFn(\"cannot parse \\\"\" + __s + \"\\\" as Float\")) }}; \
+                     return __bockOk(__v) }}({arg_str})"
                 )
             }
             _ => return Ok(false),
@@ -8555,6 +8618,13 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_container_method(node, callee, args)? {
+                    return Ok(());
+                }
+                // Q-prim-assoc: a primitive associated-conversion call
+                // (`Float.from(x)` / `Int.try_from(s)` / `String.from(c)`)
+                // lowers to Go's native conversion, NOT the free-function form
+                // below (`Float_from` is undefined).
+                if self.try_emit_primitive_conversion(node, callee, args)? {
                     return Ok(());
                 }
                 // Associated-function call (`Type.method(args)` — stamped by the
