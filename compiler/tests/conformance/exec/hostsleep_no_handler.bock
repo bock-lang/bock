@@ -1,0 +1,36 @@
+// TEST: hostsleep_no_handler
+// EXPECT: output "host-sleep: ok"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-rust-host-sleep-tokio-dep regression guard (found by #297): when NO `Clock`
+// handler is installed, the §18.3.1 host async `sleep(..)` primitive must fall
+// through to the host default AND the emitted program must actually compile and
+// run on every target. The companion `clock_no_handler_default` fixture exercises
+// the host monotonic clock (`Instant.now`/`elapsed`) but deliberately AVOIDS the
+// host `sleep` — because on rust `sleep(..)` lowers to `tokio::time::sleep(..)`
+// under a `#[tokio::main]` async `fn main`, and the scaffolded rust `Cargo.toml`
+// carried NO `tokio` dependency, so `cargo check`/`cargo run` failed with an
+// unresolved-`tokio` error (E0433). The fix adds `tokio` to the rust scaffold's
+// `Cargo.toml` whenever the emitted Rust references it (the host-sleep path or the
+// `Channel`/`spawn` concurrency runtime); the companion `clock_handler_intercepts`
+// path routes through the handler and does NOT depend on tokio.
+//
+// The sleep duration is `Duration.zero()` so the test does NOT actually delay —
+// it proves the *compile + run* path, not real wall-clock sleeping. Each backend
+// lowers the bare host `sleep`:
+//   * py   -> asyncio.sleep(0)
+//   * js   -> setTimeout(_, 0) wrapped in a Promise
+//   * ts   -> setTimeout(_, 0) wrapped in a Promise
+//   * rust -> tokio::time::sleep(Duration::from_nanos(0)) under #[tokio::main]
+//   * go   -> time.Sleep(0)
+// The output is value-independent (the program runs to completion), so it is
+// fixed at "host-sleep: ok" on every target.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale, see
+// hello_world.bock). `Duration` is a compiler builtin (no `use`).
+module main
+
+async fn main() -> Void {
+  await sleep(Duration.zero())
+  println("host-sleep: ok")
+}

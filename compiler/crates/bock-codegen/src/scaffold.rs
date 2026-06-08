@@ -504,11 +504,38 @@ pub fn run_scaffolder(
 // (parsed/validated in S5). The actual transpiled `@test` files and the
 // formatter-clean `--check` gate are S7, not here.
 
-/// The path codegen emits the shared Rust concurrency runtime to. Its presence
-/// in the emitted tree is the signal that the crate needs `tokio` as a
-/// dependency (a `Channel`/`spawn` program); a non-concurrent program emits no
-/// such file and its `Cargo.toml` carries no dependencies.
-const RUST_RUNTIME_REL: &str = "src/bock_runtime.rs";
+/// The marker the emitted Rust source carries when the crate needs `tokio` as a
+/// dependency.
+///
+/// `tokio` is required by two distinct emitted-code paths, both of which write
+/// fully-qualified `tokio::` paths into the `.rs` tree:
+///
+/// * **concurrency** — a `Channel`/`spawn` program pulls in the shared
+///   `src/bock_runtime.rs` runtime, which is `tokio::sync::mpsc`-backed; and
+/// * **bare host `sleep`** — a `sleep(..)` with no installed `Clock` handler
+///   lowers to `tokio::time::sleep(..)` under a `#[tokio::main]` async `fn main`
+///   (the host-default time path). This path emits NO `bock_runtime.rs`, so a
+///   `bock_runtime.rs`-presence check alone misses it (Q-rust-host-sleep-tokio-dep).
+///
+/// Scanning the emitted `.rs` source for this substring catches both paths
+/// uniformly: any program whose Rust output references `tokio` needs the
+/// dependency, and a program that references none gets a dependency-free
+/// `Cargo.toml` so `cargo run` stays fast. See [`rust_emits_tokio`].
+const RUST_TOKIO_MARKER: &str = "tokio::";
+
+/// Whether the emitted Rust source tree uses `tokio` (and so the scaffolded
+/// `Cargo.toml` must carry the dependency).
+///
+/// True iff any emitted `.rs` file references [`RUST_TOKIO_MARKER`]. This covers
+/// both the `Channel`/`spawn` concurrency runtime and the bare host-`sleep`
+/// (`tokio::time::sleep`) path; a program that uses neither emits no `tokio::`
+/// path and gets a dependency-free crate.
+fn rust_emits_tokio(emitted: &[OutputFile]) -> bool {
+    emitted.iter().any(|f| {
+        f.path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && f.content.contains(RUST_TOKIO_MARKER)
+    })
+}
 
 /// The default project name when `[project] name` is absent from `bock.project`.
 const DEFAULT_PROJECT_NAME: &str = "bock-app";
@@ -917,8 +944,10 @@ impl Scaffolder for PythonScaffolder {
 // ── Rust scaffolder ──────────────────────────────────────────────────────────
 
 /// Rust scaffolder: emits a `Cargo.toml` (`[package]` metadata + `[[bin]]` at
-/// `src/main.rs`, `tokio` only when the emitted tree carries the concurrency
-/// runtime), an opt-in `clippy.toml` (only when `[scaffolding].linter =
+/// `src/main.rs`, `tokio` only when the emitted Rust references it — the
+/// `Channel`/`spawn` concurrency runtime or the bare host-`sleep`
+/// `tokio::time::sleep` path), an opt-in `clippy.toml` (only when
+/// `[scaffolding].linter =
 /// "clippy"`), and a README first-contact. rustfmt is universal/always-on, so no
 /// formatter config is emitted (the formatter-clean gate is S7). cargo test is
 /// the universal test framework: the README documents `cargo test` and the
@@ -926,10 +955,14 @@ impl Scaffolder for PythonScaffolder {
 struct RustScaffolder;
 
 impl RustScaffolder {
-    /// Render the `Cargo.toml`. `tokio` (with the features the concurrency
-    /// runtime needs) is included only when the program uses `Channel`/`spawn`,
-    /// so a non-concurrent program's crate has no dependencies and `cargo run`
-    /// stays fast. The crate name is `bock_app` (a fixed, Rust-identifier-safe
+    /// Render the `Cargo.toml`. `tokio` (with the features the emitted async/
+    /// concurrency code needs) is included only when the emitted Rust references
+    /// it — a `Channel`/`spawn` program (the concurrency runtime) or a bare host
+    /// `sleep(..)` (`tokio::time::sleep` under `#[tokio::main]`) — so a program
+    /// that uses neither has no dependencies and `cargo run` stays fast. The
+    /// `time` feature backs `tokio::time::sleep`, `rt-multi-thread`/`macros` back
+    /// `#[tokio::main]`, and `sync` backs the channel runtime. The crate name is
+    /// `bock_app` (a fixed, Rust-identifier-safe
     /// name — the emitted `src/main.rs` and the toolchain run plan reference the
     /// `bock_app` bin), independent of the project name.
     fn cargo_toml(needs_tokio: bool) -> String {
@@ -982,10 +1015,7 @@ impl Scaffolder for RustScaffolder {
     }
 
     fn scaffold(&self, ctx: &ScaffoldContext<'_>) -> Result<Vec<OutputFile>, ScaffoldError> {
-        let needs_tokio = ctx
-            .emitted
-            .iter()
-            .any(|f| f.path == Path::new(RUST_RUNTIME_REL));
+        let needs_tokio = rust_emits_tokio(ctx.emitted);
         let mut files = vec![
             out_file("Cargo.toml", Self::cargo_toml(needs_tokio)),
             out_file("README.md", Self::readme(ctx)),
@@ -1461,16 +1491,56 @@ formatter = "prettier"
 
     #[test]
     fn rust_scaffolder_adds_tokio_when_runtime_present() {
+        // The `Channel`/`spawn` concurrency runtime is `tokio::sync::mpsc`-backed,
+        // so its emitted `bock_runtime.rs` references `tokio::` — the trigger.
         let cfg = TargetScaffoldConfig::default();
         let emitted = vec![OutputFile {
             path: Path::new("src/bock_runtime.rs").to_path_buf(),
-            content: "// runtime".into(),
+            content: "let (tx, rx) = tokio::sync::mpsc::unbounded_channel();".into(),
             source_map: None,
         }];
         let files = run_scaffolder("rust", &cfg, &emitted, None).unwrap();
         let cargo = file(&files, "Cargo.toml");
         assert!(cargo.content.contains("[dependencies]"));
         assert!(cargo.content.contains("tokio"));
+    }
+
+    #[test]
+    fn rust_scaffolder_adds_tokio_for_bare_host_sleep() {
+        // Q-rust-host-sleep-tokio-dep: a bare host `sleep(..)` (no `Clock`
+        // handler) lowers to `tokio::time::sleep(..)` under `#[tokio::main]` in
+        // `src/main.rs` and emits NO `bock_runtime.rs`. Scanning the emitted Rust
+        // for `tokio::` still triggers the dependency so the crate compiles.
+        let cfg = TargetScaffoldConfig::default();
+        let emitted = vec![OutputFile {
+            path: Path::new("src/main.rs").to_path_buf(),
+            content: "#[tokio::main]\nasync fn main() -> () {\n    \
+                      tokio::time::sleep(std::time::Duration::from_nanos((0i64) as u64)).await;\n}\n"
+                .into(),
+            source_map: None,
+        }];
+        let files = run_scaffolder("rust", &cfg, &emitted, None).unwrap();
+        let cargo = file(&files, "Cargo.toml");
+        assert!(cargo.content.contains("[dependencies]"));
+        assert!(cargo.content.contains("tokio"));
+        // The `time` feature is what backs `tokio::time::sleep`.
+        assert!(cargo.content.contains("\"time\""));
+    }
+
+    #[test]
+    fn rust_scaffolder_no_tokio_when_unused() {
+        // A non-async, non-concurrent program references no `tokio::` path, so the
+        // crate stays dependency-free and `cargo run` is fast.
+        let cfg = TargetScaffoldConfig::default();
+        let emitted = vec![OutputFile {
+            path: Path::new("src/main.rs").to_path_buf(),
+            content: "fn main() {\n    println!(\"{}\", \"hi\");\n}\n".into(),
+            source_map: None,
+        }];
+        let files = run_scaffolder("rust", &cfg, &emitted, None).unwrap();
+        let cargo = file(&files, "Cargo.toml");
+        assert!(!cargo.content.contains("tokio"));
+        assert!(!cargo.content.contains("[dependencies]"));
     }
 
     #[test]

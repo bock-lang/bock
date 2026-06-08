@@ -74,8 +74,12 @@ See §20.6.1.
 >   Cargo workspace) plus a `src/`-rooted module tree (`src/main.rs`,
 >   `src/core/option.rs`, the `mod`/`pub mod` wiring files), with
 >   cross-module references resolved by `use crate::core::option::…;`. The
->   concurrency runtime, when used, lives once in `src/bock_runtime.rs` and
->   pulls in `tokio`. Built and run with `cargo run` from `build/rust/`.
+>   `Cargo.toml` carries a `tokio` dependency whenever the emitted Rust uses
+>   it — the `Channel`/`spawn` concurrency runtime (which lives once in
+>   `src/bock_runtime.rs`) or a bare host `sleep(..)` with no installed
+>   `Clock` handler (which lowers to `tokio::time::sleep` under a
+>   `#[tokio::main]` async `fn main`); a program that uses neither gets a
+>   dependency-free crate. Built and run with `cargo run` from `build/rust/`.
 > - **Go** — a real Go module: a `go.mod` (module path + go version) plus
 >   flat per-module files all in one `package main` (`main.go`,
 >   `core_option.go`, …, and a shared `bock_runtime.go` for the
