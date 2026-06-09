@@ -94,10 +94,7 @@ export async function analyzeEffectFlow(
     .map((name) => effectRegistry.get(name))
     .filter((e): e is EffectDef => Boolean(e));
 
-  const operationToEffect = new Map<string, string>();
-  for (const def of effectDefs) {
-    for (const op of def.operations) operationToEffect.set(op, def.name);
-  }
+  const operationToEffect = buildOperationToEffectMap(effectDefs);
 
   const bodyStartOffset = enclosing.bodyRange.start;
   const bodyEndOffset = enclosing.bodyRange.end;
@@ -451,6 +448,26 @@ export function offsetToLocation(
     }
   }
   return { uri, line, column: offset - lastNewline - 1 };
+}
+
+/**
+ * Build the operation-name → owning-effect-name map for a set of effect
+ * definitions. Pure.
+ *
+ * When two effects declare an operation with the same name, the later
+ * definition in the list wins — preserving the behaviour of the original
+ * inline construction in `analyzeEffectFlow` (last writer wins). Composite
+ * effects (`effect X = A + B`) have no operations of their own and
+ * contribute nothing.
+ */
+export function buildOperationToEffectMap(
+  effectDefs: EffectDef[],
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const def of effectDefs) {
+    for (const op of def.operations) map.set(op, def.name);
+  }
+  return map;
 }
 
 export function expandEffects(

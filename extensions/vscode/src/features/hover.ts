@@ -2,7 +2,13 @@
 //
 // Wraps the LSP server's `textDocument/hover` response with vocab-derived
 // context: keyword/operator purpose, annotation explanations, primitive and
-// prelude spec links, stdlib module provenance, and effect handler hints.
+// prelude spec links, stdlib module provenance, built-in method receivers,
+// effect handler hints, and effect-operation provenance (which effect
+// declared in the current document owns the hovered operation).
+//
+// Operators are not word characters, so the default
+// `getWordRangeAtPosition` misses them; a vocab-derived regex (escaped
+// symbols, longest-first) is used as the fallback word pattern.
 //
 // The base type information still comes from the LSP. This layer only adds
 // signposts — spec section links (command:bock.openSpecAt) and inline
@@ -33,11 +39,19 @@ import {
   stringifyHoverContents,
   renderAnnotation,
   renderKeyword,
+  renderOperator,
   renderPrimitive,
   renderPrelude,
   renderStdlibSymbol,
+  renderBuiltinMethod,
   renderEffectUsage,
+  renderEffectOperation,
 } from './hover-render';
+import {
+  extractEffects,
+  buildOperationToEffectMap,
+  type EffectDef,
+} from './effect-analyzer';
 
 export function registerHover(
   ctx: vscode.ExtensionContext,
@@ -123,7 +137,19 @@ function collectEnrichments(
   const sections: string[] = [];
 
   const wordRange = doc.getWordRangeAtPosition(pos);
-  if (!wordRange) return sections;
+  if (!wordRange) {
+    // Operator symbols are not word characters, so the default word range
+    // misses them. Retry with the vocab-derived operator pattern (escaped,
+    // longest-first) and render the operator block on a hit.
+    if (cache.operatorRegex) {
+      const opRange = doc.getWordRangeAtPosition(pos, cache.operatorRegex);
+      if (opRange) {
+        const op = cache.operators.get(doc.getText(opRange));
+        if (op) sections.push(renderOperator(op, showSpecLinks));
+      }
+    }
+    return sections;
+  }
   const word = doc.getText(wordRange);
 
   if (isAnnotationPrefix(doc, wordRange)) {
@@ -134,6 +160,12 @@ function collectEnrichments(
 
   const kw = cache.keywords.get(word);
   if (kw) sections.push(renderKeyword(kw, showSpecLinks));
+
+  // `_` (wildcard) is the one operator made of word characters, so it
+  // arrives through the default word range rather than the operator-regex
+  // fallback above.
+  const wordOp = cache.operators.get(word);
+  if (wordOp) sections.push(renderOperator(wordOp, showSpecLinks));
 
   const prim = cache.primitives.get(word);
   if (prim) sections.push(renderPrimitive(prim, showSpecLinks));
@@ -161,12 +193,53 @@ function collectEnrichments(
     for (const hit of stdlibHits) sections.push(renderStdlibSymbol(hit, showSpecLinks));
   }
 
+  if (isPrecededByDot(doc, wordRange)) {
+    const receivers = cache.builtinMethods.get(word);
+    if (receivers && receivers.length > 0) {
+      sections.push(renderBuiltinMethod(word, receivers, showSpecLinks));
+    }
+  }
+
   if (isInEffectContext(doc, wordRange) && !cache.keywords.has(word)) {
     const handlerLine = findHandlerInFile(doc, word);
     sections.push(renderEffectUsage(word, handlerLine, showSpecLinks));
   }
 
+  if (!kw && !prim) {
+    const owningEffect = findDocumentEffectOperation(doc, word);
+    if (owningEffect) {
+      sections.push(
+        renderEffectOperation(
+          word,
+          owningEffect.name,
+          owningEffect.operations,
+          owningEffect.defined?.line,
+          showSpecLinks,
+        ),
+      );
+    }
+  }
+
   return sections;
+}
+
+/**
+ * Resolve `word` as an operation of an effect declared in this document.
+ *
+ * Re-parses the document text with the analyzer's effect extractor (two
+ * regex passes — cheap enough per hover) and maps operations to their owning
+ * effect via the same helper `analyzeEffectFlow` uses. Only effects declared
+ * in the hovered document participate, so the "declared in this file" line
+ * hint in the rendered block is always accurate.
+ */
+function findDocumentEffectOperation(
+  doc: vscode.TextDocument,
+  word: string,
+): EffectDef | undefined {
+  const defs = new Map<string, EffectDef>();
+  extractEffects(doc.uri, doc.getText(), defs);
+  const owner = buildOperationToEffectMap([...defs.values()]).get(word);
+  return owner === undefined ? undefined : defs.get(owner);
 }
 
 function isAnnotationPrefix(doc: vscode.TextDocument, range: vscode.Range): boolean {
@@ -176,6 +249,16 @@ function isAnnotationPrefix(doc: vscode.TextDocument, range: vscode.Range): bool
     range.start,
   );
   return doc.getText(before) === '@';
+}
+
+/** True when the hovered word is directly preceded by `.` (method position). */
+function isPrecededByDot(doc: vscode.TextDocument, range: vscode.Range): boolean {
+  if (range.start.character === 0) return false;
+  const before = new vscode.Range(
+    range.start.translate(0, -1),
+    range.start,
+  );
+  return doc.getText(before) === '.';
 }
 
 function isInEffectContext(doc: vscode.TextDocument, range: vscode.Range): boolean {
