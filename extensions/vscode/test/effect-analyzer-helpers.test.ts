@@ -193,6 +193,32 @@ describe('effect-analyzer.findEnclosingFunction', () => {
     assert.deepEqual(fn.withClause, ['Logger', 'Clock']);
   });
 
+  it('reports the with-clause on the idiomatic same-line `-> Type with Effects {` shape (end-to-end)', () => {
+    // The dominant signature shape across examples/: return type and effect
+    // clause on one line. findEnclosingFunction must surface the effects, not
+    // an empty list (the bug #310 pinned).
+    const text = [
+      'fn save_with_log(key: String, value: String) -> Void with Logger, Storage {',
+      '  CURSOR',
+      '}',
+    ].join('\n');
+    const fn = findEnclosingFunction(text, at(text, 'CURSOR'));
+    assert.ok(fn);
+    assert.equal(fn.name, 'save_with_log');
+    assert.deepEqual(fn.withClause, ['Logger', 'Storage']);
+  });
+
+  it('reports the with-clause when the same-line return type is a generic (end-to-end)', () => {
+    const text = [
+      'fn load_with_log(key: String) -> Optional[String] with Logger, Storage {',
+      '  CURSOR',
+      '}',
+    ].join('\n');
+    const fn = findEnclosingFunction(text, at(text, 'CURSOR'));
+    assert.ok(fn);
+    assert.deepEqual(fn.withClause, ['Logger', 'Storage']);
+  });
+
   it('skips effect-block fn signatures (no `{` body) and finds the real enclosing fn', () => {
     // The `fn log(...)` lines inside `effect Logger { ... }` are declarations,
     // not bodies; they must not be mistaken for the enclosing function.
@@ -243,13 +269,27 @@ describe('effect-analyzer.splitBindings', () => {
     ]);
   });
 
-  it('KNOWN WEAKNESS: a top-level comma inside a string literal is (wrongly) treated as a separator', () => {
-    // splitBindings is brace-/paren-aware but NOT string-aware, so a comma in
-    // an unbraced string literal splits the binding. Asserting current
-    // behaviour to pin the limitation; see report.
+  it('does NOT split on a comma inside a string literal (string-aware)', () => {
+    // splitBindings is now string-aware: the comma inside `"x,y"` is string
+    // content, not a top-level separator, so the first binding stays whole.
     assert.deepEqual(splitBindings('A with "x,y", B with C'), [
-      'A with "x',
-      'y"',
+      'A with "x,y"',
+      'B with C',
+    ]);
+  });
+
+  it('does not split on a comma inside a single-quoted string literal', () => {
+    assert.deepEqual(splitBindings("A with 'p,q', B with C"), [
+      "A with 'p,q'",
+      'B with C',
+    ]);
+  });
+
+  it('honours an escaped quote inside a string when scanning for split commas', () => {
+    // The escaped `\"` keeps us in-string, so the comma after it is still
+    // string content and the binding is not split there.
+    assert.deepEqual(splitBindings('A with "a\\",b", B with C'), [
+      'A with "a\\",b"',
       'B with C',
     ]);
   });
@@ -285,13 +325,51 @@ describe('effect-analyzer.parseWithClause', () => {
     ]);
   });
 
-  it('KNOWN BUG: a same-line `-> Type with Effects` loses its effects (greedy return-type strip)', () => {
-    // The idiomatic Bock signature `fn f() -> Void with Logger {` puts the
-    // return type and with-clause on ONE line. The strip regex `/->\s*[^\n{]*/`
-    // is greedy to the newline, so it consumes ` with Logger` too and the
-    // with-clause comes back EMPTY. Asserting current (buggy) behaviour to pin
-    // it; this is the dominant signature shape across examples/. See report.
-    assert.deepEqual(parseWithClause(' -> Void with Logger, Storage '), []);
+  it('extracts effects from a same-line `-> Type with Effects` signature (the dominant shape)', () => {
+    // The idiomatic Bock signature `fn f() -> Void with Logger, Storage {` puts
+    // the return type and with-clause on ONE line. We split at the top-level
+    // `with` keyword, so the effect list comes back in full.
+    assert.deepEqual(parseWithClause(' -> Void with Logger, Storage '), [
+      'Logger',
+      'Storage',
+    ]);
+  });
+
+  it('splits at the top-level `with` when the return type is a generic with brackets before it', () => {
+    // `Result[Int, E]` carries an inner comma and brackets; the split must land
+    // on the top-level `with`, not on anything inside the generic.
+    assert.deepEqual(parseWithClause(' -> Result[Int, E] with Logger '), [
+      'Logger',
+    ]);
+    // The real example shape: `-> Optional[String] with Logger, Storage`.
+    assert.deepEqual(
+      parseWithClause(' -> Optional[String] with Logger, Storage '),
+      ['Logger', 'Storage'],
+    );
+  });
+
+  it('returns no effects for a return type with no with-clause', () => {
+    assert.deepEqual(parseWithClause(' -> Result[Int, E] '), []);
+    assert.deepEqual(parseWithClause(' -> Map[String, Int] '), []);
+  });
+
+  it('does not treat a `with` nested inside a generic return type as the effect clause', () => {
+    // A function-type return `Fn(String) -> Void with Log` nested in brackets
+    // must not be mistaken for the function-level effect clause. Only the
+    // top-level `with` (after the bracketed type) counts.
+    assert.deepEqual(
+      parseWithClause(' -> Fn[Fn(String) -> Void with Log] with Logger '),
+      ['Logger'],
+    );
+  });
+
+  it('stops the effect list at a following top-level where-clause', () => {
+    // Grammar: `[ -> type ] [ effect_clause ] [ where_clause ]`. The effects end
+    // where `where` begins, so the constraint is not swallowed as an effect.
+    assert.deepEqual(
+      parseWithClause(' -> Void with Logger, Clock where (T: Show) '),
+      ['Logger', 'Clock'],
+    );
   });
 });
 

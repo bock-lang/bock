@@ -233,16 +233,135 @@ export function matchDelimiter(
   return -1;
 }
 
+/** Parse the effect clause from a function signature tail — the text between
+ *  the closing `)` of the parameter list and the opening `{` of the body.
+ *
+ *  Per the grammar (§21.4) the tail is `[ '->' type_expr ] [ effect_clause ]
+ *  [ where_clause ]`, where `effect_clause = 'with' type_path { ',' type_path
+ *  }`. The return type may itself contain a `with` (e.g. a function type like
+ *  `Fn(String) -> Void with Log`) nested inside generic brackets, so we split
+ *  at the FIRST top-level ` with ` keyword — one at bracket-depth 0 and not
+ *  inside a string or comment — and treat everything after it (up to a
+ *  top-level `where`) as the comma-separated effect list. The return type
+ *  before that `with` is discarded. With no top-level `with`, there is no
+ *  effect clause. */
 export function parseWithClause(betweenCloseParenAndBrace: string): string[] {
-  const stripped = betweenCloseParenAndBrace
-    .replace(/->\s*[^\n{]*/, '')
-    .trim();
-  const match = /\bwith\b\s+([^\n{]+)/.exec(stripped);
-  if (!match) return [];
-  return match[1]
-    .split(',')
+  const withIdx = findTopLevelKeyword(betweenCloseParenAndBrace, 'with');
+  if (withIdx === -1) return [];
+  let effectList = betweenCloseParenAndBrace.slice(withIdx + 'with'.length);
+  // A `where` clause may follow the effect clause; the effects end there.
+  const whereIdx = findTopLevelKeyword(effectList, 'where');
+  if (whereIdx !== -1) effectList = effectList.slice(0, whereIdx);
+  return splitTopLevelCommas(effectList)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/** Find the index of a whole-word `keyword` at bracket-depth 0, skipping over
+ *  `()`/`[]`/`{}` nesting, string literals (with escapes), and `//` line
+ *  comments. (Bock generics use `[]`, not `<>`; `<`/`>` are left untracked so
+ *  the `>` in the `->` arrow does not corrupt the depth count.) Returns the
+ *  start index of the keyword, or -1 if not found.
+ *  Matches only when the keyword is delimited by non-identifier characters so
+ *  `with`/`where` inside a longer identifier are not mistaken for the keyword. */
+function findTopLevelKeyword(text: string, keyword: string): number {
+  let depth = 0;
+  let inString = false;
+  let stringChar: '"' | "'" | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === '\\') {
+        i++;
+        continue;
+      }
+      if (c === stringChar) {
+        inString = false;
+        stringChar = null;
+      }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inString = true;
+      stringChar = c;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '/') {
+      const nl = text.indexOf('\n', i);
+      i = nl === -1 ? text.length : nl;
+      continue;
+    }
+    // Bock generics use square brackets (`Result[Int, E]`); `<`/`>` are not
+    // type-bracket delimiters here and `>` appears in the `->` arrow, so they
+    // are deliberately NOT tracked as nesting.
+    if (c === '(' || c === '[' || c === '{') {
+      depth++;
+      continue;
+    }
+    if (c === ')' || c === ']' || c === '}') {
+      if (depth > 0) depth--;
+      continue;
+    }
+    if (
+      depth === 0 &&
+      c === keyword[0] &&
+      text.startsWith(keyword, i) &&
+      !isIdentChar(text[i - 1]) &&
+      !isIdentChar(text[i + keyword.length])
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Split on top-level commas — bracket-depth 0, not inside a string or
+ *  comment — leaving commas nested in generics/records/strings intact. */
+function splitTopLevelCommas(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let inString = false;
+  let stringChar: '"' | "'" | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === '\\') {
+        i++;
+        continue;
+      }
+      if (c === stringChar) {
+        inString = false;
+        stringChar = null;
+      }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inString = true;
+      stringChar = c;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '/') {
+      const nl = text.indexOf('\n', i);
+      i = nl === -1 ? text.length : nl;
+      continue;
+    }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') {
+      if (depth > 0) depth--;
+    } else if (c === ',' && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/** True if `ch` can appear in a Bock identifier (letters, digits, `_`).
+ *  Tolerates `undefined` (out-of-range index) by returning false. */
+function isIdentChar(ch: string | undefined): boolean {
+  return ch !== undefined && /[A-Za-z0-9_]/.test(ch);
 }
 
 // ─── Workspace effect registry ──────────────────────────────────────────────
@@ -448,14 +567,39 @@ function collectLocalHandlers(
   return out;
 }
 
-/** Split a handling-block binding list on top-level commas. Brace- and
- *  paren-aware so record literals like `{}` don't get split. */
+/** Split a handling-block binding list on top-level commas. Brace-/paren-aware
+ *  so record literals like `{}` don't get split, and string-/comment-aware
+ *  (same treatment as `matchDelimiter`) so a comma inside a `"..."`/`'...'`
+ *  literal or a `//` comment is not a split point. */
 export function splitBindings(inner: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let start = 0;
+  let inString = false;
+  let stringChar: '"' | "'" | null = null;
   for (let i = 0; i < inner.length; i++) {
     const c = inner[i];
+    if (inString) {
+      if (c === '\\') {
+        i++;
+        continue;
+      }
+      if (c === stringChar) {
+        inString = false;
+        stringChar = null;
+      }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inString = true;
+      stringChar = c;
+      continue;
+    }
+    if (c === '/' && inner[i + 1] === '/') {
+      const nl = inner.indexOf('\n', i);
+      i = nl === -1 ? inner.length : nl;
+      continue;
+    }
     if (c === '{' || c === '(') depth++;
     else if (c === '}' || c === ')') depth--;
     else if (c === ',' && depth === 0) {
