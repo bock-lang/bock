@@ -12,7 +12,7 @@
 import * as vscode from 'vscode';
 import { marked, Renderer, Tokens } from 'marked';
 import { VocabService } from '../vocab';
-import { escapeHtml } from '../shared/webview';
+import { escapeHtml, nonce } from '../shared/webview';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -478,10 +478,10 @@ export function stripForSearch(md: string): string {
 // ─── HTML rendering ─────────────────────────────────────────────────────────
 
 function renderHtml(index: SpecIndex): string {
-  const nonce = randomNonce();
+  const pageNonce = nonce();
   const csp = [
     "default-src 'none'",
-    `script-src 'nonce-${nonce}'`,
+    `script-src 'nonce-${pageNonce}'`,
     `style-src 'unsafe-inline'`,
     `font-src 'self'`,
   ].join('; ');
@@ -531,7 +531,7 @@ function renderHtml(index: SpecIndex): string {
       ${contentHtml}
     </main>
   </div>
-  <script nonce="${nonce}">
+  <script nonce="${pageNonce}">
     (function () {
       const vscode = acquireVsCodeApi();
       const sections = ${JSON.stringify(searchIndex)};
@@ -690,6 +690,9 @@ function renderHtml(index: SpecIndex): string {
         }
       }
 
+      // Mirrors shared/webview.ts escapeHtml. This copy runs inside the
+      // webview script (no module imports available here), so it can't reuse
+      // the server-side export — keep the two in sync if either changes.
       function escapeHtmlClient(s) {
         return String(s)
           .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -817,16 +820,6 @@ function findNeighbors(
     prev: i > 0 ? flat[i - 1] : undefined,
     next: i >= 0 && i < flat.length - 1 ? flat[i + 1] : undefined,
   };
-}
-
-function randomNonce(): string {
-  const chars =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let out = '';
-  for (let i = 0; i < 32; i++) {
-    out += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return out;
 }
 
 // ─── Styles ─────────────────────────────────────────────────────────────────
