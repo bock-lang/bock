@@ -17,6 +17,7 @@ import {
   splitBindings,
   parseWithClause,
   expandEffects,
+  buildOperationToEffectMap,
   offsetToLocation,
   type EffectDef,
   type EnclosingFunction,
@@ -445,6 +446,54 @@ describe('effect-analyzer.expandEffects', () => {
       ['B', { components: ['A'] }],
     ]);
     assert.deepEqual(expandEffects(['A'], r), ['A', 'B']);
+  });
+});
+
+// ─── buildOperationToEffectMap ──────────────────────────────────────────────
+// The operation → owning-effect index. Shared by analyzeEffectFlow (callee
+// resolution) and the hover provider (effect-operation enrichment).
+
+describe('effect-analyzer.buildOperationToEffectMap', () => {
+  function def(name: string, d: Partial<EffectDef> = {}): EffectDef {
+    return { name, operations: [], components: [], ...d };
+  }
+
+  it('maps each operation to its declaring effect', () => {
+    const map = buildOperationToEffectMap([
+      def('Logger', { operations: ['log', 'warn'] }),
+      def('Clock', { operations: ['now'] }),
+    ]);
+    assert.equal(map.get('log'), 'Logger');
+    assert.equal(map.get('warn'), 'Logger');
+    assert.equal(map.get('now'), 'Clock');
+    assert.equal(map.size, 3);
+  });
+
+  it('returns an empty map for no defs', () => {
+    assert.equal(buildOperationToEffectMap([]).size, 0);
+  });
+
+  it('lets the later definition win on a duplicate operation name (parity with the original inline map)', () => {
+    // analyzeEffectFlow built this map inline with unconditional set(), so a
+    // later def overwrote an earlier one. The extraction pins that behaviour.
+    const map = buildOperationToEffectMap([
+      def('FileLog', { operations: ['write'] }),
+      def('NetLog', { operations: ['write'] }),
+    ]);
+    assert.equal(map.get('write'), 'NetLog');
+    assert.equal(map.size, 1);
+  });
+
+  it('contributes nothing for composite effects (components, no operations)', () => {
+    const map = buildOperationToEffectMap([
+      def('App', { components: ['Logger', 'Clock'] }),
+    ]);
+    assert.equal(map.size, 0);
+  });
+
+  it('does not resolve an unknown operation', () => {
+    const map = buildOperationToEffectMap([def('Logger', { operations: ['log'] })]);
+    assert.equal(map.get('sleep'), undefined);
   });
 });
 

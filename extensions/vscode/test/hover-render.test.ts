@@ -13,17 +13,23 @@ import {
   stringifyHoverContents,
   specLink,
   buildCache,
+  buildBuiltinMethodIndex,
+  buildOperatorRegex,
   renderAnnotation,
   renderKeyword,
+  renderOperator,
   renderPrimitive,
   renderPrelude,
   renderStdlibSymbol,
+  renderBuiltinMethod,
   renderEffectUsage,
+  renderEffectOperation,
 } from '../src/features/hover-render';
 import type {
   Vocab,
   Annotation,
   Keyword,
+  Operator,
   PrimitiveType,
   Symbol as VocabSymbol,
 } from '../src/shared/types';
@@ -52,6 +58,10 @@ function emptyVocab(): Vocab {
 
 function sym(name: string, extra: Partial<VocabSymbol> = {}): VocabSymbol {
   return { name, kind: 'function', signature: '', ...extra };
+}
+
+function op(symbol: string, extra: Partial<Operator> = {}): Operator {
+  return { symbol, associativity: 'none', kind: 'arithmetic', ...extra };
 }
 
 // ─── stringifyHoverContents ─────────────────────────────────────────────────
@@ -200,6 +210,113 @@ describe('hover-render.buildCache', () => {
     assert.equal(cache.preludeTypes.get('Option')?.name, 'Option');
     assert.equal(cache.preludeFunctions.get('print')?.name, 'print');
   });
+
+  it('indexes builtin methods by name → receiver list', () => {
+    const v = emptyVocab();
+    v.stdlib.builtin_methods = [
+      { receiver: 'List', methods: ['len', 'map'] },
+      { receiver: 'String', methods: ['len'] },
+    ];
+    const cache = buildCache(v);
+    assert.deepEqual(cache.builtinMethods.get('len'), ['List', 'String']);
+    assert.deepEqual(cache.builtinMethods.get('map'), ['List']);
+    assert.equal(cache.builtinMethods.get('nope'), undefined);
+  });
+
+  it('builds an operator word pattern from the vocab symbols', () => {
+    const v = emptyVocab();
+    v.language.operators = [op('+'), op('+=')];
+    const cache = buildCache(v);
+    assert.ok(cache.operatorRegex, 'expected a regex for a non-empty operator list');
+    assert.equal(cache.operatorRegex.exec('+=')?.[0], '+=');
+  });
+
+  it('leaves operatorRegex undefined on an operator-free vocab', () => {
+    assert.equal(buildCache(emptyVocab()).operatorRegex, undefined);
+  });
+});
+
+// ─── buildBuiltinMethodIndex ────────────────────────────────────────────────
+
+describe('hover-render.buildBuiltinMethodIndex', () => {
+  it('collects every receiver exposing a shared method, in group order', () => {
+    const index = buildBuiltinMethodIndex([
+      { receiver: 'List', methods: ['len', 'is_empty'] },
+      { receiver: 'Map', methods: ['len'] },
+      { receiver: 'String', methods: ['len'] },
+    ]);
+    assert.deepEqual(index.get('len'), ['List', 'Map', 'String']);
+    assert.deepEqual(index.get('is_empty'), ['List']);
+  });
+
+  it('returns an empty map for no groups', () => {
+    assert.equal(buildBuiltinMethodIndex([]).size, 0);
+  });
+
+  it('has no entry for a method no receiver exposes', () => {
+    const index = buildBuiltinMethodIndex([{ receiver: 'List', methods: ['len'] }]);
+    assert.equal(index.get('regex_find'), undefined);
+  });
+
+  it('dedups a receiver that lists the same method twice', () => {
+    const index = buildBuiltinMethodIndex([
+      { receiver: 'List', methods: ['len', 'len'] },
+    ]);
+    assert.deepEqual(index.get('len'), ['List']);
+  });
+});
+
+// ─── buildOperatorRegex ─────────────────────────────────────────────────────
+
+describe('hover-render.buildOperatorRegex', () => {
+  it('returns undefined for an empty / all-empty symbol list', () => {
+    assert.equal(buildOperatorRegex([]), undefined);
+    assert.equal(buildOperatorRegex(['']), undefined);
+  });
+
+  it('escapes regex metacharacters in operator symbols', () => {
+    const re = buildOperatorRegex(['**']);
+    assert.ok(re);
+    assert.equal(re.source, '\\*\\*');
+    assert.equal(re.exec('a ** b')?.[0], '**');
+  });
+
+  it('orders alternatives longest-first so maximal munch wins', () => {
+    // `+` listed before `+=`: without the length sort, JS alternation would
+    // stop at `+` when scanning `+=`.
+    const re = buildOperatorRegex(['+', '+=']);
+    assert.ok(re);
+    assert.equal(re.exec('+=')?.[0], '+=');
+    // Same for the three-way range family.
+    const range = buildOperatorRegex(['.', '..', '..=']);
+    assert.ok(range);
+    assert.equal(range.exec('..=')?.[0], '..=');
+    assert.equal(range.exec('..')?.[0], '..');
+    assert.equal(range.exec('.')?.[0], '.');
+  });
+
+  it('dedups repeated symbols and breaks length ties deterministically', () => {
+    const re = buildOperatorRegex(['>', '<', '>']);
+    assert.ok(re);
+    // Lexicographic tie-break among equal lengths: `<` before `>`.
+    assert.equal(re.source, '<|>');
+  });
+
+  it('matches every symbol of a realistic Bock operator set exactly', () => {
+    const symbols = [
+      '=', '+=', '-=', '*=', '/=', '%=', '|>', '>>', '..', '..=', '||', '&&',
+      '==', '!=', '<', '>', '<=', '>=', '|', '^', '&', '+', '-', '*', '/',
+      '%', '**', '!', '~', '?', '.', '=>', '->', '<<', ':', ';', ',', '@',
+      '#', '_',
+    ];
+    const re = buildOperatorRegex(symbols);
+    assert.ok(re);
+    for (const s of symbols) {
+      // Each symbol, scanned from its own start, must match itself in full —
+      // i.e. no shorter alternative shadows it and the escaping is sound.
+      assert.equal(re.exec(s)?.[0], s, `expected ${JSON.stringify(s)} to self-match`);
+    }
+  });
 });
 
 // ─── render* (markdown snapshots) ───────────────────────────────────────────
@@ -324,5 +441,97 @@ describe('hover-render.render*', () => {
     // taking the "no handler" branch.
     const lineZero = renderEffectUsage('Async', 0, true);
     assert.ok(lineZero.includes('No `handle Async` found in this file'));
+  });
+
+  it('renders a binary operator with precedence, associativity, and spec link', () => {
+    const plus = op('+', {
+      precedence: 11,
+      associativity: 'left',
+      kind: 'arithmetic',
+      spec_ref: '§5.1',
+    });
+    assert.equal(
+      renderOperator(plus, true),
+      [
+        '**`+`** — arithmetic operator',
+        '',
+        'Precedence 11, left-associative.',
+        '',
+        specLink('§5.1', true),
+      ].join('\n'),
+    );
+  });
+
+  it('renders a right-associative operator', () => {
+    const pow = op('**', { precedence: 13, associativity: 'right' });
+    const md = renderOperator(pow, false);
+    assert.ok(md.includes('Precedence 13, right-associative.'));
+  });
+
+  it('labels a none-associativity operator with a precedence as non-associative', () => {
+    const eq = op('==', { precedence: 7, associativity: 'none', kind: 'comparison' });
+    const md = renderOperator(eq, true);
+    assert.ok(md.startsWith('**`==`** — comparison operator'));
+    assert.ok(md.includes('Precedence 7, non-associative.'));
+  });
+
+  it('renders bare punctuation (no precedence, none associativity) without a details line', () => {
+    const arrow = op('=>', { kind: 'punctuation' });
+    assert.equal(renderOperator(arrow, true), '**`=>`** — punctuation operator');
+  });
+
+  it('omits the operator spec link when links are disabled', () => {
+    const pipe = op('|>', { precedence: 2, associativity: 'left', kind: 'pipe', spec_ref: '§5.1' });
+    const md = renderOperator(pipe, false);
+    assert.ok(!md.includes('command:bock.openSpecAt'));
+    assert.ok(md.includes('Precedence 2, left-associative.'));
+  });
+
+  it('renders a builtin method with every receiver and the §18.3 link', () => {
+    assert.equal(
+      renderBuiltinMethod('len', ['List', 'String'], true),
+      [
+        '**`len`** — built-in method on `List`, `String`',
+        '',
+        specLink('§18.3', true),
+      ].join('\n'),
+    );
+  });
+
+  it('renders a single-receiver builtin method without a link when disabled', () => {
+    const md = renderBuiltinMethod('push', ['List'], false);
+    assert.equal(md, '**`push`** — built-in method on `List`');
+  });
+
+  it('renders an effect operation with owner, operation list, line hint, and §8 link', () => {
+    const md = renderEffectOperation('log', 'Logger', ['log', 'warn'], 2, true);
+    assert.equal(
+      md,
+      [
+        '**`log`** — operation of effect `Logger`',
+        '',
+        '`Logger` operations: `log`, `warn`',
+        '',
+        'Declared in this file: `effect Logger` at line 3.',
+        '',
+        specLink('§8', true),
+      ].join('\n'),
+    );
+  });
+
+  it('treats declaration line 0 as a real location (line 1), unlike the legacy falsy-check', () => {
+    const md = renderEffectOperation('now', 'Clock', ['now'], 0, false);
+    assert.ok(md.includes('Declared in this file: `effect Clock` at line 1.'));
+  });
+
+  it('omits the line hint when the declaration line is unknown', () => {
+    const md = renderEffectOperation('now', 'Clock', ['now'], undefined, false);
+    assert.ok(!md.includes('Declared in this file'));
+    assert.ok(md.includes('`Clock` operations: `now`'));
+  });
+
+  it('omits the operation list when the owning effect has none recorded', () => {
+    const md = renderEffectOperation('now', 'Clock', [], undefined, false);
+    assert.equal(md, '**`now`** — operation of effect `Clock`');
   });
 });

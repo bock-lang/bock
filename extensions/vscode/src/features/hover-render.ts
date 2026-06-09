@@ -23,6 +23,7 @@ import {
   PrimitiveType,
   Symbol as VocabSymbol,
   Module,
+  BuiltinMethodGroup,
 } from '../shared/types';
 
 // ─── Cache ──────────────────────────────────────────────────────────────────
@@ -52,6 +53,15 @@ export interface Cache {
   preludeConstructors: Map<string, VocabSymbol>;
   stdlibSymbols: Map<string, StdlibHit[]>;
   effectNames: Set<string>;
+  /** Built-in method name → receivers that expose it (e.g. `len` → List, String). */
+  builtinMethods: Map<string, string[]>;
+  /**
+   * Word pattern matching exactly the vocab's operator symbols, for use as
+   * the custom-regex fallback of `getWordRangeAtPosition` (operators are not
+   * word characters, so the default word range misses them). `undefined`
+   * when the vocab declares no operators.
+   */
+  operatorRegex: RegExp | undefined;
 }
 
 /** Build the hover lookup cache from a vocab snapshot. Pure. */
@@ -86,6 +96,11 @@ export function buildCache(vocab: Vocab): Cache {
     pushStdlib(stdlibSymbols, mod, mod.effects, 'effect');
   }
 
+  const builtinMethods = buildBuiltinMethodIndex(vocab.stdlib.builtin_methods);
+  const operatorRegex = buildOperatorRegex(
+    vocab.language.operators.map((o) => o.symbol),
+  );
+
   return {
     keywords,
     operators,
@@ -97,7 +112,52 @@ export function buildCache(vocab: Vocab): Cache {
     preludeConstructors,
     stdlibSymbols,
     effectNames,
+    builtinMethods,
+    operatorRegex,
   };
+}
+
+/**
+ * Index the vocab's builtin-method groups by method name, collecting every
+ * receiver that exposes the method (e.g. `len` → `['List', 'String', …]`).
+ * Receivers keep the vocab's group order and are deduplicated. Pure.
+ */
+export function buildBuiltinMethodIndex(
+  groups: BuiltinMethodGroup[],
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const group of groups) {
+    for (const method of group.methods) {
+      const receivers = map.get(method);
+      if (!receivers) map.set(method, [group.receiver]);
+      else if (!receivers.includes(group.receiver)) receivers.push(group.receiver);
+    }
+  }
+  return map;
+}
+
+/**
+ * Build a word-pattern RegExp that matches exactly the given operator
+ * symbols, for `getWordRangeAtPosition`'s custom-regex fallback.
+ *
+ * Alternatives are sorted longest-first (ties lexicographic) so maximal
+ * munch wins at any scan position — `..=` before `..` before `.`, `+=`
+ * before `+` — since JS alternation is first-match-wins. Every symbol is
+ * regex-escaped. Returns `undefined` for an empty symbol list (a regex that
+ * matches nothing is not expressible as a useful word pattern). Pure.
+ */
+export function buildOperatorRegex(symbols: string[]): RegExp | undefined {
+  const unique = [...new Set(symbols)].filter((s) => s.length > 0);
+  if (unique.length === 0) return undefined;
+  // Code-unit comparison for the tie-break (not localeCompare) so the
+  // pattern is byte-for-byte deterministic across runtime locales.
+  unique.sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0));
+  return new RegExp(unique.map(escapeRegExp).join('|'));
+}
+
+/** Escape a literal string for safe embedding in a RegExp pattern. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function indexByName(symbols: VocabSymbol[]): Map<string, VocabSymbol> {
@@ -241,6 +301,85 @@ export function renderEffectUsage(
       : `No \`handle ${name}\` found in this file — the handler is in scope at the call site (enclosing \`with\` / \`handling\` block) or provided by the runtime.`,
   );
   lines.push('', '_Example handler:_', '```bock', `handle ${name} { ... }`, '```');
+  const link = specLink('§8', showSpecLinks);
+  if (link) lines.push('', link);
+  return lines.join('\n');
+}
+
+/** Render the hover block for an operator. Pure markdown. */
+export function renderOperator(o: Operator, showSpecLinks: boolean): string {
+  const lines = [`**\`${o.symbol}\`** — ${o.kind} operator`];
+  const details: string[] = [];
+  if (o.precedence !== undefined) details.push(`precedence ${o.precedence}`);
+  if (o.associativity === 'left' || o.associativity === 'right') {
+    details.push(`${o.associativity}-associative`);
+  } else if (o.associativity === 'none' && o.precedence !== undefined) {
+    // Only meaningful next to a precedence; bare punctuation (`=>`, `,`, …)
+    // carries neither and gets no details line at all.
+    details.push('non-associative');
+  }
+  if (details.length > 0) {
+    const sentence = details.join(', ');
+    lines.push('', `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}.`);
+  }
+  const link = specLink(o.spec_ref ?? '', showSpecLinks);
+  if (link) lines.push('', link);
+  return lines.join('\n');
+}
+
+/**
+ * Spec section governing the built-in receiver-method surface (§18.3 — Core
+ * Modules: `List`/`Map`/`Set`/`String` methods lower to native target ops).
+ */
+const BUILTIN_METHOD_SPEC_REF = '§18.3';
+
+/**
+ * Render the hover block for a built-in method (`.len`, `.map`, …), listing
+ * every receiver type that exposes it. Pure markdown. The caller resolves
+ * `receivers` from the cache's builtin-method index and only calls this with
+ * a non-empty list.
+ */
+export function renderBuiltinMethod(
+  method: string,
+  receivers: string[],
+  showSpecLinks: boolean,
+): string {
+  const on = receivers.map((r) => `\`${r}\``).join(', ');
+  const lines = [`**\`${method}\`** — built-in method on ${on}`];
+  const link = specLink(BUILTIN_METHOD_SPEC_REF, showSpecLinks);
+  if (link) lines.push('', link);
+  return lines.join('\n');
+}
+
+/**
+ * Render the hover block for an operation of an effect declared in the
+ * current document: the owning effect, the effect's full operation list, and
+ * a go-to hint for the declaration line.
+ *
+ * `declaredLine` is the zero-based line of the `effect` declaration (from
+ * the analyzer's `EffectDef.defined`), rendered 1-based. Unlike
+ * `renderEffectUsage`'s legacy falsy-check, line `0` is a valid location
+ * here (an effect declared on the document's first line); only `undefined`
+ * omits the hint. Pure markdown.
+ */
+export function renderEffectOperation(
+  operation: string,
+  effectName: string,
+  operations: string[],
+  declaredLine: number | undefined,
+  showSpecLinks: boolean,
+): string {
+  const lines = [`**\`${operation}\`** — operation of effect \`${effectName}\``];
+  if (operations.length > 0) {
+    const ops = operations.map((op) => `\`${op}\``).join(', ');
+    lines.push('', `\`${effectName}\` operations: ${ops}`);
+  }
+  if (declaredLine !== undefined) {
+    lines.push(
+      '',
+      `Declared in this file: \`effect ${effectName}\` at line ${declaredLine + 1}.`,
+    );
+  }
   const link = specLink('§8', showSpecLinks);
   if (link) lines.push('', link);
   return lines.join('\n');
