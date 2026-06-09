@@ -24,6 +24,7 @@ import { registerAnnotations } from './features/annotations';
 import { registerEffects } from './features/effects';
 import { registerDecisions } from './features/decisions';
 import { registerSpecPanel } from './features/spec-panel';
+import { registerSemanticTokens } from './features/semantic-tokens';
 
 // The extension's own diagnostics go to a "Bock" output channel, created in
 // `activate` and shared with `vocab.ts` via `setVocabLogChannel`. It is
@@ -51,6 +52,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   registerEffects(ctx, vocab, client);
   registerDecisions(ctx, vocab);
   registerSpecPanel(ctx, vocab);
+  registerSemanticTokens(ctx, vocab);
 
   ctx.subscriptions.push(
     vscode.commands.registerCommand('bock.refreshVocab', async () => {
