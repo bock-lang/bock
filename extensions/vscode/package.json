@@ -242,6 +242,18 @@
         "title": "Jump to Source JSON",
         "category": "Bock",
         "icon": "$(go-to-file)"
+      },
+      {
+        "command": "bock.showTargetPreview",
+        "title": "Preview Transpiled Output",
+        "category": "Bock",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "bock.setStrictness",
+        "title": "Set Strictness Level",
+        "category": "Bock",
+        "icon": "$(settings-gear)"
       }
     ],
     "viewsContainers": {
@@ -285,6 +297,11 @@
           "command": "bock.explainError",
           "when": "editorLangId == bock",
           "group": "bock@2"
+        },
+        {
+          "command": "bock.showTargetPreview",
+          "when": "editorLangId == bock",
+          "group": "bock@3"
         }
       ],
       "view/title": [
