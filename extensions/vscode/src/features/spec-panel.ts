@@ -16,7 +16,7 @@ import { escapeHtml } from '../shared/webview';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-interface SpecSection {
+export interface SpecSection {
   id: string; // "1", "1.1", "17.4"
   ref: string; // "§1", "§1.1"
   anchor: string; // "section-1-1"
@@ -26,7 +26,7 @@ interface SpecSection {
   text: string; // plain text for search
 }
 
-interface NavNode {
+export interface NavNode {
   id: string;
   ref: string;
   anchor: string;
@@ -34,7 +34,7 @@ interface NavNode {
   children: NavNode[];
 }
 
-interface SpecIndex {
+export interface SpecIndex {
   sections: SpecSection[];
   tree: NavNode[];
   sourcePath: string;
@@ -204,7 +204,7 @@ async function readSpec(
 
 const HEADING_RE = /^(##+)\s+(\d+(?:\.\d+)*)\.?\s*(?:[—–-]\s*)?(.*)$/;
 
-function parseSections(source: string): SpecSection[] {
+export function parseSections(source: string): SpecSection[] {
   const lines = source.split('\n');
   type Pending = {
     id: string;
@@ -250,7 +250,7 @@ function parseSections(source: string): SpecSection[] {
   });
 }
 
-function buildNavTree(sections: SpecSection[]): NavNode[] {
+export function buildNavTree(sections: SpecSection[]): NavNode[] {
   const roots: NavNode[] = [];
   const byId = new Map<string, NavNode>();
   for (const s of sections) {
@@ -275,7 +275,7 @@ function buildNavTree(sections: SpecSection[]): NavNode[] {
   return roots;
 }
 
-function normalizeRef(ref: string, index: SpecIndex): string | undefined {
+export function normalizeRef(ref: string, index: SpecIndex): string | undefined {
   const cleaned = ref.trim().replace(/^§/, '').replace(/[.,;:)\]\s]+$/, '');
   if (!cleaned) return undefined;
   if (index.sections.some((s) => s.id === cleaned)) return cleaned;
@@ -328,7 +328,7 @@ const BOCK_TYPES = new Set([
   'Ok', 'Err', 'Some', 'None', 'Duration', 'Instant',
 ]);
 
-function highlightBock(src: string): string {
+export function highlightBock(src: string): string {
   const out: string[] = [];
   const n = src.length;
   let i = 0;
@@ -445,7 +445,7 @@ function highlightBock(src: string): string {
 // clickable anchors that post back to the extension (so clicks land at the
 // correct section). Skips content inside `<pre>` blocks.
 
-function linkifySpecRefs(html: string): string {
+export function linkifySpecRefs(html: string): string {
   const parts = html.split(/(<pre[\s\S]*?<\/pre>)/g);
   const refRe = /§(\d+(?:\.\d+)*)/g;
   for (let i = 0; i < parts.length; i++) {
@@ -464,7 +464,7 @@ function linkifySpecRefs(html: string): string {
 
 // ─── Plain-text extraction for search index ─────────────────────────────────
 
-function stripForSearch(md: string): string {
+export function stripForSearch(md: string): string {
   return md
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`[^`]*`/g, ' ')
