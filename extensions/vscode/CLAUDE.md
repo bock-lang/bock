@@ -30,15 +30,20 @@ To launch the extension in a host VS Code window:
 
 ## Vocab Sync Reminder
 
-The syntax grammar, snippets, and `vocab.json` are **generated** —
-do not hand-edit. If you find yourself wanting to, the right fix
-is upstream:
+Only `assets/vocab.json` and the bundled spec copy under `assets/spec/`
+are **generated** — by `tools/scripts/sync-vocab.sh` (`bock-dump-vocab`
+output plus a copy of `spec/sections/`). Do not hand-edit those two; the
+right fix is upstream:
 
 - New keyword? Add it to the lexer.
 - New stdlib symbol? Add it to the stdlib.
 - Then regenerate via `/project:update-vocab`.
 
-Hand-editing generated files will be reverted on the next sync run.
+Hand-editing those generated assets will be reverted on the next sync run.
+
+The TextMate grammar (`syntaxes/bock.tmLanguage.json`) and the snippets
+(`snippets/bock.code-snippets`) are **hand-maintained source**, not
+generated — edit them directly here when adding syntax or starter snippets.
 
 ## Packaging
 

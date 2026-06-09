@@ -1,0 +1,105 @@
+{
+  "Module declaration": {
+    "prefix": "module",
+    "body": ["module ${1:name}"],
+    "description": "Module declaration (top of a file intended for cross-file `use`)."
+  },
+  "Public record": {
+    "prefix": "record",
+    "body": ["public record ${1:Name} {", "  ${2:field}: ${3:Type}", "}"],
+    "description": "A public record with named, typed fields (newline-separated)."
+  },
+  "Public enum": {
+    "prefix": "enum",
+    "body": ["public enum ${1:Name} {", "  ${2:VariantA}", "  ${3:VariantB}", "}"],
+    "description": "A public enum with newline-separated variants."
+  },
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "public fn ${1:name}(${2:arg}: ${3:Type}) -> ${4:Type} {",
+      "  $0",
+      "}"
+    ],
+    "description": "A public function with a typed signature."
+  },
+  "Effectful function": {
+    "prefix": "fneff",
+    "body": [
+      "public fn ${1:name}(${2:arg}: ${3:Type}) -> ${4:Type} with ${5:Effect} {",
+      "  $0",
+      "}"
+    ],
+    "description": "A public function that declares the effects it uses via a `with` clause."
+  },
+  "Match expression": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "  ${2:Pattern} => ${3:expr}",
+      "  _ => ${4:expr}",
+      "}"
+    ],
+    "description": "A match expression with newline-separated arms and a wildcard fallback."
+  },
+  "If / else": {
+    "prefix": "ifelse",
+    "body": ["if (${1:cond}) {", "  $2", "} else {", "  $3", "}"],
+    "description": "An if/else expression. Bock requires parentheses around the condition."
+  },
+  "Inherent impl block": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Type} {",
+      "  public fn ${2:method}(self) -> ${3:Type} {",
+      "    $0",
+      "  }",
+      "}"
+    ],
+    "description": "An inherent `impl` block adding methods to a type."
+  },
+  "Trait impl block": {
+    "prefix": "impltrait",
+    "body": [
+      "impl ${1:Trait} for ${2:Type} {",
+      "  public fn ${3:method}(self) -> ${4:Type} {",
+      "    $0",
+      "  }",
+      "}"
+    ],
+    "description": "An `impl Trait for Type` block implementing a trait."
+  },
+  "Trait declaration": {
+    "prefix": "trait",
+    "body": [
+      "public trait ${1:Name} {",
+      "  fn ${2:method}(self) -> ${3:Type}",
+      "}"
+    ],
+    "description": "A public trait declaring method signatures."
+  },
+  "Effect declaration": {
+    "prefix": "effect",
+    "body": [
+      "public effect ${1:Name} {",
+      "  fn ${2:operation}(${3:arg}: ${4:Type}) -> ${5:Type}",
+      "}"
+    ],
+    "description": "A public effect declaring one or more operations."
+  },
+  "Handle effect at module level": {
+    "prefix": "handle",
+    "body": ["public handle ${1:Effect} with ${2:Handler} {}"],
+    "description": "A module-level default handler binding an effect to a handler record."
+  },
+  "Handling block": {
+    "prefix": "handling",
+    "body": ["handling (${1:Effect} with ${2:Handler} {}) {", "  $0", "}"],
+    "description": "A local `handling` block providing handlers for the enclosed effectful calls."
+  },
+  "Test function": {
+    "prefix": "test",
+    "body": ["@test", "fn ${1:test_name}() {", "  $0", "}"],
+    "description": "A @test function (no return type, run by the Bock test harness)."
+  }
+}
