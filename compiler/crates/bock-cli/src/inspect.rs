@@ -1,6 +1,7 @@
 //! Implementation of the `bock inspect` command group.
 //!
-//! Four sub-behaviours, all rooted in the project's `.bock/` tree:
+//! Five sub-behaviours. The first four are rooted in the project's `.bock/`
+//! tree; the fifth is compiler introspection on a single source file:
 //!
 //! * `bock inspect [decisions]` — list decisions with scope filters
 //!   (`--runtime`, `--all`), pin filter (`--unpinned`), module/type
@@ -11,11 +12,27 @@
 //!   totals for `.bock/ai-cache/`.
 //! * `bock inspect rules` — list learned codegen rules, optionally
 //!   filtered by target.
+//! * `bock inspect air <file>` — dump the lowered AIR tree for one file,
+//!   human-readable by default, machine-readable with `--json`. See
+//!   [`run_air`] for the JSON contract.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use bock_ai::{AiCache, Decision, DecisionType, ManifestScope, ManifestWriter, Rule, RuleCache};
+use bock_air::visitor::{walk_node, Visitor};
+use bock_air::{
+    lower_module, resolve_names_with_registry, AIRNode, ModuleRegistry, NodeIdGen, NodeKind,
+    SymbolTable,
+};
+use bock_build::dep_graph::{self, DepGraph};
+use bock_errors::{Diagnostic, FileId, Severity};
+use bock_lexer::Lexer;
+use bock_parser::Parser;
+use bock_source::{SourceFile, SourceMap};
+use bock_types::{collect_exports, seed_imports, seed_prelude, TypeChecker};
 
+use crate::check::CheckOutcome;
 use crate::decision_io::{display_id, find_project_root, scope_name};
 
 /// Which scopes to show when listing decisions.
@@ -311,6 +328,641 @@ fn print_decisions_json(rows: &[(ManifestScope, Decision)]) -> anyhow::Result<()
     Ok(())
 }
 
+// ── `bock inspect air` ───────────────────────────────────────────────────────
+//
+// Machine-readable dump of the lowered AIR (S-AIR) tree for one source file.
+// The `--json` shape is a contract: the VS Code extension's AIR tree viewer
+// consumes it. Changing field names or meanings is a breaking change to that
+// consumer — extend additively only.
+
+/// Entry point for `bock inspect air <file>`.
+///
+/// Runs the compiler frontend (lex → parse → name resolution → AIR lowering)
+/// on a single file and dumps the resulting S-AIR tree. The embedded core
+/// stdlib is loaded first, exactly as in `bock check`, so `use core.*`
+/// imports resolve the same way they do there. Type checking does NOT run:
+/// the v1 contract is structure + spans.
+///
+/// # JSON contract (`--json`)
+///
+/// On success, stdout carries a single JSON object — the root `Module` node.
+/// Every node has exactly four fields:
+///
+/// ```json
+/// {
+///   "kind": "FnDecl",
+///   "name": "add",
+///   "span": { "start": 14, "end": 53, "line": 3, "col": 1 },
+///   "children": []
+/// }
+/// ```
+///
+/// * `kind` — the AIR node kind (the `NodeKind` variant name), e.g.
+///   `"Module"`, `"FnDecl"`, `"BinaryOp"`.
+/// * `name` — the node's source-level name when it has one (declaration
+///   names, identifier references, field/method names, dotted module/type
+///   paths, literal text), otherwise `null`.
+/// * `span` — `start`/`end` are byte offsets into the file (`end` exclusive);
+///   `line`/`col` are the 1-based line and column (column counted in
+///   characters) of `start`. Compiler-synthesized nodes report `0..0`.
+/// * `children` — the node's AIR children in traversal order (may be empty).
+///
+/// On failure (unreadable file, lex/parse/name-resolution errors), stdout
+/// carries a JSON error object instead of a tree, and the command exits
+/// non-zero:
+///
+/// ```json
+/// {
+///   "error": {
+///     "message": "parsing failed",
+///     "diagnostics": [
+///       {
+///         "severity": "error",
+///         "code": "E0204",
+///         "message": "expected an identifier",
+///         "span": { "start": 3, "end": 4, "line": 1, "col": 4 }
+///       }
+///     ]
+///   }
+/// }
+/// ```
+///
+/// Consumers distinguish the two by the presence of the top-level `error`
+/// key. Without `--json`, the tree renders as an indented human view (one
+/// node per line: kind, name, `@line:col`, byte range) and failures render
+/// the standard diagnostics to stderr.
+pub fn run_air(path: &Path, json: bool) -> anyhow::Result<CheckOutcome> {
+    match lower_file_to_air(path) {
+        Ok(lowered) => {
+            let file = lowered.source_map.get_file(lowered.file_id);
+            let tree = build_tree(&lowered.air, file);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&tree_to_json(&tree))?);
+            } else {
+                print_tree(&tree, 0);
+            }
+            Ok(CheckOutcome::Clean)
+        }
+        Err(failure) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&failure_to_json(&failure))?
+                );
+            } else {
+                print_failure(&failure);
+            }
+            Ok(CheckOutcome::Failed)
+        }
+    }
+}
+
+/// A successfully lowered file: the AIR root plus the sources backing it
+/// (needed for line/column lookups when rendering spans).
+struct LoweredAir {
+    /// Holds the embedded stdlib sources and the user file.
+    source_map: SourceMap,
+    /// The user file's id within `source_map`.
+    file_id: FileId,
+    /// The lowered S-AIR module root (`NodeKind::Module`).
+    air: AIRNode,
+}
+
+/// A frontend failure: the stage that failed plus its structured diagnostics.
+struct AirFailure {
+    /// Stage summary, e.g. `"parsing failed"`.
+    message: String,
+    /// The diagnostics that stopped the pipeline (empty for I/O failures).
+    diagnostics: Vec<Diagnostic>,
+    /// `(filename, content)` of the file the diagnostics point into;
+    /// `None` for failures before any file was read (then `diagnostics` is
+    /// empty too).
+    file: Option<(String, String)>,
+}
+
+impl AirFailure {
+    /// A failure with no diagnostics (I/O errors, internal invariants).
+    fn from_message(message: impl Into<String>) -> Box<Self> {
+        Box::new(Self {
+            message: message.into(),
+            diagnostics: Vec::new(),
+            file: None,
+        })
+    }
+
+    /// A failure carrying compiler diagnostics for one file.
+    fn with_diagnostics(
+        message: impl Into<String>,
+        diagnostics: Vec<Diagnostic>,
+        filename: String,
+        content: String,
+    ) -> Box<Self> {
+        Box::new(Self {
+            message: message.into(),
+            diagnostics,
+            file: Some((filename, content)),
+        })
+    }
+}
+
+/// Run the frontend on `path` up to (and including) AIR lowering.
+///
+/// Mirrors the phases of `check::run` for a single user file: the embedded
+/// core stdlib is parsed into the same [`SourceMap`], the dependency graph
+/// gains the implicit prelude edges, and each module is resolved + lowered in
+/// topological order with non-user modules registering their exports so the
+/// user module's imports resolve. Type checking, ownership/effect analysis,
+/// and context validation are intentionally skipped — `bock check` is the
+/// diagnostics tool; this is a structure dump.
+fn lower_file_to_air(path: &Path) -> Result<LoweredAir, Box<AirFailure>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| AirFailure::from_message(format!("could not read {}: {e}", path.display())))?;
+
+    // ── Phase 1: parse embedded stdlib + the user file ──────────────────────
+    let mut source_map = SourceMap::new();
+    let mut parsed: Vec<AirParsedFile> = Vec::new();
+
+    for src in crate::stdlib::core_sources() {
+        let file_id = source_map.add_file(src.logical_path.clone(), src.source.clone());
+        let module = parse_registered_file(&source_map, file_id).map_err(|diags| {
+            AirFailure::with_diagnostics(
+                format!(
+                    "internal error: embedded stdlib module {} failed to parse",
+                    src.logical_path.display()
+                ),
+                diags,
+                src.logical_path.display().to_string(),
+                src.source.clone(),
+            )
+        })?;
+        parsed.push(AirParsedFile {
+            path: src.logical_path.clone(),
+            file_id,
+            module,
+            is_user: false,
+        });
+    }
+
+    let user_file_id = source_map.add_file(path.to_path_buf(), content);
+    let user_module = parse_registered_file(&source_map, user_file_id).map_err(|diags| {
+        let f = source_map.get_file(user_file_id);
+        AirFailure::with_diagnostics(
+            "parsing failed",
+            diags,
+            f.path.display().to_string(),
+            f.content.clone(),
+        )
+    })?;
+    parsed.push(AirParsedFile {
+        path: path.to_path_buf(),
+        file_id: user_file_id,
+        module: user_module,
+        is_user: true,
+    });
+
+    // ── Phase 2: dependency graph with implicit prelude edges ───────────────
+    let mut graph = DepGraph::new();
+    let mut id_to_index: HashMap<String, usize> = HashMap::new();
+    let core_ids: Vec<String> = parsed
+        .iter()
+        .enumerate()
+        .filter(|(_, pf)| !pf.is_user)
+        .map(|(i, pf)| dep_graph::module_id_from_module(&pf.module, i))
+        .collect();
+
+    for (i, pf) in parsed.iter().enumerate() {
+        let module_id = dep_graph::module_id_from_module(&pf.module, i);
+        let mut deps = dep_graph::extract_dependencies(&pf.module.imports);
+        if pf.is_user {
+            dep_graph::add_prelude_deps(&mut deps, &module_id, &core_ids);
+        }
+        graph.add_module_with_deps(module_id.clone(), deps);
+        id_to_index.insert(module_id, i);
+    }
+
+    let topo = graph
+        .topological_order()
+        .ok_or_else(|| AirFailure::from_message("circular module dependency detected"))?;
+
+    // ── Phase 3: resolve + lower in dependency order ────────────────────────
+    let mut registry = ModuleRegistry::new();
+    let mut user_air: Option<AIRNode> = None;
+
+    for module_id in &topo {
+        let Some(&idx) = id_to_index.get(module_id) else {
+            continue; // external dependency — not in our source set
+        };
+        let pf = &parsed[idx];
+
+        let mut symbols = SymbolTable::new();
+        let bag = resolve_names_with_registry(&pf.module, &mut symbols, &registry);
+        let diags: Vec<Diagnostic> = bag.iter().cloned().collect();
+        if diags.iter().any(|d| d.severity == Severity::Error) {
+            let f = source_map.get_file(pf.file_id);
+            let message = if pf.is_user {
+                "name resolution failed".to_string()
+            } else {
+                format!(
+                    "internal error: embedded stdlib module {} failed name resolution",
+                    pf.path.display()
+                )
+            };
+            return Err(AirFailure::with_diagnostics(
+                message,
+                diags,
+                f.path.display().to_string(),
+                f.content.clone(),
+            ));
+        }
+
+        let id_gen = NodeIdGen::new();
+        let air = lower_module(&pf.module, &id_gen, &symbols);
+
+        if pf.is_user {
+            user_air = Some(air);
+        } else {
+            // Export collection needs a constructed (but not run) type
+            // checker — the same arrangement `check::run` uses when type
+            // checking is skipped under an `--only` restriction.
+            let mut checker = TypeChecker::new();
+            crate::check::register_type_builtins(&mut checker);
+            seed_prelude(&mut checker, &registry);
+            seed_imports(&mut checker, &pf.module.imports, &registry);
+            let exports = collect_exports(module_id, &pf.path, &checker, &air);
+            registry.register(exports);
+        }
+    }
+
+    match user_air {
+        Some(air) => Ok(LoweredAir {
+            source_map,
+            file_id: user_file_id,
+            air,
+        }),
+        None => Err(AirFailure::from_message(
+            "internal error: the input module never reached lowering",
+        )),
+    }
+}
+
+/// One parsed file in the inspect-air pipeline (user file or embedded stdlib).
+struct AirParsedFile {
+    path: PathBuf,
+    file_id: FileId,
+    module: bock_ast::Module,
+    is_user: bool,
+}
+
+/// Lex and parse one file already registered in the [`SourceMap`], collecting
+/// diagnostics instead of printing them (the `--json` error contract needs
+/// them structured; `check::parse_file` prints as it goes).
+fn parse_registered_file(
+    source_map: &SourceMap,
+    file_id: FileId,
+) -> Result<bock_ast::Module, Vec<Diagnostic>> {
+    let source_file = source_map.get_file(file_id);
+    let mut diags: Vec<Diagnostic> = Vec::new();
+
+    let mut lexer = Lexer::new(source_file);
+    let tokens = lexer.tokenize();
+    diags.extend(lexer.diagnostics().iter().cloned());
+    if diags.iter().any(|d| d.severity == Severity::Error) {
+        return Err(diags);
+    }
+
+    let mut parser = Parser::new(tokens, source_file);
+    let module = parser.parse_module();
+    diags.extend(parser.diagnostics().iter().cloned());
+    if diags.iter().any(|d| d.severity == Severity::Error) {
+        return Err(diags);
+    }
+
+    Ok(module)
+}
+
+// ── AIR tree projection ──────────────────────────────────────────────────────
+
+/// One node of the serializable AIR tree — the `bock inspect air` output
+/// shape. This is a *projection* of [`AIRNode`] (kind + name + span +
+/// children), deliberately decoupled from the internal `NodeKind` payloads so
+/// the JSON contract stays stable as the AIR evolves.
+struct AirTreeNode {
+    /// The `NodeKind` variant name, e.g. `"FnDecl"`.
+    kind: &'static str,
+    /// Source-level name when the node has one (see [`node_name`]).
+    name: Option<String>,
+    /// Start byte offset (inclusive).
+    start: usize,
+    /// End byte offset (exclusive).
+    end: usize,
+    /// 1-based line of `start`.
+    line: usize,
+    /// 1-based column (in characters) of `start`.
+    col: usize,
+    /// Children in AIR traversal order.
+    children: Vec<AirTreeNode>,
+}
+
+/// Builds an [`AirTreeNode`] tree from an AIR root by riding the canonical
+/// [`bock_air::visitor`] traversal, so child coverage and order can never
+/// drift from the compiler's own definition of the tree.
+struct TreeBuilder<'a> {
+    file: &'a SourceFile,
+    stack: Vec<AirTreeNode>,
+    root: Option<AirTreeNode>,
+}
+
+impl Visitor for TreeBuilder<'_> {
+    fn visit_node(&mut self, node: &AIRNode) {
+        self.stack.push(make_entry(self.file, node));
+        walk_node(self, node);
+        if let Some(done) = self.stack.pop() {
+            match self.stack.last_mut() {
+                Some(parent) => parent.children.push(done),
+                None => self.root = Some(done),
+            }
+        }
+    }
+}
+
+/// Project a single [`AIRNode`] (without children) into a tree entry.
+fn make_entry(file: &SourceFile, node: &AIRNode) -> AirTreeNode {
+    let (line, col) = file.line_col(node.span.start);
+    AirTreeNode {
+        kind: kind_name(&node.kind),
+        name: node_name(&node.kind),
+        start: node.span.start,
+        end: node.span.end,
+        line,
+        col,
+        children: Vec::new(),
+    }
+}
+
+/// Project an AIR root into the serializable tree.
+fn build_tree(air: &AIRNode, file: &SourceFile) -> AirTreeNode {
+    let mut builder = TreeBuilder {
+        file,
+        stack: Vec::new(),
+        root: None,
+    };
+    builder.visit_node(air);
+    // `visit_node` always sets `root` for the outermost node; the childless
+    // fallback exists only to avoid an unwrap.
+    builder.root.take().unwrap_or_else(|| make_entry(file, air))
+}
+
+/// The stable string name of a [`NodeKind`] — the `kind` field of the JSON
+/// contract. Always the Rust variant name.
+fn kind_name(kind: &NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Module { .. } => "Module",
+        NodeKind::ImportDecl { .. } => "ImportDecl",
+        NodeKind::FnDecl { .. } => "FnDecl",
+        NodeKind::RecordDecl { .. } => "RecordDecl",
+        NodeKind::EnumDecl { .. } => "EnumDecl",
+        NodeKind::EnumVariant { .. } => "EnumVariant",
+        NodeKind::ClassDecl { .. } => "ClassDecl",
+        NodeKind::TraitDecl { .. } => "TraitDecl",
+        NodeKind::ImplBlock { .. } => "ImplBlock",
+        NodeKind::EffectDecl { .. } => "EffectDecl",
+        NodeKind::TypeAlias { .. } => "TypeAlias",
+        NodeKind::ConstDecl { .. } => "ConstDecl",
+        NodeKind::ModuleHandle { .. } => "ModuleHandle",
+        NodeKind::PropertyTest { .. } => "PropertyTest",
+        NodeKind::Param { .. } => "Param",
+        NodeKind::TypeNamed { .. } => "TypeNamed",
+        NodeKind::TypeTuple { .. } => "TypeTuple",
+        NodeKind::TypeFunction { .. } => "TypeFunction",
+        NodeKind::TypeOptional { .. } => "TypeOptional",
+        NodeKind::TypeSelf => "TypeSelf",
+        NodeKind::Literal { .. } => "Literal",
+        NodeKind::Identifier { .. } => "Identifier",
+        NodeKind::BinaryOp { .. } => "BinaryOp",
+        NodeKind::UnaryOp { .. } => "UnaryOp",
+        NodeKind::Assign { .. } => "Assign",
+        NodeKind::Call { .. } => "Call",
+        NodeKind::MethodCall { .. } => "MethodCall",
+        NodeKind::FieldAccess { .. } => "FieldAccess",
+        NodeKind::Index { .. } => "Index",
+        NodeKind::Propagate { .. } => "Propagate",
+        NodeKind::Lambda { .. } => "Lambda",
+        NodeKind::Pipe { .. } => "Pipe",
+        NodeKind::Compose { .. } => "Compose",
+        NodeKind::Await { .. } => "Await",
+        NodeKind::Range { .. } => "Range",
+        NodeKind::RecordConstruct { .. } => "RecordConstruct",
+        NodeKind::ListLiteral { .. } => "ListLiteral",
+        NodeKind::MapLiteral { .. } => "MapLiteral",
+        NodeKind::SetLiteral { .. } => "SetLiteral",
+        NodeKind::TupleLiteral { .. } => "TupleLiteral",
+        NodeKind::Interpolation { .. } => "Interpolation",
+        NodeKind::Placeholder => "Placeholder",
+        NodeKind::Unreachable => "Unreachable",
+        NodeKind::ResultConstruct { .. } => "ResultConstruct",
+        NodeKind::If { .. } => "If",
+        NodeKind::Guard { .. } => "Guard",
+        NodeKind::Match { .. } => "Match",
+        NodeKind::MatchArm { .. } => "MatchArm",
+        NodeKind::For { .. } => "For",
+        NodeKind::While { .. } => "While",
+        NodeKind::Loop { .. } => "Loop",
+        NodeKind::Block { .. } => "Block",
+        NodeKind::Return { .. } => "Return",
+        NodeKind::Break { .. } => "Break",
+        NodeKind::Continue => "Continue",
+        NodeKind::LetBinding { .. } => "LetBinding",
+        NodeKind::Move { .. } => "Move",
+        NodeKind::Borrow { .. } => "Borrow",
+        NodeKind::MutableBorrow { .. } => "MutableBorrow",
+        NodeKind::EffectOp { .. } => "EffectOp",
+        NodeKind::HandlingBlock { .. } => "HandlingBlock",
+        NodeKind::EffectRef { .. } => "EffectRef",
+        NodeKind::WildcardPat => "WildcardPat",
+        NodeKind::BindPat { .. } => "BindPat",
+        NodeKind::LiteralPat { .. } => "LiteralPat",
+        NodeKind::ConstructorPat { .. } => "ConstructorPat",
+        NodeKind::RecordPat { .. } => "RecordPat",
+        NodeKind::TuplePat { .. } => "TuplePat",
+        NodeKind::ListPat { .. } => "ListPat",
+        NodeKind::OrPat { .. } => "OrPat",
+        NodeKind::GuardPat { .. } => "GuardPat",
+        NodeKind::RangePat { .. } => "RangePat",
+        NodeKind::RestPat => "RestPat",
+        NodeKind::Error => "Error",
+        // `NodeKind` is #[non_exhaustive]: a variant added upstream surfaces
+        // as "Unknown" here until this map learns its name.
+        _ => "Unknown",
+    }
+}
+
+/// The node's source-level name, when it has one: declaration names,
+/// identifier references, field/method names, dotted module/type paths, and
+/// literal text. `None` for purely structural nodes (blocks, operators, …).
+fn node_name(kind: &NodeKind) -> Option<String> {
+    match kind {
+        NodeKind::Module { path, .. } => path.as_ref().map(module_path_name),
+        NodeKind::ImportDecl { path, .. } => Some(module_path_name(path)),
+        NodeKind::FnDecl { name, .. }
+        | NodeKind::RecordDecl { name, .. }
+        | NodeKind::EnumDecl { name, .. }
+        | NodeKind::EnumVariant { name, .. }
+        | NodeKind::ClassDecl { name, .. }
+        | NodeKind::TraitDecl { name, .. }
+        | NodeKind::EffectDecl { name, .. }
+        | NodeKind::TypeAlias { name, .. }
+        | NodeKind::ConstDecl { name, .. }
+        | NodeKind::Identifier { name }
+        | NodeKind::BindPat { name, .. } => Some(name.name.clone()),
+        NodeKind::FieldAccess { field, .. } => Some(field.name.clone()),
+        NodeKind::MethodCall { method, .. } => Some(method.name.clone()),
+        NodeKind::TypeNamed { path, .. }
+        | NodeKind::RecordConstruct { path, .. }
+        | NodeKind::ConstructorPat { path, .. }
+        | NodeKind::RecordPat { path, .. }
+        | NodeKind::EffectRef { path } => Some(type_path_name(path)),
+        NodeKind::ModuleHandle { effect, .. } => Some(type_path_name(effect)),
+        NodeKind::EffectOp {
+            effect, operation, ..
+        } => Some(format!("{}.{}", type_path_name(effect), operation.name)),
+        NodeKind::PropertyTest { name, .. } => Some(name.clone()),
+        NodeKind::Literal { lit } | NodeKind::LiteralPat { lit } => Some(literal_name(lit)),
+        _ => None,
+    }
+}
+
+/// Render a module path (`module Foo.Bar`) as `"Foo.Bar"`.
+fn module_path_name(path: &bock_ast::ModulePath) -> String {
+    path.segments
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Render a type path (`Std.Io.File`) as `"Std.Io.File"`.
+fn type_path_name(path: &bock_ast::TypePath) -> String {
+    path.segments
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// The literal's source-ish text, used as the `name` of literal nodes.
+fn literal_name(lit: &bock_ast::Literal) -> String {
+    match lit {
+        bock_ast::Literal::Int(s) | bock_ast::Literal::Float(s) => s.clone(),
+        bock_ast::Literal::Bool(b) => b.to_string(),
+        bock_ast::Literal::Char(c) => format!("'{c}'"),
+        bock_ast::Literal::String(s) => format!("{s:?}"),
+        bock_ast::Literal::Unit => "()".to_string(),
+    }
+}
+
+// ── AIR output rendering ─────────────────────────────────────────────────────
+
+/// Serialize one tree node to the JSON contract shape (recursive).
+fn tree_to_json(node: &AirTreeNode) -> serde_json::Value {
+    serde_json::json!({
+        "kind": node.kind,
+        "name": node.name,
+        "span": {
+            "start": node.start,
+            "end": node.end,
+            "line": node.line,
+            "col": node.col,
+        },
+        "children": node.children.iter().map(tree_to_json).collect::<Vec<_>>(),
+    })
+}
+
+/// Serialize a frontend failure to the JSON error-object contract shape.
+fn failure_to_json(failure: &AirFailure) -> serde_json::Value {
+    let diagnostics: Vec<serde_json::Value> = failure
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let (line, col) = failure
+                .file
+                .as_ref()
+                .map(|(_, content)| line_col_of(content, d.span.start))
+                .unwrap_or((1, 1));
+            serde_json::json!({
+                "severity": severity_name(d.severity),
+                "code": d.code.to_string(),
+                "message": d.message,
+                "span": {
+                    "start": d.span.start,
+                    "end": d.span.end,
+                    "line": line,
+                    "col": col,
+                },
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "error": {
+            "message": failure.message,
+            "diagnostics": diagnostics,
+        }
+    })
+}
+
+/// Print the human-readable indented tree: one node per line with kind, name
+/// (when present), `@line:col`, and the byte range.
+fn print_tree(node: &AirTreeNode, depth: usize) {
+    let indent = "  ".repeat(depth);
+    match &node.name {
+        Some(name) => println!(
+            "{indent}{} {} @{}:{} ({}..{})",
+            node.kind, name, node.line, node.col, node.start, node.end
+        ),
+        None => println!(
+            "{indent}{} @{}:{} ({}..{})",
+            node.kind, node.line, node.col, node.start, node.end
+        ),
+    }
+    for child in &node.children {
+        print_tree(child, depth + 1);
+    }
+}
+
+/// Render a frontend failure for the human (non-`--json`) mode: the standard
+/// diagnostic rendering when we have diagnostics, a plain error line
+/// otherwise. Always goes to stderr.
+fn print_failure(failure: &AirFailure) {
+    match &failure.file {
+        Some((filename, content)) if !failure.diagnostics.is_empty() => {
+            let rendered = bock_errors::render(&failure.diagnostics, filename, content);
+            eprint!("{rendered}");
+        }
+        _ => eprintln!("error: {}", failure.message),
+    }
+}
+
+/// Stable lowercase severity names for the JSON error object.
+fn severity_name(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Info => "info",
+        Severity::Hint => "hint",
+    }
+}
+
+/// 1-based `(line, col)` of a byte offset, with the column counted in
+/// characters — mirrors [`SourceFile::line_col`] for content we hold as a
+/// plain string (failure rendering, where no `SourceFile` survives).
+fn line_col_of(content: &str, offset: usize) -> (usize, usize) {
+    let clamped = offset.min(content.len());
+    let prefix = &content[..clamped];
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let line_start = prefix.rfind('\n').map_or(0, |i| i + 1);
+    let col = prefix[line_start..].chars().count() + 1;
+    (line, col)
+}
+
 // ── Small helpers ────────────────────────────────────────────────────────────
 
 /// Short string name for a [`DecisionType`].
@@ -482,5 +1134,200 @@ mod tests {
         // but we do ensure no panics for the common shape.
         let d = decision("abc");
         print_decision_detail(ManifestScope::Build, &d);
+    }
+
+    // ── inspect air: tree projection ───────────────────────────────────────
+
+    use bock_air::{AIRNode, NodeKind};
+    use bock_ast::{BinOp, Ident, Literal};
+    use bock_errors::{FileId, Span};
+
+    fn span(start: usize, end: usize) -> Span {
+        Span {
+            file: FileId(0),
+            start,
+            end,
+        }
+    }
+
+    fn ident(name: &str, start: usize, end: usize) -> Ident {
+        Ident {
+            name: name.to_string(),
+            span: span(start, end),
+        }
+    }
+
+    /// `1 + x` over the source "1 + x\n", as a hand-built AIR fragment.
+    fn binary_op_air() -> AIRNode {
+        AIRNode::new(
+            0,
+            span(0, 5),
+            NodeKind::BinaryOp {
+                op: BinOp::Add,
+                left: Box::new(AIRNode::new(
+                    1,
+                    span(0, 1),
+                    NodeKind::Literal {
+                        lit: Literal::Int("1".into()),
+                    },
+                )),
+                right: Box::new(AIRNode::new(
+                    2,
+                    span(4, 5),
+                    NodeKind::Identifier {
+                        name: ident("x", 4, 5),
+                    },
+                )),
+            },
+        )
+    }
+
+    fn source_file_for(content: &str) -> (bock_source::SourceMap, bock_errors::FileId) {
+        let mut map = bock_source::SourceMap::new();
+        let id = map.add_file(PathBuf::from("test.bock"), content.to_string());
+        (map, id)
+    }
+
+    #[test]
+    fn kind_names_are_the_variant_names() {
+        assert_eq!(
+            kind_name(&NodeKind::Module {
+                path: None,
+                annotations: vec![],
+                imports: vec![],
+                items: vec![],
+            }),
+            "Module"
+        );
+        assert_eq!(kind_name(&NodeKind::Continue), "Continue");
+        assert_eq!(kind_name(&NodeKind::TypeSelf), "TypeSelf");
+        assert_eq!(kind_name(&NodeKind::WildcardPat), "WildcardPat");
+        assert_eq!(kind_name(&NodeKind::Error), "Error");
+    }
+
+    #[test]
+    fn node_names_extract_declaration_and_reference_names() {
+        // Identifier reference → its name.
+        assert_eq!(
+            node_name(&NodeKind::Identifier {
+                name: ident("x", 0, 1),
+            }),
+            Some("x".to_string())
+        );
+        // Module without a declared path → no name.
+        assert_eq!(
+            node_name(&NodeKind::Module {
+                path: None,
+                annotations: vec![],
+                imports: vec![],
+                items: vec![],
+            }),
+            None
+        );
+        // Literals surface their text.
+        assert_eq!(
+            node_name(&NodeKind::Literal {
+                lit: Literal::Int("42".into()),
+            }),
+            Some("42".to_string())
+        );
+        assert_eq!(
+            node_name(&NodeKind::Literal {
+                lit: Literal::String("hi".into()),
+            }),
+            Some("\"hi\"".to_string())
+        );
+        // Structural nodes have no name.
+        assert_eq!(node_name(&NodeKind::Continue), None);
+    }
+
+    #[test]
+    fn build_tree_nests_children_in_traversal_order() {
+        let (map, id) = source_file_for("1 + x\n");
+        let air = binary_op_air();
+        let tree = build_tree(&air, map.get_file(id));
+
+        assert_eq!(tree.kind, "BinaryOp");
+        assert_eq!(tree.name, None);
+        assert_eq!((tree.start, tree.end, tree.line, tree.col), (0, 5, 1, 1));
+        assert_eq!(tree.children.len(), 2);
+        assert_eq!(tree.children[0].kind, "Literal");
+        assert_eq!(tree.children[0].name.as_deref(), Some("1"));
+        assert_eq!(tree.children[1].kind, "Identifier");
+        assert_eq!(tree.children[1].name.as_deref(), Some("x"));
+        assert_eq!(
+            (tree.children[1].line, tree.children[1].col),
+            (1, 5),
+            "identifier starts at column 5 of line 1"
+        );
+        assert!(tree.children[0].children.is_empty());
+    }
+
+    #[test]
+    fn tree_to_json_emits_the_contract_fields() {
+        let (map, id) = source_file_for("1 + x\n");
+        let air = binary_op_air();
+        let json = tree_to_json(&build_tree(&air, map.get_file(id)));
+
+        assert_eq!(json["kind"], "BinaryOp");
+        assert!(json["name"].is_null());
+        assert_eq!(json["span"]["start"], 0);
+        assert_eq!(json["span"]["end"], 5);
+        assert_eq!(json["span"]["line"], 1);
+        assert_eq!(json["span"]["col"], 1);
+        let children = json["children"]
+            .as_array()
+            .expect("children must be an array");
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0]["kind"], "Literal");
+        assert_eq!(children[0]["name"], "1");
+        assert!(children[0]["children"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failure_to_json_emits_the_error_object() {
+        let diag = Diagnostic {
+            severity: Severity::Error,
+            code: bock_errors::DiagnosticCode {
+                prefix: 'E',
+                number: 204,
+            },
+            message: "boom".into(),
+            span: span(3, 4),
+            labels: vec![],
+            notes: vec![],
+        };
+        let failure = AirFailure::with_diagnostics(
+            "parsing failed",
+            vec![diag],
+            "test.bock".into(),
+            "fn {\n".into(),
+        );
+        let json = failure_to_json(&failure);
+
+        assert_eq!(json["error"]["message"], "parsing failed");
+        let diags = json["error"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0]["severity"], "error");
+        assert_eq!(diags[0]["code"], "E0204");
+        assert_eq!(diags[0]["message"], "boom");
+        assert_eq!(diags[0]["span"]["start"], 3);
+        assert_eq!(diags[0]["span"]["line"], 1);
+        assert_eq!(diags[0]["span"]["col"], 4);
+        // No tree fields on a failure object.
+        assert!(json.get("kind").is_none());
+    }
+
+    #[test]
+    fn line_col_of_matches_source_file_semantics() {
+        let content = "ab\ncd\n";
+        assert_eq!(line_col_of(content, 0), (1, 1));
+        assert_eq!(line_col_of(content, 2), (1, 3));
+        assert_eq!(line_col_of(content, 3), (2, 1));
+        assert_eq!(line_col_of(content, 4), (2, 2));
+        // Past the end clamps to the end.
+        assert_eq!(line_col_of(content, 999), (3, 1));
+        // Column counts characters, not bytes.
+        assert_eq!(line_col_of("é_x", 3), (1, 3));
     }
 }

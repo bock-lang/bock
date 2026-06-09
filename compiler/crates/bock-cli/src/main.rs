@@ -334,6 +334,21 @@ enum InspectCommand {
         #[arg(long)]
         target: Option<String>,
     },
+    /// Dump the lowered AIR tree for a single source file.
+    ///
+    /// Runs the compiler frontend (lex, parse, name resolution, AIR
+    /// lowering) on one file and prints the resulting tree — indented and
+    /// human-readable by default, or as a stable machine-readable JSON tree
+    /// with `--json` (the shape editor tooling consumes). Exits non-zero on
+    /// any frontend error; in `--json` mode errors emit a JSON error object.
+    Air {
+        /// The `.bock` file to lower.
+        file: String,
+
+        /// Emit the machine-readable JSON tree instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `bock cache` subcommands.
@@ -511,7 +526,12 @@ async fn main() -> anyhow::Result<ExitCode> {
                 type_filter,
                 json,
             });
-            run_inspect(cmd)?;
+            // `inspect air` carries an exit-code contract (0 = lowered
+            // cleanly, 1 = frontend error), mirroring `bock check`; the
+            // other inspect subcommands always report `Clean`.
+            if !run_inspect(cmd)?.is_clean() {
+                exit_code = ExitCode::FAILURE;
+            }
         }
         Command::Pin {
             decision,
@@ -588,7 +608,12 @@ fn stub(name: &str) {
     println!("bock {name}: not yet implemented");
 }
 
-fn run_inspect(cmd: InspectCommand) -> anyhow::Result<()> {
+/// Dispatch one `bock inspect` subcommand.
+///
+/// Returns the pass/fail outcome so `main` can map it to the process exit
+/// code: `inspect air` reports `Failed` on frontend errors; every other
+/// subcommand reports `Clean` (their genuine failures surface as `Err`).
+fn run_inspect(cmd: InspectCommand) -> anyhow::Result<check::CheckOutcome> {
     match cmd {
         InspectCommand::Decisions {
             runtime,
@@ -612,11 +637,18 @@ fn run_inspect(cmd: InspectCommand) -> anyhow::Result<()> {
                 type_filter,
                 json,
             };
-            inspect::run_decisions(&options)
+            inspect::run_decisions(&options).map(|()| check::CheckOutcome::Clean)
         }
-        InspectCommand::Decision { id, json } => inspect::run_decision(&id, json),
-        InspectCommand::Cache { size } => inspect::run_cache(size),
-        InspectCommand::Rules { target } => inspect::run_rules(target.as_deref()),
+        InspectCommand::Decision { id, json } => {
+            inspect::run_decision(&id, json).map(|()| check::CheckOutcome::Clean)
+        }
+        InspectCommand::Cache { size } => {
+            inspect::run_cache(size).map(|()| check::CheckOutcome::Clean)
+        }
+        InspectCommand::Rules { target } => {
+            inspect::run_rules(target.as_deref()).map(|()| check::CheckOutcome::Clean)
+        }
+        InspectCommand::Air { file, json } => inspect::run_air(std::path::Path::new(&file), json),
     }
 }
 
