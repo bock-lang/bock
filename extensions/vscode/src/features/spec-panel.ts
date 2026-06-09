@@ -3,7 +3,9 @@
 // Loads `assets/spec/bock-spec.md` (or a user-configured override), parses its
 // heading structure into a navigation tree, renders each section as HTML with
 // Bock-aware code highlighting, and serves the whole thing to a webview that
-// owns search, navigation, and back/forward entirely client-side.
+// owns navigation and back/forward client-side. Search is split: the webview
+// posts each query to the extension, which ranks sections with the exported
+// (and unit-tested) `rankSpecSections` and posts rendered result rows back.
 //
 // Every other feature's spec link (hover, errors, decisions, annotations,
 // effects) ultimately funnels into `bock.openSpecAt §X.Y`, so this panel is
@@ -158,7 +160,37 @@ class SpecPanelController {
     const m = msg as Record<string, unknown>;
     if (m.type === 'openRef' && typeof m.ref === 'string') {
       void vscode.commands.executeCommand('bock.openSpecAt', m.ref);
+    } else if (m.type === 'search' && typeof m.query === 'string') {
+      const seq = typeof m.seq === 'number' ? m.seq : 0;
+      void this.runSearch(m.query, seq);
     }
+  }
+
+  /**
+   * Rank sections against `query` and post pre-rendered result rows back to
+   * the webview. The `seq` value is echoed verbatim so the webview can drop
+   * responses that a newer query has superseded.
+   */
+  private async runSearch(query: string, seq: number): Promise<void> {
+    const index = await this.loadIndex();
+    if (!index || !this.panel) return;
+    const hits = rankSpecSections(index.sections, query, SEARCH_RESULT_LIMIT);
+    void this.panel.webview.postMessage({
+      type: 'searchResults',
+      seq,
+      query,
+      hits: hits.map((h) => ({
+        id: h.id,
+        ref: h.ref,
+        // HTML is escaped here (renderHighlighted) so the webview can inject
+        // it directly; only <mark> tags are introduced.
+        titleHtml: renderHighlighted(h.title, h.titleMatches),
+        snippetHtml:
+          (h.snippetEllipsisStart ? '…' : '') +
+          renderHighlighted(h.snippet, h.snippetMatches) +
+          (h.snippetEllipsisEnd ? '…' : ''),
+      })),
+    });
   }
 
   private async loadIndex(): Promise<SpecIndex | undefined> {
@@ -475,6 +507,258 @@ export function stripForSearch(md: string): string {
     .trim();
 }
 
+// ─── Search ranking ─────────────────────────────────────────────────────────
+//
+// The webview posts each (debounced) query to the extension; the extension
+// ranks sections here and posts pre-rendered result rows back. Keeping the
+// ranking on this side means the exported function below *is* the production
+// search path, and the headless unit tests exercise the real code.
+
+/** The subset of {@link SpecSection} the ranking function reads. */
+export interface SearchableSection {
+  id: string;
+  ref: string;
+  title: string;
+  /** Plain text of the section body (see {@link stripForSearch}). */
+  text: string;
+  /** Heading depth (2–4); shallower sections get a small rank bonus. */
+  level: number;
+}
+
+/** A `[start, end)` character span inside a title or snippet. */
+export type MatchSpan = [number, number];
+
+/** One ranked search result, with everything needed to render + highlight. */
+export interface SpecSearchHit {
+  id: string;
+  ref: string;
+  title: string;
+  /** Total relevance score (higher is better). Deterministic for a given input. */
+  score: number;
+  /** Plain-text window from the section body around the best match ('' if the body is empty). */
+  snippet: string;
+  /** True when the snippet was cut from a longer text on the left/right. */
+  snippetEllipsisStart: boolean;
+  snippetEllipsisEnd: boolean;
+  /** Term-occurrence spans inside `title` (sorted, non-overlapping). */
+  titleMatches: MatchSpan[];
+  /** Term-occurrence spans inside `snippet` (sorted, non-overlapping). */
+  snippetMatches: MatchSpan[];
+}
+
+/** Maximum number of results the panel shows for one query. */
+export const SEARCH_RESULT_LIMIT = 40;
+
+// Per-term weights. Any title hit must outrank any body hit, and within each
+// haystack an exact word-boundary hit outranks a word-prefix hit, which
+// outranks a bare substring hit. The body position bonus (max 8) is sized so
+// it can never lift a body hit over a title hit.
+const TITLE_WORD_SCORE = 100;
+const TITLE_PREFIX_SCORE = 80;
+const TITLE_SUBSTRING_SCORE = 60;
+const BODY_WORD_SCORE = 30;
+const BODY_PREFIX_SCORE = 22;
+const BODY_SUBSTRING_SCORE = 15;
+
+const SNIPPET_CHARS_BEFORE = 40;
+const SNIPPET_CHARS_AFTER = 60;
+
+/** Match quality: 2 = exact word (bounded both sides), 1 = word prefix, 0 = substring. */
+type MatchQuality = 0 | 1 | 2;
+
+function isWordChar(c: string | undefined): boolean {
+  return c !== undefined && /[A-Za-z0-9_]/.test(c);
+}
+
+/**
+ * Find every occurrence of `term` in `hayLower` and report the first
+ * occurrence index plus the best word-boundary quality seen. Returns
+ * undefined when the term does not occur at all.
+ */
+function scanTerm(
+  hayLower: string,
+  term: string,
+): { first: number; quality: MatchQuality } | undefined {
+  let from = 0;
+  let first = -1;
+  let quality: MatchQuality = 0;
+  for (;;) {
+    const i = hayLower.indexOf(term, from);
+    if (i === -1) break;
+    if (first === -1) first = i;
+    const startOk = !isWordChar(hayLower[i - 1]);
+    const endOk = !isWordChar(hayLower[i + term.length]);
+    const q: MatchQuality = startOk && endOk ? 2 : startOk ? 1 : 0;
+    if (q > quality) quality = q;
+    if (quality === 2) break; // can't improve further
+    from = i + 1;
+  }
+  return first === -1 ? undefined : { first, quality };
+}
+
+/** Earlier body matches score higher; the bonus decays in coarse bands. */
+function positionBonus(first: number): number {
+  if (first === 0) return 8;
+  if (first < 50) return 6;
+  if (first < 200) return 4;
+  if (first < 1000) return 2;
+  return 0;
+}
+
+/**
+ * Collect the spans of every occurrence of every term in `hayLower`,
+ * merging overlaps so the result is sorted and non-overlapping (safe to
+ * feed to {@link renderHighlighted}).
+ */
+function collectSpans(hayLower: string, terms: readonly string[]): MatchSpan[] {
+  const raw: MatchSpan[] = [];
+  for (const term of terms) {
+    let from = 0;
+    for (;;) {
+      const i = hayLower.indexOf(term, from);
+      if (i === -1) break;
+      raw.push([i, i + term.length]);
+      from = i + 1;
+    }
+  }
+  raw.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: MatchSpan[] = [];
+  for (const span of raw) {
+    const last = merged[merged.length - 1];
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+    else merged.push([span[0], span[1]]);
+  }
+  return merged;
+}
+
+function buildSnippet(
+  text: string,
+  textLower: string,
+  terms: readonly string[],
+  earliestBodyMatch: number,
+): { text: string; leading: boolean; trailing: boolean } {
+  if (text.length === 0) return { text: '', leading: false, trailing: false };
+  if (earliestBodyMatch === -1) {
+    // Title-only match: show the opening of the section body for context.
+    const end = Math.min(text.length, SNIPPET_CHARS_BEFORE + SNIPPET_CHARS_AFTER);
+    return { text: text.slice(0, end), leading: false, trailing: end < text.length };
+  }
+  // Size the window from the longest term that matches at the earliest spot.
+  let matchLen = 0;
+  for (const term of terms) {
+    if (textLower.startsWith(term, earliestBodyMatch)) {
+      matchLen = Math.max(matchLen, term.length);
+    }
+  }
+  const start = Math.max(0, earliestBodyMatch - SNIPPET_CHARS_BEFORE);
+  const end = Math.min(text.length, earliestBodyMatch + matchLen + SNIPPET_CHARS_AFTER);
+  return { text: text.slice(start, end), leading: start > 0, trailing: end < text.length };
+}
+
+/**
+ * Rank spec sections against a whitespace-separated query.
+ *
+ * Semantics:
+ * - **AND across terms** — every term must occur (case-insensitively) in the
+ *   section's title or body, or the section is excluded.
+ * - **Weighting** — title hits outrank body hits; exact word-boundary hits
+ *   outrank word-prefix hits, which outrank bare substring hits; earlier body
+ *   matches and shallower headings earn small bonuses.
+ * - **Determinism** — equal scores tie-break on document order, so the result
+ *   ordering is stable for a given input.
+ *
+ * Offsets in the returned hits index into `title`/`snippet` as returned
+ * (matching is done on a lowercased copy; for the ASCII spec text this
+ * preserves offsets).
+ */
+export function rankSpecSections(
+  sections: readonly SearchableSection[],
+  query: string,
+  limit: number = SEARCH_RESULT_LIMIT,
+): SpecSearchHit[] {
+  const terms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
+  if (terms.length === 0 || limit <= 0) return [];
+
+  const scored: { hit: SpecSearchHit; order: number }[] = [];
+  sections.forEach((s, order) => {
+    const titleLower = s.title.toLowerCase();
+    const textLower = s.text.toLowerCase();
+    let score = 0;
+    let earliestBodyMatch = -1;
+    for (const term of terms) {
+      const inTitle = scanTerm(titleLower, term);
+      const inBody = scanTerm(textLower, term);
+      if (!inTitle && !inBody) return; // AND semantics: every term must hit
+      if (inTitle) {
+        score +=
+          inTitle.quality === 2
+            ? TITLE_WORD_SCORE
+            : inTitle.quality === 1
+              ? TITLE_PREFIX_SCORE
+              : TITLE_SUBSTRING_SCORE;
+      }
+      if (inBody) {
+        score +=
+          (inBody.quality === 2
+            ? BODY_WORD_SCORE
+            : inBody.quality === 1
+              ? BODY_PREFIX_SCORE
+              : BODY_SUBSTRING_SCORE) + positionBonus(inBody.first);
+        if (earliestBodyMatch === -1 || inBody.first < earliestBodyMatch) {
+          earliestBodyMatch = inBody.first;
+        }
+      }
+    }
+    // Shallower headings (## over ###/####) get a small structural bonus.
+    score += (4 - Math.min(4, Math.max(2, s.level))) * 3;
+
+    const snip = buildSnippet(s.text, textLower, terms, earliestBodyMatch);
+    scored.push({
+      hit: {
+        id: s.id,
+        ref: s.ref,
+        title: s.title,
+        score,
+        snippet: snip.text,
+        snippetEllipsisStart: snip.leading,
+        snippetEllipsisEnd: snip.trailing,
+        titleMatches: collectSpans(titleLower, terms),
+        snippetMatches: collectSpans(snip.text.toLowerCase(), terms),
+      },
+      order,
+    });
+  });
+
+  scored.sort((a, b) => b.hit.score - a.hit.score || a.order - b.order);
+  return scored.slice(0, limit).map((e) => e.hit);
+}
+
+/**
+ * Render `text` as HTML with the given (sorted, non-overlapping) spans
+ * wrapped in `<mark>`. Both the marked and unmarked segments are passed
+ * through {@link escapeHtml}, so the output is safe to inject. Malformed
+ * spans (overlapping, inverted, or out of range) are skipped defensively.
+ */
+export function renderHighlighted(
+  text: string,
+  spans: readonly (readonly [number, number])[],
+): string {
+  if (spans.length === 0) return escapeHtml(text);
+  const out: string[] = [];
+  let pos = 0;
+  for (const [start, end] of spans) {
+    if (start < pos || end <= start || end > text.length) continue;
+    out.push(escapeHtml(text.slice(pos, start)));
+    out.push(`<mark>${escapeHtml(text.slice(start, end))}</mark>`);
+    pos = end;
+  }
+  out.push(escapeHtml(text.slice(pos)));
+  return out.join('');
+}
+
 // ─── HTML rendering ─────────────────────────────────────────────────────────
 
 function renderHtml(index: SpecIndex): string {
@@ -490,12 +774,13 @@ function renderHtml(index: SpecIndex): string {
   const contentHtml = index.sections
     .map((s) => renderSectionHtml(s, index))
     .join('\n');
+  // Metadata the client script needs for navigation/crumbs. Search itself
+  // runs extension-side (rankSpecSections), so body text is not shipped here.
   const searchIndex = index.sections.map((s) => ({
     id: s.id,
     ref: s.ref,
     anchor: s.anchor,
     title: s.title,
-    text: s.text,
   }));
 
   return `<!DOCTYPE html>
@@ -524,7 +809,7 @@ function renderHtml(index: SpecIndex): string {
   </header>
   <div class="bock-layout">
     <aside class="bock-nav" id="bock-nav">
-      <nav>${navHtml}</nav>
+      <nav id="bock-nav-tree">${navHtml}</nav>
       <div class="bock-results" id="bock-results" hidden></div>
     </aside>
     <main class="bock-content" id="bock-content">
@@ -537,6 +822,7 @@ function renderHtml(index: SpecIndex): string {
       const sections = ${JSON.stringify(searchIndex)};
       const byId = new Map(sections.map((s) => [s.id, s]));
       const navEl = document.getElementById('bock-nav');
+      const navTreeEl = document.getElementById('bock-nav-tree');
       const contentEl = document.getElementById('bock-content');
       const searchEl = document.getElementById('bock-search');
       const resultsEl = document.getElementById('bock-results');
@@ -635,74 +921,116 @@ function renderHtml(index: SpecIndex): string {
         updateNavButtons();
       });
 
-      // Search
-      function renderResults(query) {
-        if (!query) {
-          resultsEl.hidden = true;
-          resultsEl.innerHTML = '';
-          return;
-        }
-        const q = query.toLowerCase();
-        const hits = [];
-        for (const s of sections) {
-          const hay = (s.title + ' ' + s.text).toLowerCase();
-          const idx = hay.indexOf(q);
-          if (idx === -1) continue;
-          const snippetSource = s.text;
-          const snipIdx = snippetSource.toLowerCase().indexOf(q);
-          let snippet = '';
-          if (snipIdx !== -1) {
-            const start = Math.max(0, snipIdx - 40);
-            const end = Math.min(snippetSource.length, snipIdx + q.length + 60);
-            snippet = (start > 0 ? '…' : '') +
-              snippetSource.slice(start, end) +
-              (end < snippetSource.length ? '…' : '');
-          } else {
-            snippet = s.title;
-          }
-          hits.push({ id: s.id, ref: s.ref, title: s.title, snippet });
-          if (hits.length >= 40) break;
-        }
-        if (hits.length === 0) {
-          resultsEl.innerHTML = '<p class="bock-noresults">No matches for "' +
-            escapeHtmlClient(query) + '"</p>';
-        } else {
-          resultsEl.innerHTML = hits.map((h) => (
-            '<a href="#" class="bock-result" data-id="' + h.id + '">' +
-            '<span class="bock-result-ref">' + escapeHtmlClient(h.ref) + '</span>' +
-            '<span class="bock-result-title">' + escapeHtmlClient(h.title) + '</span>' +
-            '<span class="bock-result-snippet">' +
-              highlightQuery(h.snippet, query) + '</span></a>'
-          )).join('');
-        }
-        resultsEl.hidden = false;
-      }
-
-      function highlightQuery(text, q) {
-        const escQ = q.replace(/[.*+?^$\\{}()|[\\]]/g, '\\\\$&');
-        const safe = escapeHtmlClient(text);
-        try {
-          return safe.replace(new RegExp(escQ, 'gi'), (m) =>
-            '<mark>' + m + '</mark>'
-          );
-        } catch (_) {
-          return safe;
-        }
-      }
-
-      // Mirrors shared/webview.ts escapeHtml. This copy runs inside the
-      // webview script (no module imports available here), so it can't reuse
-      // the server-side export — keep the two in sync if either changes.
-      function escapeHtmlClient(s) {
-        return String(s)
-          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-      }
-
+      // Search — each (debounced) query is posted to the extension, which
+      // ranks sections with rankSpecSections() and posts pre-rendered,
+      // pre-escaped result rows back. The seq counter drops stale responses.
+      let searchSeq = 0;
       let searchTimer = null;
+      let activeIdx = -1;
+      let resultIds = [];
+
+      function hideResults() {
+        resultsEl.hidden = true;
+        resultsEl.innerHTML = '';
+        navTreeEl.hidden = false;
+        activeIdx = -1;
+        resultIds = [];
+      }
+
+      function clearSearch() {
+        searchEl.value = '';
+        hideResults();
+      }
+
+      function setActive(idx) {
+        activeIdx = idx;
+        const els = resultsEl.querySelectorAll('.bock-result');
+        els.forEach((el, i) => {
+          el.classList.toggle('active', i === idx);
+        });
+        if (idx >= 0 && els[idx]) {
+          els[idx].scrollIntoView({ block: 'nearest' });
+        }
+      }
+
+      function moveActive(delta) {
+        const n = resultIds.length;
+        if (n === 0) return;
+        const next = activeIdx < 0
+          ? (delta > 0 ? 0 : n - 1)
+          : (activeIdx + delta + n) % n;
+        setActive(next);
+      }
+
+      function openActive() {
+        if (activeIdx < 0 || activeIdx >= resultIds.length) return;
+        const id = resultIds[activeIdx];
+        clearSearch();
+        scrollToSection(id, true);
+      }
+
+      function renderResults(query, hits) {
+        resultsEl.innerHTML = '';
+        resultIds = hits.map((h) => h.id);
+        if (hits.length === 0) {
+          const p = document.createElement('p');
+          p.className = 'bock-noresults';
+          p.textContent = 'No matches for "' + query + '"';
+          resultsEl.appendChild(p);
+        } else {
+          for (const h of hits) {
+            const a = document.createElement('a');
+            a.href = '#';
+            a.className = 'bock-result';
+            a.setAttribute('data-id', h.id);
+            const ref = document.createElement('span');
+            ref.className = 'bock-result-ref';
+            ref.textContent = h.ref;
+            const title = document.createElement('span');
+            title.className = 'bock-result-title';
+            // Escaped extension-side (renderHighlighted); only <mark> tags.
+            title.innerHTML = h.titleHtml;
+            const snippet = document.createElement('span');
+            snippet.className = 'bock-result-snippet';
+            snippet.innerHTML = h.snippetHtml;
+            a.appendChild(ref);
+            a.appendChild(title);
+            a.appendChild(snippet);
+            resultsEl.appendChild(a);
+          }
+        }
+        navTreeEl.hidden = true;
+        resultsEl.hidden = false;
+        setActive(hits.length > 0 ? 0 : -1);
+      }
+
       searchEl.addEventListener('input', () => {
         if (searchTimer) clearTimeout(searchTimer);
-        searchTimer = setTimeout(() => renderResults(searchEl.value.trim()), 80);
+        searchTimer = setTimeout(() => {
+          const q = searchEl.value.trim();
+          if (!q) {
+            hideResults();
+            return;
+          }
+          searchSeq++;
+          vscode.postMessage({ type: 'search', query: q, seq: searchSeq });
+        }, 80);
+      });
+
+      // Keyboard navigation while the search box has focus: arrows move the
+      // active-result cursor, Enter opens it. Escape is handled at window
+      // level so it also works when focus is elsewhere.
+      searchEl.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          moveActive(1);
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          moveActive(-1);
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          openActive();
+        }
       });
 
       resultsEl.addEventListener('click', (e) => {
@@ -711,23 +1039,22 @@ function renderHtml(index: SpecIndex): string {
         e.preventDefault();
         const id = a.getAttribute('data-id');
         if (id) {
+          clearSearch();
           scrollToSection(id, true);
-          searchEl.value = '';
-          resultsEl.hidden = true;
-          resultsEl.innerHTML = '';
         }
       });
 
-      // Ctrl/Cmd+F focuses the search box
+      // Ctrl/Cmd+F focuses the search box; Escape clears the query and
+      // restores the nav tree.
       window.addEventListener('keydown', (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
           e.preventDefault();
           searchEl.focus();
           searchEl.select();
-        } else if (e.key === 'Escape' && document.activeElement === searchEl) {
-          searchEl.value = '';
-          renderResults('');
-          searchEl.blur();
+        } else if (e.key === 'Escape' && (searchEl.value || !resultsEl.hidden)) {
+          e.preventDefault();
+          clearSearch();
+          if (document.activeElement === searchEl) searchEl.blur();
         }
       });
 
@@ -758,6 +1085,13 @@ function renderHtml(index: SpecIndex): string {
         if (!msg || typeof msg !== 'object') return;
         if (msg.type === 'navigate' && typeof msg.id === 'string') {
           scrollToSection(msg.id, true);
+        } else if (msg.type === 'searchResults') {
+          if (msg.seq !== searchSeq) return; // superseded by a newer query
+          if (!searchEl.value.trim()) return; // cleared while ranking
+          renderResults(
+            typeof msg.query === 'string' ? msg.query : '',
+            Array.isArray(msg.hits) ? msg.hits : [],
+          );
         }
       });
 
@@ -961,6 +1295,19 @@ function styles(): string {
     }
     .bock-result:hover {
       background: var(--vscode-list-hoverBackground);
+    }
+    .bock-result.active {
+      background: var(--vscode-list-activeSelectionBackground);
+      color: var(--vscode-list-activeSelectionForeground);
+      border-left-color: var(--vscode-focusBorder);
+    }
+    .bock-result.active .bock-result-ref,
+    .bock-result.active .bock-result-snippet {
+      color: inherit;
+    }
+    .bock-result-title mark {
+      background: var(--vscode-editor-findMatchHighlightBackground);
+      color: inherit;
     }
     .bock-result-ref {
       color: var(--vscode-descriptionForeground);
