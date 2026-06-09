@@ -6,15 +6,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.1] — Unreleased
 
+### Added
+
+- **AIR tree viewer** — `Bock: Show AIR Tree` opens an AIR outline of the
+  active file in the Bock activity-bar container, powered by
+  `bock inspect air --json` (#325): auto-refresh on save, click-to-reveal
+  source spans, and in-view error states. (#329)
+- **Target preview** — `Bock: Preview Transpiled Output` builds the project
+  with `bock build -t <target> --source-only` for a chosen target (or all
+  five) and opens the emitted file(s) beside the editor. (#326)
+- **Strictness picker** — a status-bar item and `Bock: Set Strictness Level`
+  command that edit the `[strictness]` table's `default` key in
+  `bock.project`. (#326)
+- **Quick fixes** — code actions for E4013 (method-name suggestion, e.g.
+  Map `contains` → `contains_key`), E4014 (bare → braced import), E5004
+  (insert `mut` on the binding), and W1001 (remove unused import entry). (#327)
+- **Semantic tokens** — a client-side semantic-token provider using standard
+  token types only, vocabulary- and effect-aware. (#328)
+- **Language server: references, rename, document symbols** — `bock lsp`
+  now provides find references, symbol rename (validated: identifier shape,
+  keyword rejection, case-class preservation), and hierarchical document
+  symbols. Requires a current `bock` binary. (#324)
+- **Language server: inlay hints** — inferred-type hints on unannotated
+  `let` / `let mut` / destructuring / `for` binders; hints for unresolved or
+  error types are suppressed, and renders are capped at 60 characters.
+  Requires a current `bock` binary. (#330)
+- `Bock: Restart Language Server` command and starter snippets
+  (`snippets/bock.code-snippets`). (#317)
+
 ### Changed
 
 - Migrated to `vscode-languageclient` v10. The minimum supported editor
   version is now **VS Code 1.91.0** (raised from 1.75.0). (#290)
+- Hover now also covers operators, builtin methods (listing candidate
+  receiver types), and effect operations declared in the current file. (#321)
+- Spec-panel search ranks multi-term queries (title over body,
+  word-boundary over substring matches), highlights matches, and supports
+  keyboard navigation (`↑`/`↓`/`Enter`/`Escape`). (#322)
+- The Decisions view gained filtering (type / pinned / minimum confidence)
+  via a filter menu, sort modes, a clear-filters command, and a
+  "Jump to Source JSON" context action; active filters and sort are shown
+  in the view description. (#323)
+- The Annotations tree is now group → file → usage with usage and file
+  counts, the view badge shows the workspace-wide usage total, and the
+  usage-analysis webview adds a per-file breakdown and a parameter-pattern
+  summary. (#320)
 - The extension now requires **workspace trust** before spawning the `bock`
   language server / CLI. The server binary is resolved only from `PATH` or a
   machine-scoped `bock.lspPath` (which supports `${workspaceFolder}` and `~`)
   — it is no longer auto-discovered from a workspace's `target/` directory,
   which was an arbitrary-code-execution risk when opening untrusted repos.
+  (#318)
 
 ### Fixed
 
@@ -36,7 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Unified the webview CSP/nonce handling (crypto-secure) and removed dead
   code. (#310, #311)
-- The headless test suite grew from 7 to 168 tests. (#314, #315)
+- The headless test suite grew from 7 to 168 tests (#314, #315), then to
+  435 across the v1.1 feature wave. (#320–#330)
 
 ## [0.1.0] — 2026-04-19
 
