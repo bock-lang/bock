@@ -20,9 +20,10 @@ use bock_errors::{FileId, Span};
 use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
-use bock_types::{seed_imports, seed_prelude, FnType, PrimitiveType, Type, TypeChecker};
+use bock_types::{seed_imports, seed_prelude, FnType, Type, TypeChecker};
 
 use crate::goto_definition::position_to_offset;
+use crate::pipeline::register_builtins;
 use crate::type_display::format_type;
 
 /// Result of a successful hover lookup.
@@ -139,57 +140,6 @@ fn fn_signature(f: &FnType) -> String {
     out
 }
 
-// ─── Builtin prelude (shared with pipeline::check_document) ──────────────────
-
-/// Define the prelude builtins expected by hand-written Bock programs.
-///
-/// Kept in sync with `pipeline::register_builtins`. Without this the hover
-/// query would try to type-check against an environment missing `print`,
-/// `assert`, `Ok`, etc., and spurious errors would poison `checker.types`.
-fn register_builtins(checker: &mut TypeChecker) {
-    let io_fn_ty = Type::Function(FnType {
-        params: vec![Type::Primitive(PrimitiveType::String)],
-        ret: Box::new(Type::Primitive(PrimitiveType::Void)),
-        effects: vec![],
-    });
-    for name in ["print", "println", "debug"] {
-        checker.env.define(name, io_fn_ty.clone());
-    }
-
-    let assert_ty = Type::Function(FnType {
-        params: vec![Type::Primitive(PrimitiveType::Bool)],
-        ret: Box::new(Type::Primitive(PrimitiveType::Void)),
-        effects: vec![],
-    });
-    checker.env.define("assert", assert_ty);
-
-    let expect_ty = Type::Function(FnType {
-        params: vec![Type::Error],
-        ret: Box::new(Type::Error),
-        effects: vec![],
-    });
-    checker.env.define("expect", expect_ty);
-
-    let never_fn_ty = Type::Function(FnType {
-        params: vec![],
-        ret: Box::new(Type::Primitive(PrimitiveType::Never)),
-        effects: vec![],
-    });
-    for name in ["todo", "unreachable"] {
-        checker.env.define(name, never_fn_ty.clone());
-    }
-
-    let constructor_ty = Type::Function(FnType {
-        params: vec![Type::Error],
-        ret: Box::new(Type::Error),
-        effects: vec![],
-    });
-    for name in ["Ok", "Err", "Some"] {
-        checker.env.define(name, constructor_ty.clone());
-    }
-    checker.env.define("None", Type::Error);
-}
-
 // ─── AIR walker: find the innermost node at a byte offset ────────────────────
 
 /// Visitor that records the innermost AIR node whose span contains the
@@ -262,6 +212,7 @@ fn describe_kind(kind: &NodeKind) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bock_types::PrimitiveType;
 
     fn run(src: &str, line: u32, ch: u32) -> Option<HoverResult> {
         hover(PathBuf::from("test.bock"), src.to_string(), line, ch)

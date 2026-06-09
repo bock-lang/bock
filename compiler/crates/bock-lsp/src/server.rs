@@ -5,7 +5,7 @@
 //! pipeline on the edited document and publish the resulting diagnostics
 //! back to the client. `did_close` clears them. The navigation trio —
 //! find-references, rename (with prepare), and document symbols — reuses
-//! the same single-file pipeline.
+//! the same single-file pipeline, as do inferred-type inlay hints.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,10 +18,10 @@ use tower_lsp::lsp_types::{
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams,
     DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
     HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-    Location, MarkupContent, MarkupKind, MessageType, OneOf, PrepareRenameResponse,
-    ReferenceParams, RenameOptions, RenameParams, ServerCapabilities, ServerInfo,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
-    WorkDoneProgressOptions, WorkspaceEdit,
+    InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
+    MessageType, OneOf, PrepareRenameResponse, ReferenceParams, RenameOptions, RenameParams,
+    ServerCapabilities, ServerInfo, TextDocumentPositionParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions, WorkspaceEdit,
 };
 use tower_lsp::{Client, LanguageServer};
 
@@ -29,6 +29,7 @@ use crate::diagnostics::{span_to_range, to_lsp_diagnostic};
 use crate::document_symbol::{document_symbols, to_lsp_symbols};
 use crate::goto_definition::find_definition;
 use crate::hover::hover;
+use crate::inlay_hint::inlay_hints;
 use crate::pipeline::check_document;
 use crate::references::find_occurrences;
 use crate::rename::validate_new_name;
@@ -64,6 +65,7 @@ impl BockLanguageServer {
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             })),
             document_symbol_provider: Some(OneOf::Left(true)),
+            inlay_hint_provider: Some(OneOf::Left(true)),
             diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
                 identifier: Some("bock".to_string()),
                 inter_file_dependencies: true,
@@ -406,6 +408,45 @@ impl LanguageServer for BockLanguageServer {
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
 
+    async fn inlay_hint(&self, params: InlayHintParams) -> LspResult<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        let range = params.range;
+
+        let Some(content) = self.document_text(&uri) else {
+            return Ok(None);
+        };
+
+        let path = url_to_path(&uri);
+        // Pipeline is CPU-bound — hop to a blocking thread so we don't
+        // stall the LSP reactor.
+        let result = tokio::task::spawn_blocking(move || inlay_hints(path, content, range)).await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(err) => {
+                self.log_task_panic("inlay_hint", err).await;
+                return Ok(None);
+            }
+        };
+
+        let source_file = result.source_map.get_file(result.file_id);
+        let hints = result
+            .hints
+            .into_iter()
+            .map(|hint| InlayHint {
+                position: span_to_range(hint.span, source_file).start,
+                label: InlayHintLabel::String(hint.label),
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: None,
+                data: None,
+            })
+            .collect();
+        Ok(Some(hints))
+    }
+
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.documents.remove(&uri);
@@ -458,6 +499,11 @@ mod tests {
         assert!(
             matches!(caps.document_symbol_provider, Some(OneOf::Left(true))),
             "document symbol provider must be enabled",
+        );
+
+        assert!(
+            matches!(caps.inlay_hint_provider, Some(OneOf::Left(true))),
+            "inlay hint provider must be enabled",
         );
 
         assert!(

@@ -131,8 +131,9 @@ fn has_errors(diagnostics: &[Diagnostic]) -> bool {
 /// Kept in sync with `bock-cli`'s `register_type_builtins` — the LSP must
 /// treat the same set of identifiers as predefined, otherwise buffers that
 /// type-check on disk would show spurious "undefined variable" diagnostics
-/// in the editor.
-fn register_builtins(checker: &mut TypeChecker) {
+/// in the editor. Shared with the hover and inlay-hint pipelines, which
+/// run the same type checker on their own AIR lowering.
+pub(crate) fn register_builtins(checker: &mut TypeChecker) {
     let io_fn_ty = Type::Function(FnType {
         params: vec![Type::Primitive(PrimitiveType::String)],
         ret: Box::new(Type::Primitive(PrimitiveType::Void)),
