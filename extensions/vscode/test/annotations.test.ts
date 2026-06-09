@@ -13,7 +13,12 @@ import * as assert from 'node:assert/strict';
 // `scanText`, but pulling it in transitively imports `vscode-languageclient`,
 // whose package `exports` subpath the headless ts-node CommonJS resolver
 // can't follow — so the tests target the dependency-free module.
-import { scanText } from '../src/features/annotations-scan';
+import {
+  scanText,
+  aggregateByFile,
+  summarizeParams,
+  type AnnotationUsage,
+} from '../src/features/annotations-scan';
 import { Uri } from './vscode-stub';
 
 // scanText takes a `vscode.Uri`; the stub is structurally compatible for the
@@ -102,5 +107,145 @@ describe('annotations.scanText', () => {
     // Open and close on the same line: subsequent annotations are live.
     const text = ['let d = """inline doc"""', '@managed'].join('\n');
     assert.deepEqual(names(text), ['managed']);
+  });
+});
+
+// ─── Aggregation helpers (per-file tree depth + usage webview) ──────────────
+
+/** Build an AnnotationUsage at a given file path / location. */
+function usage(
+  fsPath: string,
+  name: string,
+  params = '',
+  line = 0,
+  column = 0,
+): AnnotationUsage {
+  return {
+    name,
+    params,
+    uri: Uri.file(fsPath) as unknown as AnnotationUsage['uri'],
+    line,
+    column,
+  };
+}
+
+describe('annotations.aggregateByFile', () => {
+  it('returns an empty array for no usages', () => {
+    assert.deepEqual(aggregateByFile([]), []);
+  });
+
+  it('groups usages by file and sorts files by path', () => {
+    const files = aggregateByFile([
+      usage('/ws/zeta.bock', 'managed', '', 3),
+      usage('/ws/alpha.bock', 'managed', '', 9),
+      usage('/ws/zeta.bock', 'managed', '', 1),
+      usage('/ws/midway.bock', 'managed', '', 0),
+    ]);
+    assert.deepEqual(
+      files.map((f) => f.fsPath),
+      ['/ws/alpha.bock', '/ws/midway.bock', '/ws/zeta.bock'],
+    );
+    assert.deepEqual(
+      files.map((f) => f.usages.length),
+      [1, 1, 2],
+    );
+  });
+
+  it('uses the URI string as the stable grouping key', () => {
+    const [file] = aggregateByFile([usage('/ws/a.bock', 'test')]);
+    assert.equal(file.key, 'file:///ws/a.bock');
+    assert.equal(file.uri.fsPath, '/ws/a.bock');
+  });
+
+  it('sorts usages within a file by line, then column', () => {
+    const [file] = aggregateByFile([
+      usage('/ws/a.bock', 'context', '', 5, 4),
+      usage('/ws/a.bock', 'context', '', 2, 0),
+      usage('/ws/a.bock', 'context', '', 5, 0),
+    ]);
+    assert.deepEqual(
+      file.usages.map((u) => [u.line, u.column]),
+      [
+        [2, 0],
+        [5, 0],
+        [5, 4],
+      ],
+    );
+  });
+
+  it('handles many files without merging distinct paths', () => {
+    const input: AnnotationUsage[] = [];
+    for (let i = 0; i < 25; i++) {
+      input.push(usage(`/ws/f${String(i).padStart(2, '0')}.bock`, 'managed'));
+    }
+    const files = aggregateByFile(input);
+    assert.equal(files.length, 25);
+    assert.ok(files.every((f) => f.usages.length === 1));
+  });
+});
+
+describe('annotations.summarizeParams', () => {
+  it('returns an empty array for no usages', () => {
+    assert.deepEqual(summarizeParams([]), []);
+  });
+
+  it('counts usages without arguments under the empty string', () => {
+    const patterns = summarizeParams([
+      usage('/ws/a.bock', 'managed'),
+      usage('/ws/b.bock', 'managed'),
+      usage('/ws/c.bock', 'managed', '"hot"'),
+    ]);
+    assert.deepEqual(patterns, [
+      { params: '', count: 2 },
+      { params: '"hot"', count: 1 },
+    ]);
+  });
+
+  it('counts duplicate parameter strings across files', () => {
+    const patterns = summarizeParams([
+      usage('/ws/a.bock', 'security', '"pii"'),
+      usage('/ws/b.bock', 'security', '"pii"'),
+      usage('/ws/c.bock', 'security', '"pii"'),
+      usage('/ws/c.bock', 'security', '"audit"'),
+    ]);
+    assert.deepEqual(patterns, [
+      { params: '"pii"', count: 3 },
+      { params: '"audit"', count: 1 },
+    ]);
+  });
+
+  it('breaks count ties by ascending parameter text', () => {
+    const patterns = summarizeParams([
+      usage('/ws/a.bock', 'requires', 'net'),
+      usage('/ws/a.bock', 'requires', 'fs'),
+    ]);
+    assert.deepEqual(
+      patterns.map((p) => p.params),
+      ['fs', 'net'],
+    );
+  });
+
+  it('truncates to the given limit, keeping the most frequent', () => {
+    const input: AnnotationUsage[] = [];
+    // 12 distinct patterns; pattern i occurs (i + 1) times.
+    for (let i = 0; i < 12; i++) {
+      for (let n = 0; n <= i; n++) {
+        input.push(usage('/ws/a.bock', 'performance', `p${i}`));
+      }
+    }
+    const top = summarizeParams(input, 10);
+    assert.equal(top.length, 10);
+    assert.equal(top[0].params, 'p11');
+    assert.equal(top[0].count, 12);
+    // The two least-frequent patterns (p0, p1) fall off the end.
+    assert.ok(top.every((p) => p.params !== 'p0' && p.params !== 'p1'));
+  });
+
+  it('returns all patterns when no limit is given', () => {
+    const input: AnnotationUsage[] = [];
+    for (let i = 0; i < 12; i++) {
+      input.push(usage('/ws/a.bock', 'performance', `p${i}`));
+    }
+    assert.equal(summarizeParams(input).length, 12);
   });
 });
