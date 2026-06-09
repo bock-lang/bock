@@ -50,11 +50,46 @@ interface DecisionRecord {
   timestamp: string;
 }
 
-interface LoadedDecision {
+export interface LoadedDecision {
   record: DecisionRecord;
   scope: DecisionScope;
   /** Source JSON file on disk, used for jump-to-source actions. */
   sourceFile: string;
+}
+
+/**
+ * Structural validation for a decision record loaded from disk. Only the
+ * fields the tree / tooltip / detail webview dereference unconditionally are
+ * required; everything optional in `DecisionRecord` stays optional here. A
+ * record that fails this guard is dropped at load time (and counted) so a
+ * single malformed file can't crash rendering with `record.id.slice` /
+ * `confidence.toFixed` / `alternatives.length` on `undefined`.
+ *
+ * Exported for unit testing.
+ */
+export function isValidDecisionRecord(x: unknown): x is DecisionRecord {
+  if (typeof x !== 'object' || x === null) return false;
+  const r = x as Record<string, unknown>;
+  return (
+    typeof r.id === 'string' &&
+    typeof r.module === 'string' &&
+    typeof r.choice === 'string' &&
+    typeof r.decision_type === 'string' &&
+    typeof r.model_id === 'string' &&
+    typeof r.confidence === 'number' &&
+    Number.isFinite(r.confidence) &&
+    Array.isArray(r.alternatives) &&
+    typeof r.pinned === 'boolean' &&
+    typeof r.timestamp === 'string'
+  );
+}
+
+/** Outcome of loading decisions: the valid records plus a count of records
+ *  that were dropped (malformed JSON file OR invalid record shape).
+ *  Exported for unit testing of the drop-count threading. */
+export interface LoadResult {
+  decisions: LoadedDecision[];
+  skipped: number;
 }
 
 // ─── Tree nodes ─────────────────────────────────────────────────────────────
@@ -182,9 +217,10 @@ class DecisionsTreeProvider implements vscode.TreeDataProvider<TreeNode> {
           'warning',
           new vscode.ThemeColor('charts.yellow'),
         );
-    const short = record.id.length > 8 ? record.id.slice(0, 8) : record.id;
-    const choicePreview = truncate(firstLine(record.choice), 50);
-    const label = `${record.decision_type} #${short} — ${choicePreview}`;
+    const id = record.id ?? '';
+    const short = id.length > 8 ? id.slice(0, 8) : id || '(no id)';
+    const choicePreview = truncate(firstLine(record.choice ?? ''), 50);
+    const label = `${record.decision_type ?? 'decision'} #${short} — ${choicePreview}`;
 
     const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
     item.iconPath = icon;
@@ -217,13 +253,29 @@ function decisionContextValue(d: LoadedDecision): string {
 }
 
 function firstLine(s: string): string {
+  if (typeof s !== 'string') return '';
   const idx = s.indexOf('\n');
   return idx === -1 ? s : s.slice(0, idx);
 }
 
 function truncate(s: string, n: number): string {
-  const trimmed = s.trim();
+  const trimmed = (s ?? '').trim();
   return trimmed.length > n ? `${trimmed.slice(0, n - 1)}…` : trimmed;
+}
+
+/** Format a confidence value defensively — fall back to `n/a` if the field
+ *  isn't a finite number (e.g. a record that slipped past validation). */
+function formatConfidence(value: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value.toFixed(2)
+    : 'n/a';
+}
+
+/** Truncate an id defensively for display — tolerates a missing/non-string
+ *  id on a record that slipped past validation. */
+function shortId(id: string, n: number): string {
+  if (typeof id !== 'string' || id.length === 0) return '(no id)';
+  return id.length > n ? id.slice(0, n) : id;
 }
 
 function buildDecisionTooltip(d: LoadedDecision): vscode.MarkdownString {
@@ -234,7 +286,7 @@ function buildDecisionTooltip(d: LoadedDecision): vscode.MarkdownString {
   md.appendMarkdown(`_Module:_ \`${r.module}\`\n\n`);
   if (r.target) md.appendMarkdown(`_Target:_ \`${r.target}\`\n\n`);
   md.appendMarkdown(`_Model:_ \`${r.model_id}\`\n\n`);
-  md.appendMarkdown(`_Confidence:_ ${r.confidence.toFixed(2)}\n\n`);
+  md.appendMarkdown(`_Confidence:_ ${formatConfidence(r.confidence)}\n\n`);
   md.appendMarkdown(`_Scope:_ ${d.scope}\n\n`);
   if (r.pinned) {
     const who = r.pinned_by ? ` by ${r.pinned_by}` : '';
@@ -263,21 +315,24 @@ function findProjectRoot(): string | undefined {
   return folders[0].uri.fsPath;
 }
 
-async function loadAllDecisions(root: string): Promise<LoadedDecision[]> {
+/** Load every decision JSON under `<root>/.bock/decisions/{build,runtime}`,
+ *  returning the valid records and a count of those dropped (malformed JSON
+ *  or invalid shape). Exported for unit testing. */
+export async function loadAllDecisions(root: string): Promise<LoadResult> {
   const decisionsRoot = path.join(root, '.bock', 'decisions');
-  const out: LoadedDecision[] = [];
+  const result: LoadResult = { decisions: [], skipped: 0 };
   for (const scope of ['build', 'runtime'] as const) {
     const scopeRoot = path.join(decisionsRoot, scope);
     if (!fs.existsSync(scopeRoot)) continue;
-    await walkJson(scopeRoot, scope, out);
+    await walkJson(scopeRoot, scope, result);
   }
-  return out;
+  return result;
 }
 
 async function walkJson(
   dir: string,
   scope: DecisionScope,
-  out: LoadedDecision[],
+  result: LoadResult,
 ): Promise<void> {
   let entries: fs.Dirent[];
   try {
@@ -288,18 +343,28 @@ async function walkJson(
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      await walkJson(full, scope, out);
+      await walkJson(full, scope, result);
     } else if (entry.isFile() && entry.name.endsWith('.json')) {
+      let parsed: unknown;
       try {
         const text = await fs.promises.readFile(full, 'utf8');
-        const parsed = JSON.parse(text);
-        const list: DecisionRecord[] = Array.isArray(parsed) ? parsed : [parsed];
-        for (const record of list) {
-          out.push({ record, scope, sourceFile: full });
-        }
+        parsed = JSON.parse(text);
       } catch {
-        // Malformed JSON — silently skip so a single bad file doesn't
+        // Malformed JSON — count and skip so a single bad file doesn't
         // break the whole view. `bock check` will flag it on rebuild.
+        result.skipped++;
+        continue;
+      }
+      const list: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+      for (const candidate of list) {
+        if (isValidDecisionRecord(candidate)) {
+          result.decisions.push({ record: candidate, scope, sourceFile: full });
+        } else {
+          // Valid JSON but the record is missing fields the tree / detail
+          // view dereferences unconditionally. Drop it (counted) rather
+          // than crash rendering.
+          result.skipped++;
+        }
       }
     }
   }
@@ -370,7 +435,7 @@ function openDetailWebview(
   decision: LoadedDecision,
 ): void {
   const r = decision.record;
-  const title = `Bock — Decision ${r.id.slice(0, 8)}`;
+  const title = `Bock — Decision ${shortId(r.id, 8)}`;
   const handle = webviews.create(
     `bock.decision.${r.id}`,
     title,
@@ -436,7 +501,7 @@ function renderDetailHtml(decision: LoadedDecision): {
     `<tr><th>Model</th><td><code>${escapeHtml(r.model_id)}</code></td></tr>`,
   );
   metaRows.push(
-    `<tr><th>Confidence</th><td>${r.confidence.toFixed(2)}</td></tr>`,
+    `<tr><th>Confidence</th><td>${formatConfidence(r.confidence)}</td></tr>`,
   );
   if (r.pinned) {
     const who = r.pinned_by ? escapeHtml(r.pinned_by) : 'unknown';
@@ -459,9 +524,10 @@ function renderDetailHtml(decision: LoadedDecision): {
     `<tr><th>Recorded</th><td>${escapeHtml(r.timestamp)}</td></tr>`,
   );
 
-  const alternatives = r.alternatives.length
-    ? `<ol>${r.alternatives
-        .map((alt) => `<li><code>${escapeHtml(alt)}</code></li>`)
+  const alts = Array.isArray(r.alternatives) ? r.alternatives : [];
+  const alternatives = alts.length
+    ? `<ol>${alts
+        .map((alt) => `<li><code>${escapeHtml(String(alt))}</code></li>`)
         .join('')}</ol>`
     : `<p class="bock-missing">None recorded.</p>`;
 
@@ -509,7 +575,7 @@ function renderDetailHtml(decision: LoadedDecision): {
       }
       .bock-action:hover { background: var(--vscode-button-hoverBackground); }
     </style>
-    <h1>Decision <code>${escapeHtml(r.id.slice(0, 12))}</code> ${pinBadge}</h1>
+    <h1>Decision <code>${escapeHtml(shortId(r.id, 12))}</code> ${pinBadge}</h1>
     <table>${metaRows.join('')}</table>
     <h2>Choice</h2>
     <pre><code>${escapeHtml(r.choice)}</code></pre>
@@ -567,9 +633,14 @@ export function registerDecisions(
       updateIndicators(view, statusBar, provider);
       return;
     }
-    const decisions = await loadAllDecisions(root);
+    const { decisions, skipped } = await loadAllDecisions(root);
     provider.setDecisions(decisions);
     updateIndicators(view, statusBar, provider);
+    if (skipped > 0) {
+      void vscode.window.showWarningMessage(
+        `Bock: skipped ${skipped} malformed decision record(s).`,
+      );
+    }
   };
   const scheduleRefresh = (): void => {
     if (pending) clearTimeout(pending);

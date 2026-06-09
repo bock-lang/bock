@@ -18,21 +18,15 @@ import type { LanguageClient } from 'vscode-languageclient/node';
 import { VocabService } from '../vocab';
 import type { Annotation } from '../shared/types';
 import { WebviewManager, escapeHtml } from '../shared/webview';
+import { scanText, type AnnotationUsage } from './annotations-scan';
+
+// Re-export the pure scanner so existing importers (and tests) can reach it
+// through this module too. The scanning logic itself lives in
+// `annotations-scan.ts` so it can be unit-tested without pulling in the
+// `vscode-languageclient` / webview dependency chain.
+export { scanText, type AnnotationUsage } from './annotations-scan';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
-
-interface AnnotationUsage {
-  /** Name without the leading `@`. */
-  name: string;
-  /** Raw parameter text, empty if the annotation has no arguments. */
-  params: string;
-  /** Workspace file URI where this usage lives. */
-  uri: vscode.Uri;
-  /** Zero-based line number of the `@name` token. */
-  line: number;
-  /** Zero-based column of the `@` character. */
-  column: number;
-}
 
 type AnnoNode = GroupNode | UsageNode;
 
@@ -200,85 +194,39 @@ function affectedSystems(name: string): string {
 }
 
 // ─── Workspace scanning ─────────────────────────────────────────────────────
+//
+// The per-line `scanText` parser (and its triple-quote state machine) lives
+// in `annotations-scan.ts` so it can be unit-tested in isolation. The IO
+// orchestration below stays here because it touches the live `vscode`
+// workspace API.
 
-// Matches a top-level annotation token at the start of a (possibly
-// indented) line. We intentionally stop at the first `(` on that line
-// and capture the text up to the first unnested `)` when the caller
-// asks for full parameters — multi-line parameter lists (e.g. `@context`
-// with a triple-quoted string) may have no closing paren on the same
-// line, in which case the params field is left empty.
-const ANNOTATION_RE = /^[\t ]*@([A-Za-z_][A-Za-z0-9_]*)\b/;
+/** Read and scan a single `.bock` file. Returns `undefined` if the file is
+ *  unreadable (deleted, permissions) so the caller can drop its entry. */
+async function scanFile(uri: vscode.Uri): Promise<AnnotationUsage[] | undefined> {
+  try {
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    const text = Buffer.from(bytes).toString('utf8');
+    return scanText(uri, text);
+  } catch {
+    // Unreadable (e.g. deleted between watcher event and read).
+    return undefined;
+  }
+}
 
-async function scanWorkspace(): Promise<AnnotationUsage[]> {
+/** Full workspace scan, keyed by file-URI string. Used for the initial load
+ *  and the explicit `bock.annotations.refresh` command only; incremental
+ *  watcher events re-scan just the changed file. */
+async function scanWorkspace(): Promise<Map<string, AnnotationUsage[]>> {
   const files = await vscode.workspace.findFiles(
     '**/*.bock',
     '**/{node_modules,target,dist,out,.git}/**',
   );
-  const all: AnnotationUsage[] = [];
+  const byFile = new Map<string, AnnotationUsage[]>();
   for (const uri of files) {
-    try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      const text = Buffer.from(bytes).toString('utf8');
-      all.push(...scanText(uri, text));
-    } catch {
-      // Skip unreadable files; they'll reappear next refresh if they
-      // become readable.
-    }
+    const usages = await scanFile(uri);
+    if (usages) byFile.set(uri.toString(), usages);
   }
-  return all;
-}
-
-/** Parse annotation usages out of a single file's text. Exported for tests. */
-export function scanText(uri: vscode.Uri, text: string): AnnotationUsage[] {
-  const out: AnnotationUsage[] = [];
-  const lines = text.split(/\r?\n/);
-  let inTripleString = false;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const tripleCount = countTripleQuotes(line);
-    const startedInString = inTripleString;
-    if (tripleCount % 2 !== 0) {
-      inTripleString = !inTripleString;
-    }
-    // Skip the line if it opened fully inside a triple-quoted string.
-    // Annotations buried inside a `@context("""...""")` body (e.g.
-    // `@intent:`) are documentation markers, not top-level annotations.
-    if (startedInString) continue;
-
-    const match = ANNOTATION_RE.exec(line);
-    if (!match) continue;
-    const name = match[1];
-    const column = line.indexOf('@');
-    const params = extractParams(line, column);
-    out.push({ name, params, uri, line: i, column });
-  }
-  return out;
-}
-
-function countTripleQuotes(line: string): number {
-  let count = 0;
-  let idx = 0;
-  while ((idx = line.indexOf('"""', idx)) !== -1) {
-    count++;
-    idx += 3;
-  }
-  return count;
-}
-
-function extractParams(line: string, atColumn: number): string {
-  const open = line.indexOf('(', atColumn);
-  if (open === -1) return '';
-  let depth = 1;
-  for (let i = open + 1; i < line.length; i++) {
-    const c = line[i];
-    if (c === '(') depth++;
-    else if (c === ')') {
-      depth--;
-      if (depth === 0) return line.slice(open + 1, i);
-    }
-  }
-  // Unclosed on this line (e.g. `@context("""` spanning multiple lines).
-  return line.slice(open + 1).trimEnd();
+  return byFile;
 }
 
 // ─── Registration ───────────────────────────────────────────────────────────
@@ -297,31 +245,50 @@ export function registerAnnotations(
   });
   ctx.subscriptions.push(view);
 
-  let pending: NodeJS.Timeout | undefined;
-  const refresh = async (): Promise<void> => {
-    const usages = await scanWorkspace();
-    provider.setUsages(usages);
+  // Per-file usage store keyed by `uri.toString()`. The tree is rebuilt by
+  // flattening every file's usages, so a single-file save only has to
+  // re-scan and replace that one file's entry instead of re-reading the
+  // whole workspace.
+  const byFile = new Map<string, AnnotationUsage[]>();
+
+  const rebuildTree = (): void => {
+    const all: AnnotationUsage[] = [];
+    for (const usages of byFile.values()) all.push(...usages);
+    provider.setUsages(all);
   };
-  const scheduleRefresh = (): void => {
-    if (pending) clearTimeout(pending);
-    pending = setTimeout(() => {
-      pending = undefined;
-      void refresh();
-    }, 200);
+
+  // Full rescan: initial load and the explicit refresh command only.
+  const fullRefresh = async (): Promise<void> => {
+    const scanned = await scanWorkspace();
+    byFile.clear();
+    for (const [key, usages] of scanned) byFile.set(key, usages);
+    rebuildTree();
+  };
+
+  // Incremental: re-scan exactly one changed/created file and swap its entry.
+  const refreshFile = async (uri: vscode.Uri): Promise<void> => {
+    const usages = await scanFile(uri);
+    if (usages === undefined) byFile.delete(uri.toString());
+    else byFile.set(uri.toString(), usages);
+    rebuildTree();
+  };
+
+  const removeFile = (uri: vscode.Uri): void => {
+    if (byFile.delete(uri.toString())) rebuildTree();
   };
 
   // Initial scan — run asynchronously so activation isn't blocked on IO.
-  void refresh();
+  void fullRefresh();
 
   const watcher = vscode.workspace.createFileSystemWatcher('**/*.bock');
-  watcher.onDidChange(scheduleRefresh);
-  watcher.onDidCreate(scheduleRefresh);
-  watcher.onDidDelete(scheduleRefresh);
+  watcher.onDidChange((uri) => void refreshFile(uri));
+  watcher.onDidCreate((uri) => void refreshFile(uri));
+  watcher.onDidDelete((uri) => removeFile(uri));
   ctx.subscriptions.push(watcher);
 
   ctx.subscriptions.push(
     vscode.commands.registerCommand('bock.annotations.refresh', () => {
-      void refresh();
+      void fullRefresh();
     }),
     vscode.commands.registerCommand(
       'bock.annotations.revealUsage',
