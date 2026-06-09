@@ -4,6 +4,35 @@ All notable changes to the **Bock Language** VS Code extension are documented
 here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — Unreleased
+
+### Changed
+
+- Migrated to `vscode-languageclient` v10. The minimum supported editor
+  version is now **VS Code 1.91.0** (raised from 1.75.0). (#290)
+
+### Fixed
+
+- Activation is now resilient: a missing or broken `bock` binary, or a
+  corrupt vocabulary file, degrades gracefully instead of disabling the
+  whole extension. (#308)
+- Decision-manifest records are validated on load, so a malformed file can
+  no longer crash the Decisions view. (#309)
+- The effect-flow panel correctly parses the effect clause on single-line
+  `-> T with E` signatures. (#313)
+- The annotation scanner no longer mis-handles triple-quoted strings. (#309)
+
+### Performance
+
+- Effect-flow auto-render is debounced, and annotation scanning is now
+  incremental. (#309)
+
+### Internal
+
+- Unified the webview CSP/nonce handling (crypto-secure) and removed dead
+  code. (#310, #311)
+- The headless test suite grew from 7 to 168 tests. (#314, #315)
+
 ## [0.1.0] — 2026-04-19
 
 First public release. Ships the eight core features that make Bock a
