@@ -254,6 +254,18 @@
         "title": "Set Strictness Level",
         "category": "Bock",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "bock.showAir",
+        "title": "Show AIR Tree",
+        "category": "Bock",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "bock.airView.refresh",
+        "title": "Refresh AIR Tree",
+        "category": "Bock",
+        "icon": "$(refresh)"
       }
     ],
     "viewsContainers": {
@@ -283,6 +295,10 @@
           "type": "webview",
           "id": "bock.effectsView",
           "name": "Effect Flow"
+        },
+        {
+          "id": "bock.airView",
+          "name": "AIR Tree"
         }
       ]
     },
@@ -302,6 +318,11 @@
           "command": "bock.showTargetPreview",
           "when": "editorLangId == bock",
           "group": "bock@3"
+        },
+        {
+          "command": "bock.showAir",
+          "when": "editorLangId == bock",
+          "group": "bock@4"
         }
       ],
       "view/title": [
@@ -344,6 +365,11 @@
           "command": "bock.decisions.clearFilters",
           "when": "view == bock.decisions",
           "group": "1_filters@1"
+        },
+        {
+          "command": "bock.airView.refresh",
+          "when": "view == bock.airView",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -442,6 +468,10 @@
         },
         {
           "command": "bock.decisions.jumpToSource",
+          "when": "false"
+        },
+        {
+          "command": "bock.airView.refresh",
           "when": "false"
         }
       ]
