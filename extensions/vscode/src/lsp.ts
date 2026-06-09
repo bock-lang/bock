@@ -50,7 +50,26 @@ export async function startLspClient(
   );
 
   ctx.subscriptions.push({ dispose: () => client.stop() });
-  await client.start();
+
+  try {
+    await client.start();
+  } catch (err) {
+    // A present-but-broken `bock` binary (wrong version, missing `lsp`
+    // subcommand, immediate crash) rejects here. Swallow it so the rest of
+    // the extension — commands, panels, syntax highlighting — still activates.
+    // Best-effort stop to release any half-spawned process; ignore failures.
+    try {
+      await client.stop();
+    } catch {
+      // The client never fully started; stop() may itself reject. Nothing to do.
+    }
+    vscode.window.showWarningMessage(
+      `Bock: language server failed to start — ${(err as Error).message}. ` +
+        'Language features are disabled; syntax highlighting and panels still work.',
+    );
+    return undefined;
+  }
+
   return client;
 }
 
@@ -59,7 +78,16 @@ function findBockLspBinary(): string | undefined {
     .getConfiguration('bock')
     .get<string>('lspPath', '')
     .trim();
-  if (configured && fs.existsSync(configured)) return configured;
+  if (configured) {
+    if (fs.existsSync(configured)) return configured;
+    // An explicit override that points nowhere is almost always a typo or a
+    // stale path; name it so the user can fix it, then fall through to the
+    // PATH search rather than silently ignoring the misconfiguration.
+    vscode.window.showWarningMessage(
+      `Bock: configured \`bock.lspPath\` does not exist: ${configured}. ` +
+        'Falling back to searching PATH for `bock`.',
+    );
+  }
 
   const envPath = process.env.PATH ?? '';
   const isWin = process.platform === 'win32';

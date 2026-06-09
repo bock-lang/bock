@@ -4,9 +4,16 @@
 //   1. Load the compiler-emitted vocabulary (assets/vocab.json).
 //   2. Start the LSP client (spawns `bock lsp` over stdio).
 //   3. Register every feature module — hover, errors, annotations,
-//      effects, decisions, spec panel. Each module is a stub today;
-//      F1.5.3–F1.5.8 will flesh them out without touching package.json
-//      because all contribution points are already registered there.
+//      effects, decisions, spec panel — plus the `bock.refreshVocab`
+//      command, the vocab watcher, and the `workspaceHasBockFiles`
+//      context key.
+//
+// Activation degrades gracefully: neither `VocabService.load` nor
+// `startLspClient` rejects, so a missing/corrupt `vocab.json` or a
+// broken `bock` binary leaves activation intact — features still
+// register (over an empty vocab and/or an `undefined` client), and
+// syntax highlighting and panels keep working. This is the behaviour
+// the README promises.
 
 import * as vscode from 'vscode';
 import { VocabService, watchVocab } from './vocab';
