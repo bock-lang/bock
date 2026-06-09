@@ -12,7 +12,18 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-08 — main 2b0f8c2, 1 open PR (#300 doc-only design-OPEN — PROPOSED close), clean, CI green.**
+_**Last reconciled 2026-06-09 — main 5137a62, 0 open PRs, clean, CI green. ★ NIGHT WIND-DOWN.**
+Disjoint pair (bock-codegen ⨯ bock-fmt): **#303** Q-rust-enum-variant-import (rust drops braced enum-VARIANT items from a
+`use` and imports the enum TYPE instead → no more `E0432`; variant-bracing fixture builds+runs ×5) + **#304**
+Q-fmt-doccomment-indent (preserve `//!` continuation-line indentation via a ZERO-RIPPLE bock-fmt seam — re-derive from the raw
+comment stream; **lexer untouched**, so parser/`bock doc`/LSP unaffected; stdlib-fmt stays clean). Combined tree re-verified
+(fmt/clippy/**test 0 failed**/doc; conformance REQUIRE=all **0 failed** ×5; stdlib-fmt clean). **2 CLOSED.** **1 NEW filed:**
+Q-py-enum-variant-import (#303 FOUND, LOW — Python has the same enum-variant import bug: `from … import Less` but the variant is
+class `Ordering_Less` → `ImportError`). **NIGHTLY STATE: main green, 0 open PRs, all worktrees pruned.** Open backlog (all
+non-blocking): Q-py-enum-variant-import (LOW · py.rs), Q-list-mut-pop-insert-remove (types+codegen · solo),
+Q-equatable-gating-user-types (**BLOCKED on DQ29 → Design**). **Awaiting owner: DQ29 ruling** (`==`/`!=` Equatable gating —
+R1 auto-conform / R2 defer-to-derive / R3 strict[rejected]). ↓ —
+PRIOR: **Last reconciled 2026-06-08 — main 2b0f8c2, 1 open PR (#300 doc-only design-OPEN — PROPOSED close), clean, CI green.**
 ★ FOLLOW-UP WAVE. The proposed "trio" (Q-user-comparison-codegen + Q-equatable-gating + Q-rust-host-sleep) could NOT run 3-way:
 all three collide on bock-codegen/bock-types (the rust scaffold is in bock-codegen, NOT bock-build; and the comparison lowering
 needs a checker stamp in `infer_binop`) — so it ran as **Cmp SOLO → Eq+Sleep PAIR**. **3 items CLOSED:** Q-user-comparison-codegen
@@ -269,12 +280,13 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   inline `[T: Ranked]` worked (lands on `GenericParam.bounds`) but `where`-clause bounds land in a separate field the ts/go
   renderers never read; the one helper fixes both local + imported. ORIG: OPEN from #286 (checker enforces the bound on all 5;
   only ts/go codegen dropped it).
-- **[Q-fmt-doccomment-indent] `bock fmt` flattens doc-comment prose indentation** — bug · ready · LOW ·
-  `compiler/crates/bock-lexer/src/lexer.rs` (~:786) · — · links #287 · note: FOUND 2026-06-08 (#287). Reformatting flattens the
-  leading indentation of `//!`/`///` continuation lines (`//!   * **Go**` → `//! * **Go**`). Root cause is in the LEXER, not the
-  formatter: doc-comment content is `.trim()`'d per line at lex time, so the formatter can't reconstruct the original
-  indentation. Benign (comment prose only; byte-content preserved), independent of the #287 fixes; needs a lexer change
-  (preserve doc-comment leading whitespace) — outside bock-fmt ownership.
+- **[Q-fmt-doccomment-indent] `bock fmt` flattens doc-comment prose indentation** — bug · **DONE (#304)** · LOW ·
+  `compiler/crates/bock-fmt/src/emit.rs` · — · links #287, #304 · note: **DONE 2026-06-09 (#304).** Fixed via a ZERO-RIPPLE
+  seam entirely inside bock-fmt — `format_module` re-derives each `//!` line's content from the RAW comment stream
+  (`comments.rs` already extracts it verbatim), stripping only the marker + ≤1 space and trimming trailing ws, so indentation
+  is preserved; **the lexer was not touched** (parser/`bock doc`/LSP unaffected — the feared ripple avoided). `///` item docs
+  already preserved indentation (only `//!` was broken). 4 new round-trip+idempotence tests; stdlib-fmt-check stays clean. ORIG:
+  FOUND 2026-06-08 (#287) — root cause was the lexer's per-line `.trim()`, but the fix didn't need to change it.
 - **[Q-bockfmt-cfarm-comma] `bock fmt` appends an illegal trailing comma after a control-flow match arm** — bug · **DONE (#287)** ·
   `compiler/crates/bock-fmt/` · — · links #272, #287, Q-stdlib-fmtcheck · note: **DONE 2026-06-08 (#287)** — value-less
   `break`/`continue`/`return` arm bodies no longer emit a trailing comma (value-bearing forms like `return f(x),` correctly
@@ -329,12 +341,19 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   fixture flipped (`opgate_comparison_user_type_impl`) + 2 new; conformance 814/0 ×5. Primitives/`T: Comparable`/`==`/`!=`
   untouched. **FOUND** → Q-rust-enum-variant-import (rust `use core.compare.{Less,Equal,Greater}` lowered to a non-existent free
   import). ORIG: FOUND 2026-06-08 (#296) — the codegen half of the operator-gating story.
-- **[Q-rust-enum-variant-import] rust import lowering emits `use crate::…::{Variant}` for enum variants (E0432)** — bug · ready · LOW ·
-  `compiler/crates/bock-codegen/src/rs.rs` (import lowering) · — · links #299 · note: FOUND 2026-06-08 (#299). `use
-  core.compare.{Ordering, Less, Equal, Greater}` lowers on rust to `use crate::core::compare::{Less, Equal, Greater}` — but rust
-  enum VARIANTS aren't free-importable items → `E0432`. Worked around in #299 by importing only `{Ordering}` (variants reached as
-  `Ordering::Less`). Fix the rust import lowering to drop/redirect enum-variant imports (or emit `Ordering::Less` at use sites).
-  Pre-existing; only bites a program that braces enum variants in a `use`.
+- **[Q-rust-enum-variant-import] rust import lowering emits `use crate::…::{Variant}` for enum variants (E0432)** — bug · **DONE (#303)** · LOW ·
+  `compiler/crates/bock-codegen/src/rs.rs` (`emit_cross_module_uses`) · — · links #299, #303, Q-py-enum-variant-import · note:
+  **DONE 2026-06-09 (#303).** A braced named import resolving to a registered enum variant (`self.enum_variants`) is now replaced
+  by its enum TYPE under the same module path (`use crate::core::compare::{Comparable, Ordering};` instead of the E0432 `{Less,
+  Equal, Greater}`); rust reaches variants as `Ordering::Less`. New `enumvarimport_braced_variants` fixture builds+runs (js/ts/
+  rust/go). **FOUND** → Q-py-enum-variant-import (Python has the SAME class of bug). ORIG: FOUND 2026-06-08 (#299).
+- **[Q-py-enum-variant-import] python import lowering emits `from … import <Variant>` but the variant is class `Enum_Variant`** — bug · ready · LOW ·
+  `compiler/crates/bock-codegen/src/py.rs` (import lowering) · — · links #303 · note: FOUND 2026-06-09 (#303). Bracing
+  cross-module enum variants (`use core.compare.{Ordering, Less, Equal, Greater}`) lowers on Python to `from core.compare import
+  Ordering, Less, Equal, Greater`, but a variant is emitted as a module-level class `Ordering_Less` (not `Less`) → runtime
+  `ImportError: cannot import name 'Less'`. First exposed by #303's variant-bracing fixture (which OMITS python pending this fix).
+  Mirror the #303 rust fix: drop the variant from the `from … import …` (reach it as `Ordering_Less`). Re-add `python` to
+  `enumvarimport_braced_variants`'s `// EXPECT: targets` once fixed.
 - **[Q-rust-host-sleep-tokio-dep] rust no-handler host `sleep` needs a tokio scaffold dep** — bug · **DONE (#301)** ·
   `compiler/crates/bock-codegen/src/scaffold.rs` · — · links #297, #301, Q-clock-handler-routing, Q-time-shim-path · note: **DONE
   2026-06-08 (#301).** The rust scaffold's tokio trigger keyed only on `bock_runtime.rs` presence, so the host-sleep crate (which
