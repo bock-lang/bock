@@ -2321,3 +2321,26 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
   Follow-up: Q-ext-feature-opportunities CLOSED (7/8 README v1.1 items shipped; docs reconciled #331). AWAITING OWNER:
     DQ29/DQ30 (unchanged) + NEW for Design: DV19 disposition. STATE: main = 0567568 (+ this tracking PR), 0 open PRs,
     clean, all feature worktrees/branches cleaned, extension suite 435 / bock-lsp 98 / workspace 2854/0.
+
+[2026-06-09 22:30 UTC] ✦ DAILY DIGEST — 2026-06-09 (session close)
+  Merged: 30 PRs (#303–#332) across three workstreams — (a) compiler backlog-drain: #303/#304 (rust enum-variant import ·
+    fmt doc-comment indent) + #306 (py enum-variant import — the js/ts/python/rust mirror complete); (b) VS Code extension
+    QUALITY-HARDENING #308–#318 (activation resilience, decision/effect/annotation reliability, test foundation 7→168,
+    effect-flow parseWithClause fix, webview consolidation, doc-rot + quick-wins, and the self-caught + self-fixed
+    workspace-binary RCE #318); (c) the v1.1 EDITOR-FEATURE WAVE #320–#331 (richer hover · ranked spec search + keyboard
+    nav · decisions filtering/sort/jump-to-source · annotations insight + badges · semantic tokens · target preview +
+    strictness picker · quick fixes E4013/E4014/E5004/W1001 · AIR tree viewer over the new `bock inspect air --json` ·
+    LSP find-references/rename/document-symbols/inlay-hints · docs reconcile); + the per-block tracking reconciles
+    (incl. #319, #332).
+  Dispatched: 14 worktree engineer lanes today (+3 read-only scouts for the editor wave); every wave combined-tree
+    re-verified before merge; 1 engineer stall recovered by the orchestrator; 0 red merges.
+  Queued: "Editor v1.1 feature-wave follow-ups" — 11 items (Q-lsp-member-rename, Q-lsp-completion, Q-w1001-glob-internal-
+    symbols, Q-ext-migration-assistant, + LOWs); detail in queue.md.
+  Blocked/awaiting: DQ29 + DQ30 (owner rulings; re-surfaced 14:47 UTC, owner deferred) — the compiler v1 backlog remains
+    Design-gated. NEW for Design: DV19 (§20.3 claims a v1 LSP completion provider; none implemented — implement vs
+    reconcile).
+  Escalations raised today: DQ30 (List mutator return contracts, pending) · DV19 (low, via #331, pending).
+  State at close: main 32eab5d == origin/main, working tree clean, 0 open PRs, CI green at HEAD (incl. Tracking Views).
+    Extension tests 435 · bock-lsp 98 · workspace 2854/0 · conformance 824/0/0 ×5 (last conformance-touching merge: #306).
+    Maintenance: all session worktrees + branches pruned; per-branch cargo caches reclaimed (all cached branches merged +
+    deleted; disk 87% → 44%).
