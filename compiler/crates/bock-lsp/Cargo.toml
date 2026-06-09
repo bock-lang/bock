@@ -17,6 +17,7 @@ readme.workspace = true
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["io-std", "rt-multi-thread", "macros", "sync"] }
 dashmap = "6"
+thiserror.workspace = true
 bock-errors.workspace = true
 bock-source.workspace = true
 bock-lexer.workspace = true

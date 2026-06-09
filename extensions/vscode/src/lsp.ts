@@ -136,7 +136,14 @@ export async function startLspClient(): Promise<LanguageClient | undefined> {
   return client;
 }
 
-function findBockLspBinary(): string | undefined {
+/**
+ * Resolve the `bock` binary: the machine-scoped `bock.lspPath` setting (with
+ * `${workspaceFolder}` / `~` expansion) first, then a `PATH` search. Exported
+ * so CLI-invoking features (e.g. the target preview) reuse the exact same
+ * resolution instead of re-implementing it — see the SECURITY note below: a
+ * binary must never be discovered from workspace *content*.
+ */
+export function findBockLspBinary(): string | undefined {
   const configured = vscode.workspace
     .getConfiguration('bock')
     .get<string>('lspPath', '')

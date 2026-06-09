@@ -31,7 +31,7 @@ REPL, formatter, LSP, and testing tiers have their own page
 | `bock test`   | Run tests on the interpreter.                             |
 | `bock fmt`    | Format `.bock` files (one canonical style).               |
 | `bock repl`   | Start the interactive evaluator.                          |
-| `bock inspect`| Browse AI decisions, the rule cache, and the AI cache.    |
+| `bock inspect`| Browse AI decisions, caches, and dump the AIR for a file. |
 | `bock pin`    | Pin AI decisions so they replay deterministically.        |
 | `bock unpin`  | Remove pin metadata from a decision.                      |
 | `bock override`| Override or promote an AI decision.                      |
@@ -201,10 +201,11 @@ Bock records every AI-assisted code-generation decision in a manifest
 so builds can replay deterministically. These commands browse and
 manage those decisions and the caches behind them (§17.4, §10.8).
 
-### `bock inspect [decisions|decision|cache|rules] [FILTERS]`
+### `bock inspect [decisions|decision|cache|rules|air] [FILTERS]`
 
 Read-only browsing of AI decisions, the rule cache, and the AI
-response cache. With no subcommand it lists build-scope decisions.
+response cache, plus compiler introspection (`air`). With no
+subcommand it lists build-scope decisions.
 
 ```bash
 bock inspect                      # list build decisions
@@ -213,6 +214,7 @@ bock inspect --unpinned           # only decisions not yet pinned
 bock inspect decision build:abc123
 bock inspect cache                # summarise the AI response cache
 bock inspect rules --target rust  # learned codegen rules for one target
+bock inspect air src/main.bock    # dump the lowered AIR tree for one file
 ```
 
 | Subcommand  | What it shows                                              |
@@ -221,6 +223,7 @@ bock inspect rules --target rust  # learned codegen rules for one target
 | `decision`  | One decision in detail (`<ID>`; prefixed or bare).        |
 | `cache`     | A summary of the on-disk AI response cache.               |
 | `rules`     | Learned codegen rules.                                    |
+| `air`       | The lowered AIR tree for one source file (see below).     |
 
 | Filter (on `inspect` / `inspect decisions`) | Meaning                                          |
 | -------------------------------------------- | ------------------------------------------------ |
@@ -234,6 +237,95 @@ bock inspect rules --target rust  # learned codegen rules for one target
 `inspect cache --size` always reports on-disk size; `inspect rules
 --target <T>` scopes to one target; `inspect decision <ID> --json`
 emits JSON.
+
+### `bock inspect air <FILE>`
+
+Compiler introspection rather than decision browsing: run the
+frontend (lex, parse, name resolution, AIR lowering) on a single
+file and dump the resulting AIR tree. Type checking does not run —
+the output is structure plus spans. The embedded core stdlib is
+loaded exactly as in `bock check`, so `use core.*` imports resolve
+the same way. Exit code mirrors `bock check`: 0 when the file
+lowers cleanly, 1 on any frontend error.
+
+```bash
+bock inspect air src/main.bock         # human-readable indented tree
+bock inspect air src/main.bock --json  # machine-readable JSON tree
+```
+
+| Argument / Flag | Meaning                                          |
+| --------------- | ------------------------------------------------ |
+| `<FILE>`        | The `.bock` file to lower.                       |
+| `--json`        | Emit the stable JSON tree instead of the human view. |
+
+The default view prints one node per line — kind, name (when the
+node has one), `@line:col` of the node's start, and its byte range:
+
+```text
+Module Demo @1:1 (0..53)
+  FnDecl add @3:1 (13..52)
+    Param @3:8 (20..27)
+      BindPat a @3:8 (20..21)
+      TypeNamed Int @3:11 (23..26)
+    ...
+    Block @3:31 (43..52)
+      BinaryOp @3:33 (45..50)
+        Identifier a @3:33 (45..46)
+        Identifier b @3:37 (49..50)
+```
+
+**JSON shape (stable contract).** With `--json`, stdout carries a
+single JSON object — the root `Module` node. Every node has exactly
+four fields (object key order is not significant):
+
+```json
+{
+  "kind": "FnDecl",
+  "name": "add",
+  "span": { "start": 13, "end": 52, "line": 3, "col": 1 },
+  "children": []
+}
+```
+
+- `kind` — the AIR node kind, e.g. `"Module"`, `"FnDecl"`,
+  `"BinaryOp"`, `"BindPat"`.
+- `name` — the node's source-level name when it has one
+  (declaration names, identifier references, field/method names,
+  dotted module/type paths, literal text), otherwise `null`.
+- `span` — `start`/`end` are byte offsets into the file (`end`
+  exclusive); `line`/`col` are the 1-based line and column (column
+  counted in characters) of `start`. Compiler-synthesized nodes
+  report `0..0`.
+- `children` — the node's AIR children in traversal order (may be
+  empty).
+
+On failure (unreadable file, lex/parse/name-resolution errors) the
+command exits 1. Without `--json` the standard diagnostics render
+on stderr; with `--json`, stdout carries a JSON error object
+instead of a tree — consumers distinguish the two by the top-level
+`error` key:
+
+```json
+{
+  "error": {
+    "message": "parsing failed",
+    "diagnostics": [
+      {
+        "severity": "error",
+        "code": "E2000",
+        "message": "expected `)`, found `{`",
+        "span": { "start": 3, "end": 4, "line": 1, "col": 4 }
+      }
+    ]
+  }
+}
+```
+
+This JSON shape is the contract consumed by editor tooling (the
+VS Code extension's AIR tree viewer); it only changes additively.
+For full diagnostics (types, ownership, effects, context), use
+[`bock check`](#bock-check-files) — `inspect air` reports only the
+errors that stop lowering.
 
 ### `bock pin [DECISION]`
 
