@@ -104,18 +104,22 @@ class EffectFlowController {
   }
 
   /** Auto-render path used by the hover provider. Only opens the panel if
-   *  it's already visible or `bock.effects.autoRender` is enabled. */
-  async autoRender(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-  ): Promise<void> {
+   *  it's already visible or `bock.effects.autoRender` is enabled.
+   *
+   *  Hover fires on every cursor movement, so this must NOT call `render()`
+   *  directly: `render()` runs `analyzeEffectFlow`, which scans every
+   *  `.bock` file in the workspace plus `bock.project`. Route through the
+   *  shared ~300 ms `scheduleRefresh()` debounce instead, so a burst of
+   *  hovers collapses into a single workspace re-analysis rather than one
+   *  synchronous scan per hover. */
+  autoRender(document: vscode.TextDocument, position: vscode.Position): void {
     const cfg = vscode.workspace.getConfiguration('bock');
     const enabled = cfg.get<boolean>('effects.autoRender', false);
     if (!enabled && !this.panel) return;
     this.currentDoc = document;
     this.currentPos = position;
     this.ensurePanel();
-    await this.render();
+    this.scheduleRefresh();
   }
 
   private ensurePanel(): void {
@@ -194,7 +198,7 @@ class AutoRenderProvider implements vscode.HoverProvider {
     document: vscode.TextDocument,
     position: vscode.Position,
   ): vscode.ProviderResult<vscode.Hover> {
-    void this.controller.autoRender(document, position);
+    this.controller.autoRender(document, position);
     // Never contribute a hover body — we only piggy-back on the event.
     return undefined;
   }
