@@ -1,6 +1,6 @@
 // TEST: exec_enumvarimport_braced_variants
 // EXPECT: output "less;equal;greater;is-less"
-// EXPECT: targets js, ts, rust, go
+// EXPECT: targets js, ts, python, rust, go
 //
 // Regression fixture for Q-rust-enum-variant-import (FOUND by #299): a user
 // program that BRACES the enum VARIANTS in its cross-module `use` —
@@ -20,13 +20,15 @@
 // (variants are package-level types, no import) already accept braced variant
 // imports, so this fixture also covers them.
 //
-// NOTE — python is intentionally OMITTED from the targets list: the python
-// backend has the *same* class of bug this fixes for rust, but out of this
-// session's ownership. It emits `from core.compare import Ordering, Less, Equal,
-// Greater`, yet a variant lowers to a module-level class `Ordering_Less` (not
-// `Less`), so the bare-name import raises `ImportError: cannot import name
-// 'Less'`. Filed as a FOUND (Q-py-enum-variant-import); when fixed, add
-// `python` back to the targets list above.
+// python (Q-py-enum-variant-import, FOUND by #303) had the *same* class of bug:
+// it emitted `from core.compare import Ordering, Less, Equal, Greater`, yet a
+// variant lowers to a module-level dataclass `Ordering_Less` (not `Less`), so
+// the bare-name import raised `ImportError: cannot import name 'Less'`. The py
+// backend now drops the braced enum-variant leaf names from the `from … import
+// …` list (keeping the enum TYPE `Ordering`, which is a real module-level
+// symbol). Each dropped variant is reached at its use site as the
+// `Ordering_Less` dataclass, which the implicit-import pass pulls into the
+// module — mirroring js/ts and the rust fix above. So python is now covered too.
 //
 // `ord_for` constructs each unit variant via a braced-imported name; `name_of`
 // matches an `Ordering` against the braced-imported variants. The output threads
