@@ -1,6 +1,10 @@
 // Starts the Bock language server as a child process over stdio, wires
 // it to the VS Code language client, and returns the started client so
 // feature modules can add request/notification handlers.
+//
+// The `LspController` owns the *current* client so the `bock.restartLsp`
+// command can tear it down and spin up a fresh one (e.g. after rebuilding
+// the compiler) without reloading the whole window.
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
@@ -14,9 +18,69 @@ import {
 
 const CHANNEL = 'Bock Language Server';
 
-export async function startLspClient(
-  ctx: vscode.ExtensionContext,
-): Promise<LanguageClient | undefined> {
+/**
+ * Owns the lifecycle of the single live {@link LanguageClient}. Feature
+ * modules capture the client returned by {@link start} at activation, but the
+ * controller can transparently {@link restart} the underlying server process
+ * — handy when the contributor has just rebuilt the `bock` compiler.
+ */
+export class LspController {
+  private current: LanguageClient | undefined;
+
+  private constructor() {}
+
+  /**
+   * Creates the controller and performs the initial start. Registers a single
+   * disposable on the extension context that always stops whichever client is
+   * current at shutdown time, so a post-restart client is cleaned up too.
+   */
+  static async create(
+    ctx: vscode.ExtensionContext,
+  ): Promise<{ controller: LspController; client: LanguageClient | undefined }> {
+    const controller = new LspController();
+    ctx.subscriptions.push({
+      dispose: () => {
+        void controller.current?.stop();
+      },
+    });
+    const client = await controller.start();
+    return { controller, client };
+  }
+
+  /** The currently running client, or `undefined` if none is active. */
+  get client(): LanguageClient | undefined {
+    return this.current;
+  }
+
+  /**
+   * Stops the current client (if any) and starts a fresh one. Returns the new
+   * client, or `undefined` if the binary could not be found or failed to start.
+   */
+  async restart(): Promise<LanguageClient | undefined> {
+    if (this.current) {
+      try {
+        await this.current.stop();
+      } catch {
+        // A wedged client may reject on stop(); proceed to start a new one
+        // regardless rather than leaving the user with no server.
+      }
+      this.current = undefined;
+    }
+    return this.start();
+  }
+
+  private async start(): Promise<LanguageClient | undefined> {
+    this.current = await startLspClient();
+    return this.current;
+  }
+}
+
+/**
+ * Builds, starts, and returns a single Bock {@link LanguageClient}. Resolves to
+ * `undefined` (after surfacing a warning) when the binary is missing or the
+ * server fails to start, so callers can degrade gracefully.
+ */
+export async function startLspClient(): Promise<LanguageClient | undefined> {
   const serverPath = findBockLspBinary();
   if (!serverPath) {
     vscode.window.showWarningMessage(
@@ -48,8 +112,6 @@ export async function startLspClient(
     serverOptions,
     clientOptions,
   );
-
-  ctx.subscriptions.push({ dispose: () => client.stop() });
 
   try {
     await client.start();
@@ -89,13 +151,26 @@ function findBockLspBinary(): string | undefined {
     );
   }
 
-  const envPath = process.env.PATH ?? '';
   const isWin = process.platform === 'win32';
   const exe = isWin ? 'bock.exe' : 'bock';
+
+  const envPath = process.env.PATH ?? '';
   for (const dir of envPath.split(path.delimiter)) {
     if (!dir) continue;
     const candidate = path.join(dir, exe);
     if (fs.existsSync(candidate)) return candidate;
+  }
+
+  // Final fallback: a Bock contributor working in this repo builds the
+  // compiler into `target/{release,debug}/bock`. Prefer a release build
+  // over a debug one, and check every open workspace folder. This lets the
+  // extension light up language features against a freshly-built compiler
+  // without the contributor having to set `bock.lspPath` or alter PATH.
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    for (const profile of ['release', 'debug']) {
+      const candidate = path.join(folder.uri.fsPath, 'target', profile, exe);
+      if (fs.existsSync(candidate)) return candidate;
+    }
   }
 
   return undefined;

@@ -16,8 +16,8 @@
 // the README promises.
 
 import * as vscode from 'vscode';
-import { VocabService, watchVocab } from './vocab';
-import { startLspClient } from './lsp';
+import { VocabService, watchVocab, setVocabLogChannel } from './vocab';
+import { LspController } from './lsp';
 import { registerHover } from './features/hover';
 import { registerErrors } from './features/errors';
 import { registerAnnotations } from './features/annotations';
@@ -25,11 +25,25 @@ import { registerEffects } from './features/effects';
 import { registerDecisions } from './features/decisions';
 import { registerSpecPanel } from './features/spec-panel';
 
-export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
-  const vocab = await VocabService.load(ctx);
-  console.log(`[bock] vocabulary v${vocab.get().version} loaded`);
+// The extension's own diagnostics go to a "Bock" output channel, created in
+// `activate` and shared with `vocab.ts` via `setVocabLogChannel`. It is
+// distinct from the LSP server's "Bock Language Server" channel.
+let logChannel: vscode.OutputChannel | undefined;
 
-  const client = await startLspClient(ctx);
+/** Appends a timestamped `[bock]`-prefixed line to the Bock output channel. */
+function log(message: string): void {
+  logChannel?.appendLine(`[bock] ${message}`);
+}
+
+export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
+  logChannel = vscode.window.createOutputChannel('Bock');
+  ctx.subscriptions.push(logChannel);
+  setVocabLogChannel(logChannel);
+
+  const vocab = await VocabService.load(ctx);
+  log(`vocabulary v${vocab.get().version} loaded`);
+
+  const { controller, client } = await LspController.create(ctx);
 
   registerHover(ctx, vocab, client);
   registerErrors(ctx, vocab, client);
@@ -49,6 +63,21 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
         vscode.window.showErrorMessage(
           `Bock: vocab reload failed — ${(err as Error).message}`,
         );
+      }
+    }),
+    vscode.commands.registerCommand('bock.restartLsp', async () => {
+      log('restarting language server…');
+      const restarted = await controller.restart();
+      if (restarted) {
+        vscode.window.showInformationMessage(
+          'Bock: language server restarted.',
+        );
+        log('language server restarted');
+      } else {
+        vscode.window.showWarningMessage(
+          'Bock: language server did not restart — see the Bock output channel for details.',
+        );
+        log('language server restart failed');
       }
     }),
   );

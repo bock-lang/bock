@@ -17,6 +17,17 @@ import {
 
 type ChangeHandler = (vocab: Vocab) => void;
 
+// Shared "Bock" output channel, injected from `extension.ts` at activation so
+// vocab-watcher logging lands alongside the rest of the extension's logs
+// rather than the hidden developer console. Unset (and thus a no-op) in the
+// headless unit tests, which never call `setVocabLogChannel`.
+let logChannel: vscode.OutputChannel | undefined;
+
+/** Wires the vocab watcher's logging into the extension's output channel. */
+export function setVocabLogChannel(channel: vscode.OutputChannel): void {
+  logChannel = channel;
+}
+
 export class VocabService {
   private vocab: Vocab;
   private readonly handlers: ChangeHandler[] = [];
@@ -194,9 +205,11 @@ export function watchVocab(
   const reload = async () => {
     try {
       await vocab.reload();
-      console.log('[bock] vocab reloaded');
+      logChannel?.appendLine('[bock] vocab reloaded');
     } catch (err) {
-      console.error('[bock] vocab reload failed:', err);
+      logChannel?.appendLine(
+        `[bock] vocab reload failed: ${(err as Error).message}`,
+      );
     }
   };
   watcher.onDidChange(reload);

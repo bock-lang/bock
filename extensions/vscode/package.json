@@ -1,7 +1,7 @@
 {
   "name": "bock-lang",
   "displayName": "Bock Language",
-  "description": "Official VS Code extension for the Bock programming language \u2014 syntax, LSP, spec panel, and decision manifest UI.",
+  "description": "Official VS Code extension for the Bock programming language — syntax, LSP, spec panel, and decision manifest UI.",
   "version": "0.1.1",
   "publisher": "bock-lang",
   "license": "MIT",
@@ -65,6 +65,12 @@
         "language": "bock",
         "scopeName": "source.bock",
         "path": "./syntaxes/bock.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "bock",
+        "path": "./snippets/bock.code-snippets"
       }
     ],
     "configuration": {
@@ -150,8 +156,14 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "bock.restartLsp",
+        "title": "Restart Language Server",
+        "category": "Bock",
+        "icon": "$(debug-restart)"
+      },
+      {
         "command": "bock.openSpecAt",
-        "title": "Open Spec at Section\u2026",
+        "title": "Open Spec at Section…",
         "category": "Bock"
       },
       {
@@ -380,7 +392,6 @@
   },
   "dependencies": {
     "marked": "^18.0.5",
-    "mermaid": "^11.15.0",
     "vscode-languageclient": "^10.0.0"
   },
   "devDependencies": {
