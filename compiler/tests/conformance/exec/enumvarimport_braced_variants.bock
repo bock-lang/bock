@@ -1,0 +1,69 @@
+// TEST: exec_enumvarimport_braced_variants
+// EXPECT: output "less;equal;greater;is-less"
+// EXPECT: targets js, ts, rust, go
+//
+// Regression fixture for Q-rust-enum-variant-import (FOUND by #299): a user
+// program that BRACES the enum VARIANTS in its cross-module `use` —
+// `use core.compare.{Ordering, Less, Equal, Greater}` — and then constructs
+// and matches those variants directly.
+//
+// Before the fix, the Rust backend lowered the braced variant items to
+// `use crate::core::compare::{Less, Equal, Greater};`. Rust enum variants are
+// not free-importable items, so this is `E0432: unresolved import` and the
+// build fails. (#299 worked around it by bracing only `{Ordering}` and writing
+// `Ordering::Less` at use sites — see use_core_compare.bock.)
+//
+// The fix drops braced enum-variant items from the emitted Rust `use` (Rust
+// reaches a variant through its enum type, `Ordering::Less`), while still
+// importing the enum TYPE `Ordering` so it is in scope. js/ts (variants are
+// real `Ordering_Less` module exports, mapped from the braced name) and go
+// (variants are package-level types, no import) already accept braced variant
+// imports, so this fixture also covers them.
+//
+// NOTE — python is intentionally OMITTED from the targets list: the python
+// backend has the *same* class of bug this fixes for rust, but out of this
+// session's ownership. It emits `from core.compare import Ordering, Less, Equal,
+// Greater`, yet a variant lowers to a module-level class `Ordering_Less` (not
+// `Less`), so the bare-name import raises `ImportError: cannot import name
+// 'Less'`. Filed as a FOUND (Q-py-enum-variant-import); when fixed, add
+// `python` back to the targets list above.
+//
+// `ord_for` constructs each unit variant via a braced-imported name; `name_of`
+// matches an `Ordering` against the braced-imported variants. The output threads
+// a constructed `Less`/`Equal`/`Greater` and a match result through `println`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Ordering, Less, Equal, Greater}
+
+fn name_of(o: Ordering) -> String {
+  match o {
+    Less => "less"
+    Equal => "equal"
+    Greater => "greater"
+  }
+}
+
+fn ord_for(n: Int) -> Ordering {
+  if (n < 0) {
+    Less
+  } else if (n == 0) {
+    Equal
+  } else {
+    Greater
+  }
+}
+
+fn main() -> Void {
+  let a: Ordering = ord_for(-1)
+  let b: Ordering = ord_for(0)
+  let c: Ordering = ord_for(1)
+  let tail: String = match a {
+    Less => "is-less"
+    Equal => "is-equal"
+    Greater => "is-greater"
+  }
+  println("${name_of(a)};${name_of(b)};${name_of(c)};${tail}")
+}

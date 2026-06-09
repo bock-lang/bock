@@ -1493,6 +1493,13 @@ impl RsEmitCtx {
     /// skipped — they are not real exports of the declaring stdlib module, so a
     /// `use crate::core::option::Some;` would not resolve. Cross-module
     /// references to those resolve through the native lowering instead.
+    ///
+    /// A braced enum **variant** (`use core.compare.{Ordering, Less, ...}`) is
+    /// likewise not emitted as a free `use` item: Rust reaches a variant only as
+    /// `Enum::Variant` (a bare `use crate::core::compare::Less;` is
+    /// `E0432: unresolved import`). Such an item is replaced by its enum *type*
+    /// under the same module path, so the type is in scope and the variant's use
+    /// sites — which already emit `Ordering::Less` — resolve.
     fn emit_cross_module_uses(&mut self, imports: &[AIRNode]) {
         use std::collections::BTreeMap;
         // crate-path → set of leaf symbol names (sorted, deduped on render).
@@ -1514,13 +1521,30 @@ impl RsEmitCtx {
             }
             if let bock_ast::ImportItems::Named(named) = items {
                 for n in named {
-                    if RS_NATIVE_PRELUDE_NAMES.contains(&n.name.name.as_str()) {
+                    let item = n.name.name.as_str();
+                    if RS_NATIVE_PRELUDE_NAMES.contains(&item) {
+                        continue;
+                    }
+                    // An enum VARIANT is not a free-importable item in Rust
+                    // (E0432): a variant is reached as `Enum::Variant`, never
+                    // through `use crate::<m>::Variant`. Drop the braced variant
+                    // and import its enum TYPE instead, under the same declaring
+                    // module path the variant was `use`d from — the variant's
+                    // use sites already emit `Enum::Variant`, so having the type
+                    // in scope is all that's needed. (The built-in
+                    // Optional/Result variants never reach here — they are in the
+                    // native-prelude skip set above.)
+                    if let Some(info) = self.enum_variants.get(item) {
+                        by_module
+                            .entry(dotted.clone())
+                            .or_default()
+                            .insert(info.enum_name.clone());
                         continue;
                     }
                     by_module
                         .entry(dotted.clone())
                         .or_default()
-                        .insert(n.name.name.clone());
+                        .insert(item.to_string());
                 }
             }
             // `use Foo` / `use Foo.*`: the referenced names are resolved as
