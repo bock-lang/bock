@@ -2287,3 +2287,37 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
     operator-gated). Compiler v1 backlog still Design-gated (DQ29/DQ30). New memory filed: the vscode-languageclient/node
     test-harness extraction constraint. STATE: main = 82a25cb (+ this tracking PR), 0 open PRs after merge, clean, all
     worktrees/branches cleaned, extension test suite 7 → 168.
+
+[2026-06-09 20:42 UTC] ✦✦ v1.1 EDITOR-FEATURE WAVE — 12 PRs (#320–#331), 3 waves, 11 engineering lanes + docs, operator-directed
+  Input: operator directive — accelerate the future (v1.x) features not blocked by Bock-language v1.x; "most ambitious
+    session to date in effort, fan-out, and impact." This un-gated Q-ext-feature-opportunities and authorized max parallelism.
+  Options: (a) extension-only lanes (the literal queue item); (b) extension + compiler-TOOLING lanes (bock-lsp capabilities,
+    a CLI AIR dump) — CHOSEN: the README v1.1 items (rename, references, inlay hints, AIR viewer) are tooling, not
+    Design-gated language semantics, and the LSP symbol table + checker already carried the needed data (3 read-only scouts
+    confirmed before any dispatch); (c) also start standalone-LSP / incremental compilation — REJECTED (large, unscoped,
+    no owner sizing; filed as remaining v1.1).
+  Decision/sequence: WAVE 1 = 6 file-disjoint lanes (#320 annotations · #321 hover · #322 spec-search · #323 decisions
+    [sole package.json owner] · #324 bock-lsp nav trio · #325 bock-cli inspect-air). WAVE 2 = 5 lanes (#326
+    target-preview+strictness · #327 quick fixes · #328 semantic tokens · #329 AIR viewer · #330 inlay hints). WAVE 3 =
+    #331 docs reconcile. Per-wave combined-tree re-verify: wave-1 ext octopus 273 tests green + compiler octopus full
+    4-gate + mdbook green; wave-2 ext octopus 400 green; merged main diff-verified BYTE-IDENTICAL to the verified octopus;
+    #329/#330 mutually-disjoint solos (own CI = combined check). Extension tests 168→435; bock-lsp 84→98; workspace 2854/0.
+  Deviations (eyes-open): (1) wave-2/3 ext lanes deliberately shared two append-points (extension.ts wiring, package.json
+    contributes) — routing.md's same-file rule relaxed under the owner's fan-out directive; mitigation: wire-ups isolated
+    in dedicated final commits, orchestrator resolved the trivial conflicts via merge-from-main (NO force-push, NO stash —
+    the #257 incident pattern avoided), post-merge tree diff-verified against the pre-verified octopus. (2) #326 merged
+    with the examples-matrix check still pending — extension-only diff, locally gate-verified; final HEAD CI on main is
+    the health signal per the rapid-merge convention. (3) One engineer stall (the #325 lane died mid-gate, the known
+    background-and-wait failure mode) — recovered: orchestrator re-ran the full gate (fmt/clippy/test incl. the 8 new
+    integration tests/doc/mdbook), committed, opened the PR. (4) SendMessage continuation unavailable in this environment —
+    recovery done directly rather than resuming the agent.
+  Security/compliance: #329/#326 reuse the #318-safe binary resolution (no workspace discovery); model floor respected
+    (every lane at the orchestrator's model); no new npm/cargo deps beyond bock-lsp's workspace thiserror.
+  FOUND/OPEN triage (filed this PR): DV19 (§20.3 claims LSP completion; none implemented — FOUND by #331; → Design),
+    Q-lsp-member-rename (#324), Q-lsp-completion (DV19), Q-w1001-glob-internal-symbols (#327),
+    Q-ext-effects-extract-comment-aware (#328), Q-ext-decisions-binary-resolver-dup (#326), Q-importdecl-span-tight +
+    Q-parser-import-doc-stale (#327), Q-ext-hover-line0 (#321), Q-lsp-prelude-types-singlefile (#330),
+    Q-ext-quickfix-backlog (#327 seeds), Q-ext-migration-assistant (the unshipped README half).
+  Follow-up: Q-ext-feature-opportunities CLOSED (7/8 README v1.1 items shipped; docs reconciled #331). AWAITING OWNER:
+    DQ29/DQ30 (unchanged) + NEW for Design: DV19 disposition. STATE: main = 0567568 (+ this tracking PR), 0 open PRs,
+    clean, all feature worktrees/branches cleaned, extension suite 435 / bock-lsp 98 / workspace 2854/0.

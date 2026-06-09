@@ -45,9 +45,15 @@ the Bock identity.
 
 ## v1.1 — Editor & Tooling Polish
 **Theme:** delight in the editor; close interpreter gaps.
-- AIR tree view; target preview; standalone LSP; incremental
-  compilation + persistent cache; diagnostics quick-fixes; hover-card
-  improvements. (Mapped items: TBD as scoped.)
+- **★ Editor-feature slice DELIVERED EARLY (owner-directed, 2026-06-09,
+  #320–#331):** AIR tree viewer, target preview, diagnostics quick-fixes,
+  semantic tokens, inlay hints, symbol rename, find-references, document
+  symbols, strictness picker, + hover/spec-search/decisions/annotations
+  depth (detail by ID in `queue.md`). Landed on main pre-v1.0; they ship
+  with whatever release vehicle v1.0 settles on.
+- Remaining: standalone LSP; incremental compilation + persistent cache;
+  LSP completion (DV19 → Design); strictness migration assistant
+  (Q-ext-migration-assistant); further hover-card work as scoped.
 
 ## v1.2 — Deferred Loose Ends
 **Theme:** finish what v1.0 deferred.

@@ -17,6 +17,18 @@ status(open | resolved→link)`
 
 ## Open
 
+### DV19 — §20.3 claims a v1 LSP completion provider; none is implemented
+- **§:** §20.3 · **spec-says:** the v1 LSP ships completion ·
+  **impl-does:** `bock lsp` registers hover, definition, push+pull
+  diagnostics, find-references, validated rename, hierarchical document
+  symbols, inlay hints (#324/#330) — no completion provider
+  (`bock-lsp/src/server.rs` capabilities).
+- **Classification:** spec-ahead-of-impl
+- **Disposition:** route to Design — implement completion (→ queue
+  `Q-lsp-completion`) or reconcile §20.3's v1 claim. Docs state the gap
+  plainly since #331 (`docs/src/reference/tooling.md`). Non-blocking.
+- **Status:** open (FOUND by the #331 docs reconcile, 2026-06-09)
+
 ### DV1 — core stdlib modules unimplemented
 - **§:** §18.3 · **spec-says:** 11 v1 `core.*` modules ship in v1 ·
   **impl-does:** **3/11 landed** — `core.error` (#103), `core.compare` (#104),

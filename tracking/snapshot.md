@@ -11,11 +11,11 @@ changes.
 
 ---
 
-## Build status (as of main 5994e9a, 2026-06-09)
+## Build status (as of main 0567568, 2026-06-09)
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (0 failed — #306 (python enum-variant import drop, completing the js/ts/python/rust mirror) atop #303/#304 + #299/#301 + the #296/#297 pair + #294 + wave-3/2; conformance **824/0/0** ×5; orchestrator re-verified the diff scope + full CI before squash-merge) |
+| `cargo test --workspace` | passing (0 failed — **2854 tests**; bock-lsp 84→98 via the 2026-06-09 editor wave (#324 nav trio · #330 inlay hints) + the #325 `inspect air` integration tests, atop #306/#303/#304/#299/#301/#296/#297/#294; conformance **824/0/0** ×5 — no codegen changes in the editor wave; per-wave combined-tree re-verify before every merge) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |
@@ -64,8 +64,20 @@ changes.
   workspace-`target/` LSP-binary auto-detect RCE (introduced + caught + fixed
   same session, #318)** — the server binary now resolves only from PATH or a
   machine-scoped `bock.lspPath`. The headless test suite went **7 → 168**.
-  Remaining: the deferred Q-ext-feature-opportunities backlog (richer hover,
-  spec-search ranking, decisions filtering, + the README v1.1 roadmap).
+  **★ v1.1 EDITOR-FEATURE WAVE (2026-06-09, #320–#331):** richer hover
+  (operators / builtin methods / effect operations — #321), ranked spec
+  search + keyboard nav (#322), decisions filtering/sort/jump-to-source
+  (#323), annotations group→file→usage tree + view badge + param summary
+  (#320), client-side semantic tokens (#328), target preview
+  (`--source-only` → open-beside, ×5) + strictness status-bar picker
+  (#326), quick fixes for E4013/E4014/E5004/W1001 (#327), and an AIR tree
+  viewer (#329) over the new `bock inspect air --json` (#325). `bock lsp`
+  itself now also serves find-references, validated rename, hierarchical
+  document symbols (#324) and inlay hints for inferred binder types
+  (#330). Extension test suite **435**; README/CHANGELOG/tooling.md
+  reconciled (#331 — the stale LSP "Completion" claim removed → DV19).
+  Remaining editor backlog: the follow-ups subsection in `queue.md`
+  (member rename, completion/DV19, migration assistant, + LOWs).
 - **Docs** — mdBook with tooling reference in sync with the CLI (#90);
   the v1 **stdlib reference** (D4, #172) and a proper **Contributing** section
   (D5, #174 — overview/architecture/workflow/spec-changes) are live.
