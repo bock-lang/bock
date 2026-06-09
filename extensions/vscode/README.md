@@ -52,7 +52,7 @@ Or search for **Bock Language** in the Extensions view (`Ctrl+Shift+X`
 ### From a `.vsix` file
 
 ```bash
-code --install-extension bock-lang-0.1.0.vsix
+code --install-extension bock-lang-0.1.1.vsix
 ```
 
 You can also open the Extensions view, click the `⋯` menu in the top-right,
@@ -62,11 +62,11 @@ and choose **Install from VSIX…**.
 
 ```bash
 git clone https://github.com/bock-lang/bock
-cd bock/extensions/vscode/bock-lang
+cd bock/extensions/vscode
 npm install
 npm run build
 npx vsce package
-code --install-extension bock-lang-0.1.0.vsix
+code --install-extension bock-lang-0.1.1.vsix
 ```
 
 ## Requirements
@@ -102,17 +102,19 @@ All commands are registered under the `Bock:` prefix in the Command Palette.
 This extension is part of the Bock monorepo. To build:
 
 ```bash
-cd extensions/vscode/bock-lang
+cd extensions/vscode
 npm install
 npm run build
 ```
 
 Launch an Extension Development Host with `F5` from the extension folder in VS Code.
 
-To regenerate the bundled vocabulary and spec from the compiler:
+To regenerate the bundled vocabulary and spec from the compiler, run the sync
+script from the repo root (it builds `bock-dump-vocab`, writes
+`assets/vocab.json`, and copies `spec/sections/` into `assets/spec/`):
 
 ```bash
-./scripts/sync-vscode-assets.sh
+./tools/scripts/sync-vocab.sh
 ```
 
 ### Layout
