@@ -12,7 +12,29 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-09 — main 5994e9a, 0 open PRs, clean, CI green. ★ BACKLOG-DRAIN + DESIGN-GATE.**
+_**Last reconciled 2026-06-09 — main 9232528, 0 open PRs, clean, CI green. ★ VS CODE EXTENSION QUALITY HARDENING (operator-initiated).**
+While the v1 compiler backlog is Design-gated (DQ29/DQ30), the operator opened a new workstream: evaluate the VS Code extension
+and improve quality/reliability/feature-set, sequenced **reliability → tests → infra → docs/quick-wins, paralleling where
+feasible**. A 2-agent read-only evaluation mapped the extension (~4.8k LOC, 7 feature modules); findings drove two file-disjoint
+parallel waves, each combined-tree re-verified locally (npm ci/lint/compile/test) before merge:
+**WAVE 1 — reliability (#308 ⨯ #309, disjoint pair):** **#308** activation resilience — a broken (not just missing) `bock`
+binary or corrupt `vocab.json` no longer bricks the whole UI (`startLspClient` never throws; `VocabService.load` degrades to an
+empty-but-usable vocab; features/commands/context-key always register) + scoped hover command-trust (`isTrusted` →
+`{enabledCommands:['bock.openSpecAt']}`). **#309** decision-record schema validation (malformed records dropped+counted+surfaced,
+no more crash-on-render) + effect-flow auto-render debounced (was re-running a workspace-wide scan on every hover) + incremental
+annotation scan (was full-workspace re-read on every save) + **fixed a real `scanText` triple-quote false-negative** (a `"""` in a
+comment/string suppressed all later annotations; pure scanner extracted to `annotations-scan.ts`).
+**WAVE 2 — test foundation (#310 ⨯ #311, disjoint pair):** **#310** effect-analyzer parser helpers (matchDelimiter,
+findEnclosingFunction [suspected innermost bug proven NOT real], splitBindings, parseWithClause, expandEffects, offsetToLocation)
++ **#311** spec-panel helpers (normalizeRef, buildNavTree, highlightBock, parseSections, stripForSearch, linkifySpecRefs).
+Additive `export`s only, zero behavior change. **Extension test suite 7 → 117.**
+**2 FOUNDs (real pre-existing bugs surfaced by #310's tests, pinned with KNOWN-BUG tests):** Q-ext-parsewithclause-effect-underreport
+(HIGH-ish — same-line `fn f() -> T with E {` has its ` with E` eaten by the greedy return-type strip → the effect-flow panel
+under-reports effects for MOST functions, the dominant signature shape) + Q-ext-splitbindings-string-aware (LOW). **Remaining
+extension threads (queued, not started):** Q-ext-infra-webview-consolidation (thread 3 — invasive), Q-ext-docs-and-quickwins
+(thread 4), + a feature-opportunity backlog (richer hover, spec-search ranking, decisions filtering — many align with the
+extension's own README v1.1 roadmap). ↓ —
+PRIOR: **Last reconciled 2026-06-09 — main 5994e9a, 0 open PRs, clean, CI green. ★ BACKLOG-DRAIN + DESIGN-GATE.**
 Solo engineer lane (the smaller of the two open `ready` items; the other is `solo` and they collide on `py.rs`, so they
 sequence). **#306** Q-py-enum-variant-import (python import lowering drops **unaliased** braced enum-variant leaf names from
 `from {module} import …` — the variant is emitted as the dataclass `Ordering_Less`, not `Less`, so the bare-name import raised
@@ -278,6 +300,62 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 ---
 
 ## Ready
+
+### VS Code extension quality workstream (operator-initiated 2026-06-09)
+
+- **[Q-ext-reliability-hardening] activation resilience + data-feature reliability** — bug · **DONE (#308 + #309)** ·
+  `extensions/vscode/src/{extension,lsp,vocab,features/hover,features/decisions,features/effects,features/annotations}.ts` · — ·
+  links #308, #309 · note: **DONE 2026-06-09.** #308: `startLspClient` never throws (try/catch around `client.start()`, warn +
+  return undefined); `VocabService.load` degrades to an empty-but-usable vocab on read/parse failure (all getters null-safe);
+  features/commands/`workspaceHasBockFiles` always register → a broken binary / corrupt vocab no longer bricks the UI (the
+  README's graceful-degradation promise is now real). Hover `isTrusted` scoped to `{enabledCommands:['bock.openSpecAt']}`. #309:
+  decision-record `isValidDecisionRecord` guard (drop+count+`showWarningMessage`, defensive render); effect-flow auto-render
+  routed through the 300ms debounce; annotation watcher made incremental (per-file store, splice on change/create/delete; full
+  scan only on init + explicit refresh); **`scanText` triple-quote false-negative fixed** (string/comment-aware `nextTripleState`;
+  pure scanner extracted to `annotations-scan.ts`). Regression tests shipped with each fix.
+- **[Q-ext-test-foundation] unit-test the extension's pure parser/render helpers** — test · **DONE (#310 + #311; effects/hover deferred)** ·
+  `extensions/vscode/src/features/{effect-analyzer,spec-panel}.ts` + `extensions/vscode/test/` · — · links #310, #311,
+  Q-ext-infra-webview-consolidation · note: **DONE 2026-06-09 for the two harness-friendly clusters.** #310 covers
+  effect-analyzer (matchDelimiter, findEnclosingFunction, splitBindings, parseWithClause, expandEffects, offsetToLocation —
+  additive exports, no behavior change); #311 covers spec-panel (normalizeRef, buildNavTree, highlightBock, parseSections,
+  stripForSearch, linkifySpecRefs). **Extension test suite 7 → 117.** `effects.ts`/`hover.ts` pure helpers (buildMermaid,
+  stringifyHoverContents, …) still untested because those modules import `vscode-languageclient/node` (unresolvable under the
+  ts-node test harness) → their pure logic must be EXTRACTED first; folded into Q-ext-infra-webview-consolidation (thread 3).
+- **[Q-ext-parsewithclause-effect-underreport] effect-flow panel under-reports effects for same-line `-> T with E` signatures** — bug · ready ·
+  `extensions/vscode/src/features/effect-analyzer.ts` (`parseWithClause` ~line 236) · — · links #310 · note: FOUND 2026-06-09
+  (#310 tests). The greedy return-type strip `/->\s*[^\n{]*/` eats ` with E` on the idiomatic `fn f() -> Void with Logger,
+  Storage {` shape (confirmed against `examples/spec-exercisers/effect-showcase`), so `parseWithClause` returns `[]` and the
+  effect-flow visualization shows no handled effects for the dominant signature form. A KNOWN-BUG test pins the current (wrong)
+  behavior; flip it when fixed. Fix: stop the return-type strip at a top-level ` with ` boundary (mind `with` inside a generic /
+  nested type). Higher user-impact than the infra/docs threads.
+- **[Q-ext-splitbindings-string-aware] `splitBindings` mis-splits a top-level comma inside a string literal** — bug · ready · LOW ·
+  `extensions/vscode/src/features/effect-analyzer.ts` (`splitBindings` ~line 453) · — · links #310 · note: FOUND 2026-06-09
+  (#310 tests). The depth counter is brace-/paren-aware but not string-aware, so `A with "x,y", B` splits at the in-string comma.
+  Pinned by a KNOWN-WEAKNESS test. Make it string/comment-aware (reuse the `matchDelimiter` scanning style).
+- **[Q-ext-infra-webview-consolidation] unify the extension's webview layer + kill dead infra** — chore/refactor · ready · **thread 3 (invasive)** ·
+  `extensions/vscode/src/shared/webview.ts` + `extensions/vscode/src/features/{spec-panel,effects,errors,decisions,annotations}.ts` · — ·
+  links #308-#311, Q-ext-test-foundation · note: FOUND by the 2026-06-09 evaluation. `WebviewPanelBase` is dead code (nothing
+  extends it); spec-panel + effects each hand-roll their own panel/CSP/nonce/escape (3 copies of `randomNonce`, 2 of
+  `escapeHtml`, ~150 lines of overlapping CSS); the CSP nonce uses `Math.random()` not crypto; `truncate` is duplicated across
+  decisions/annotations. Consolidate onto one `WebviewManager` (with per-feature CSP extension points for effects' mermaid
+  `script-src`), delete `WebviewPanelBase`, crypto-secure the nonce, extract shared helpers. En route, extract effects/hover pure
+  helpers (buildMermaid, stringifyHoverContents) into harness-testable modules + cover them (completes Q-ext-test-foundation).
+  Wide blast radius → scope/sequence carefully.
+- **[Q-ext-docs-and-quickwins] fix extension doc-rot + low-risk feature quick-wins** — docs/chore · ready · **thread 4** ·
+  `extensions/vscode/{README.md,CHANGELOG.md,src/vocab.ts,package.json,src/lsp.ts,...}` · — · links #290 · note: FOUND by the
+  2026-06-09 evaluation. Doc-rot: README:115 + the `vocab.ts` error message reference a **nonexistent** `scripts/sync-vscode-assets.sh`
+  (real script is `tools/scripts/sync-vocab.sh`); CHANGELOG says "VS Code 1.75.0" (engine is now `^1.91.0` post-#290) + has no
+  0.1.1 entry; README build path `.../vscode/bock-lang` doesn't exist + cites a 0.1.0 vsix vs 0.1.1 pkg. Quick-wins: likely-dead
+  `mermaid` npm dep (^11; webview uses the committed 3.16 MB `assets/mermaid.min.js`) — remove or build-generate; binary
+  auto-detect of workspace `target/{debug,release}/bock` + a "Restart Language Server" command + an output channel; add
+  `snippets` (contributes none, though CLAUDE.md lists them).
+- **[Q-ext-feature-opportunities] richer-feature backlog (mostly the extension's own README v1.1 roadmap)** — feature · deferred ·
+  `extensions/vscode/` · — · links Q-ext-docs-and-quickwins · note: FOUND by the 2026-06-09 evaluation; deferred (post threads
+  3/4, operator-gated). Richer hover (operators/stdlib-methods are cached but never rendered; effect-operation hovers could reuse
+  the analyzer's `operationToEffect` map); spec-search ranking + keyboard nav (today substring-only, click-only); decisions
+  filtering by type/pinned/confidence + sort + a "jump to source JSON" action; annotations usage-analysis depth + a count badge.
+  Plus the README's stated v1.1 set: semantic tokens, inlay hints, code actions/quick-fixes, rename, find-references, AIR viewer,
+  target-preview.
 
 - **[Q-vscode-langclient-v10] migrate VS Code extension to vscode-languageclient v10 API** — chore/bug · **DONE (#290)** ·
   `extensions/vscode/` (`tsconfig.json`, `test/tsconfig.json`, `package.json`, lockfile) · — · links #285, #290 · note: **DONE

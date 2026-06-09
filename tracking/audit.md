@@ -2243,3 +2243,26 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
   Follow-up: AWAITING OWNER — DQ30 (List mutator signatures; recommend A Optional-safe) + DQ29 (Equatable gating; recommend R1
     auto-conform). With both pending there is NO autonomous `ready` engineering left — the v1 backlog is fully Design-gated.
     STATE: main = 5994e9a (+ this tracking PR), 0 open PRs after merge, clean, CI green, all worktrees/branches cleaned.
+
+[2026-06-09 16:10 UTC] ✦ VS CODE EXTENSION QUALITY HARDENING — waves 1+2 (reliability + tests), 4 PRs, 7→117 tests
+  Input: operator request (while the compiler backlog is Design-gated on DQ29/DQ30) — "evaluate the VS Code extension and look
+    for opportunities to improve quality, reliability, feature-set." Operator then set the order: reliability → tests → infra →
+    docs/quick-wins, paralleling where feasible.
+  Options: (a) read the whole extension solo — rejected (token-heavy, slower); (b) 2 read-only analysis agents over the feature
+    modules + orchestrator reads the core/build/test/docs spine — chosen; then per-thread file-disjoint engineer pairs.
+  Decision: 2-agent evaluation mapped ~4.8k LOC / 7 modules → prioritized findings. WAVE 1 reliability as a disjoint pair
+    (#308 activation/lsp/hover ⨯ #309 decisions/effects/annotations) — each shipped regression tests for its own fix (the only
+    feasible way to "parallel tests with reliability"; a separate test session would collide on the same files). WAVE 2 tests as
+    a disjoint pair (#310 effect-analyzer ⨯ #311 spec-panel), additive exports + tests, zero behavior change. Both waves
+    combined-tree re-verified LOCALLY (npm ci/lint/compile/test on the merged union: wave-1 36 green, wave-2 117 green) before
+    merge, per the octopus-re-verify duty — extension CI ("vscode extension" job) also green on every PR.
+  Reasoning: §18.3-style "spec silence → Design" doesn't apply here (extension, not language), so engineer dispatch was right;
+    but the contested return-CONTRACTS in the compiler backlog stay Design-gated. The extension's activation fragility (a broken
+    binary bricking the whole UI, contradicting the README) was the highest-value fix. Two genuine pre-existing bugs surfaced by
+    wave-2 tests were correctly NOT fixed in test-only PRs (pinned with KNOWN-BUG tests) and filed as FOUNDs.
+  Follow-up: queued — Q-ext-parsewithclause-effect-underreport (real effect-flow bug, higher impact than infra/docs),
+    Q-ext-splitbindings-string-aware (LOW), Q-ext-infra-webview-consolidation (thread 3, invasive — also completes effects/hover
+    pure-helper tests via extraction), Q-ext-docs-and-quickwins (thread 4), Q-ext-feature-opportunities (deferred). Checkpointing
+    with the operator before thread 3 (invasive shared-webview refactor) + to prioritize the new effect-flow FOUND.
+    STATE: main = 9232528 (+ this tracking PR), 0 open PRs after merge, clean, all worktrees/branches cleaned. Compiler backlog
+    still Design-gated (DQ29/DQ30). Extension test suite 7→117.
