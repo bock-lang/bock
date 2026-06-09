@@ -12,7 +12,20 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-09 — main 9232528, 0 open PRs, clean, CI green. ★ VS CODE EXTENSION QUALITY HARDENING (operator-initiated).**
+_**Last reconciled 2026-06-09 — main 82a25cb, 0 open PRs, clean, CI green. ★ VS CODE EXTENSION HARDENING COMPLETE (threads 1-4 + security).**
+Second half of the operator-initiated extension workstream, all combined-tree re-verified locally before merge: **effect-flow fix**
+(**#313** — Q-ext-parsewithclause-effect-underreport: the effect-flow panel was under-reporting effects on the dominant single-line
+`-> T with E` signature; + Q-ext-splitbindings string-awareness); **THREAD 3 webview-infra consolidation** (disjoint pair **#314 ⨯
+#315** — deleted dead `WebviewPanelBase`, one crypto-secure CSP `nonce()`, deduped `truncate`, extracted effects→`effects-flow.ts`
++ hover→`hover-render.ts` which COMPLETED the test foundation); **THREAD 4 docs/quick-wins** (disjoint pair **#316 ⨯ #317** —
+README/CHANGELOG doc-rot fixed incl. the nonexistent sync-script ref, dead `mermaid` dep removed, Restart-LSP command + output
+channel + 14 snippets + CLAUDE.md correction). **★ SECURITY: #317's workspace-`target/` binary auto-detect was an RCE** (two
+automated reviews flagged it CRITICAL/HIGH — a hostile repo's `target/debug/bock` would auto-spawn on folder-open); **self-fixed
+in #318** (Q-ext-lsp-binary-rce — removed the auto-discovery; `bock.lspPath` machine-scoped + `${workspaceFolder}`/`~` expansion;
+`untrustedWorkspaces.supported:false`). **Extension test suite 7 → 168.** All 4 threads + the bug + the security fix DONE; only
+**Q-ext-feature-opportunities** remains (deferred, operator-gated — richer hover, spec-search ranking, decisions filtering, +
+the extension's README v1.1 roadmap). Compiler v1 backlog still Design-gated (DQ29/DQ30, awaiting owner). ↓ —
+PRIOR: **Last reconciled 2026-06-09 — main 9232528, 0 open PRs, clean, CI green. ★ VS CODE EXTENSION QUALITY HARDENING (operator-initiated).**
 While the v1 compiler backlog is Design-gated (DQ29/DQ30), the operator opened a new workstream: evaluate the VS Code extension
 and improve quality/reliability/feature-set, sequenced **reliability → tests → infra → docs/quick-wins, paralleling where
 feasible**. A 2-agent read-only evaluation mapped the extension (~4.8k LOC, 7 feature modules); findings drove two file-disjoint
@@ -313,42 +326,52 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   routed through the 300ms debounce; annotation watcher made incremental (per-file store, splice on change/create/delete; full
   scan only on init + explicit refresh); **`scanText` triple-quote false-negative fixed** (string/comment-aware `nextTripleState`;
   pure scanner extracted to `annotations-scan.ts`). Regression tests shipped with each fix.
-- **[Q-ext-test-foundation] unit-test the extension's pure parser/render helpers** — test · **DONE (#310 + #311; effects/hover deferred)** ·
-  `extensions/vscode/src/features/{effect-analyzer,spec-panel}.ts` + `extensions/vscode/test/` · — · links #310, #311,
-  Q-ext-infra-webview-consolidation · note: **DONE 2026-06-09 for the two harness-friendly clusters.** #310 covers
-  effect-analyzer (matchDelimiter, findEnclosingFunction, splitBindings, parseWithClause, expandEffects, offsetToLocation —
-  additive exports, no behavior change); #311 covers spec-panel (normalizeRef, buildNavTree, highlightBock, parseSections,
-  stripForSearch, linkifySpecRefs). **Extension test suite 7 → 117.** `effects.ts`/`hover.ts` pure helpers (buildMermaid,
-  stringifyHoverContents, …) still untested because those modules import `vscode-languageclient/node` (unresolvable under the
-  ts-node test harness) → their pure logic must be EXTRACTED first; folded into Q-ext-infra-webview-consolidation (thread 3).
-- **[Q-ext-parsewithclause-effect-underreport] effect-flow panel under-reports effects for same-line `-> T with E` signatures** — bug · ready ·
-  `extensions/vscode/src/features/effect-analyzer.ts` (`parseWithClause` ~line 236) · — · links #310 · note: FOUND 2026-06-09
-  (#310 tests). The greedy return-type strip `/->\s*[^\n{]*/` eats ` with E` on the idiomatic `fn f() -> Void with Logger,
-  Storage {` shape (confirmed against `examples/spec-exercisers/effect-showcase`), so `parseWithClause` returns `[]` and the
-  effect-flow visualization shows no handled effects for the dominant signature form. A KNOWN-BUG test pins the current (wrong)
-  behavior; flip it when fixed. Fix: stop the return-type strip at a top-level ` with ` boundary (mind `with` inside a generic /
-  nested type). Higher user-impact than the infra/docs threads.
-- **[Q-ext-splitbindings-string-aware] `splitBindings` mis-splits a top-level comma inside a string literal** — bug · ready · LOW ·
-  `extensions/vscode/src/features/effect-analyzer.ts` (`splitBindings` ~line 453) · — · links #310 · note: FOUND 2026-06-09
-  (#310 tests). The depth counter is brace-/paren-aware but not string-aware, so `A with "x,y", B` splits at the in-string comma.
-  Pinned by a KNOWN-WEAKNESS test. Make it string/comment-aware (reuse the `matchDelimiter` scanning style).
-- **[Q-ext-infra-webview-consolidation] unify the extension's webview layer + kill dead infra** — chore/refactor · ready · **thread 3 (invasive)** ·
-  `extensions/vscode/src/shared/webview.ts` + `extensions/vscode/src/features/{spec-panel,effects,errors,decisions,annotations}.ts` · — ·
-  links #308-#311, Q-ext-test-foundation · note: FOUND by the 2026-06-09 evaluation. `WebviewPanelBase` is dead code (nothing
-  extends it); spec-panel + effects each hand-roll their own panel/CSP/nonce/escape (3 copies of `randomNonce`, 2 of
-  `escapeHtml`, ~150 lines of overlapping CSS); the CSP nonce uses `Math.random()` not crypto; `truncate` is duplicated across
-  decisions/annotations. Consolidate onto one `WebviewManager` (with per-feature CSP extension points for effects' mermaid
-  `script-src`), delete `WebviewPanelBase`, crypto-secure the nonce, extract shared helpers. En route, extract effects/hover pure
-  helpers (buildMermaid, stringifyHoverContents) into harness-testable modules + cover them (completes Q-ext-test-foundation).
-  Wide blast radius → scope/sequence carefully.
-- **[Q-ext-docs-and-quickwins] fix extension doc-rot + low-risk feature quick-wins** — docs/chore · ready · **thread 4** ·
-  `extensions/vscode/{README.md,CHANGELOG.md,src/vocab.ts,package.json,src/lsp.ts,...}` · — · links #290 · note: FOUND by the
-  2026-06-09 evaluation. Doc-rot: README:115 + the `vocab.ts` error message reference a **nonexistent** `scripts/sync-vscode-assets.sh`
-  (real script is `tools/scripts/sync-vocab.sh`); CHANGELOG says "VS Code 1.75.0" (engine is now `^1.91.0` post-#290) + has no
-  0.1.1 entry; README build path `.../vscode/bock-lang` doesn't exist + cites a 0.1.0 vsix vs 0.1.1 pkg. Quick-wins: likely-dead
-  `mermaid` npm dep (^11; webview uses the committed 3.16 MB `assets/mermaid.min.js`) — remove or build-generate; binary
-  auto-detect of workspace `target/{debug,release}/bock` + a "Restart Language Server" command + an output channel; add
-  `snippets` (contributes none, though CLAUDE.md lists them).
+- **[Q-ext-test-foundation] unit-test the extension's pure parser/render helpers** — test · **DONE (#310 + #311 + #314 + #315)** ·
+  `extensions/vscode/src/features/{effect-analyzer,spec-panel,effects-flow,hover-render,annotations-scan}.ts` + `extensions/vscode/test/` ·
+  — · links #310, #311, #314, #315, Q-ext-infra-webview-consolidation · note: **FULLY DONE 2026-06-09.** #310 effect-analyzer +
+  #311 spec-panel (harness-friendly clusters); then the thread-3 extractions completed it — #315 extracted effects' pure helpers
+  to `effects-flow.ts` (+23 tests: buildMermaid/nodeId/buildNavigationMap/…) and #314 extracted hover's to `hover-render.ts`
+  (+20 tests: stringifyHoverContents/specLink/buildCache/render-family). **Extension test suite 7 → 168.** The
+  `vscode-languageclient/node` harness constraint (those modules can't be imported under ts-node) is the reason extraction was
+  required — see memory `vscode-test-harness-languageclient-constraint`.
+- **[Q-ext-parsewithclause-effect-underreport] effect-flow panel under-reports effects for same-line `-> T with E` signatures** — bug · **DONE (#313)** ·
+  `extensions/vscode/src/features/effect-analyzer.ts` (`parseWithClause`) · — · links #310, #313 · note: **DONE 2026-06-09 (#313).**
+  Replaced the greedy `/->\s*[^\n{]*/` strip with a bracket/string/comment-aware scan that separates the return type from the
+  effect clause at the **top-level ` with ` keyword** (`findTopLevelKeyword`/`splitTopLevelCommas`); single-line `fn f() -> Void
+  with Logger, Storage {` and generic `-> Result[Int, E] with Logger {` now extract effects, and a `where`-tail stops the list.
+  KNOWN-BUG test flipped + cases added. **NB:** depth-tracking uses `()`/`[]`/`{}` only — NOT `<>` (the `>` in `->` would corrupt
+  depth, and Bock generics use `[]`). Test suite → 125.
+- **[Q-ext-splitbindings-string-aware] `splitBindings` mis-splits a top-level comma inside a string literal** — bug · **DONE (#313)** · LOW ·
+  `extensions/vscode/src/features/effect-analyzer.ts` (`splitBindings`) · — · links #310, #313 · note: **DONE 2026-06-09 (#313).**
+  Added the same string/comment-skip state machine to the brace/paren depth counter, so a comma inside `"..."`/`'...'`/`//`
+  comments is no longer a split point; KNOWN-WEAKNESS test flipped.
+- **[Q-ext-infra-webview-consolidation] unify the extension's webview layer + kill dead infra** — chore/refactor · **DONE (#314 + #315, disjoint pair)** ·
+  `extensions/vscode/src/shared/{webview,strings}.ts` + `src/features/{spec-panel,effects,effects-flow,decisions,annotations,hover,hover-render}.ts` ·
+  — · links #314, #315, Q-ext-test-foundation · note: **DONE 2026-06-09 (thread 3, combined-tree verified).** #315: deleted dead
+  `WebviewPanelBase`, collapsed the 3 `Math.random` `randomNonce` copies into one crypto-secure `nonce()` (used by WebviewManager
+  + spec-panel + effects), dropped spec-panel's duplicate escaper, extracted effects' pure helpers → `effects-flow.ts` (+tests).
+  #314: deduped `truncate` → `shared/strings.ts` (decisions + annotations), extracted hover's pure helpers → `hover-render.ts`
+  (+tests). Behavior-preserving (webview output identical; only the nonce source changed). I took the **measured** scope (share
+  the nonce/escape/CSP pieces + extract-for-tests) rather than the riskier full panel-lifecycle migration onto WebviewManager.
+- **[Q-ext-docs-and-quickwins] fix extension doc-rot + low-risk feature quick-wins** — docs/chore · **DONE (#316 + #317; auto-detect reverted by #318)** ·
+  `extensions/vscode/{README.md,CHANGELOG.md,package.json,CLAUDE.md,src/{lsp,extension,vocab}.ts,snippets/bock.code-snippets}` · — ·
+  links #290, #316, #317, #318, Q-ext-lsp-binary-rce · note: **DONE 2026-06-09 (thread 4, disjoint pair).** #316 (docs): fixed the
+  nonexistent `scripts/sync-vscode-assets.sh` ref (→ `tools/scripts/sync-vocab.sh`) in README, fixed the `.../vscode/bock-lang`
+  build path + 0.1.0→0.1.1 vsix names, added a `[0.1.1] — Unreleased` CHANGELOG entry. #317 (features): removed the dead `mermaid`
+  npm dep (webview keeps the committed asset; −1246 lockfile lines), added a "Restart Language Server" command (`LspController`) +
+  a "Bock" output channel, added a 14-prefix `snippets/bock.code-snippets` (validated via `bock check`) + `contributes.snippets`,
+  corrected the CLAUDE.md "snippets/grammar are generated" claim (only vocab.json + spec/ are). **⚠ the #317 workspace-`target/`
+  binary auto-detect was an RCE and was REVERTED by #318** (see Q-ext-lsp-binary-rce) — replaced with the safe equivalent
+  (`bock.lspPath` expands `${workspaceFolder}`/`~`, machine-scoped).
+- **[Q-ext-lsp-binary-rce] workspace-local LSP binary auto-discovery is an RCE** — bug/security · **DONE (#318)** ·
+  `extensions/vscode/src/lsp.ts` + `package.json` + `CHANGELOG.md` · — · links #317, #318, Q-ext-docs-and-quickwins · note:
+  **DONE 2026-06-09 (#318).** Two automated security reviews (commit + push sweep, CRITICAL/HIGH) flagged the
+  workspace-`target/{release,debug}/bock` fallback added in #317: opening/cloning a hostile repo shipping a `target/debug/bock`
+  executable would auto-spawn it → arbitrary code execution on folder-open. Fix: REMOVED the workspace auto-discovery entirely
+  (binary now resolves only from PATH or the user-controlled `bock.lspPath`); marked `bock.lspPath` `"scope": "machine"` so a
+  malicious workspace `.vscode/settings.json` cannot redirect it; preserved the contributor convenience SAFELY — `bock.lspPath`
+  now expands `${workspaceFolder}`/`~` (an explicit user-settings opt-in, not auto-discovery); declared
+  `capabilities.untrustedWorkspaces.supported: false`. Self-fixed same session; vscode-extension CI green, 168 tests.
 - **[Q-ext-feature-opportunities] richer-feature backlog (mostly the extension's own README v1.1 roadmap)** — feature · deferred ·
   `extensions/vscode/` · — · links Q-ext-docs-and-quickwins · note: FOUND by the 2026-06-09 evaluation; deferred (post threads
   3/4, operator-gated). Richer hover (operators/stdlib-methods are cached but never rendered; effect-operation hovers could reuse

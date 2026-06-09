@@ -2266,3 +2266,24 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
     with the operator before thread 3 (invasive shared-webview refactor) + to prioritize the new effect-flow FOUND.
     STATE: main = 9232528 (+ this tracking PR), 0 open PRs after merge, clean, all worktrees/branches cleaned. Compiler backlog
     still Design-gated (DQ29/DQ30). Extension test suite 7→117.
+
+[2026-06-09 17:46 UTC] ✦ VS CODE EXTENSION HARDENING COMPLETE — effect-flow fix + threads 3+4 + a self-caught RCE
+  Input: operator "proceed as recommended" — slot the effect-flow correctness fix first, then thread 3 (webview infra) → thread 4
+    (docs/quick-wins), paralleling where feasible.
+  Decision/sequence: (1) #313 fixed the effect-flow parseWithClause under-reporting + splitBindings string-awareness (solo).
+    (2) Thread 3 as a disjoint pair #314 (hover-render extract + truncate dedup) ⨯ #315 (webview consolidation + effects-flow
+    extract) — I took the MEASURED scope (share nonce/escape/CSP + extract-for-tests) over the riskier full panel-lifecycle
+    migration. (3) Thread 4 as a disjoint pair #316 (README/CHANGELOG doc-rot) ⨯ #317 (mermaid removal, restart-LSP, snippets,
+    CLAUDE.md). Each pair combined-tree re-verified locally (npm ci/lint/compile/test) before merge: 125 → 148/145 → 168.
+  ★ SECURITY: an automated commit review (CRITICAL) + push sweep (HIGH) flagged the workspace-`target/` LSP-binary auto-detect I
+    shipped in #317 as an RCE (a hostile repo's `target/debug/bock` would auto-spawn on folder-open). I did NOT dismiss it (the
+    "user asked + tradeoffs surfaced" exemption didn't apply — I added it as a convenience). Self-fixed in #318: removed the
+    auto-discovery; `bock.lspPath` machine-scoped + `${workspaceFolder}`/`~` expansion (safe contributor opt-in);
+    `untrustedWorkspaces.supported:false`. Done directly by the orchestrator (small, security-critical, full context) in a branch
+    → PR → vscode-extension CI green → merge.
+  Reasoning: extension work isn't Design-gated (it's not the language), so engineer dispatch was right; disjoint pairs honored
+    "parallel where feasible"; the orchestrator combined-tree re-verify caught nothing broken but is the standing duty.
+  Follow-up: ALL 4 threads + the effect-flow bug + the RCE fix DONE. Only Q-ext-feature-opportunities remains (deferred,
+    operator-gated). Compiler v1 backlog still Design-gated (DQ29/DQ30). New memory filed: the vscode-languageclient/node
+    test-harness extraction constraint. STATE: main = 82a25cb (+ this tracking PR), 0 open PRs after merge, clean, all
+    worktrees/branches cleaned, extension test suite 7 → 168.
