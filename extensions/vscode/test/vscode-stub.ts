@@ -52,3 +52,21 @@ export class Uri {
     return `${this.scheme}://${this.fsPath}`;
   }
 }
+
+/**
+ * Minimal `vscode.window` stand-in. `VocabService.load` calls
+ * `showErrorMessage` on its degrade-to-empty path, so the headless vocab
+ * test needs the call to be a harmless no-op rather than `undefined`.
+ * Returns a resolved promise to mirror the real (Thenable) signature.
+ */
+export const window = {
+  showErrorMessage(_message: string): Promise<undefined> {
+    return Promise.resolve(undefined);
+  },
+  showWarningMessage(_message: string): Promise<undefined> {
+    return Promise.resolve(undefined);
+  },
+  showInformationMessage(_message: string): Promise<undefined> {
+    return Promise.resolve(undefined);
+  },
+};

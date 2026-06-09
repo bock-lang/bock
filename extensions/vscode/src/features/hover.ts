@@ -143,7 +143,11 @@ export function registerHover(
       if (!lspBody && enrichments.length === 0) return undefined;
 
       const md = new vscode.MarkdownString();
-      md.isTrusted = true;
+      // The hover appends verbatim LSP content, so a fully-trusted markdown
+      // string would let a malicious/buggy server smuggle arbitrary
+      // `command:` links. Trust exactly the one command this layer emits
+      // (the `§…→` spec links) and nothing else.
+      md.isTrusted = { enabledCommands: ['bock.openSpecAt'] };
       md.supportHtml = false;
 
       if (lspBody) md.appendMarkdown(lspBody.trim());
