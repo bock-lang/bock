@@ -3,27 +3,35 @@
 //!
 //! F.1.2 adds live diagnostics: `did_open`/`did_change` run the full check
 //! pipeline on the edited document and publish the resulting diagnostics
-//! back to the client. `did_close` clears them.
+//! back to the client. `did_close` clears them. The navigation trio —
+//! find-references, rename (with prepare), and document symbols — reuses
+//! the same single-file pipeline.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tower_lsp::jsonrpc::Result as LspResult;
+use tower_lsp::jsonrpc::{Error as LspError, Result as LspResult};
 use tower_lsp::lsp_types::{
     DiagnosticOptions, DiagnosticServerCapabilities, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InitializedParams, Location, MarkupContent, MarkupKind,
-    MessageType, OneOf, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    Location, MarkupContent, MarkupKind, MessageType, OneOf, PrepareRenameResponse,
+    ReferenceParams, RenameOptions, RenameParams, ServerCapabilities, ServerInfo,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    WorkDoneProgressOptions, WorkspaceEdit,
 };
 use tower_lsp::{Client, LanguageServer};
 
 use crate::diagnostics::{span_to_range, to_lsp_diagnostic};
+use crate::document_symbol::{document_symbols, to_lsp_symbols};
 use crate::goto_definition::find_definition;
 use crate::hover::hover;
 use crate::pipeline::check_document;
+use crate::references::find_occurrences;
+use crate::rename::validate_new_name;
 
 /// The Bock language server.
 ///
@@ -50,6 +58,12 @@ impl BockLanguageServer {
             text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
             definition_provider: Some(OneOf::Left(true)),
+            references_provider: Some(OneOf::Left(true)),
+            rename_provider: Some(OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            })),
+            document_symbol_provider: Some(OneOf::Left(true)),
             diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
                 identifier: Some("bock".to_string()),
                 inter_file_dependencies: true,
@@ -58,6 +72,18 @@ impl BockLanguageServer {
             })),
             ..ServerCapabilities::default()
         }
+    }
+
+    /// Fetch the current contents of `uri` from the document store.
+    fn document_text(&self, uri: &Url) -> Option<String> {
+        self.documents.get(uri).map(|e| e.value().clone())
+    }
+
+    /// Log a panic that escaped a blocking navigation task.
+    async fn log_task_panic(&self, what: &str, err: impl std::fmt::Display) {
+        self.client
+            .log_message(MessageType::ERROR, format!("{what} panicked: {err}"))
+            .await;
     }
 
     /// Re-run the check pipeline on `uri`'s current contents and publish the
@@ -226,6 +252,160 @@ impl LanguageServer for BockLanguageServer {
         }))
     }
 
+    async fn references(&self, params: ReferenceParams) -> LspResult<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+
+        let Some(content) = self.document_text(&uri) else {
+            return Ok(None);
+        };
+
+        let path = url_to_path(&uri);
+        // Pipeline is CPU-bound — hop to a blocking thread so we don't
+        // stall the LSP reactor.
+        let result = tokio::task::spawn_blocking(move || {
+            find_occurrences(path, content, pos.line, pos.character)
+        })
+        .await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(err) => {
+                self.log_task_panic("references", err).await;
+                return Ok(None);
+            }
+        };
+
+        let Some(occ) = result else { return Ok(None) };
+
+        let source_file = occ.source_map.get_file(occ.file_id);
+        let mut spans = occ.reference_spans.clone();
+        if include_declaration {
+            spans.push(occ.decl_span);
+        }
+        spans.sort_unstable_by_key(|s| (s.start, s.end));
+
+        let locations = spans
+            .into_iter()
+            .map(|span| Location {
+                uri: uri.clone(),
+                range: span_to_range(span, source_file),
+            })
+            .collect();
+        Ok(Some(locations))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> LspResult<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let pos = params.position;
+
+        let Some(content) = self.document_text(&uri) else {
+            return Ok(None);
+        };
+
+        let path = url_to_path(&uri);
+        let result = tokio::task::spawn_blocking(move || {
+            find_occurrences(path, content, pos.line, pos.character)
+        })
+        .await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(err) => {
+                self.log_task_panic("prepare_rename", err).await;
+                return Ok(None);
+            }
+        };
+
+        // `None` (cursor not on a renameable symbol) tells the client to
+        // refuse the rename UI for this position.
+        Ok(result.map(|occ| {
+            let source_file = occ.source_map.get_file(occ.file_id);
+            PrepareRenameResponse::RangeWithPlaceholder {
+                range: span_to_range(occ.origin_span, source_file),
+                placeholder: occ.name.clone(),
+            }
+        }))
+    }
+
+    async fn rename(&self, params: RenameParams) -> LspResult<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let new_name = params.new_name;
+
+        let Some(content) = self.document_text(&uri) else {
+            return Ok(None);
+        };
+
+        let path = url_to_path(&uri);
+        let result = tokio::task::spawn_blocking(move || {
+            find_occurrences(path, content, pos.line, pos.character)
+        })
+        .await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(err) => {
+                self.log_task_panic("rename", err).await;
+                return Ok(None);
+            }
+        };
+
+        let Some(occ) = result else { return Ok(None) };
+
+        if let Err(reason) = validate_new_name(&occ.name, &new_name) {
+            return Err(LspError::invalid_params(reason.to_string()));
+        }
+
+        let source_file = occ.source_map.get_file(occ.file_id);
+        let edits: Vec<TextEdit> = occ
+            .reference_spans
+            .iter()
+            .chain(std::iter::once(&occ.decl_span))
+            .map(|span| TextEdit {
+                range: span_to_range(*span, source_file),
+                new_text: new_name.clone(),
+            })
+            .collect();
+
+        let mut changes = HashMap::new();
+        changes.insert(uri, edits);
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..WorkspaceEdit::default()
+        }))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> LspResult<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+
+        let Some(content) = self.document_text(&uri) else {
+            return Ok(None);
+        };
+
+        let path = url_to_path(&uri);
+        let result = tokio::task::spawn_blocking(move || document_symbols(path, content)).await;
+
+        let result = match result {
+            Ok(r) => r,
+            Err(err) => {
+                self.log_task_panic("document_symbol", err).await;
+                return Ok(None);
+            }
+        };
+
+        let source_file = result.source_map.get_file(result.file_id);
+        let symbols = to_lsp_symbols(&result.symbols, source_file);
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.documents.remove(&uri);
@@ -260,6 +440,24 @@ mod tests {
         assert!(
             matches!(caps.definition_provider, Some(OneOf::Left(true))),
             "definition provider must be enabled",
+        );
+
+        assert!(
+            matches!(caps.references_provider, Some(OneOf::Left(true))),
+            "references provider must be enabled",
+        );
+
+        match caps.rename_provider {
+            Some(OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                ..
+            })) => {}
+            other => panic!("rename provider with prepare support expected, got {other:?}"),
+        }
+
+        assert!(
+            matches!(caps.document_symbol_provider, Some(OneOf::Left(true))),
+            "document symbol provider must be enabled",
         );
 
         assert!(

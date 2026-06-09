@@ -24,6 +24,9 @@ import { registerAnnotations } from './features/annotations';
 import { registerEffects } from './features/effects';
 import { registerDecisions } from './features/decisions';
 import { registerSpecPanel } from './features/spec-panel';
+import { registerTargetPreview } from './features/target-preview';
+import { registerStrictness } from './features/strictness';
+import { registerQuickFixes } from './features/quick-fixes';
 import { registerSemanticTokens } from './features/semantic-tokens';
 
 // The extension's own diagnostics go to a "Bock" output channel, created in
@@ -52,6 +55,9 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   registerEffects(ctx, vocab, client);
   registerDecisions(ctx, vocab);
   registerSpecPanel(ctx, vocab);
+  registerTargetPreview(ctx, logChannel);
+  registerStrictness(ctx);
+  registerQuickFixes(ctx);
   registerSemanticTokens(ctx, vocab);
 
   ctx.subscriptions.push(
