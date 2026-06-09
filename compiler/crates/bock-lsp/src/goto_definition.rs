@@ -4,33 +4,26 @@
 //! The flow is:
 //! 1. Lex + parse + resolve the current buffer (single-file mode; no
 //!    cross-file symbol resolution).
-//! 2. Translate the LSP [`Position`] to a byte offset.
-//! 3. Walk the AST to find the innermost [`Expr::Identifier`] containing
-//!    that offset, while simultaneously collecting a map of `NodeId ->
-//!    declaration Span` so we can answer the lookup.
-//! 4. Query the populated [`SymbolTable`] for the identifier's resolved
-//!    `def_id`, then look up the recorded declaration span.
+//! 2. Translate the LSP `Position` to a byte offset.
+//! 3. Build a [`SymbolIndex`](crate::symbol_index) over the AST: declaration
+//!    spans by `NodeId`, identifier use sites, and type-path occurrences.
+//! 4. Query the populated `SymbolTable` for the identifier's resolved
+//!    `def_id`, then look up the recorded declaration span. If the cursor is
+//!    on a type reference instead (the resolver records no per-node
+//!    resolutions for those), fall back to a top-level name lookup.
 //!
 //! Cross-file go-to-definition is out of scope for F.1.3 — every
 //! declaration span returned here belongs to the buffer being checked.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use bock_air::{resolve_names_with_registry, ModuleRegistry, NameKind, SymbolTable};
-use bock_ast::{
-    visitor::{
-        walk_class_decl, walk_effect_decl, walk_enum_decl, walk_expr, walk_fn_decl,
-        walk_impl_block, walk_module, walk_record_decl, walk_trait_decl, walk_type_expr, Visitor,
-    },
-    ClassDecl, ConstDecl, EffectDecl, EnumDecl, EnumVariant, Expr, FnDecl, ImplBlock, Item, Module,
-    NodeId, Param, Pattern, RecordDecl, RecordPatternField, TraitDecl, TypeAliasDecl, TypeExpr,
-    TypePath,
-};
 use bock_errors::{FileId, Span};
 use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
+
+use crate::symbol_index::SymbolIndex;
 
 /// Result of a successful go-to-definition lookup.
 pub struct DefinitionResult {
@@ -72,24 +65,19 @@ pub fn find_definition(
     let mut symbols = SymbolTable::new();
     let _ = resolve_names_with_registry(&module, &mut symbols, &registry);
 
-    // Walk the AST: find the innermost identifier containing `offset` and
-    // build a NodeId -> declaration Span index in the same pass.
-    let mut finder = DefinitionFinder::new(offset);
-    finder.collect_toplevel_names(&module);
-    finder.visit_module(&module);
+    let index = SymbolIndex::build(&module);
 
     // Prefer an expression-identifier match (which can be resolved via
     // the symbol table) over a bare type-reference name match.
-    let target = finder
-        .identifier_id
-        .and_then(|id| symbols.resolutions.get(&id))
+    let target = index
+        .ident_use_at(offset)
+        .and_then(|(id, _)| symbols.resolutions.get(&id))
         .filter(|r| r.kind != NameKind::Builtin)
-        .and_then(|r| finder.def_spans.get(&r.def_id).copied())
+        .and_then(|r| index.def_spans.get(&r.def_id).copied())
         .or_else(|| {
-            finder
-                .type_ref_name
-                .as_ref()
-                .and_then(|n| finder.toplevel_by_name.get(n).copied())
+            index
+                .type_segment_at(offset)
+                .and_then(|(name, _)| index.toplevel_by_name.get(name).map(|&(_, span)| span))
         })?;
 
     Some(DefinitionResult {
@@ -141,269 +129,6 @@ pub fn position_to_offset(content: &str, line: u32, character: u32) -> Option<us
         byte_offset = i + ch.len_utf8();
     }
     Some(line_start + byte_offset)
-}
-
-// ─── AST walker ──────────────────────────────────────────────────────────────
-
-/// Single-pass visitor that:
-///   - Records declaration spans keyed by NodeId (`def_spans`).
-///   - Finds the innermost `Expr::Identifier` whose span contains a target
-///     byte offset (`identifier_id`).
-struct DefinitionFinder {
-    offset: usize,
-    def_spans: HashMap<NodeId, Span>,
-    /// Map of top-level declaration name → decl span. Used as a fallback
-    /// when the cursor is on a type reference (type refs never create
-    /// entries in `SymbolTable::resolutions`; the resolver only calls
-    /// `mark_used` for them).
-    toplevel_by_name: HashMap<String, Span>,
-    identifier_id: Option<NodeId>,
-    /// Width of the innermost identifier match found so far. Smaller =
-    /// more specific; we prefer tighter matches when nesting occurs.
-    best_width: usize,
-    /// Name of a [`TypePath`] segment under the cursor, if any.
-    type_ref_name: Option<String>,
-    /// Width of the innermost type-ref match found so far.
-    best_type_width: usize,
-}
-
-impl DefinitionFinder {
-    fn new(offset: usize) -> Self {
-        Self {
-            offset,
-            def_spans: HashMap::new(),
-            toplevel_by_name: HashMap::new(),
-            identifier_id: None,
-            best_width: usize::MAX,
-            type_ref_name: None,
-            best_type_width: usize::MAX,
-        }
-    }
-
-    fn span_contains(&self, span: Span) -> bool {
-        self.offset >= span.start && self.offset <= span.end
-    }
-
-    fn record_decl(&mut self, id: NodeId, span: Span) {
-        self.def_spans.insert(id, span);
-    }
-
-    /// Pre-pass: index every top-level named declaration by name so
-    /// type references can resolve by string lookup.
-    fn collect_toplevel_names(&mut self, module: &Module) {
-        for item in &module.items {
-            match item {
-                Item::Fn(d) => {
-                    self.toplevel_by_name
-                        .insert(d.name.name.clone(), d.name.span);
-                }
-                Item::Record(d) => {
-                    self.toplevel_by_name
-                        .insert(d.name.name.clone(), d.name.span);
-                }
-                Item::Enum(d) => {
-                    self.toplevel_by_name
-                        .insert(d.name.name.clone(), d.name.span);
-                    for v in &d.variants {
-                        let (name, span) = match v {
-                            EnumVariant::Unit { name, .. }
-                            | EnumVariant::Struct { name, .. }
-                            | EnumVariant::Tuple { name, .. } => (name.name.clone(), name.span),
-                        };
-                        self.toplevel_by_name.insert(name, span);
-                    }
-                }
-                Item::Class(d) => {
-                    self.toplevel_by_name
-                        .insert(d.name.name.clone(), d.name.span);
-                }
-                Item::Trait(d) | Item::PlatformTrait(d) => {
-                    self.toplevel_by_name
-                        .insert(d.name.name.clone(), d.name.span);
-                }
-                Item::Effect(d) => {
-                    self.toplevel_by_name
-                        .insert(d.name.name.clone(), d.name.span);
-                }
-                Item::TypeAlias(d) => {
-                    self.toplevel_by_name
-                        .insert(d.name.name.clone(), d.name.span);
-                }
-                Item::Const(d) => {
-                    self.toplevel_by_name
-                        .insert(d.name.name.clone(), d.name.span);
-                }
-                Item::Impl(_)
-                | Item::ModuleHandle(_)
-                | Item::PropertyTest(_)
-                | Item::Error { .. } => {}
-            }
-        }
-    }
-
-    /// Check each segment of a [`TypePath`]; if the cursor is on one,
-    /// remember its name as a candidate for name-based lookup.
-    fn probe_type_path(&mut self, path: &TypePath) {
-        for seg in &path.segments {
-            if self.span_contains(seg.span) {
-                let width = seg.span.end.saturating_sub(seg.span.start);
-                if width < self.best_type_width {
-                    self.best_type_width = width;
-                    self.type_ref_name = Some(seg.name.clone());
-                }
-            }
-        }
-    }
-
-    fn record_pattern_bindings(&mut self, pattern: &Pattern) {
-        match pattern {
-            Pattern::Bind { id, span, .. } | Pattern::MutBind { id, span, .. } => {
-                self.record_decl(*id, *span);
-            }
-            Pattern::Tuple { elems, .. } => {
-                for e in elems {
-                    self.record_pattern_bindings(e);
-                }
-            }
-            Pattern::Constructor { fields, .. } => {
-                for f in fields {
-                    self.record_pattern_bindings(f);
-                }
-            }
-            Pattern::Record { fields, .. } => {
-                for RecordPatternField { pattern, .. } in fields {
-                    if let Some(p) = pattern {
-                        self.record_pattern_bindings(p);
-                    }
-                    // Shorthand `{ name }` bindings use a synthetic
-                    // NodeId inside the resolver, so we can't resolve
-                    // them here — skip.
-                }
-            }
-            Pattern::List { elems, rest, .. } => {
-                for e in elems {
-                    self.record_pattern_bindings(e);
-                }
-                if let Some(r) = rest {
-                    self.record_pattern_bindings(r);
-                }
-            }
-            Pattern::Or { alternatives, .. } => {
-                if let Some(first) = alternatives.first() {
-                    self.record_pattern_bindings(first);
-                }
-            }
-            Pattern::Range { lo, hi, .. } => {
-                self.record_pattern_bindings(lo);
-                self.record_pattern_bindings(hi);
-            }
-            Pattern::Wildcard { .. } | Pattern::Literal { .. } | Pattern::Rest { .. } => {}
-        }
-    }
-}
-
-impl Visitor for DefinitionFinder {
-    fn visit_module(&mut self, node: &Module) {
-        walk_module(self, node);
-    }
-
-    fn visit_fn_decl(&mut self, node: &FnDecl) {
-        self.record_decl(node.id, node.name.span);
-        walk_fn_decl(self, node);
-    }
-
-    fn visit_record_decl(&mut self, node: &RecordDecl) {
-        self.record_decl(node.id, node.name.span);
-        for f in &node.fields {
-            self.record_decl(f.id, f.name.span);
-        }
-        walk_record_decl(self, node);
-    }
-
-    fn visit_enum_decl(&mut self, node: &EnumDecl) {
-        self.record_decl(node.id, node.name.span);
-        for v in &node.variants {
-            match v {
-                EnumVariant::Unit { id, name, .. }
-                | EnumVariant::Struct { id, name, .. }
-                | EnumVariant::Tuple { id, name, .. } => {
-                    self.record_decl(*id, name.span);
-                }
-            }
-        }
-        walk_enum_decl(self, node);
-    }
-
-    fn visit_class_decl(&mut self, node: &ClassDecl) {
-        self.record_decl(node.id, node.name.span);
-        for f in &node.fields {
-            self.record_decl(f.id, f.name.span);
-        }
-        walk_class_decl(self, node);
-    }
-
-    fn visit_trait_decl(&mut self, node: &TraitDecl) {
-        self.record_decl(node.id, node.name.span);
-        walk_trait_decl(self, node);
-    }
-
-    fn visit_effect_decl(&mut self, node: &EffectDecl) {
-        self.record_decl(node.id, node.name.span);
-        walk_effect_decl(self, node);
-    }
-
-    fn visit_impl_block(&mut self, node: &ImplBlock) {
-        walk_impl_block(self, node);
-    }
-
-    fn visit_type_alias_decl(&mut self, node: &TypeAliasDecl) {
-        self.record_decl(node.id, node.name.span);
-    }
-
-    fn visit_const_decl(&mut self, node: &ConstDecl) {
-        self.record_decl(node.id, node.name.span);
-        // Walk into the initializer so identifiers inside it are still
-        // considered for the position-to-node lookup.
-        self.visit_expr(&node.value);
-    }
-
-    fn visit_param(&mut self, node: &Param) {
-        self.record_pattern_bindings(&node.pattern);
-        if let Some(default) = &node.default {
-            self.visit_expr(default);
-        }
-    }
-
-    fn visit_pattern(&mut self, node: &Pattern) {
-        self.record_pattern_bindings(node);
-    }
-
-    fn visit_expr(&mut self, node: &Expr) {
-        match node {
-            Expr::Identifier { id, span, .. } => {
-                if self.span_contains(*span) {
-                    let width = span.end.saturating_sub(span.start);
-                    if width < self.best_width {
-                        self.best_width = width;
-                        self.identifier_id = Some(*id);
-                    }
-                }
-                // Identifiers have no children; no recursion needed.
-            }
-            Expr::RecordConstruct { path, .. } => {
-                self.probe_type_path(path);
-                walk_expr(self, node);
-            }
-            _ => walk_expr(self, node),
-        }
-    }
-
-    fn visit_type_expr(&mut self, node: &TypeExpr) {
-        if let TypeExpr::Named { path, .. } = node {
-            self.probe_type_path(path);
-        }
-        walk_type_expr(self, node);
-    }
 }
 
 #[cfg(test)]
@@ -548,6 +273,24 @@ fn favorite() -> Color {
             .expect("definition found");
         let source = result.source_map.get_file(result.file_id);
         assert_eq!(source.slice(result.target), "Red");
+    }
+
+    #[test]
+    fn definition_finds_param_type_from_annotation() {
+        let src = "\
+module m
+
+public record Point { x: Int, y: Int }
+
+fn shift(p: Point) -> Int {
+    p.x
+}
+";
+        // Cursor on `Point` in the parameter annotation (line 4, col 12).
+        let result = find_definition(PathBuf::from("test.bock"), src.to_string(), 4, 12)
+            .expect("definition found");
+        let source = result.source_map.get_file(result.file_id);
+        assert_eq!(source.slice(result.target), "Point");
     }
 
     #[test]

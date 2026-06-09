@@ -353,6 +353,7 @@ dependencies = [
  "bock-source",
  "bock-types",
  "dashmap 6.2.1",
+ "thiserror 1.0.69",
  "tokio",
  "tower-lsp",
 ]
