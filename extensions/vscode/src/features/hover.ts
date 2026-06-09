@@ -17,104 +17,27 @@
 //   2. Zero or more enrichment blocks (annotation, keyword, prelude, …)
 // Each block is a small markdown fragment separated by a horizontal rule so
 // the user can scan the tooltip top-to-bottom.
+//
+// The pure markdown builders and the cache constructor live in
+// `hover-render.ts` (free of the `vscode-languageclient` dependency) so they
+// can be unit-tested headlessly. This module keeps only the orchestration
+// that touches the live `vscode` / LSP APIs.
 
 import * as vscode from 'vscode';
 import type { LanguageClient } from 'vscode-languageclient/node';
 import { VocabService } from '../vocab';
 import {
-  Vocab,
-  Annotation,
-  Keyword,
-  Operator,
-  PrimitiveType,
-  Symbol as VocabSymbol,
-  Module,
-} from '../shared/types';
-
-type StdlibKind = 'function' | 'type' | 'trait' | 'effect';
-interface StdlibHit {
-  module: Module;
-  symbol: VocabSymbol;
-  kind: StdlibKind;
-}
-
-interface Cache {
-  keywords: Map<string, Keyword>;
-  operators: Map<string, Operator>;
-  annotations: Map<string, Annotation>;
-  primitives: Map<string, PrimitiveType>;
-  preludeTypes: Map<string, VocabSymbol>;
-  preludeFunctions: Map<string, VocabSymbol>;
-  preludeTraits: Map<string, VocabSymbol>;
-  preludeConstructors: Map<string, VocabSymbol>;
-  stdlibSymbols: Map<string, StdlibHit[]>;
-  effectNames: Set<string>;
-}
-
-function buildCache(vocab: Vocab): Cache {
-  const keywords = new Map<string, Keyword>();
-  for (const k of vocab.language.keywords) keywords.set(k.name, k);
-
-  const operators = new Map<string, Operator>();
-  for (const o of vocab.language.operators) operators.set(o.symbol, o);
-
-  const annotations = new Map<string, Annotation>();
-  for (const a of vocab.language.annotations) {
-    const bare = a.name.startsWith('@') ? a.name.slice(1) : a.name;
-    annotations.set(bare, a);
-  }
-
-  const primitives = new Map<string, PrimitiveType>();
-  for (const p of vocab.language.primitive_types) primitives.set(p.name, p);
-
-  const preludeTypes = indexByName(vocab.language.prelude_types);
-  const preludeFunctions = indexByName(vocab.language.prelude_functions);
-  const preludeTraits = indexByName(vocab.language.prelude_traits);
-  const preludeConstructors = indexByName(vocab.language.prelude_constructors);
-
-  const stdlibSymbols = new Map<string, StdlibHit[]>();
-  const effectNames = new Set<string>();
-  for (const mod of vocab.stdlib.modules) {
-    pushStdlib(stdlibSymbols, mod, mod.functions, 'function');
-    pushStdlib(stdlibSymbols, mod, mod.types, 'type');
-    pushStdlib(stdlibSymbols, mod, mod.traits, 'trait');
-    for (const s of mod.effects) effectNames.add(s.name);
-    pushStdlib(stdlibSymbols, mod, mod.effects, 'effect');
-  }
-
-  return {
-    keywords,
-    operators,
-    annotations,
-    primitives,
-    preludeTypes,
-    preludeFunctions,
-    preludeTraits,
-    preludeConstructors,
-    stdlibSymbols,
-    effectNames,
-  };
-}
-
-function indexByName(symbols: VocabSymbol[]): Map<string, VocabSymbol> {
-  const map = new Map<string, VocabSymbol>();
-  for (const s of symbols) map.set(s.name, s);
-  return map;
-}
-
-function pushStdlib(
-  map: Map<string, StdlibHit[]>,
-  module: Module,
-  symbols: VocabSymbol[],
-  kind: StdlibKind,
-): void {
-  for (const symbol of symbols) {
-    const hit = { module, symbol, kind };
-    const arr = map.get(symbol.name);
-    if (arr) arr.push(hit);
-    else map.set(symbol.name, [hit]);
-  }
-}
+  Cache,
+  LspHoverResponse,
+  buildCache,
+  stringifyHoverContents,
+  renderAnnotation,
+  renderKeyword,
+  renderPrimitive,
+  renderPrelude,
+  renderStdlibSymbol,
+  renderEffectUsage,
+} from './hover-render';
 
 export function registerHover(
   ctx: vscode.ExtensionContext,
@@ -189,24 +112,6 @@ async function fetchLspHover(
   }
 }
 
-interface LspHoverResponse {
-  contents?: string | MarkedString | MarkedString[];
-}
-type MarkedString = string | { language?: string; value: string; kind?: string };
-
-function stringifyHoverContents(
-  contents: LspHoverResponse['contents'],
-): string | undefined {
-  if (!contents) return undefined;
-  if (typeof contents === 'string') return contents;
-  if (Array.isArray(contents)) {
-    const parts = contents.map((c) => (typeof c === 'string' ? c : c.value));
-    return parts.join('\n\n');
-  }
-  if (typeof contents === 'object' && 'value' in contents) return contents.value;
-  return undefined;
-}
-
 // ─── Enrichment ─────────────────────────────────────────────────────────────
 
 function collectEnrichments(
@@ -257,7 +162,8 @@ function collectEnrichments(
   }
 
   if (isInEffectContext(doc, wordRange) && !cache.keywords.has(word)) {
-    sections.push(renderEffectUsage(word, doc, showSpecLinks));
+    const handlerLine = findHandlerInFile(doc, word);
+    sections.push(renderEffectUsage(word, handlerLine, showSpecLinks));
   }
 
   return sections;
@@ -276,83 +182,6 @@ function isInEffectContext(doc: vscode.TextDocument, range: vscode.Range): boole
   const line = doc.lineAt(range.start.line).text;
   const prefix = line.slice(0, range.start.character);
   return /\b(with|handle|handling)\b[\s,A-Za-z0-9_]*$/.test(prefix);
-}
-
-// ─── Rendering ──────────────────────────────────────────────────────────────
-
-function specLink(ref: string, enabled: boolean): string | undefined {
-  if (!enabled || !ref) return undefined;
-  const uri = `command:bock.openSpecAt?${encodeURIComponent(JSON.stringify([ref]))}`;
-  return `[${ref} →](${uri})`;
-}
-
-function renderAnnotation(a: Annotation, showSpecLinks: boolean): string {
-  const name = a.name.startsWith('@') ? a.name : `@${a.name}`;
-  const lines = [`**${name}** — annotation`, '', a.purpose];
-  if (a.params) lines.push('', `Params: \`${a.params}\``);
-  const example = a.params ? `${name}(${a.params})` : name;
-  lines.push('', '_Example:_', '```bock', example, '```');
-  const link = specLink(a.spec_ref ?? '', showSpecLinks);
-  if (link) lines.push('', link);
-  return lines.join('\n');
-}
-
-function renderKeyword(k: Keyword, showSpecLinks: boolean): string {
-  const lines = [`**\`${k.name}\`** — ${k.category} keyword`];
-  const link = specLink(k.spec_ref ?? '', showSpecLinks);
-  if (link) lines.push('', link);
-  return lines.join('\n');
-}
-
-function renderPrimitive(p: PrimitiveType, showSpecLinks: boolean): string {
-  const lines = [`**${p.name}** — primitive type`];
-  const link = specLink(p.spec_ref ?? '', showSpecLinks);
-  if (link) lines.push('', link);
-  return lines.join('\n');
-}
-
-function renderPrelude(
-  label: string,
-  s: VocabSymbol,
-  showSpecLinks: boolean,
-): string {
-  const lines = [`**${s.name}** — ${label}`];
-  if (s.signature) lines.push('', '```bock', s.signature, '```');
-  if (s.doc) lines.push('', s.doc);
-  const link = specLink(s.spec_ref ?? '', showSpecLinks);
-  if (link) lines.push('', link);
-  return lines.join('\n');
-}
-
-function renderStdlibSymbol(hit: StdlibHit, showSpecLinks: boolean): string {
-  const { symbol: s, module, kind } = hit;
-  const lines = [`**${s.name}** — ${kind} in \`${module.path}\``];
-  if (s.signature) lines.push('', '```bock', s.signature, '```');
-  if (s.doc) lines.push('', s.doc);
-  if (s.since) lines.push('', `_Since: ${s.since}_`);
-  const ref = s.spec_ref ?? module.spec_ref ?? '';
-  const link = specLink(ref, showSpecLinks);
-  if (link) lines.push('', link);
-  return lines.join('\n');
-}
-
-function renderEffectUsage(
-  name: string,
-  doc: vscode.TextDocument,
-  showSpecLinks: boolean,
-): string {
-  const lines = [`**${name}** — effect`];
-  const handler = findHandlerInFile(doc, name);
-  lines.push(
-    '',
-    handler
-      ? `Handler in this file: line ${handler + 1}.`
-      : `No \`handle ${name}\` found in this file — the handler is in scope at the call site (enclosing \`with\` / \`handling\` block) or provided by the runtime.`,
-  );
-  lines.push('', '_Example handler:_', '```bock', `handle ${name} { ... }`, '```');
-  const link = specLink('§8', showSpecLinks);
-  if (link) lines.push('', link);
-  return lines.join('\n');
 }
 
 function findHandlerInFile(doc: vscode.TextDocument, name: string): number | undefined {

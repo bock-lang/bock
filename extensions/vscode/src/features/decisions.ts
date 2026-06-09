@@ -18,6 +18,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { VocabService } from '../vocab';
 import { WebviewManager, escapeHtml } from '../shared/webview';
+import { truncate } from '../shared/strings';
 
 // ─── Types mirroring crates/bock-ai/src/decision.rs ─────────────────────────
 
@@ -256,11 +257,6 @@ function firstLine(s: string): string {
   if (typeof s !== 'string') return '';
   const idx = s.indexOf('\n');
   return idx === -1 ? s : s.slice(0, idx);
-}
-
-function truncate(s: string, n: number): string {
-  const trimmed = (s ?? '').trim();
-  return trimmed.length > n ? `${trimmed.slice(0, n - 1)}…` : trimmed;
 }
 
 /** Format a confidence value defensively — fall back to `n/a` if the field
