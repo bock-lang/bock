@@ -326,13 +326,30 @@ without modifying files (use it in CI).
 
 `bock lsp` starts the Bock language server, speaking LSP over stdio.
 Point any LSP client (VS Code, Neovim, Emacs `lsp-mode`, etc.) at the
-`bock lsp` command. v1 ships a **full LSP implementation** of the
-standard protocol capabilities:
+`bock lsp` command. The server implements these standard protocol
+capabilities:
 
-- Completion
-- Hover
-- Go-to-definition
-- Diagnostics
+- **Hover** — types and documentation at the cursor.
+- **Go-to-definition.**
+- **Diagnostics** — published live on open/change; the server also
+  registers a pull-diagnostics provider.
+- **Find references.**
+- **Symbol rename** — validated before applying: the new name must lex
+  as a single Bock identifier, must not be a reserved keyword, and must
+  stay in the same case class (uppercase-initial names lex as type
+  identifiers, so renaming a value to a type-shaped name — or vice
+  versa — is rejected).
+- **Document symbols** — a hierarchical outline of the file's
+  declarations.
+- **Inlay hints** — the inferred type on every unannotated `let`,
+  `let mut`, destructuring, and `for` binder. Hints are suppressed when
+  the type is unresolved or poisoned by a type error, and a rendered
+  type is capped at 60 characters.
+
+Completion is **not yet implemented**: §20.3 lists it among the v1
+capabilities, but the v1 server does not register a completion
+provider. This spec/implementation divergence is tracked openly rather
+than resolved here.
 
 `--stdio` is accepted for convention but stdio is already the default
 and only transport in v1.
@@ -349,6 +366,13 @@ Five Bock-specific LSP extensions are planned but **not in v1**
 | Capability Graph     | Visual call-graph with capability and effect propagation.                        |
 | Smart Completions    | Ownership-, effect-, and pipe-aware completions.                                 |
 | Inline Diagnostics   | Ownership-transfer warnings, capability-narrowing hints, AI-decision previews.   |
+
+The VS Code extension ships a *client-side* target preview today
+(`Bock: Preview Transpiled Output`, built on
+`bock build -t <target> --source-only`) and a client-side AIR tree view
+(built on [`bock inspect air --json`](./cli.md#bock-inspect-air-file)).
+The protocol-level **Target Preview** extension in the table above —
+live per-function output served by the LSP itself — remains Reserved.
 
 ## Testing Tiers
 
