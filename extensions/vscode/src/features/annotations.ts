@@ -18,6 +18,7 @@ import type { LanguageClient } from 'vscode-languageclient/node';
 import { VocabService } from '../vocab';
 import type { Annotation } from '../shared/types';
 import { WebviewManager, escapeHtml } from '../shared/webview';
+import { truncate } from '../shared/strings';
 import { scanText, type AnnotationUsage } from './annotations-scan';
 
 // Re-export the pure scanner so existing importers (and tests) can reach it
@@ -119,11 +120,6 @@ function sortByLocation(a: AnnotationUsage, b: AnnotationUsage): number {
   if (pathCmp !== 0) return pathCmp;
   if (a.line !== b.line) return a.line - b.line;
   return a.column - b.column;
-}
-
-function truncate(s: string, n: number): string {
-  const trimmed = s.trim();
-  return trimmed.length > n ? `${trimmed.slice(0, n - 1)}…` : trimmed;
 }
 
 // ─── Tooltips ───────────────────────────────────────────────────────────────
