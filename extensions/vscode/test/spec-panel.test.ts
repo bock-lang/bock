@@ -18,8 +18,12 @@ import {
   linkifySpecRefs,
   stripForSearch,
   parseSections,
+  rankSpecSections,
+  renderHighlighted,
+  SEARCH_RESULT_LIMIT,
   type SpecSection,
   type SpecIndex,
+  type SpecSearchHit,
 } from '../src/features/spec-panel';
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
@@ -291,6 +295,265 @@ describe('spec-panel.stripForSearch', () => {
     assert.equal(
       stripForSearch('# Heading\n\n*bold*  and   _em_'),
       'Heading bold and em',
+    );
+  });
+});
+
+// ─── rankSpecSections ────────────────────────────────────────────────────────
+
+/**
+ * Build a SpecSection with searchable content. Using the full SpecSection
+ * shape (rather than a bare SearchableSection literal) also pins that
+ * SpecSection stays structurally assignable to the ranking input.
+ */
+function searchable(
+  id: string,
+  title: string,
+  text: string,
+  level = 2,
+): SpecSection {
+  return {
+    id,
+    ref: `§${id}`,
+    anchor: `section-${id.replace(/\./g, '-')}`,
+    title,
+    level,
+    html: '',
+    text,
+  };
+}
+
+/** Shorthand: rank and return just the hit ids, in order. */
+function rankIds(
+  sections: SpecSection[],
+  query: string,
+  limit?: number,
+): string[] {
+  return rankSpecSections(sections, query, limit).map((h) => h.id);
+}
+
+describe('spec-panel.rankSpecSections', () => {
+  it('returns [] for an empty or whitespace-only query', () => {
+    const sections = [searchable('1', 'Effects', 'effect rows')];
+    assert.deepEqual(rankSpecSections(sections, ''), []);
+    assert.deepEqual(rankSpecSections(sections, '   \t '), []);
+  });
+
+  it('returns [] when no section matches', () => {
+    const sections = [searchable('1', 'Effects', 'effect rows')];
+    assert.deepEqual(rankSpecSections(sections, 'zebra'), []);
+  });
+
+  it('matches case-insensitively', () => {
+    const sections = [searchable('1', 'Effects', 'about effect rows')];
+    assert.deepEqual(rankIds(sections, 'EFFECT'), ['1']);
+    assert.deepEqual(rankIds([searchable('2', 'UPPER TITLE', '')], 'upper'), [
+      '2',
+    ]);
+  });
+
+  it('ranks a title match above a body match', () => {
+    const sections = [
+      // §1 mentions the term only in its body — at position 0 with an exact
+      // word boundary, i.e. the strongest possible body hit.
+      searchable('1', 'Introduction', 'handlers are described here'),
+      searchable('2', 'Handlers', 'something else entirely'),
+    ];
+    assert.deepEqual(rankIds(sections, 'handlers'), ['2', '1']);
+  });
+
+  it('ranks an exact word-boundary title match above a substring title match', () => {
+    const sections = [
+      searchable('1', 'Cranky parser notes', ''), // "rank" mid-word substring
+      searchable('2', 'Rank rules', ''), // exact word
+    ];
+    assert.deepEqual(rankIds(sections, 'rank'), ['2', '1']);
+  });
+
+  it('ranks an exact word above a word-prefix above a substring (title)', () => {
+    const sections = [
+      searchable('1', 'Cranky', ''), // substring
+      searchable('2', 'Effective ranking', ''), // "rank" is a word prefix of "ranking"
+      searchable('3', 'Rank', ''), // exact word
+    ];
+    assert.deepEqual(rankIds(sections, 'rank'), ['3', '2', '1']);
+  });
+
+  it('ranks an exact word above a substring in the body too', () => {
+    const sections = [
+      searchable('1', 'Alpha', 'the cranky tokenizer'),
+      searchable('2', 'Beta', 'the rank computation'),
+    ];
+    assert.deepEqual(rankIds(sections, 'rank'), ['2', '1']);
+  });
+
+  it('applies AND semantics across whitespace-separated terms', () => {
+    const sections = [
+      searchable('1', 'Effects', 'no handlers mentioned... wait, yes: handler'),
+      searchable('2', 'Effects', 'plain body text'),
+      searchable('3', 'Types', 'unrelated'),
+    ];
+    // §2 has "effects" but no "handler"; §3 has neither.
+    assert.deepEqual(rankIds(sections, 'effect handler'), ['1']);
+  });
+
+  it('lets different terms match in title vs body (AND still satisfied)', () => {
+    const sections = [
+      searchable('1', 'Effect rows', 'a handler resumes the computation'),
+    ];
+    assert.deepEqual(rankIds(sections, 'effect handler'), ['1']);
+  });
+
+  it('gives earlier body matches a position bonus', () => {
+    const filler = 'lorem ipsum dolor sit amet '.repeat(40); // > 1000 chars, no term
+    const sections = [
+      searchable('1', 'Alpha', filler + 'resume appears late'),
+      searchable('2', 'Beta', 'resume appears immediately'),
+    ];
+    assert.deepEqual(rankIds(sections, 'resume'), ['2', '1']);
+  });
+
+  it('gives shallower headings a bonus (level 2 over level 3 over level 4)', () => {
+    const sections = [
+      searchable('1.1.1', 'Guards', 'guard clauses', 4),
+      searchable('1.1', 'Guards', 'guard clauses', 3),
+      searchable('1', 'Guards', 'guard clauses', 2),
+    ];
+    assert.deepEqual(rankIds(sections, 'guards'), ['1', '1.1', '1.1.1']);
+  });
+
+  it('breaks score ties by document order (deterministic, stable)', () => {
+    const sections = [
+      searchable('7', 'Match', 'same body', 2),
+      searchable('3', 'Match', 'same body', 2),
+      searchable('9', 'Match', 'same body', 2),
+    ];
+    // Identical scores — input (document) order must be preserved.
+    assert.deepEqual(rankIds(sections, 'match'), ['7', '3', '9']);
+  });
+
+  it('respects the limit parameter and the default cap', () => {
+    const many = Array.from({ length: 50 }, (_, i) =>
+      searchable(String(i + 1), 'Match', 'match body'),
+    );
+    assert.equal(rankSpecSections(many, 'match', 5).length, 5);
+    assert.equal(rankSpecSections(many, 'match').length, SEARCH_RESULT_LIMIT);
+    assert.deepEqual(rankSpecSections(many, 'match', 0), []);
+  });
+
+  it('builds a snippet window around the first body match with ellipsis flags', () => {
+    const before = 'b'.repeat(100);
+    const after = 'a'.repeat(100);
+    const sections = [searchable('1', 'Alpha', `${before} resume ${after}`)];
+    const [hit] = rankSpecSections(sections, 'resume');
+    assert.ok(hit.snippet.includes('resume'));
+    assert.equal(hit.snippetEllipsisStart, true);
+    assert.equal(hit.snippetEllipsisEnd, true);
+    // Window: 40 chars before the match, 60 after it.
+    assert.ok(hit.snippet.length <= 40 + 'resume'.length + 60);
+  });
+
+  it('reports snippet match offsets that index into the returned snippet', () => {
+    const sections = [
+      searchable('1', 'Alpha', 'x'.repeat(80) + ' the resume keyword resumes'),
+    ];
+    const [hit] = rankSpecSections(sections, 'resume');
+    assert.ok(hit.snippetMatches.length >= 1);
+    for (const [start, end] of hit.snippetMatches) {
+      assert.equal(hit.snippet.slice(start, end).toLowerCase(), 'resume');
+    }
+  });
+
+  it('reports title match offsets that index into the title', () => {
+    const sections = [searchable('1', 'Effect handlers and effects', '')];
+    const [hit] = rankSpecSections(sections, 'effect');
+    assert.ok(hit.titleMatches.length >= 2);
+    for (const [start, end] of hit.titleMatches) {
+      assert.equal(hit.title.slice(start, end).toLowerCase(), 'effect');
+    }
+  });
+
+  it('merges overlapping term spans into one highlight range', () => {
+    // "foo" and "oo" overlap inside "foo" — a single merged span [0, 3).
+    const sections = [searchable('1', 'foo bar', 'foo here')];
+    const [hit] = rankSpecSections(sections, 'foo oo');
+    assert.deepEqual(hit.titleMatches[0], [0, 3]);
+  });
+
+  it('falls back to the opening of the body for a title-only match', () => {
+    const long = 'opening words of the section body. ' + 'z'.repeat(200);
+    const sections = [searchable('1', 'Pattern matching', long)];
+    const [hit] = rankSpecSections(sections, 'pattern');
+    assert.ok(hit.snippet.startsWith('opening words'));
+    assert.equal(hit.snippetEllipsisStart, false);
+    assert.equal(hit.snippetEllipsisEnd, true);
+    assert.deepEqual(hit.snippetMatches, []);
+  });
+
+  it('returns an empty snippet when the matched section has no body text', () => {
+    const sections = [searchable('1', 'Pattern matching', '')];
+    const [hit]: SpecSearchHit[] = rankSpecSections(sections, 'pattern');
+    assert.equal(hit.snippet, '');
+    assert.equal(hit.snippetEllipsisStart, false);
+    assert.equal(hit.snippetEllipsisEnd, false);
+    assert.deepEqual(hit.snippetMatches, []);
+  });
+});
+
+// ─── renderHighlighted ───────────────────────────────────────────────────────
+
+describe('spec-panel.renderHighlighted', () => {
+  it('returns plain escaped text when there are no spans', () => {
+    assert.equal(renderHighlighted('a < b & c', []), 'a &lt; b &amp; c');
+  });
+
+  it('wraps a span in <mark>', () => {
+    assert.equal(
+      renderHighlighted('the resume keyword', [[4, 10]]),
+      'the <mark>resume</mark> keyword',
+    );
+  });
+
+  it('handles spans at the very start and end of the text', () => {
+    assert.equal(
+      renderHighlighted('resume it', [[0, 6]]),
+      '<mark>resume</mark> it',
+    );
+    assert.equal(
+      renderHighlighted('to resume', [[3, 9]]),
+      'to <mark>resume</mark>',
+    );
+  });
+
+  it('renders multiple spans in order', () => {
+    assert.equal(
+      renderHighlighted('aa bb cc', [
+        [0, 2],
+        [6, 8],
+      ]),
+      '<mark>aa</mark> bb <mark>cc</mark>',
+    );
+  });
+
+  it('escapes HTML both inside and outside marked spans (no injection)', () => {
+    // The span covers the <script> tag itself — it must come out escaped.
+    const out = renderHighlighted('x <script>alert(1)</script> y', [[2, 27]]);
+    assert.ok(!out.includes('<script>'));
+    assert.equal(
+      out,
+      'x <mark>&lt;script&gt;alert(1)&lt;/script&gt;</mark> y',
+    );
+  });
+
+  it('skips malformed spans (inverted, overlapping, out of range) defensively', () => {
+    assert.equal(renderHighlighted('abcdef', [[4, 2]]), 'abcdef');
+    assert.equal(renderHighlighted('abcdef', [[2, 99]]), 'abcdef');
+    assert.equal(
+      renderHighlighted('abcdef', [
+        [0, 3],
+        [2, 4], // overlaps the previous span — skipped
+      ]),
+      '<mark>abc</mark>def',
     );
   });
 });
