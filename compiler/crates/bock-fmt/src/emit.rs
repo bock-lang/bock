@@ -20,6 +20,21 @@ const HARD_LIMIT: usize = 100;
 /// Number of spaces per indentation level.
 const INDENT_WIDTH: usize = 2;
 
+/// Strip a doc-comment marker (`//!` or `///`) and at most one following
+/// space from a raw comment line, preserving any further leading
+/// indentation and trimming trailing whitespace only.
+///
+/// Returns the content portion. For a bare marker line (`//!`) the result is
+/// empty. Continuation-line indentation beyond the single marker-separator
+/// space is preserved verbatim so `bock fmt` round-trips bullet lists and
+/// other indented prose (Q-fmt-doccomment-indent).
+fn strip_doc_marker<'t>(raw: &'t str, marker: &str) -> &'t str {
+    let rest = raw.strip_prefix(marker).unwrap_or(raw);
+    // Drop exactly one separator space if present; keep further indentation.
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    rest.trim_end()
+}
+
 /// The canonical formatter. Walks the AST and emits formatted source text.
 pub struct Formatter<'a> {
     /// Output buffer.
@@ -221,14 +236,30 @@ impl<'a> Formatter<'a> {
 
     /// Format a complete module.
     pub fn format_module(&mut self, module: &Module) {
-        // Module doc comments
-        for doc in &module.doc {
-            if doc.is_empty() {
+        // Module doc comments (`//!`). The AST (`module.doc`) only carries the
+        // marker-trimmed prose — the lexer trims it, and that trimmed form is
+        // what `bock doc`/LSP consume. To preserve continuation-line
+        // indentation on round-trip (Q-fmt-doccomment-indent) without changing
+        // the shared AST representation, the formatter re-derives each line's
+        // content from the raw comment stream, stripping only the marker and at
+        // most one following space. `module.doc` still drives *whether* and *how
+        // many* module-doc lines exist; the comment stream supplies the bytes.
+        let raw_module_docs: Vec<&str> = self
+            .comments
+            .iter()
+            .filter(|c| c.kind == CommentKind::ModuleDoc)
+            .map(|c| strip_doc_marker(&c.text, "//!"))
+            .collect();
+        for (i, doc) in module.doc.iter().enumerate() {
+            // Prefer the indentation-preserving raw text; fall back to the AST
+            // value if the comment stream and AST somehow disagree in count.
+            let content = raw_module_docs.get(i).copied().unwrap_or(doc.as_str());
+            if content.is_empty() {
                 // Avoid emitting a trailing space on blank `//!` lines.
                 self.push("//!");
             } else {
                 self.push("//! ");
-                self.push(doc);
+                self.push(content);
             }
             self.newline();
         }

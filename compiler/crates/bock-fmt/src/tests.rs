@@ -866,3 +866,54 @@ fn assert_parses(src: &str) {
         "formatted output failed to parse:\n{src}"
     );
 }
+
+// ─── Doc-comment continuation-line indentation (Q-fmt-doccomment-indent) ────
+
+#[test]
+fn format_preserves_module_doc_continuation_indent() {
+    // Regression for Q-fmt-doccomment-indent: `bock fmt` used to flatten the
+    // leading indentation of `//!` continuation lines (e.g. a bullet list).
+    // The marker plus at most one following space is stripped; any further
+    // leading indentation is preserved verbatim.
+    let src = "//! Targets:\n//!   * Go\n//!   * Rust\n\nfn main() {}\n";
+    check(src, src);
+}
+
+#[test]
+fn format_preserves_module_doc_blank_line() {
+    // A bare `//!` line carries no trailing space and survives round-trip.
+    let src = "//! Heading\n//!\n//!   indented body\n\nfn main() {}\n";
+    check(src, src);
+}
+
+#[test]
+fn format_preserves_item_doc_continuation_indent() {
+    // `///` item docs are emitted from the raw comment stream and already
+    // preserve indentation; lock that in alongside the `//!` fix.
+    let src = "/// Targets:\n///   * Go\n///   * Rust\nfn main() {}\n";
+    let out = format_source(src, "test.bock").output;
+    assert!(
+        out.contains("///   * Go"),
+        "item doc indent flattened:\n{out}"
+    );
+    assert!(
+        out.contains("///   * Rust"),
+        "item doc indent flattened:\n{out}"
+    );
+    // Idempotent.
+    let out2 = format_source(&out, "test.bock").output;
+    assert_eq!(out, out2, "item doc indent not idempotent");
+}
+
+#[test]
+fn format_preserves_after_module_decl_doc_indent() {
+    // `//!` after a `module` decl: the parser consolidates it into
+    // `module.doc` and the formatter hoists module docs above the decl. The
+    // indentation of continuation lines must still survive the round-trip.
+    let src = "module Foo\n\n//! After-decl doc\n//!   indented\n\nfn main() {}\n";
+    let out = format_source(src, "test.bock").output;
+    assert!(out.contains("//!   indented"), "indent flattened:\n{out}");
+    // Idempotent on its own canonical form.
+    let out2 = format_source(&out, "test.bock").output;
+    assert_eq!(out, out2, "after-decl module doc not idempotent");
+}
