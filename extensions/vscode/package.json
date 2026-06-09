@@ -42,6 +42,12 @@
     "workspaceContains:**/*.bock"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Bock spawns the `bock` compiler as a language server (and shells out to the `bock` CLI for decision-manifest actions). Running these executables against unreviewed workspace content requires trust."
+    }
+  },
   "contributes": {
     "languages": [
       {
@@ -80,7 +86,8 @@
         "bock.lspPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Explicit path to the `bock` binary. If empty, the extension searches `PATH`."
+          "scope": "machine",
+          "markdownDescription": "Explicit path to the `bock` binary. Supports `${workspaceFolder}` and a leading `~`. If empty, the extension searches `PATH`. Machine-scoped: it can be set only in your user/machine settings, never by a workspace's `.vscode/settings.json` — this prevents a malicious repository from redirecting the language server to an arbitrary executable."
         },
         "bock.specPath": {
           "type": "string",

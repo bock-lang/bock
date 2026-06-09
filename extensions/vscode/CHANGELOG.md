@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Migrated to `vscode-languageclient` v10. The minimum supported editor
   version is now **VS Code 1.91.0** (raised from 1.75.0). (#290)
+- The extension now requires **workspace trust** before spawning the `bock`
+  language server / CLI. The server binary is resolved only from `PATH` or a
+  machine-scoped `bock.lspPath` (which supports `${workspaceFolder}` and `~`)
+  — it is no longer auto-discovered from a workspace's `target/` directory,
+  which was an arbitrary-code-execution risk when opening untrusted repos.
 
 ### Fixed
 
