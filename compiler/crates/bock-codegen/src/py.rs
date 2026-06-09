@@ -3633,15 +3633,48 @@ impl PyEmitCtx {
                 }
                 match items {
                     bock_ast::ImportItems::Named(names) => {
+                        // A braced cross-module enum VARIANT (`use core.compare.
+                        // {Ordering, Less, Equal, Greater}`) is NOT a free
+                        // module-level symbol in the emitted Python: the py backend
+                        // lowers a user enum variant to a dataclass named
+                        // `{Enum}_{Variant}` (`Ordering_Less`), never the bare
+                        // `Less`, so `from core.compare import Less` raises
+                        // `ImportError: cannot import name 'Less'` at runtime. Drop
+                        // the (unaliased) variant leaf names here: the variant is
+                        // reached at its use sites as the `Ordering_Less` dataclass
+                        // (the use-site lowering already emits that name), and the
+                        // implicit-import pass (`implicit_imports_for`) pulls that
+                        // dataclass into the module. This mirrors the js/ts filter
+                        // (js.rs `ImportItems::Named`, which drops non-js-value
+                        // leaves) and the Rust fix (rs.rs `emit_cross_module_uses`,
+                        // which reaches a variant via its enum type). The enum TYPE
+                        // name (`Ordering`) IS a real module-level symbol
+                        // (`Ordering = Union[Ordering_Less, …]`) and is kept, as is
+                        // any non-variant leaf. (`user_variant_for_name` returns
+                        // `Some` only for user enum variants and excludes the
+                        // built-in `Optional`/`Result`.) An *aliased* variant
+                        // (`{Less as L}`) is left untouched — aliased-variant
+                        // rebinding is a separate, unexercised concern.
                         let rendered: Vec<String> = names
                             .iter()
+                            .filter(|n| {
+                                n.alias.is_some()
+                                    || self.user_variant_for_name(&n.name.name).is_none()
+                            })
                             .map(|n| match &n.alias {
                                 Some(alias) => format!("{} as {}", n.name.name, alias.name),
                                 None => n.name.name.clone(),
                             })
                             .collect();
                         if rendered.is_empty() {
-                            self.writeln(&format!("import {module_path}"));
+                            // A genuinely-empty braced list (`use mod.{}`) keeps the
+                            // `import {module_path}` fallback. But if filtering the
+                            // variant leaves emptied a *non-empty* original list,
+                            // emit nothing — the dropped variants are covered by the
+                            // implicit-import pass + use sites, exactly as js does.
+                            if names.is_empty() {
+                                self.writeln(&format!("import {module_path}"));
+                            }
                         } else {
                             self.writeln(&format!(
                                 "from {module_path} import {}",
