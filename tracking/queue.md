@@ -12,7 +12,33 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-09 — main 82a25cb, 0 open PRs, clean, CI green. ★ VS CODE EXTENSION HARDENING COMPLETE (threads 1-4 + security).**
+_**Last reconciled 2026-06-09 — main 0567568, 0 open PRs, clean. ★★ v1.1 EDITOR-FEATURE WAVE COMPLETE — 12 PRs (#320–#331), 3 waves, operator-directed acceleration.**
+The operator un-gated Q-ext-feature-opportunities and directed maximum fan-out on v1.1 features not blocked by Bock-language v1.x.
+**WAVE 1 (6 file-disjoint lanes):** **#321** richer hover (the cached-but-never-rendered vocab now renders: operators, builtin
+methods w/ receiver candidates, in-file effect-operation hovers) · **#322** spec-panel ranked search (multi-term AND, title>body,
+word-boundary>substring; search moved extension-side) + keyboard nav · **#323** decisions filtering (type/pinned/min-confidence)
++ sort + jump-to-source-JSON · **#320** annotations group→file→usage tree + view badge + param-pattern summary · **#324** LSP
+find-references + validated rename + hierarchical document symbols (new `symbol_index.rs`; single-file scope preserved; a
+param-type goto-def gap fixed in passing) · **#325** `bock inspect air` (pretty + `--json`; the stable JSON contract for the AIR
+viewer; bock-cli-walker route, ZERO bock-air changes; mdBook docs in-PR). **WAVE 2:** **#328** client-side semantic tokens
+(standard legend only, vocab+effect-aware, string/comment-masked) · **#326** target preview (`--source-only` build → open
+emitted file(s) beside, ×5; path mapping verified against the real binary) + strictness status-bar picker (`[strictness]
+default` in bock.project, format-preserving line edit) · **#327** quick fixes (E4013 incl. Map contains→contains_key, E4014
+braced-import, E5004 insert-mut, W1001 remove-unused-import — every format verified at the emission site AND empirically) ·
+**#329** AIR tree viewer (bock.airView; consumes #325; validated against the real binary; failure modes render in-view) ·
+**#330** LSP inlay hints (unannotated let/let-mut/destructuring/for binders; error/unresolved/synthesized suppressed; 60-char
+budget). **WAVE 3:** **#331** docs reconcile (README v1.1 checkboxes — 7/8 shipped, migration assistant remains; CHANGELOG
+0.1.1; tooling.md LSP capability list corrected — the false "Completion" claim removed → **DV19 filed**, route to Design).
+**Extension tests 168 → 435; bock-lsp 84 → 98; workspace 2854/0; conformance untouched (no codegen changes).** Verification:
+per-wave combined-tree re-verify (wave-1 ext octopus 273 green + compiler octopus full 4-gate + mdbook; wave-2 ext octopus 400
+green; merged main diff-verified byte-identical to the verified octopus) + per-PR CI. PROCESS (logged in audit): wave-2/3 ext
+lanes deliberately shared two append-points (extension.ts wiring, package.json contributes) under the owner's fan-out
+directive — orchestrator resolved the trivial conflicts at merge via merge-from-main (no force-push, no stash); one engineer
+stall (#325 lane) recovered by the orchestrator (gate re-run + commit + PR). **Q-ext-feature-opportunities CLOSED.** NEW
+follow-ups filed below (Q-lsp-member-rename, Q-lsp-completion/DV19, Q-w1001-glob-internal-symbols, + 7 LOW). Remaining v1.1
+(compiler-side, unscoped): standalone LSP, incremental compilation + persistent cache, migration assistant. Compiler v1
+backlog still Design-gated (DQ29/DQ30, awaiting owner). ↓ —
+PRIOR: **Last reconciled 2026-06-09 — main 82a25cb, 0 open PRs, clean, CI green. ★ VS CODE EXTENSION HARDENING COMPLETE (threads 1-4 + security).**
 Second half of the operator-initiated extension workstream, all combined-tree re-verified locally before merge: **effect-flow fix**
 (**#313** — Q-ext-parsewithclause-effect-underreport: the effect-flow panel was under-reporting effects on the dominant single-line
 `-> T with E` signature; + Q-ext-splitbindings string-awareness); **THREAD 3 webview-infra consolidation** (disjoint pair **#314 ⨯
@@ -314,6 +340,42 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ## Ready
 
+### Editor v1.1 feature-wave follow-ups (filed 2026-06-09)
+
+- **[Q-lsp-member-rename] rename/find-references for methods & fields** — feature · blocked ·
+  `compiler/crates/bock-lsp/` + bock-air resolver · blocked-by: the resolver records no MethodCall/FieldAccess member
+  resolutions (needs bock-air data — cross-crate) · links #324 · note: OPEN from #324; rename/references correctly REFUSE
+  member positions today rather than mis-renaming. The natural next LSP lane once a bock-air session adds member
+  resolutions to the SymbolTable.
+- **[Q-lsp-completion] LSP completion provider (DV19)** — feature · blocked (DV19 → Design: implement vs reconcile §20.3) ·
+  `compiler/crates/bock-lsp/` · — · links DV19, #331 · note: the only §20.3 v1 LSP claim not implemented; vocab +
+  `symbol_index` + the checker are the obvious data sources if Design rules "implement".
+- **[Q-w1001-glob-internal-symbols] W1001 on unused glob imports leaks internal `__bock_impl__*` names** — bug · ready · LOW ·
+  `compiler/crates/bock-air/src/resolve.rs` (~1370) · — · links #327 · note: FOUND by #327 — an unused glob import emits one
+  W1001 per exported symbol INCLUDING the synthetic impl markers; user-facing internal-name leak.
+- **[Q-ext-effects-extract-comment-aware] `extractEffects` admits commented-out effect declarations** — bug · ready · LOW ·
+  `extensions/vscode/src/features/effect-analyzer.ts` · — · links #328 · note: FOUND by #328 (semantic tokens defends
+  locally by intersecting with masked text); effect-flow/hover consumers want the same comment/string-awareness.
+- **[Q-ext-decisions-binary-resolver-dup] decisions.ts re-implements pre-#318 binary resolution** — chore · ready · LOW ·
+  `extensions/vscode/src/features/decisions.ts` · — · links #326, #318 · note: FOUND by #326 — a private duplicate lacking
+  `~`/`${workspaceFolder}` expansion; swap to the now-exported `findBockLspBinary`.
+- **[Q-importdecl-span-tight] `ImportDecl.span` swallows the trailing newline** — bug · ready · LOW · parser · — · links #327 ·
+  note: FOUND by #327 — whole-decl diagnostics underline into the next line; cosmetic span tightening.
+- **[Q-parser-import-doc-stale] `parse_import_items` doc table claims an unreachable `.Name`→Named branch** — docs · ready ·
+  LOW · parser · — · links #327 · note: FOUND by #327; stale doc comment.
+- **[Q-ext-hover-line0] `renderEffectUsage` legacy falsy line-0 check** — bug · ready · LOW ·
+  `extensions/vscode/src/features/hover-render.ts` · — · links #321 · note: FOUND by #321 (left for zero behavior change);
+  the new `renderEffectOperation` handles line 0 correctly — reconcile the old path.
+- **[Q-lsp-prelude-types-singlefile] single-file LSP pipeline types `Ok`/`Err`/`Some` as `Fn(<error>)`** — gap · ready · LOW ·
+  `compiler/crates/bock-lsp/` · — · links #330 · note: FOUND by #330 (informational) — inlay hints on prelude-constructor
+  lets are correctly suppressed; they light up when the LSP pipeline gains real prelude types.
+- **[Q-ext-quickfix-backlog] next quick-fix candidates** — feature · deferred ·
+  `extensions/vscode/src/features/quick-fixes-logic.ts` · — · links #327 · note: E6001/W6002 + the ship/skip table in #327
+  are the seed; add fixes only where the emission-site format is verified.
+- **[Q-ext-migration-assistant] strictness migration assistant** — feature · deferred ·
+  `extensions/vscode/` · — · links #326 · note: the unshipped half of the README v1.1 "strictness picker + migration
+  assistant" line (the picker shipped in #326). Needs owner/Design scoping (what a migration actually rewrites).
+
 ### VS Code extension quality workstream (operator-initiated 2026-06-09)
 
 - **[Q-ext-reliability-hardening] activation resilience + data-feature reliability** — bug · **DONE (#308 + #309)** ·
@@ -372,13 +434,15 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   malicious workspace `.vscode/settings.json` cannot redirect it; preserved the contributor convenience SAFELY — `bock.lspPath`
   now expands `${workspaceFolder}`/`~` (an explicit user-settings opt-in, not auto-discovery); declared
   `capabilities.untrustedWorkspaces.supported: false`. Self-fixed same session; vscode-extension CI green, 168 tests.
-- **[Q-ext-feature-opportunities] richer-feature backlog (mostly the extension's own README v1.1 roadmap)** — feature · deferred ·
-  `extensions/vscode/` · — · links Q-ext-docs-and-quickwins · note: FOUND by the 2026-06-09 evaluation; deferred (post threads
-  3/4, operator-gated). Richer hover (operators/stdlib-methods are cached but never rendered; effect-operation hovers could reuse
-  the analyzer's `operationToEffect` map); spec-search ranking + keyboard nav (today substring-only, click-only); decisions
-  filtering by type/pinned/confidence + sort + a "jump to source JSON" action; annotations usage-analysis depth + a count badge.
-  Plus the README's stated v1.1 set: semantic tokens, inlay hints, code actions/quick-fixes, rename, find-references, AIR viewer,
-  target-preview.
+- **[Q-ext-feature-opportunities] richer-feature backlog (mostly the extension's own README v1.1 roadmap)** — feature ·
+  **DONE (#320–#323, #326–#329 ext · #324/#330 LSP · #325 CLI · #331 docs)** · `extensions/vscode/` +
+  `compiler/crates/{bock-lsp,bock-cli}` · — · links Q-ext-docs-and-quickwins, DV19 · note: **CLOSED 2026-06-09** — the operator
+  un-gated it and directed the acceleration. All four richer-feature threads shipped (hover #321, spec-search #322, decisions
+  #323, annotations #320) and 7/8 of the README v1.1 roadmap (semantic tokens #328, inlay hints #330, quick fixes #327,
+  rename + find-references #324, AIR viewer #329 over #325, target preview + strictness picker #326); the strictness
+  MIGRATION ASSISTANT is the one unshipped half → Q-ext-migration-assistant. Docs reconciled in #331. Follow-ups filed in
+  "Editor v1.1 feature-wave follow-ups" below. ORIG: FOUND by the 2026-06-09 evaluation (richer hover; spec-search ranking;
+  decisions filtering; annotations depth; + the README v1.1 set).
 
 - **[Q-vscode-langclient-v10] migrate VS Code extension to vscode-languageclient v10 API** — chore/bug · **DONE (#290)** ·
   `extensions/vscode/` (`tsconfig.json`, `test/tsconfig.json`, `package.json`, lockfile) · — · links #285, #290 · note: **DONE
