@@ -12,7 +12,22 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-09 — main 5137a62, 0 open PRs, clean, CI green. ★ NIGHT WIND-DOWN.**
+_**Last reconciled 2026-06-09 — main 5994e9a, 0 open PRs, clean, CI green. ★ BACKLOG-DRAIN + DESIGN-GATE.**
+Solo engineer lane (the smaller of the two open `ready` items; the other is `solo` and they collide on `py.rs`, so they
+sequence). **#306** Q-py-enum-variant-import (python import lowering drops **unaliased** braced enum-variant leaf names from
+`from {module} import …` — the variant is emitted as the dataclass `Ordering_Less`, not `Less`, so the bare-name import raised
+`ImportError`; reached now via use-site + implicit-import, mirroring the js/ts `Named` filter and the #303 rust fix; `python`
+re-added to the variant-bracing fixture). PR-own-CI was the combined-tree check (solo on unchanged base): full CI green — all 6
+test cells, clippy, blocking examples matrix, stdlib-fmt; conformance REQUIRE=all **824/0/0** ×5. Orchestrator re-verified the
+diff scope (2 owned files) + CI before squash-merge. **1 CLOSED.** **The enum-variant-import mirror is now COMPLETE across
+js/ts/python/rust** (go never affected). **BOARD NOW DESIGN-GATED:** the two remaining backlog items both await an owner ruling
+and there is **no autonomous `ready` engineering left**: (1) **Q-list-mut-pop-insert-remove → DQ30 (NEW, escalated)** — §18.3 is
+silent on `pop`/`insert`/`remove`/`reverse` return contracts (contested: `remove` by-index return type, OOB behavior,
+`pop`-on-empty); surfaced to owner, deferred ("will circle back"); (2) **Q-equatable-gating-user-types → DQ29** (still pending).
+**Awaiting owner: DQ30 ruling** (List mutator signatures — recommended **Optional-safe**: `pop`→`Optional[T]`, `remove(i)`→`Optional[T]`,
+`insert(i,v)`→`Void`, `reverse`→`Void`, all `mut self`) **+ DQ29 ruling** (Equatable `==`/`!=` gating — recommended **R1
+auto-conform**). ↓ —
+PRIOR: **Last reconciled 2026-06-09 — main 5137a62, 0 open PRs, clean, CI green. ★ NIGHT WIND-DOWN.**
 Disjoint pair (bock-codegen ⨯ bock-fmt): **#303** Q-rust-enum-variant-import (rust drops braced enum-VARIANT items from a
 `use` and imports the enum TYPE instead → no more `E0432`; variant-bracing fixture builds+runs ×5) + **#304**
 Q-fmt-doccomment-indent (preserve `//!` continuation-line indentation via a ZERO-RIPPLE bock-fmt seam — re-derive from the raw
@@ -347,13 +362,17 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   by its enum TYPE under the same module path (`use crate::core::compare::{Comparable, Ordering};` instead of the E0432 `{Less,
   Equal, Greater}`); rust reaches variants as `Ordering::Less`. New `enumvarimport_braced_variants` fixture builds+runs (js/ts/
   rust/go). **FOUND** → Q-py-enum-variant-import (Python has the SAME class of bug). ORIG: FOUND 2026-06-08 (#299).
-- **[Q-py-enum-variant-import] python import lowering emits `from … import <Variant>` but the variant is class `Enum_Variant`** — bug · ready · LOW ·
-  `compiler/crates/bock-codegen/src/py.rs` (import lowering) · — · links #303 · note: FOUND 2026-06-09 (#303). Bracing
-  cross-module enum variants (`use core.compare.{Ordering, Less, Equal, Greater}`) lowers on Python to `from core.compare import
-  Ordering, Less, Equal, Greater`, but a variant is emitted as a module-level class `Ordering_Less` (not `Less`) → runtime
-  `ImportError: cannot import name 'Less'`. First exposed by #303's variant-bracing fixture (which OMITS python pending this fix).
-  Mirror the #303 rust fix: drop the variant from the `from … import …` (reach it as `Ordering_Less`). Re-add `python` to
-  `enumvarimport_braced_variants`'s `// EXPECT: targets` once fixed.
+- **[Q-py-enum-variant-import] python import lowering emits `from … import <Variant>` but the variant is class `Enum_Variant`** — bug · **DONE (#306)** · LOW ·
+  `compiler/crates/bock-codegen/src/py.rs` (import lowering) · — · links #303, #306 · note: **DONE 2026-06-09 (#306).** The
+  `ImportItems::Named` arm now filters out **unaliased** braced leaf names that resolve to a registered user enum variant
+  (`user_variant_for_name`, which excludes built-in Optional/Result) before rendering `from {module} import …`; the variant is
+  reached at its use site as the `{Enum}_{Variant}` dataclass (`Ordering_Less`), which the implicit-import pass pulls in — exactly
+  mirroring the js/ts `Named` filter and the #303 rust fix. The enum TYPE `Ordering` (a real module-level `Union` alias) and all
+  non-variant leaves are kept; an *aliased* variant (`{Less as L}`) is left untouched (separate, unexercised). A list filtered
+  to empty emits nothing (only a genuinely-empty `{}` keeps the bare `import {module}`). `python` re-added to the
+  `enumvarimport_braced_variants` fixture targets → now green ×5 (conformance 824/0/0). ORIG: FOUND 2026-06-09 (#303). No
+  follow-ups. **NB:** mirror complete — all of js/ts/python/rust now drop braced enum-variant items; go was never affected
+  (package-level types, no import).
 - **[Q-rust-host-sleep-tokio-dep] rust no-handler host `sleep` needs a tokio scaffold dep** — bug · **DONE (#301)** ·
   `compiler/crates/bock-codegen/src/scaffold.rs` · — · links #297, #301, Q-clock-handler-routing, Q-time-shim-path · note: **DONE
   2026-06-08 (#301).** The rust scaffold's tokio trigger keyed only on `bock_runtime.rs` presence, so the host-sleep crate (which
@@ -369,10 +388,15 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
   `@derive` is v1.x-reserved — so a strict `require_equatable_operand` gate would reject idiomatic `record == record` with no v1
   escape. That's a design decision, not impl-completeness → **DQ29** (candidate resolutions R1 auto-conform / R2 defer-to-derive /
   R3 strict-reject[rejected]). Un-block + implement once Design rules. Same `infer_binop` mechanism as #296 once ruled.
-- **[Q-list-mut-pop-insert-remove] `pop`/`insert`/`remove`/`reverse` mutating-method semantics** — impl · ready ·
-  `compiler/crates/bock-types`, `compiler/crates/bock-codegen` · — · links DQ18, #269 · note: FOUND 2026-06-06 (#269). DQ18 did
-  `push`/`append` (`mut self` Void); the other in-place mutators have distinct shapes (`pop` → `Optional[T]`, `insert`/`remove`
-  by index, `reverse` → Void) and were left value-returning. Apply the `mut self` model with the right return types + codegen ×5.
+- **[Q-list-mut-pop-insert-remove] `pop`/`insert`/`remove`/`reverse` mutating-method semantics** — impl/design · **blocked · escalated → Design (DQ30)** ·
+  `compiler/crates/bock-types`, `compiler/crates/bock-codegen` · — · blocked-by DQ30 · links DQ18, DQ30, #269 · note:
+  **ESCALATED 2026-06-09 (DQ30).** DQ18 ruled `push`/`append` (`mut self` Void); these four were left value-returning
+  (checker.rs:4607-4620 still type `pop`/`insert`/`remove`/`reverse` as the placeholder receiver `List[T]`). Applying the
+  `mut self` model needs the RETURN CONTRACT decided first, and §18.3 is **silent** on it — the contested axes (`remove` by-index
+  return type [`Optional[T]` vs `T`], out-of-bounds behavior, `pop`-on-empty) are a Design call, not impl-completeness (CLAUDE.md:
+  "undecided behavior → Design"). Surfaced to the owner 2026-06-09; owner deferred ("will circle back with the design decision").
+  Un-block + implement once DQ30 rules; the codegen is then a direct extension of the DQ18 mut-self lowering table ×5. ORIG: FOUND
+  2026-06-06 (#269).
 - **[Q-py-collections-builtin-shadow] type-zoo python locals named `list`/`map`/`set` shadow builtins** — bug · **DONE (#262 — py codegen renames builtin-shadowing `let`s to `list__bN`)** ·
   `examples/spec-exercisers/type-zoo/` + `compiler/crates/bock-codegen/src/py.rs` · — · links #259 · note: FOUND 2026-06-05,
   surfaced (not caused) by #259 — the py statement-`match` fix de-masked type-zoo py, which then hits `keys = list(map.keys())`

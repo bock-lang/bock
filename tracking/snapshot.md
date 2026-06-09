@@ -11,11 +11,11 @@ changes.
 
 ---
 
-## Build status (as of main 5137a62, 2026-06-09)
+## Build status (as of main 5994e9a, 2026-06-09)
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (0 failed — #303 (rust enum-variant import) + #304 (doc-comment indentation) atop #299/#301 + the #296/#297 pair + #294 + wave-3/2; conformance 0/failed ×5; orchestrator re-verified each tree before merge) |
+| `cargo test --workspace` | passing (0 failed — #306 (python enum-variant import drop, completing the js/ts/python/rust mirror) atop #303/#304 + #299/#301 + the #296/#297 pair + #294 + wave-3/2; conformance **824/0/0** ×5; orchestrator re-verified the diff scope + full CI before squash-merge) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |

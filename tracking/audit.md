@@ -2224,3 +2224,22 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
     16). Remaining reds: react-components js/ts (DQ27), type-zoo go (DQ28) + Q-go-chained-combinator, Q-nested-compose-jstsgo,
     a few per-backend residuals + LOW Q-propagate-exprpos-shared. NEXT (operator's call): the DQ27/DQ28 rulings, then the
     residual per-backend bugs.
+
+[2026-06-09 14:47 UTC] ✦ BACKLOG-DRAIN + DESIGN-GATE — #306 merged; DQ30 filed; board fully Design-gated
+  Input: "pick up where we left off" off the 2026-06-09 night wind-down (main 5994e9a base 58687ef, 0 open PRs, clean, CI green).
+    Open backlog was 2 `ready` items (Q-py-enum-variant-import LOW · py.rs; Q-list-mut-pop-insert-remove · solo) + 1 blocked
+    (Q-equatable → DQ29). The two `ready` items both touch py.rs → not a clean disjoint pair → sequence, smaller first.
+  Options: (a) dispatch both ready items in parallel — rejected (py.rs collision); (b) dispatch Q-py-enum solo, then scope
+    Q-list-mut — chosen; (c) ask the operator which to do — unnecessary for the small isolated mirror.
+  Decision: dispatched ONE worktree-isolated engineer for Q-py-enum-variant-import (mirror of #303 / the js Named filter), then
+    on scoping Q-list-mut discovered §18.3 is SILENT on the `pop`/`insert`/`remove`/`reverse` return contract → escalated as
+    DQ30 (did NOT dispatch an engineer to guess spec semantics). Surfaced DQ30 + the still-pending DQ29 to the owner; owner
+    deferred both ("will circle back with the design decision"). Closed the block with this batched tracking PR.
+  Reasoning: #306 was solo on an unchanged base, so its own CI is the combined-tree check — re-verified diff scope (2 owned
+    files) + full green CI (6 test cells, clippy, blocking examples matrix, stdlib-fmt; conformance 824/0/0 ×5) before
+    squash-merge, per the orchestrator gate-re-verify duty. Q-list-mut's contested axes (remove by-index return, OOB behavior,
+    pop-on-empty) are a Design call (CLAUDE.md "undecided behavior → Design"), mirroring how DQ29 was handled (engineer
+    investigated, stopped, escalated — did not guess).
+  Follow-up: AWAITING OWNER — DQ30 (List mutator signatures; recommend A Optional-safe) + DQ29 (Equatable gating; recommend R1
+    auto-conform). With both pending there is NO autonomous `ready` engineering left — the v1 backlog is fully Design-gated.
+    STATE: main = 5994e9a (+ this tracking PR), 0 open PRs after merge, clean, CI green, all worktrees/branches cleaned.

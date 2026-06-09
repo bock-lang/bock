@@ -393,4 +393,15 @@ prioritization for the rest of the open queue (folded into design-questions.md; 
 **Options:** **(R1)** structurally auto-conform records/enums to `Equatable`, then gate `==`/`!=`; **(R2)** defer `==`/`!=` gating to the v1.x `@derive` era (leave `==`/`!=` ungated for now); **(R3)** strict gate requiring explicit `impl Equatable` — **rejected** (breaks idiomatic record equality, no v1 escape hatch).
 **Recommendation:** none on the merits (Design's call). Note R1 and R2 both keep current code working; R1 also enables the gate now. The impl is ready to wire (same `infer_binop` mechanism as #296) once ruled. Non-blocking — `==`/`!=` stays ungated meanwhile (status quo), so nothing regresses.
 **Awaiting:** Design ruling on DQ29 (R1 / R2 / other).
-**Status:** pending
+**Status:** pending — re-surfaced to owner 2026-06-09 14:47 UTC alongside DQ30; owner deferred ("will follow-up with a decision").
+
+## [2026-06-09 14:47 UTC] DQ30 — return-contract for the in-place `List` mutators `pop`/`insert`/`remove`/`reverse`
+
+**Type:** scope
+**Severity:** low
+**Trigger:** with the queue drained to its last two `ready`/blocked items, the orchestrator scoped Q-list-mut-pop-insert-remove for dispatch and found §18.3 is **silent** on the return contract of the four remaining in-place List mutators. DQ18 ruled only `push`/`append` (`mut self` → `Void`); `pop`/`insert`/`remove`/`reverse` are still placeholder-typed as the value-returning receiver `List[T]` (checker.rs:4607-4620). The contested axes (`remove` by-index return type `Optional[T]` vs `T`; out-of-bounds behavior; `pop`-on-empty) are a Design call, not impl-completeness — dispatching an engineer to invent the semantics would violate CLAUDE.md "undecided behavior → Design".
+**Context:** §18.3 / DQ18 (changelog `20260606-list-mutation-map-contains`). The DQ18 mut-self lowering table already exists for `push`/`append` ×5; once the return contract is fixed, the four mutators are a direct extension (checker stamp + per-backend arm). `reverse() -> Void` is unambiguous; the ambiguity is concentrated in `pop`/`insert`/`remove`.
+**Options:** **(A) Optional-safe** — `pop()→Optional[T]` (None on empty), `remove(i)→Optional[T]` (None on OOB), `insert(i,v)→Void` (abort on OOB), `reverse()→Void`, all `mut self`; symmetric with the existing `get`/`index_of` Optional returns, no surprise panics on `remove`. **(B) Rust-style panic** — as (A) but `remove(i)→T` aborting on OOB (an OOB index is a programmer error; matches `Vec::remove`). **(C) reverse-only now, defer the rest** — land `reverse()→Void` and defer `pop`/`insert`/`remove` to v1.x.
+**Recommendation:** **(A) Optional-safe** — most consistent with Bock's Optional-everywhere ethos and the existing List read methods; no new panic surface. Non-blocking — the four methods stay placeholder-typed meanwhile (no regression; no example/stdlib calls them as mutators yet).
+**Awaiting:** Design ruling on DQ30 (A / B / C / other).
+**Status:** pending — surfaced to owner 2026-06-09 14:47 UTC; owner deferred ("will circle back with the design decision").
