@@ -1,83 +1,27 @@
-// Minimal webview host used by feature panels (spec, effects, decisions).
-// Subclasses override `render()` to produce HTML; this class handles
-// creation, disposal, and a nonce-protected CSP boilerplate.
+// Webview infrastructure shared by feature panels (spec, effects, decisions,
+// annotations, error explanations).
 //
-// `WebviewManager` is a lower-level alternative used by features that
-// want to drive the panel imperatively (e.g. error explanations, where
-// the rendered content depends on the specific diagnostic code).
+// `WebviewManager` is the primary host: features build HTML dynamically and
+// hand it to `create()`, which wraps it with CSP boilerplate, theme-aware
+// styles, and nonce-scoped inline scripts, keeping a single panel per
+// `viewType`. Standalone panels that manage their own `WebviewPanel` (the
+// spec panel, effect flow) reuse the exported `nonce()` and `escapeHtml()`
+// helpers here rather than re-deriving them.
 
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { renderMarkdown } from './markdown';
 
-export abstract class WebviewPanelBase {
-  protected panel?: vscode.WebviewPanel;
-
-  constructor(
-    protected readonly viewType: string,
-    protected readonly title: string,
-    protected readonly ctx: vscode.ExtensionContext,
-  ) {}
-
-  show(column: vscode.ViewColumn = vscode.ViewColumn.Beside): void {
-    if (this.panel) {
-      this.panel.reveal(column);
-      return;
-    }
-    this.panel = vscode.window.createWebviewPanel(
-      this.viewType,
-      this.title,
-      column,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [
-          vscode.Uri.joinPath(this.ctx.extensionUri, 'assets'),
-          vscode.Uri.joinPath(this.ctx.extensionUri, 'out'),
-        ],
-      },
-    );
-    this.panel.onDidDispose(() => (this.panel = undefined));
-    this.panel.webview.html = this.wrap(this.render());
-  }
-
-  protected abstract render(): string;
-
-  protected refresh(): void {
-    if (this.panel) this.panel.webview.html = this.wrap(this.render());
-  }
-
-  private wrap(body: string): string {
-    const nonce = randomNonce();
-    const csp = [
-      "default-src 'none'",
-      `style-src 'unsafe-inline'`,
-      `script-src 'nonce-${nonce}'`,
-    ].join('; ');
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="${csp}" />
-  <title>${escapeHtml(this.title)}</title>
-  <style>
-    body { font-family: var(--vscode-font-family); padding: 1rem; }
-    h1, h2, h3 { color: var(--vscode-editor-foreground); }
-    code { font-family: var(--vscode-editor-font-family); background: var(--vscode-textBlockQuote-background); padding: 0.1em 0.3em; border-radius: 3px; }
-    a { color: var(--vscode-textLink-foreground); }
-  </style>
-</head>
-<body>${body}</body>
-</html>`;
-  }
-}
-
-function randomNonce(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let out = '';
-  for (let i = 0; i < 32; i++) {
-    out += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return out;
+/**
+ * Generate a fresh CSP nonce.
+ *
+ * Uses Node's CSPRNG (`crypto.randomBytes`) rather than `Math.random()`:
+ * a content-security-policy nonce is a security boundary — it gates which
+ * inline scripts the webview will execute — so it must be unpredictable.
+ * Returns an attribute-safe base64 encoding of 16 random bytes.
+ */
+export function nonce(): string {
+  return crypto.randomBytes(16).toString('base64');
 }
 
 export function escapeHtml(s: string): string {
@@ -91,10 +35,10 @@ export function escapeHtml(s: string): string {
 
 // ─── WebviewManager ─────────────────────────────────────────────────────────
 //
-// Manager-style helper for features that build HTML dynamically instead of
-// subclassing `WebviewPanelBase`. Keeps a single panel per `viewType` so
-// repeated invocations update the existing panel rather than spawning new
-// ones (matches the pattern of the spec panel and decision manifest).
+// Manager-style helper for features that build HTML dynamically. Keeps a
+// single panel per `viewType` so repeated invocations update the existing
+// panel rather than spawning new ones (matches the pattern of the spec panel
+// and decision manifest).
 
 export interface WebviewContent {
   body: string;
@@ -217,14 +161,14 @@ export class WebviewManager {
   }
 
   private wrap(title: string, content: WebviewContent): string {
-    const nonce = randomNonce();
+    const pageNonce = nonce();
     const csp = [
       "default-src 'none'",
       `style-src 'unsafe-inline'`,
-      `script-src 'nonce-${nonce}'`,
+      `script-src 'nonce-${pageNonce}'`,
     ].join('; ');
     const scripts = (content.scripts ?? [])
-      .map((src) => `<script nonce="${nonce}">${src}</script>`)
+      .map((src) => `<script nonce="${pageNonce}">${src}</script>`)
       .join('\n');
     return `<!DOCTYPE html>
 <html lang="en">
