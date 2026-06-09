@@ -2,15 +2,18 @@
 //
 // Scans every `.bock` file in the workspace for top-level annotations,
 // groups them by annotation name (e.g. `@managed`, `@context`,
-// `@performance`), and exposes them as a tree in the Explorer. Each
-// leaf carries the source location and a preview of the annotation's
-// parameters; clicking jumps to the file. Hover on either level pulls
-// the annotation's purpose and spec link from the compiler-emitted
-// vocabulary so the UI stays in sync with the language.
+// `@performance`), and exposes them as a three-level tree in the
+// Explorer: annotation group (usage + file counts) → file (per-file
+// count) → usage. Each leaf carries the source location and a preview
+// of the annotation's parameters; clicking jumps to the file. Hover on
+// any level pulls the annotation's purpose and spec link from the
+// compiler-emitted vocabulary so the UI stays in sync with the
+// language. The view badge carries the workspace-wide usage total.
 //
 // A bundled webview (`bock.annotations.showUsage`) renders a usage
 // analysis for a single annotation kind — its purpose, the systems it
-// influences, and every occurrence in the workspace.
+// influences, a per-file breakdown, the most common parameter
+// patterns, and every occurrence in the workspace.
 
 import * as vscode from 'vscode';
 import * as path from 'path';
@@ -19,22 +22,44 @@ import { VocabService } from '../vocab';
 import type { Annotation } from '../shared/types';
 import { WebviewManager, escapeHtml } from '../shared/webview';
 import { truncate } from '../shared/strings';
-import { scanText, type AnnotationUsage } from './annotations-scan';
+import {
+  scanText,
+  aggregateByFile,
+  summarizeParams,
+  type AnnotationUsage,
+  type FileUsageAggregate,
+} from './annotations-scan';
 
-// Re-export the pure scanner so existing importers (and tests) can reach it
-// through this module too. The scanning logic itself lives in
-// `annotations-scan.ts` so it can be unit-tested without pulling in the
-// `vscode-languageclient` / webview dependency chain.
-export { scanText, type AnnotationUsage } from './annotations-scan';
+// Re-export the pure scanner and aggregation helpers so existing importers
+// (and tests) can reach them through this module too. The logic itself
+// lives in `annotations-scan.ts` so it can be unit-tested without pulling
+// in the `vscode-languageclient` / webview dependency chain.
+export {
+  scanText,
+  aggregateByFile,
+  summarizeParams,
+  type AnnotationUsage,
+  type FileUsageAggregate,
+  type ParamPattern,
+} from './annotations-scan';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type AnnoNode = GroupNode | UsageNode;
+type AnnoNode = GroupNode | FileNode | UsageNode;
 
 interface GroupNode {
   kind: 'group';
   name: string;
   usages: AnnotationUsage[];
+  /** Per-file breakdown of `usages` (sorted by path; usages by location). */
+  files: FileUsageAggregate[];
+}
+
+interface FileNode {
+  kind: 'file';
+  /** Annotation name this file group belongs to. */
+  name: string;
+  file: FileUsageAggregate;
 }
 
 interface UsageNode {
@@ -60,11 +85,15 @@ class AnnotationsTreeProvider implements vscode.TreeDataProvider<AnnoNode> {
       else byName.set(u.name, [u]);
     }
     const groups: GroupNode[] = Array.from(byName.entries()).map(
-      ([name, group]) => ({
-        kind: 'group',
-        name,
-        usages: group.sort(sortByLocation),
-      }),
+      ([name, group]) => {
+        const sorted = group.sort(sortByLocation);
+        return {
+          kind: 'group' as const,
+          name,
+          usages: sorted,
+          files: aggregateByFile(sorted),
+        };
+      },
     );
     groups.sort((a, b) => a.name.localeCompare(b.name));
     this.groups = groups;
@@ -74,35 +103,55 @@ class AnnotationsTreeProvider implements vscode.TreeDataProvider<AnnoNode> {
   getChildren(element?: AnnoNode): AnnoNode[] {
     if (!element) return this.groups;
     if (element.kind === 'group') {
-      return element.usages.map((usage) => ({ kind: 'usage', usage }));
+      return element.files.map((file) => ({
+        kind: 'file',
+        name: element.name,
+        file,
+      }));
+    }
+    if (element.kind === 'file') {
+      return element.file.usages.map((usage) => ({ kind: 'usage', usage }));
     }
     return [];
   }
 
   getTreeItem(element: AnnoNode): vscode.TreeItem {
     if (element.kind === 'group') {
-      const label = `@${element.name} (${element.usages.length})`;
       const item = new vscode.TreeItem(
-        label,
+        `@${element.name}`,
         vscode.TreeItemCollapsibleState.Collapsed,
       );
+      const total = element.usages.length;
+      const fileCount = element.files.length;
+      item.description = `${total} ${plural(total, 'usage')} in ${fileCount} ${plural(fileCount, 'file')}`;
       item.iconPath = new vscode.ThemeIcon('tag');
       item.contextValue = 'annotationGroup';
       item.tooltip = buildGroupTooltip(element.name, this.vocab.getAnnotation(element.name));
       return item;
     }
 
+    if (element.kind === 'file') {
+      const { file } = element;
+      const item = new vscode.TreeItem(
+        relativePath(file.uri),
+        vscode.TreeItemCollapsibleState.Collapsed,
+      );
+      item.description = String(file.usages.length);
+      // `resourceUri` + ThemeIcon.File lets the active file-icon theme pick
+      // the icon; the explicit label above keeps the relative path visible.
+      item.resourceUri = file.uri;
+      item.iconPath = vscode.ThemeIcon.File;
+      item.contextValue = 'annotationFile';
+      item.tooltip = `${file.fsPath} — ${file.usages.length} @${element.name} ${plural(file.usages.length, 'usage')}`;
+      return item;
+    }
+
     const { usage } = element;
     const ann = this.vocab.getAnnotation(usage.name);
-    const folder = vscode.workspace.getWorkspaceFolder(usage.uri);
-    const relative = folder
-      ? path.relative(folder.uri.fsPath, usage.uri.fsPath)
-      : usage.uri.fsPath;
-    const label = usage.params
-      ? `${truncate(usage.params, 60)} — ${relative}:${usage.line + 1}`
-      : `${relative}:${usage.line + 1}`;
+    const label = usage.params ? truncate(usage.params, 60) : `@${usage.name}`;
 
     const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+    item.description = `Ln ${usage.line + 1}`;
     item.iconPath = new vscode.ThemeIcon('symbol-field');
     item.tooltip = buildUsageTooltip(usage, ann);
     item.contextValue = 'annotationUsage';
@@ -113,6 +162,17 @@ class AnnotationsTreeProvider implements vscode.TreeDataProvider<AnnoNode> {
     };
     return item;
   }
+}
+
+/** Naive pluralizer for the count labels (`1 usage`, `2 usages`). */
+function plural(n: number, word: string): string {
+  return n === 1 ? word : `${word}s`;
+}
+
+/** Workspace-relative path for display, falling back to the full path. */
+function relativePath(uri: vscode.Uri): string {
+  const folder = vscode.workspace.getWorkspaceFolder(uri);
+  return folder ? path.relative(folder.uri.fsPath, uri.fsPath) : uri.fsPath;
 }
 
 function sortByLocation(a: AnnotationUsage, b: AnnotationUsage): number {
@@ -251,6 +311,15 @@ export function registerAnnotations(
     const all: AnnotationUsage[] = [];
     for (const usages of byFile.values()) all.push(...usages);
     provider.setUsages(all);
+    // Surface the workspace-wide total on the view container. Cleared when
+    // the workspace has no annotations so the icon stays quiet.
+    view.badge =
+      all.length > 0
+        ? {
+            value: all.length,
+            tooltip: `${all.length} annotation usage${all.length === 1 ? '' : 's'} in the workspace`,
+          }
+        : undefined;
   };
 
   // Full rescan: initial load and the explicit refresh command only.
@@ -300,7 +369,7 @@ export function registerAnnotations(
     vscode.commands.registerCommand(
       'bock.annotations.showUsage',
       (node: AnnoNode | undefined) => {
-        const name = node?.kind === 'group'
+        const name = node?.kind === 'group' || node?.kind === 'file'
           ? node.name
           : node?.kind === 'usage'
             ? node.usage.name
@@ -369,8 +438,45 @@ function renderUsageHtml(
     ? `<tr><th>Spec</th><td><a href="#" class="bock-spec-link" data-spec-ref="${escapeHtml(ann.spec_ref)}">${escapeHtml(ann.spec_ref)} →</a></td></tr>`
     : '';
   const influencesRow = `<tr><th>Influences</th><td>${escapeHtml(affectedSystems(group.name))}</td></tr>`;
-  const countRow = `<tr><th>Occurrences</th><td>${group.usages.length}</td></tr>`;
+  const countRow = `<tr><th>Occurrences</th><td>${group.usages.length} in ${group.files.length} file${group.files.length === 1 ? '' : 's'}</td></tr>`;
   const meta = `<table>${paramsRow}${specRow}${influencesRow}${countRow}</table>`;
+
+  // Per-file breakdown, heaviest files first (ties broken by path so the
+  // table is deterministic).
+  const fileRows = [...group.files]
+    .sort(
+      (a, b) =>
+        b.usages.length - a.usages.length ||
+        a.fsPath.localeCompare(b.fsPath),
+    )
+    .map(
+      (f) =>
+        `<tr><td>${escapeHtml(f.fsPath)}</td><td>${f.usages.length}</td></tr>`,
+    )
+    .join('\n');
+  const fileTable = `<h2>Files</h2><table><tr><th>File</th><th>Count</th></tr>${
+    fileRows || '<tr><td class="bock-missing" colspan="2">None.</td></tr>'
+  }</table>`;
+
+  // Distinct parameter patterns, most frequent first (top 10).
+  const PARAM_PATTERN_LIMIT = 10;
+  const patterns = summarizeParams(group.usages);
+  const shown = patterns.slice(0, PARAM_PATTERN_LIMIT);
+  const patternRows = shown
+    .map((p) => {
+      const text = p.params
+        ? `<code>${escapeHtml(truncate(p.params, 100))}</code>`
+        : '<span class="bock-missing">(no parameters)</span>';
+      return `<tr><td>${text}</td><td>${p.count}</td></tr>`;
+    })
+    .join('\n');
+  const overflow =
+    patterns.length > shown.length
+      ? `<p class="bock-missing">… and ${patterns.length - shown.length} more distinct pattern${patterns.length - shown.length === 1 ? '' : 's'}.</p>`
+      : '';
+  const patternTable = `<h2>Parameter patterns</h2><table><tr><th>Pattern</th><th>Count</th></tr>${
+    patternRows || '<tr><td class="bock-missing" colspan="2">None.</td></tr>'
+  }</table>${overflow}`;
 
   const items = group.usages
     .map((u, i) => {
@@ -399,7 +505,7 @@ document.querySelectorAll('.bock-usage').forEach((el) => {
   });
 });`;
   return {
-    body: `${header}${purpose}${meta}${usageList}`,
+    body: `${header}${purpose}${meta}${fileTable}${patternTable}${usageList}`,
     script,
   };
 }

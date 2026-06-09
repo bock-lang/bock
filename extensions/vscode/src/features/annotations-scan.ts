@@ -109,6 +109,87 @@ export function nextTripleState(line: string, inTriple: boolean): boolean {
   return false;
 }
 
+// ─── Pure usage aggregations ───────────────────────────────────────────────
+//
+// These power the per-file tree depth, the view badge, and the usage
+// webview's breakdown tables. They live here (not in `annotations.ts`) so
+// the headless Mocha suite can exercise them without dragging in the
+// `vscode-languageclient` / webview dependency chain.
+
+/** Usages of one annotation grouped under a single file. */
+export interface FileUsageAggregate {
+  /** Stable grouping key — the file URI's `toString()`. */
+  key: string;
+  /** Filesystem path of the file (display / sorting). */
+  fsPath: string;
+  /** The file's URI (taken from the first usage seen for the file). */
+  uri: vscode.Uri;
+  /** This file's usages, sorted by line then column. */
+  usages: AnnotationUsage[];
+}
+
+/**
+ * Group usages by their containing file.
+ *
+ * Files are sorted by `fsPath`; within each file, usages are sorted by
+ * line then column. Input order is irrelevant. An empty input yields an
+ * empty array.
+ */
+export function aggregateByFile(
+  usages: AnnotationUsage[],
+): FileUsageAggregate[] {
+  const byKey = new Map<string, FileUsageAggregate>();
+  for (const u of usages) {
+    const key = u.uri.toString();
+    const entry = byKey.get(key);
+    if (entry) entry.usages.push(u);
+    else byKey.set(key, { key, fsPath: u.uri.fsPath, uri: u.uri, usages: [u] });
+  }
+  const files = Array.from(byKey.values());
+  for (const file of files) {
+    file.usages.sort(
+      (a, b) => (a.line !== b.line ? a.line - b.line : a.column - b.column),
+    );
+  }
+  files.sort((a, b) => a.fsPath.localeCompare(b.fsPath));
+  return files;
+}
+
+/** One distinct parameter pattern and how often it occurs. */
+export interface ParamPattern {
+  /** Raw parameter text; `''` for usages without arguments. */
+  params: string;
+  /** Number of usages carrying exactly this parameter text. */
+  count: number;
+}
+
+/**
+ * Summarize the distinct parameter strings across a set of usages.
+ *
+ * Usages without arguments are counted under the empty string (callers
+ * render that however they like, e.g. "(no parameters)"). Patterns are
+ * sorted by descending count, ties broken by ascending parameter text so
+ * the output is deterministic. When `limit` is given, only the top
+ * `limit` patterns are returned.
+ */
+export function summarizeParams(
+  usages: AnnotationUsage[],
+  limit?: number,
+): ParamPattern[] {
+  const counts = new Map<string, number>();
+  for (const u of usages) {
+    counts.set(u.params, (counts.get(u.params) ?? 0) + 1);
+  }
+  const patterns = Array.from(counts.entries()).map(([params, count]) => ({
+    params,
+    count,
+  }));
+  patterns.sort(
+    (a, b) => b.count - a.count || a.params.localeCompare(b.params),
+  );
+  return limit === undefined ? patterns : patterns.slice(0, limit);
+}
+
 function extractParams(line: string, atColumn: number): string {
   const open = line.indexOf('(', atColumn);
   if (open === -1) return '';
