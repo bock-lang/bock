@@ -6,16 +6,16 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 69
+- Ready: 70
 - v1-blocking: 2
 - Blocked: 22
 - Deferred: 1
 
-## Build status (as of main 2b0f8c2, 2026-06-08)
+## Build status (as of main 5137a62, 2026-06-09)
 
 | What | State |
 |------|-------|
-| `cargo test --workspace` | passing (0 failed — #299 (user-type comparison codegen) + #301 (rust tokio scaffold) atop the #296/#297 pair + #294 + wave-3/2; conformance 819/0 ×5; orchestrator re-verified each tree before merge) |
+| `cargo test --workspace` | passing (0 failed — #303 (rust enum-variant import) + #304 (doc-comment indentation) atop #299/#301 + the #296/#297 pair + #294 + wave-3/2; conformance 0/failed ×5; orchestrator re-verified each tree before merge) |
 | `cargo clippy --workspace --all-targets -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `cargo doc --workspace --no-deps -D warnings` | clean (now in the pre-PR gate + CI) |
