@@ -315,6 +315,9 @@ options:
 - Trailing commas in multi-line constructs
 - Sorted imports (core → std → external → local)
 - Consistent wrapping for long signatures
+- Doc comments (`///`, `//!`) keep their continuation-line
+  indentation — only the marker and at most one following space are
+  normalized, so indented prose (e.g. bullet lists) round-trips
 
 `bock fmt` rewrites files in place; `bock fmt --check` reports drift
 without modifying files (use it in CI).
