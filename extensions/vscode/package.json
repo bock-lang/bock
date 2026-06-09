@@ -224,6 +224,24 @@
         "command": "bock.decisions.pinAllBuild",
         "title": "Pin All Build Decisions",
         "category": "Bock"
+      },
+      {
+        "command": "bock.decisions.sort",
+        "title": "Sort Decisions",
+        "category": "Bock",
+        "icon": "$(list-ordered)"
+      },
+      {
+        "command": "bock.decisions.clearFilters",
+        "title": "Clear Decision Filters",
+        "category": "Bock",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "bock.decisions.jumpToSource",
+        "title": "Jump to Source JSON",
+        "category": "Bock",
+        "icon": "$(go-to-file)"
       }
     ],
     "viewsContainers": {
@@ -296,9 +314,19 @@
           "group": "navigation@2"
         },
         {
-          "command": "bock.decisions.refresh",
+          "command": "bock.decisions.sort",
           "when": "view == bock.decisions",
           "group": "navigation@3"
+        },
+        {
+          "command": "bock.decisions.refresh",
+          "when": "view == bock.decisions",
+          "group": "navigation@4"
+        },
+        {
+          "command": "bock.decisions.clearFilters",
+          "when": "view == bock.decisions",
+          "group": "1_filters@1"
         }
       ],
       "view/item/context": [
@@ -331,6 +359,11 @@
           "command": "bock.decisions.showDetail",
           "when": "view == bock.decisions && viewItem =~ /Decision/",
           "group": "bock@1"
+        },
+        {
+          "command": "bock.decisions.jumpToSource",
+          "when": "view == bock.decisions && viewItem =~ /Decision/",
+          "group": "bock@2"
         }
       ],
       "commandPalette": [
@@ -380,6 +413,18 @@
         },
         {
           "command": "bock.decisions.scopeAll",
+          "when": "false"
+        },
+        {
+          "command": "bock.decisions.sort",
+          "when": "false"
+        },
+        {
+          "command": "bock.decisions.clearFilters",
+          "when": "false"
+        },
+        {
+          "command": "bock.decisions.jumpToSource",
           "when": "false"
         }
       ]

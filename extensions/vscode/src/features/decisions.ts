@@ -11,6 +11,16 @@
 // pin state. A `FileSystemWatcher` on the decisions directory keeps the
 // view in sync with external edits (e.g. a CI `bock pin --all-build`
 // run).
+//
+// On top of scope, the view supports querying the decision database:
+// a facet filter (decision type multi-select, pin state, minimum
+// confidence) driven from the Filter command, five sort modes
+// (default / confidence ↑↓ / newest / module), and a per-record
+// "Jump to Source JSON" action that opens the backing manifest file
+// at the record's `"id"` line. Filtering, sorting, and the source-line
+// lookup are exported pure functions (`applyDecisionFilter`,
+// `sortLoadedDecisions`, `findRecordLine`) covered by the headless
+// unit suite.
 
 import * as vscode from 'vscode';
 import * as cp from 'child_process';
@@ -25,7 +35,7 @@ import { truncate } from '../shared/strings';
 type DecisionScope = 'build' | 'runtime';
 type ViewScope = DecisionScope | 'all';
 
-type DecisionTypeTag =
+export type DecisionTypeTag =
   | 'codegen'
   | 'repair'
   | 'optimize'
@@ -93,6 +103,211 @@ export interface LoadResult {
   skipped: number;
 }
 
+// ─── Query helpers (filter / sort / source lookup) ──────────────────────────
+//
+// Pure functions over LoadedDecision[] — no `vscode` runtime dependency, so
+// the headless unit suite exercises them directly.
+
+/** Every decision type tag, in the order the filter QuickPick presents them.
+ *  Mirrors the `DecisionTypeTag` union. */
+export const DECISION_TYPE_TAGS: readonly DecisionTypeTag[] = [
+  'codegen',
+  'repair',
+  'optimize',
+  'rule_applied',
+  'handler_choice',
+  'adaptive_recovery',
+];
+
+/** Pin-state facet of a decision filter. */
+export type PinFilter = 'all' | 'pinned' | 'unpinned';
+
+/**
+ * Facet filter over loaded decisions. Every facet is optional; an absent
+ * facet imposes no constraint. The empty object `{}` matches everything.
+ */
+export interface DecisionFilter {
+  /** Show only these decision types. `undefined` or `[]` = all types. */
+  types?: DecisionTypeTag[];
+  /** Show only pinned / only unpinned records. `undefined`/`'all'` = both. */
+  pinned?: PinFilter;
+  /** Show only records with `confidence >= minConfidence` (inclusive). */
+  minConfidence?: number;
+}
+
+/** True when `filter` constrains the result set at all. */
+export function isFilterActive(filter: DecisionFilter): boolean {
+  return (
+    (filter.types !== undefined && filter.types.length > 0) ||
+    (filter.pinned !== undefined && filter.pinned !== 'all') ||
+    filter.minConfidence !== undefined
+  );
+}
+
+/**
+ * Apply a `DecisionFilter` to a list of loaded decisions. Pure: returns a
+ * new array, never mutates the input. Facets combine with AND; an empty
+ * filter returns every element.
+ */
+export function applyDecisionFilter(
+  list: LoadedDecision[],
+  filter: DecisionFilter,
+): LoadedDecision[] {
+  return list.filter((d) => {
+    if (
+      filter.types !== undefined &&
+      filter.types.length > 0 &&
+      !filter.types.includes(d.record.decision_type)
+    ) {
+      return false;
+    }
+    if (filter.pinned === 'pinned' && !d.record.pinned) return false;
+    if (filter.pinned === 'unpinned' && d.record.pinned) return false;
+    if (
+      filter.minConfidence !== undefined &&
+      d.record.confidence < filter.minConfidence
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Sort modes for the decisions view.
+ *
+ * - `default` — unpinned first (needs-review on top), then id
+ * - `confidence-asc` / `confidence-desc` — by `confidence`, ties by id
+ * - `newest` — by `timestamp` descending (ISO-8601 strings compare
+ *   lexicographically; non-ISO timestamps degrade to string order), ties by id
+ * - `module` — by `module` ascending, then the default order within a module
+ */
+export type DecisionSortMode =
+  | 'default'
+  | 'confidence-asc'
+  | 'confidence-desc'
+  | 'newest'
+  | 'module';
+
+/**
+ * Return a sorted copy of `list` according to `mode`. Pure: the input array
+ * is never mutated.
+ */
+export function sortLoadedDecisions(
+  list: LoadedDecision[],
+  mode: DecisionSortMode,
+): LoadedDecision[] {
+  const copy = [...list];
+  const byId = (a: LoadedDecision, b: LoadedDecision): number =>
+    a.record.id.localeCompare(b.record.id);
+  switch (mode) {
+    case 'default':
+      return copy.sort(sortDecisions);
+    case 'confidence-asc':
+      return copy.sort(
+        (a, b) => a.record.confidence - b.record.confidence || byId(a, b),
+      );
+    case 'confidence-desc':
+      return copy.sort(
+        (a, b) => b.record.confidence - a.record.confidence || byId(a, b),
+      );
+    case 'newest':
+      return copy.sort(
+        (a, b) =>
+          b.record.timestamp.localeCompare(a.record.timestamp) || byId(a, b),
+      );
+    case 'module':
+      return copy.sort(
+        (a, b) =>
+          a.record.module.localeCompare(b.record.module) || sortDecisions(a, b),
+      );
+  }
+}
+
+/** Compact label for a sort mode, used in the view description. */
+const SORT_MODE_SHORT: Record<DecisionSortMode, string> = {
+  default: 'default',
+  'confidence-asc': 'conf↑',
+  'confidence-desc': 'conf↓',
+  newest: 'newest',
+  module: 'module',
+};
+
+/**
+ * Compact summary of the active filter + sort for the tree view's
+ * description (e.g. `type:codegen · conf≥0.8 · sort:newest`). Returns
+ * `undefined` when nothing diverges from the defaults, so the view shows
+ * no description at all.
+ */
+export function describeDecisionView(
+  filter: DecisionFilter,
+  mode: DecisionSortMode,
+): string | undefined {
+  const parts: string[] = [];
+  if (filter.types !== undefined && filter.types.length > 0) {
+    parts.push(`type:${filter.types.join(',')}`);
+  }
+  if (filter.pinned === 'pinned' || filter.pinned === 'unpinned') {
+    parts.push(filter.pinned);
+  }
+  if (filter.minConfidence !== undefined) {
+    parts.push(`conf≥${filter.minConfidence}`);
+  }
+  if (mode !== 'default') {
+    parts.push(`sort:${SORT_MODE_SHORT[mode]}`);
+  }
+  return parts.length > 0 ? parts.join(' · ') : undefined;
+}
+
+/**
+ * Parse a user-typed minimum-confidence value. Accepts a finite number in
+ * `[0, 1]` (e.g. `0.85`); returns `undefined` for anything else (empty
+ * input, non-numeric text, out-of-range values).
+ */
+export function parseConfidenceInput(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return undefined;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n < 0 || n > 1) return undefined;
+  return n;
+}
+
+/** Escape a string for literal use inside a `RegExp`. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Find the 0-based line in `jsonText` that contains the `"id"` key whose
+ * value is exactly `id`. Handles both pretty-printed (`"id": "abc"`) and
+ * compact (`{"id":"abc",...}`) JSON, and does not false-positive on other
+ * keys that merely end in `id` (`"model_id"`) or on the same hash stored
+ * under a different key (`"superseded_by": "abc"`). Returns `undefined`
+ * when the record is not present.
+ *
+ * Used by the "Jump to Source JSON" action; exported for unit testing.
+ */
+export function findRecordLine(
+  jsonText: string,
+  id: string,
+): number | undefined {
+  if (typeof jsonText !== 'string' || typeof id !== 'string' || id.length === 0) {
+    return undefined;
+  }
+  // JSON.stringify yields the quoted, escaped form a serializer writes for
+  // the id; escape that literal for use in the key:value pattern.
+  const needle = new RegExp(
+    `"id"\\s*:\\s*${escapeRegExp(JSON.stringify(id))}`,
+  );
+  const match = needle.exec(jsonText);
+  if (!match) return undefined;
+  let line = 0;
+  for (let i = 0; i < match.index; i++) {
+    if (jsonText.charCodeAt(i) === 10 /* \n */) line++;
+  }
+  return line;
+}
+
 // ─── Tree nodes ─────────────────────────────────────────────────────────────
 
 type TreeNode = ModuleNode | DecisionNode | EmptyNode;
@@ -121,6 +336,8 @@ class DecisionsTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
   private decisions: LoadedDecision[] = [];
   private scope: ViewScope = 'build';
+  private filter: DecisionFilter = {};
+  private sortMode: DecisionSortMode = 'default';
 
   setDecisions(decisions: LoadedDecision[]): void {
     this.decisions = decisions;
@@ -136,10 +353,33 @@ class DecisionsTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     return this.scope;
   }
 
-  /** Every decision in the active scope (unfiltered by module). */
-  filtered(): LoadedDecision[] {
+  setFilter(filter: DecisionFilter): void {
+    this.filter = filter;
+    this.emitter.fire(undefined);
+  }
+
+  getFilter(): DecisionFilter {
+    return this.filter;
+  }
+
+  setSortMode(mode: DecisionSortMode): void {
+    this.sortMode = mode;
+    this.emitter.fire(undefined);
+  }
+
+  getSortMode(): DecisionSortMode {
+    return this.sortMode;
+  }
+
+  /** Every decision in the active scope, before facet filtering. */
+  private scoped(): LoadedDecision[] {
     if (this.scope === 'all') return this.decisions;
     return this.decisions.filter((d) => d.scope === this.scope);
+  }
+
+  /** Every decision in the active scope that passes the active filter. */
+  filtered(): LoadedDecision[] {
+    return applyDecisionFilter(this.scoped(), this.filter);
   }
 
   unpinnedCount(): number {
@@ -157,7 +397,9 @@ class DecisionsTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         const msg =
           this.decisions.length === 0
             ? 'No .bock/decisions/ found in this workspace.'
-            : `No ${this.scope} decisions.`;
+            : this.scoped().length === 0
+              ? `No ${this.scope} decisions.`
+              : 'No decisions match the active filters.';
         return [{ kind: 'empty', message: msg }];
       }
       const byModule = new Map<string, LoadedDecision[]>();
@@ -170,7 +412,7 @@ class DecisionsTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         .map(([module, ds]) => ({
           kind: 'module' as const,
           module,
-          decisions: ds.sort(sortDecisions),
+          decisions: sortLoadedDecisions(ds, this.sortMode),
         }))
         .sort((a, b) => a.module.localeCompare(b.module));
       return modules;
@@ -648,6 +890,17 @@ export function registerDecisions(
 
   void refresh();
 
+  // Re-derive everything that depends on the filter/sort state: the
+  // compact description next to the view title, the unpinned badge, and
+  // the status-bar summary (all of which respect the active filter).
+  const refreshViewState = (): void => {
+    view.description = describeDecisionView(
+      provider.getFilter(),
+      provider.getSortMode(),
+    );
+    updateIndicators(view, statusBar, provider);
+  };
+
   // Keep the title scope indicator in sync when the caller cycles scopes.
   const setScope = (scope: ViewScope): void => {
     provider.setScope(scope);
@@ -657,9 +910,96 @@ export function registerDecisions(
       scope,
     );
     view.title = `Bock Decisions — ${scopeLabel(scope)}`;
-    updateIndicators(view, statusBar, provider);
+    refreshViewState();
   };
   setScope('build');
+
+  const setFilter = (filter: DecisionFilter): void => {
+    provider.setFilter(filter);
+    refreshViewState();
+  };
+
+  // ── Filter facet pickers ──────────────────────────────────────────────
+
+  const pickScope = async (): Promise<void> => {
+    const pick = await vscode.window.showQuickPick(
+      [
+        { label: 'Build', description: 'Compile-time decisions', scope: 'build' as const },
+        { label: 'Runtime', description: 'Adaptive-recovery decisions', scope: 'runtime' as const },
+        { label: 'All', description: 'Both scopes', scope: 'all' as const },
+      ],
+      { placeHolder: 'Filter decisions by scope' },
+    );
+    if (pick) setScope(pick.scope);
+  };
+
+  const pickTypeFilter = async (): Promise<void> => {
+    const current = provider.getFilter().types;
+    const items = DECISION_TYPE_TAGS.map((tag) => ({
+      label: tag,
+      picked: current === undefined || current.includes(tag),
+    }));
+    const picks = await vscode.window.showQuickPick(items, {
+      canPickMany: true,
+      placeHolder:
+        'Show only these decision types (all or none checked = no type filter)',
+    });
+    if (picks === undefined) return; // cancelled
+    const chosen = picks.map((p) => p.label as DecisionTypeTag);
+    const types =
+      chosen.length === 0 || chosen.length === DECISION_TYPE_TAGS.length
+        ? undefined
+        : chosen;
+    setFilter({ ...provider.getFilter(), types });
+  };
+
+  const pickPinFilter = async (): Promise<void> => {
+    const pick = await vscode.window.showQuickPick(
+      [
+        { label: 'All', description: 'Pinned and unpinned', value: 'all' as const },
+        { label: 'Pinned only', value: 'pinned' as const },
+        { label: 'Unpinned only', description: 'Still needs review', value: 'unpinned' as const },
+      ],
+      { placeHolder: 'Filter decisions by pin state' },
+    );
+    if (pick === undefined) return;
+    setFilter({
+      ...provider.getFilter(),
+      pinned: pick.value === 'all' ? undefined : pick.value,
+    });
+  };
+
+  const pickConfidenceFilter = async (): Promise<void> => {
+    const pick = await vscode.window.showQuickPick(
+      [
+        { label: 'No minimum', value: 'none' as const },
+        { label: '≥ 0.5', value: 0.5 },
+        { label: '≥ 0.7', value: 0.7 },
+        { label: '≥ 0.9', value: 0.9 },
+        { label: 'Custom…', description: 'Enter a value in [0, 1]', value: 'custom' as const },
+      ],
+      { placeHolder: 'Show only decisions at or above this confidence' },
+    );
+    if (pick === undefined) return;
+    let min: number | undefined;
+    if (pick.value === 'none') {
+      min = undefined;
+    } else if (pick.value === 'custom') {
+      const raw = await vscode.window.showInputBox({
+        prompt: 'Minimum confidence (0 to 1, e.g. 0.85)',
+        validateInput: (v) =>
+          parseConfidenceInput(v) === undefined
+            ? 'Enter a number between 0 and 1.'
+            : undefined,
+      });
+      if (raw === undefined) return; // cancelled
+      min = parseConfidenceInput(raw);
+      if (min === undefined) return;
+    } else {
+      min = pick.value;
+    }
+    setFilter({ ...provider.getFilter(), minConfidence: min });
+  };
 
   const watcher = vscode.workspace.createFileSystemWatcher(
     '**/.bock/decisions/**/*.json',
@@ -680,16 +1020,116 @@ export function registerDecisions(
       void refresh();
     }),
     vscode.commands.registerCommand('bock.decisions.filter', async () => {
+      const f = provider.getFilter();
       const pick = await vscode.window.showQuickPick(
         [
-          { label: 'Build', description: 'Compile-time decisions', scope: 'build' as const },
-          { label: 'Runtime', description: 'Adaptive-recovery decisions', scope: 'runtime' as const },
-          { label: 'All', description: 'Both scopes', scope: 'all' as const },
+          {
+            label: '$(target) Scope',
+            description: scopeLabel(provider.getScope()),
+            action: 'scope' as const,
+          },
+          {
+            label: '$(symbol-enum) Decision type',
+            description: f.types !== undefined && f.types.length > 0 ? f.types.join(', ') : 'all',
+            action: 'type' as const,
+          },
+          {
+            label: '$(pin) Pin state',
+            description: f.pinned ?? 'all',
+            action: 'pinned' as const,
+          },
+          {
+            label: '$(dashboard) Minimum confidence',
+            description: f.minConfidence !== undefined ? `≥ ${f.minConfidence}` : 'none',
+            action: 'confidence' as const,
+          },
+          {
+            label: '$(clear-all) Clear filters',
+            description: isFilterActive(f) ? 'remove all active facets' : 'nothing active',
+            action: 'clear' as const,
+          },
         ],
-        { placeHolder: 'Filter decisions by scope' },
+        { placeHolder: 'Filter Bock decisions' },
       );
-      if (pick) setScope(pick.scope);
+      if (pick === undefined) return;
+      switch (pick.action) {
+        case 'scope':
+          await pickScope();
+          break;
+        case 'type':
+          await pickTypeFilter();
+          break;
+        case 'pinned':
+          await pickPinFilter();
+          break;
+        case 'confidence':
+          await pickConfidenceFilter();
+          break;
+        case 'clear':
+          setFilter({});
+          break;
+      }
     }),
+    vscode.commands.registerCommand('bock.decisions.clearFilters', () => {
+      setFilter({});
+    }),
+    vscode.commands.registerCommand('bock.decisions.sort', async () => {
+      const current = provider.getSortMode();
+      const modes: { label: string; description?: string; mode: DecisionSortMode }[] = [
+        { label: 'Default', description: 'unpinned first, then id', mode: 'default' },
+        { label: 'Confidence — low to high', mode: 'confidence-asc' },
+        { label: 'Confidence — high to low', mode: 'confidence-desc' },
+        { label: 'Newest first', description: 'by timestamp', mode: 'newest' },
+        { label: 'Module', description: 'by source module', mode: 'module' },
+      ];
+      const pick = await vscode.window.showQuickPick(
+        modes.map((m) => ({
+          ...m,
+          description:
+            m.mode === current
+              ? `${m.description ? `${m.description} · ` : ''}current`
+              : m.description,
+        })),
+        { placeHolder: 'Sort Bock decisions' },
+      );
+      if (pick === undefined) return;
+      provider.setSortMode(pick.mode);
+      refreshViewState();
+    }),
+    vscode.commands.registerCommand(
+      'bock.decisions.jumpToSource',
+      async (node: DecisionNode | LoadedDecision | undefined) => {
+        const decision = resolveDecision(node);
+        if (!decision) return;
+        let doc: vscode.TextDocument;
+        try {
+          doc = await vscode.workspace.openTextDocument(
+            vscode.Uri.file(decision.sourceFile),
+          );
+        } catch {
+          void vscode.window.showErrorMessage(
+            `Bock: could not open ${decision.sourceFile}.`,
+          );
+          return;
+        }
+        const editor = await vscode.window.showTextDocument(doc, {
+          preview: false,
+        });
+        const line = findRecordLine(doc.getText(), decision.record.id);
+        if (line === undefined) {
+          void vscode.window.showWarningMessage(
+            `Bock: record ${shortId(decision.record.id, 8)} not found in ${path.basename(decision.sourceFile)} — the manifest may have changed on disk.`,
+          );
+          return;
+        }
+        const range = doc.lineAt(line).range;
+        editor.selection = new vscode.Selection(range.start, range.end);
+        editor.revealRange(
+          range,
+          vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+        );
+      },
+    ),
     vscode.commands.registerCommand('bock.decisions.scopeBuild', () =>
       setScope('build'),
     ),
@@ -841,10 +1281,13 @@ function updateIndicators(
   const badgeEnabled = vscode.workspace
     .getConfiguration('bock')
     .get<boolean>('decisions.showUnpinnedBadge', true);
+  const filterSuffix = isFilterActive(provider.getFilter())
+    ? ' (filtered)'
+    : '';
   if (badgeEnabled && unpinned > 0) {
     view.badge = {
       value: unpinned,
-      tooltip: `${unpinned} unpinned ${provider.getScope()} decision(s)`,
+      tooltip: `${unpinned} unpinned ${provider.getScope()} decision(s)${filterSuffix}`,
     };
   } else {
     view.badge = undefined;
