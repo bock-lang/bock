@@ -8,6 +8,7 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import {
   LanguageClient,
@@ -141,12 +142,13 @@ function findBockLspBinary(): string | undefined {
     .get<string>('lspPath', '')
     .trim();
   if (configured) {
-    if (fs.existsSync(configured)) return configured;
+    const resolved = resolveConfiguredLspPath(configured);
+    if (fs.existsSync(resolved)) return resolved;
     // An explicit override that points nowhere is almost always a typo or a
     // stale path; name it so the user can fix it, then fall through to the
     // PATH search rather than silently ignoring the misconfiguration.
     vscode.window.showWarningMessage(
-      `Bock: configured \`bock.lspPath\` does not exist: ${configured}. ` +
+      `Bock: configured \`bock.lspPath\` does not exist: ${resolved}. ` +
         'Falling back to searching PATH for `bock`.',
     );
   }
@@ -161,17 +163,33 @@ function findBockLspBinary(): string | undefined {
     if (fs.existsSync(candidate)) return candidate;
   }
 
-  // Final fallback: a Bock contributor working in this repo builds the
-  // compiler into `target/{release,debug}/bock`. Prefer a release build
-  // over a debug one, and check every open workspace folder. This lets the
-  // extension light up language features against a freshly-built compiler
-  // without the contributor having to set `bock.lspPath` or alter PATH.
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    for (const profile of ['release', 'debug']) {
-      const candidate = path.join(folder.uri.fsPath, 'target', profile, exe);
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  }
-
+  // SECURITY: the extension deliberately does NOT auto-discover a `bock` binary
+  // inside opened workspace folders (e.g. `target/{release,debug}/bock`).
+  // Spawning an executable found in workspace *content* is an arbitrary-code-
+  // execution vector — opening/cloning a hostile repo would silently run its
+  // bundled binary. The server binary is resolved only from `PATH` or the
+  // machine-scoped, user-controlled `bock.lspPath` setting (which a malicious
+  // workspace cannot set — see `"scope": "machine"` in package.json). A
+  // contributor building from source sets `bock.lspPath` explicitly in their
+  // *user* settings; `${workspaceFolder}` and `~` are expanded for them.
   return undefined;
+}
+
+/**
+ * Resolve the user-controlled `bock.lspPath` setting, expanding a leading `~`
+ * to the home directory and the `${workspaceFolder}` variable to the first
+ * workspace folder. Only this explicitly-configured setting is expanded — the
+ * extension never derives a server binary from workspace *content*, so a hostile
+ * workspace cannot inject a path here (the setting is machine-scoped).
+ */
+function resolveConfiguredLspPath(raw: string): string {
+  let p = raw;
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (folder) {
+    p = p.replace(/\$\{workspaceFolder\}/g, folder);
+  }
+  if (p === '~' || p.startsWith('~/') || p.startsWith('~\\')) {
+    p = path.join(os.homedir(), p.slice(1));
+  }
+  return p;
 }
