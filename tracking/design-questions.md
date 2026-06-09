@@ -42,8 +42,11 @@ decided→link)`
 > language decision). **DQ1** (`bock check` default strictness) stays the non-core CLI track (orchestrator + operator). Remaining
 > work is implementation + the v1.x deferrals recorded in the entries below, not open decisions.
 >
-> **★ NEW 2026-06-08 — DQ29** reopens one core-spec decision (Equatable `==`/`!=` operator-gating for user types). Board is no
-> longer fully clear: DQ29 needs a Design ruling; DQ10/DQ11 remain ratification-pending.
+> **★ NEW 2026-06-08 — DQ29** reopens one core-spec decision (Equatable `==`/`!=` operator-gating for user types). **★ NEW
+> 2026-06-09 — DQ30** (List mutator `pop`/`insert`/`remove`/`reverse` return contracts, §18.3-silent). Board is no longer fully
+> clear: **DQ29 + DQ30 both need a Design ruling** (surfaced to owner 2026-06-09, deferred — owner will circle back); DQ10/DQ11
+> remain ratification-pending. With those two pending there is **no autonomous `ready` engineering left in the queue** — the v1
+> backlog is fully Design-gated.
 
 ### DQ29 — does structural record/enum equality satisfy `Equatable` for `==`/`!=` operator-gating?
 - **Question:** §18.5's rule is "implementing the trait gates the operator." It landed for `Comparable` →
@@ -59,6 +62,26 @@ decided→link)`
   then gate; **(R2)** defer `==`/`!=` gating to the v1.x `@derive` era; **(R3)** strict gate requiring explicit
   `impl Equatable` — **rejected** (breaks idiomatic record equality, no v1 escape). Impl is ready to wire (same
   `infer_binop` mechanism as #296) the moment Design rules. Unblocks queue item Q-equatable-gating-user-types.
+- **Status:** escalated → Design (escalations.md)
+
+### DQ30 — return-contract for the in-place `List` mutators `pop`/`insert`/`remove`/`reverse`
+- **Question:** DQ18 ruled `push`/`append` are `mut self` → `Void` in-place mutators (§18.3, changelog
+  `20260606-list-mutation-map-contains`). The four remaining in-place mutators were left value-returning
+  (checker.rs:4607-4620 still type all four as the placeholder receiver `List[T]`), and §18.3 is **silent** on their
+  return contract. Applying the `mut self` model needs that contract decided first, and the contested axes are a Design
+  call: (a) `remove(index)` by-index return — `Optional[T]` (None on out-of-bounds) vs `T` (abort on OOB) vs `Void`;
+  (b) out-of-bounds behavior for `insert(index, value)` / `remove(index)` — abort vs Optional-safe; (c) `pop()` on an
+  empty list — `Optional[T]` None (recommended, matches Bock's Optional-everywhere ethos and the existing
+  `get`/`index_of` Optional returns) vs abort. `reverse() -> Void` is unambiguous.
+- **§:** §18.3 · **context:** FOUND 2026-06-06 (#269, the DQ18 follow-up); queue item Q-list-mut-pop-insert-remove.
+  Candidate resolutions: **(A) Optional-safe** — `pop()→Optional[T]`, `remove(i)→Optional[T]` (None on OOB),
+  `insert(i,v)→Void` (abort on OOB), `reverse()→Void`, all `mut self` (symmetric with `get`/`index_of`; no surprise
+  panics on `remove`); **(B) Rust-style panic** — as (A) but `remove(i)→T` aborting on OOB (an OOB index is a
+  programmer error; matches `Vec::remove`); **(C) reverse-only now, defer the rest** — land `reverse()→Void` (fully
+  unambiguous) and defer `pop`/`insert`/`remove` to v1.x. Recommendation: **(A)**. Once ruled, the codegen is a direct
+  extension of the DQ18 per-target mut-self lowering table ×5; impl mechanism is the same checker stamp + per-backend
+  arm. Unblocks queue item Q-list-mut-pop-insert-remove. Surfaced to owner 2026-06-09; owner deferred ("will circle back
+  with the design decision").
 - **Status:** escalated → Design (escalations.md)
 
 ### DQ10 — normative primitive-conformance matrix
