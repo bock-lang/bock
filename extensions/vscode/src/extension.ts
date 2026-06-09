@@ -26,6 +26,7 @@ import { registerDecisions } from './features/decisions';
 import { registerSpecPanel } from './features/spec-panel';
 import { registerTargetPreview } from './features/target-preview';
 import { registerStrictness } from './features/strictness';
+import { registerQuickFixes } from './features/quick-fixes';
 
 // The extension's own diagnostics go to a "Bock" output channel, created in
 // `activate` and shared with `vocab.ts` via `setVocabLogChannel`. It is
@@ -55,6 +56,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   registerSpecPanel(ctx, vocab);
   registerTargetPreview(ctx, logChannel);
   registerStrictness(ctx);
+  registerQuickFixes(ctx);
 
   ctx.subscriptions.push(
     vscode.commands.registerCommand('bock.refreshVocab', async () => {

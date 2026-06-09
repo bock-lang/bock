@@ -70,3 +70,58 @@ export const window = {
     return Promise.resolve(undefined);
   },
 };
+
+/**
+ * Mirror of `vscode.CodeActionKind` — only the `QuickFix` constant plus
+ * the `value` field the real class exposes.
+ */
+export class CodeActionKind {
+  static readonly QuickFix = new CodeActionKind('quickfix');
+  private constructor(public readonly value: string) {}
+}
+
+/**
+ * Mirror of `vscode.CodeAction`: title/kind plus the mutable fields the
+ * quick-fix provider assigns (`edit`, `diagnostics`, `isPreferred`).
+ */
+export class CodeAction {
+  edit?: WorkspaceEdit;
+  diagnostics?: unknown[];
+  isPreferred?: boolean;
+  command?: unknown;
+  constructor(
+    public readonly title: string,
+    public readonly kind?: CodeActionKind,
+  ) {}
+}
+
+/**
+ * Minimal `vscode.WorkspaceEdit` stand-in. Only `replace` is modelled;
+ * the recorded operations are exposed via `replacements` so headless
+ * tests can assert exactly what an action would change.
+ */
+export class WorkspaceEdit {
+  readonly replacements: Array<{
+    uri: Uri;
+    range: Range;
+    newText: string;
+  }> = [];
+
+  replace(uri: Uri, range: Range, newText: string): void {
+    this.replacements.push({ uri, range, newText });
+  }
+}
+
+/**
+ * Minimal `vscode.languages` stand-in: provider registration is a no-op
+ * disposable, which is all `register*` wiring functions need headlessly.
+ */
+export const languages = {
+  registerCodeActionsProvider(
+    _selector: unknown,
+    _provider: unknown,
+    _metadata?: unknown,
+  ): { dispose(): void } {
+    return { dispose() {} };
+  },
+};
