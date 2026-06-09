@@ -52,15 +52,20 @@ changes.
   toolchain, diffs stdout (#114/#115); `tools/scripts/run-conformance.sh`.
 - **VS Code extension** — builds to a working `.vsix`; vocab synced
   from the compiler; deps current (ESLint 10, etc., #80); langclient v10
-  (#290). **Quality-hardening workstream underway (2026-06-09):** activation
-  is now crash-resilient (a broken `bock` binary / corrupt vocab degrades
-  gracefully instead of bricking the UI — #308), decision records are
-  validated, effect-flow auto-render is debounced, annotation scanning is
-  incremental, and a real `scanText` triple-quote bug is fixed (#309). The
-  headless test suite went **7 → 117** (effect-analyzer + spec-panel pure
-  helpers, #310/#311). Remaining: webview-infra consolidation (thread 3),
-  doc-rot + quick-wins (thread 4), 2 open FOUNDs (incl. effect-flow
-  under-reporting effects on `-> T with E` signatures), feature backlog.
+  (#290). **Quality-hardening workstream COMPLETE (2026-06-09, threads 1-4 +
+  security):** activation is crash-resilient (a broken `bock` binary / corrupt
+  vocab degrades gracefully instead of bricking the UI — #308); decision
+  records validated, effect-flow auto-render debounced, annotation scanning
+  incremental, `scanText` triple-quote bug fixed (#309); the effect-flow panel
+  now parses single-line `-> T with E` signatures (#313); webview infra
+  consolidated — dead `WebviewPanelBase` removed, one crypto-secure CSP nonce,
+  pure helpers extracted (#314/#315); doc-rot fixed + dead `mermaid` dep
+  removed + Restart-LSP command + snippets (#316/#317). **Security: a
+  workspace-`target/` LSP-binary auto-detect RCE (introduced + caught + fixed
+  same session, #318)** — the server binary now resolves only from PATH or a
+  machine-scoped `bock.lspPath`. The headless test suite went **7 → 168**.
+  Remaining: the deferred Q-ext-feature-opportunities backlog (richer hover,
+  spec-search ranking, decisions filtering, + the README v1.1 roadmap).
 - **Docs** — mdBook with tooling reference in sync with the CLI (#90);
   the v1 **stdlib reference** (D4, #172) and a proper **Contributing** section
   (D5, #174 — overview/architecture/workflow/spec-changes) are live.
