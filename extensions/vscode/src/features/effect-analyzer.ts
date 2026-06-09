@@ -140,7 +140,7 @@ export async function analyzeEffectFlow(
 
 // ─── Function discovery ─────────────────────────────────────────────────────
 
-interface EnclosingFunction {
+export interface EnclosingFunction {
   name: string;
   signatureStart: number;
   /** Inclusive open brace offset. */
@@ -150,7 +150,7 @@ interface EnclosingFunction {
 
 const FN_SIG_RE = /\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 
-function findEnclosingFunction(
+export function findEnclosingFunction(
   text: string,
   cursorOffset: number,
 ): EnclosingFunction | undefined {
@@ -192,7 +192,7 @@ function findEnclosingFunction(
 /** Match a balanced delimiter pair starting at `openIdx`. Returns the index
  *  of the matching closing delimiter or -1 if unbalanced. Ignores `{`/`(`
  *  that appear inside double-quoted strings. */
-function matchDelimiter(
+export function matchDelimiter(
   text: string,
   openIdx: number,
   open: string,
@@ -233,7 +233,7 @@ function matchDelimiter(
   return -1;
 }
 
-function parseWithClause(betweenCloseParenAndBrace: string): string[] {
+export function parseWithClause(betweenCloseParenAndBrace: string): string[] {
   const stripped = betweenCloseParenAndBrace
     .replace(/->\s*[^\n{]*/, '')
     .trim();
@@ -318,7 +318,7 @@ export function extractEffects(
   }
 }
 
-function offsetToLocation(
+export function offsetToLocation(
   uri: vscode.Uri,
   text: string,
   offset: number,
@@ -334,7 +334,7 @@ function offsetToLocation(
   return { uri, line, column: offset - lastNewline - 1 };
 }
 
-function expandEffects(
+export function expandEffects(
   root: string[],
   registry: Map<string, EffectDef>,
 ): string[] {
@@ -450,7 +450,7 @@ function collectLocalHandlers(
 
 /** Split a handling-block binding list on top-level commas. Brace- and
  *  paren-aware so record literals like `{}` don't get split. */
-function splitBindings(inner: string): string[] {
+export function splitBindings(inner: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let start = 0;
