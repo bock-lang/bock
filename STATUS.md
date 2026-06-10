@@ -6,7 +6,7 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 89
+- Ready: 95
 - v1-blocking: 2
 - Blocked: 22
 - Deferred: 1
@@ -141,6 +141,21 @@ compiled targets fine).
 (`Ordering`/`Less`/`Equal`/`Greater`, `Comparable`/`Equatable`, `Into`/`From`/
 `TryFrom`/`Displayable`, `Error`) resolve without an explicit `use` (the membership
 of `TryFrom`/`Error` vs §18.2's literal list → DQ13). See DV1, MS-stdlib.
+
+## Validation ledger (audit R9 — specced vs demonstrated)
+
+Standing ledger distinguishing designed bets from proven capabilities
+(2026-06-09 design audit, R9). Positioning/marketing may NOT lead with a
+**specced-unvalidated** pillar until an end-to-end demonstration exists.
+
+| Pillar | Status |
+|--------|--------|
+| Cross-target conformance equivalence (§20.4) | **validated** — 824 fixture×target pairs / 0 failed ×5; divergences (Int division, Bool spelling) caught + eliminated by the mechanism |
+| Deterministic codegen substrate (Tier 2, §17.2) | **validated** — the entire v1 compiler/stdlib/examples surface runs on it; no API key in CI |
+| Decision manifests / pins / deterministic fallback (§17.4, §19) | **validated at build time** — manifest plumbing live; runtime promote-from-runtime path unexercised |
+| Effects + capabilities as checked semantics (§10, §14) | **validated** — checked + executing ×5 (incl. the §10 invocation forms, #155) |
+| Adaptive effect handlers (§10.8) | **specced-unvalidated** — never exercised end-to-end (no example, no fixture, no runtime Select in anger); funding the demo is OQ4 (operator) |
+| Rule learning (§17.7) | **specced-unvalidated** — post-v1 status; direction externally confirmed (audit §2c) but unbuilt |
 
 ## Phase history
 

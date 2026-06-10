@@ -9,6 +9,11 @@ the Bock identity.
 
 ## v1.0 — Public Release
 **Theme:** ship what's already done — verify, polish, announce.
+- **★ Design-audit affirmation (2026-06-09, `designs/2026-06-09-design-audit.md` R12/R-B):** ship v1
+  **on current scope** — nothing in the audit grows v1.0; all its recommendations route to v1.x,
+  positioning, or marketing. The audit's lean on timing (OQ3, operator's call): release-prep now —
+  the governance window is open. Repositioned identity (equivalence + auditability lead; convenience
+  pitch retired) awaits operator sign-off (R1, escalations) before any external copy moves.
 - **Property claims:** "one language, many targets" (JS/TS/Py/Rust/Go
   codegen parity on examples); "effects on every function"; "targeted
   output, not a runtime".
@@ -54,6 +59,23 @@ the Bock identity.
 - Remaining: standalone LSP; incremental compilation + persistent cache;
   LSP completion (DV19 → Design); strictness migration assistant
   (Q-ext-migration-assistant); further hover-card work as scoped.
+- **★ Design-audit reorientation (2026-06-09 audit, R4/R5/R6/R7):**
+  - **Tooling is agent-first:** `Q-mcp-server` (bock-mcp: check/build/test/
+    inspect/conformance as MCP tools) **leads** the v1.x tooling list; the
+    §20.3 human-facing panels ship behind it (spec note + changelog
+    `20260610-design-audit-spec-touches.md`).
+  - **First v1.x design pass = `Q-ai-loop-design-pass`** (agentic repair-loop /
+    AI-layer composability: loop budgets, convergence, fallback policy — R5).
+  - **Prioritization principle (R6, PROPOSED — operator ratification pending,
+    see escalations):** verification features over surface-area features —
+    property testing (`@property`) → runtime guardrails (§15.4) → refinement
+    predicates (§4.7), ahead of new targets / FFI breadth.
+  - **Target demand-gate (R7, affirms §1.3 posture):** a v1.x target is added
+    only on concrete demand + a fully automated end-to-end conformance lane —
+    never on a calendar.
+  - **Model-familiarity workstream (R3/R-A, queue):** Q-context-pack ·
+    Q-synthetic-corpus · Q-diagnostics-agent-audit; + Q-dogfood-tool (R8).
+    Corpus publication is OQ2 (operator).
 
 ## v1.2 — Deferred Loose Ends
 **Theme:** finish what v1.0 deferred.
