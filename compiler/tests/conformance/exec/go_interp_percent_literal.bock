@@ -1,0 +1,30 @@
+// TEST: exec_go_interp_percent_literal
+// EXPECT: output "95% pass;%lead 50;50%-75%;%v %s %d;100%% raw"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-go-percent-interpolation — a literal `%` inside an interpolated string must
+// survive the Go lowering to `fmt.Sprintf` byte-for-byte.
+//
+// Go is the only v1 target whose interpolation lowering goes through a
+// printf-style format string, so a literal `%` in a `${..}` string is the
+// dangerous case: unescaped it forms a verb with whatever follows
+// (`"${n}% pass"` → format `"%v% pass"` → `95%!p(MISSING)ass`) while the other
+// four targets print `95% pass`. The build stays green — this is a SILENT
+// cross-target output divergence, which is why the fixture runs on all five
+// targets and pins the exact bytes.
+//
+// Shapes covered, `;`-separated in one line:
+//   * `%` immediately after an interpolated value (the dogfood repro — the
+//     `%` + following letter looked like a `%p` verb)
+//   * `%` leading the literal text before any interpolation
+//   * `%` on both sides of interpolated values (`50%-75%`)
+//   * bare Go-verb lookalikes `%v %s %d` as literal text
+//   * a doubled `%%` that must come out doubled, not collapsed
+module main
+
+fn main() -> Void {
+  let n = 95
+  let lo = 50
+  let hi = 75
+  println("${n}% pass;%lead ${lo};${lo}%-${hi}%;%v %s %d;100%% raw")
+}

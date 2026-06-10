@@ -1,0 +1,45 @@
+// TEST: exec_go_split_combinator_typing
+// EXPECT: output "a|b|c|;3;X|Y;2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-go-split-combinator-typing — element-type recovery through a *builtin
+// string-method* receiver on the Go backend.
+//
+// `split()` returns `List[String]`, but the Go backend's element-type resolver
+// only recovered elements from declared bindings, list literals, and chained
+// *combinator* receivers (the #256 fix). A `.map`/`.filter` chained directly
+// onto `split()` therefore erased to `func(p interface{})` /
+// `[]interface{}`, which Go rejects against `strings.Split`'s concrete
+// `[]string` (`cannot use p (variable of type interface{}) as string value in
+// argument to strings.TrimSpace`). The fix threads the builtin's known
+// `string` element through both the receiver resolver and the value resolver.
+//
+// Shapes covered:
+//   * the dogfood repro verbatim: combinators chained directly on `split()`
+//     (`split → map(trim) → filter(non-empty)`), then iterated
+//   * a `split()` result bound first, with the combinator chain on the
+//     *binding* (`let raw = s.split(..)` then `raw.filter(..).map(..)`) — the
+//     binding must record its `string` element for the chain to type
+module main
+
+fn main() -> Void {
+  // Chained directly on the builtin: the dogfood shape.
+  let parts = "a, b ,c".split(",").map((p) => p.trim()).filter((p) => p != "")
+  let mut joined = ""
+  for part in parts {
+    joined = joined + part + "|"
+  }
+
+  // Bound first, then chained on the binding.
+  let raw = "x;; y ;".split(";")
+  let kept = raw.map((p) => p.trim()).filter((p) => p != "").map((p) => p.to_upper())
+  let mut shown = ""
+  for k in kept {
+    if (shown != "") {
+      shown = shown + "|"
+    }
+    shown = shown + k
+  }
+
+  println("${joined};${parts.len()};${shown};${kept.len()}")
+}
