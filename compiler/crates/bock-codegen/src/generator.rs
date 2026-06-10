@@ -3598,6 +3598,37 @@ pub fn is_user_compare(node: &AIRNode) -> bool {
     )
 }
 
+/// The DQ29 equality lane a `BinaryOp { op: Eq | Ne, .. }` node was stamped
+/// with by the checker ([`bock_types::checker::USER_EQ_META_KEY`]), or `None`
+/// for an unstamped (native-equality) comparison.
+///
+/// Lanes: `"impl"` (explicit `impl Equatable` — dispatch through the type's
+/// `eq`), `"structural"` (record/enum/tuple shape — JS/TS need the `__bockEq`
+/// helper; natively-structural targets keep `==`), `"deep"` (involves a
+/// collection — JS/TS *and* Go route through their deep-equality helpers), and
+/// `"generic"` (bounded type var — JS/TS route through `__bockEq`). See the
+/// metadata key's docs for the per-target rationale. Like [`is_user_compare`],
+/// the stamp is the sole signal: codegen has no type information of its own.
+#[must_use]
+pub fn user_eq_kind(node: &AIRNode) -> Option<&str> {
+    match node.metadata.get(bock_types::checker::USER_EQ_META_KEY) {
+        Some(bock_air::Value::String(kind)) => Some(kind.as_str()),
+        _ => None,
+    }
+}
+
+/// True when a `RecordDecl` / `EnumDecl` node carries the checker's
+/// [`bock_types::checker::DERIVE_EQ_META_KEY`] stamp — the type conforms to
+/// `Equatable` structurally (DQ29) and declares no explicit impl, so the Rust
+/// backend adds `PartialEq` to its `#[derive(..)]` list.
+#[must_use]
+pub fn derives_structural_eq(node: &AIRNode) -> bool {
+    matches!(
+        node.metadata.get(bock_types::checker::DERIVE_EQ_META_KEY),
+        Some(bock_air::Value::Bool(true))
+    )
+}
+
 /// Map an ordering [`BinOp`](bock_ast::BinOp) (`<` / `<=` / `>` / `>=`) onto the `Ordering`
 /// variant name and whether the comparison is an *equality* (`true`) or
 /// *inequality* (`false`) against it, for lowering a user-`Comparable`

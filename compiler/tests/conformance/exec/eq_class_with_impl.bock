@@ -1,0 +1,37 @@
+// TEST: eq_class_with_impl
+// EXPECT: output "eq:true;ne:false;bang:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 (§18.5 structural Equatable): CLASSES are excluded from structural
+// conformance — they sit on the data/identity line — so a class gets `==`
+// only via an explicit `impl Equatable`. `Account` declares one (comparing
+// `id` only, ignoring `balance`), and `==`/`!=` dispatch through it. The
+// rejected no-impl case is pinned by
+// types-diagnostics/opgate_eq_class_unimpl.bock.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Equatable}
+
+class Account {
+  id: Int,
+  balance: Int,
+}
+
+impl Equatable for Account {
+  public fn eq(self, other: Account) -> Bool {
+    self.id == other.id
+  }
+}
+
+fn main() -> Void {
+  let a: Account = Account { id: 7, balance: 100 }
+  let b: Account = Account { id: 7, balance: 250 }
+  let c: Account = Account { id: 8, balance: 100 }
+  let eq: Bool = a == b
+  let ne: Bool = a == c
+  let bang: Bool = a != b
+  println("eq:${eq};ne:${ne};bang:${bang}")
+}

@@ -1,0 +1,42 @@
+// TEST: eq_record_float_nan
+// EXPECT: output "nan_eq:false;nan_ne:true;plain:true"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 × DQ10 (§18.5 structural Equatable, IEEE Float caveat): `Float` fields
+// compose into structural equality with IEEE 754 semantics — NaN is not equal
+// to NaN, so a record holding NaN in a Float field is `!=` an identically
+// constructed record (and would be `!=` itself). There is NO special case:
+// field-wise `==` simply inherits the primitive Float comparison.
+//
+// NaN is constructed portably as `inf - inf` (the overflow `1.0e308 * 10.0`
+// yields +inf on every target without raising). Each record gets its own
+// independently computed NaN: CPython's container comparison short-circuits
+// on object identity (`x is y`), so a SHARED NaN object inside two dataclass
+// values would wrongly compare equal on the python target. Bock's normative
+// semantics are IEEE either way; the fixture pins the portable form.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Reading {
+  label: String,
+  value: Float,
+}
+
+fn make_nan() -> Float {
+  let big: Float = 1.0e308
+  let inf: Float = big * 10.0
+  inf - inf
+}
+
+fn main() -> Void {
+  let r1: Reading = Reading { label: "probe", value: make_nan() }
+  let r2: Reading = Reading { label: "probe", value: make_nan() }
+  let p1: Reading = Reading { label: "probe", value: 1.5 }
+  let p2: Reading = Reading { label: "probe", value: 1.5 }
+  let nan_eq: Bool = r1 == r2
+  let nan_ne: Bool = r1 != r2
+  let plain: Bool = p1 == p2
+  println("nan_eq:${nan_eq};nan_ne:${nan_ne};plain:${plain}")
+}

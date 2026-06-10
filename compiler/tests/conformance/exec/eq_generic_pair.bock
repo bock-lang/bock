@@ -1,0 +1,31 @@
+// TEST: eq_generic_pair
+// EXPECT: output "eq:true;ne:false;swap:true"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 (§18.5 structural Equatable): a GENERIC user type instantiates
+// conditionally — `Pair[A, B]` is Equatable iff `A` and `B` are, decided at
+// the use site on the instantiated type. `Pair[Int, String]` composes two
+// Equatable primitives, so `==` is accepted and compares field-wise. The
+// rejected instantiation (`Pair` holding a function) is pinned by
+// types-diagnostics/opgate_eq_generic_pair_poisoned.bock.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Pair[A, B] {
+  first: A,
+  second: B,
+}
+
+fn main() -> Void {
+  let p1: Pair[Int, String] = Pair { first: 1, second: "x" }
+  let p2: Pair[Int, String] = Pair { first: 1, second: "x" }
+  let p3: Pair[Int, String] = Pair { first: 2, second: "x" }
+  let q1: Pair[String, Int] = Pair { first: "x", second: 1 }
+  let q2: Pair[String, Int] = Pair { first: "x", second: 1 }
+  let eq: Bool = p1 == p2
+  let ne: Bool = p1 == p3
+  let swap: Bool = q1 == q2
+  println("eq:${eq};ne:${ne};swap:${swap}")
+}

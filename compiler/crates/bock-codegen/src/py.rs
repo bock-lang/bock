@@ -5134,6 +5134,22 @@ impl PyEmitCtx {
                         return Ok(());
                     }
                 }
+                // DQ29 (§18.5): `==`/`!=` on a type with an explicit
+                // `impl Equatable` dispatch through its `eq` method — Python's
+                // native `==` is the dataclass-generated STRUCTURAL equality,
+                // which would silently ignore the user's custom `eq`. The
+                // structural/deep lanes stay native: dataclass `==`, `list`/
+                // `dict`/`set`/`tuple` equality are already field-wise /
+                // content-based (and `dict`/`set` order-independent).
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && crate::generator::user_eq_kind(node) == Some("impl")
+                {
+                    let recv = self.expr_to_string(left)?;
+                    let other = self.expr_to_string(right)?;
+                    let neg = if *op == BinOp::Ne { "not " } else { "" };
+                    let _ = write!(self.buf, "({neg}({recv}).eq({other}))");
+                    return Ok(());
+                }
                 self.buf.push('(');
                 self.emit_expr(left)?;
                 let op_str = match op {

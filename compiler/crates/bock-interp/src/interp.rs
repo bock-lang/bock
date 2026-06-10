@@ -406,7 +406,37 @@ impl Interpreter {
                     })
             }
 
-            NodeKind::BinaryOp { op, left, right } => self.eval_binary_op(*op, left, right).await,
+            NodeKind::BinaryOp { op, left, right } => {
+                // DQ29 (§18.5): `==`/`!=` the checker stamped `"impl"` carry an
+                // explicit `impl Equatable`, whose `eq` defines the type's
+                // equality — dispatch through it, exactly as the compiled
+                // targets do. (`bock run` type-checks the same AIR it
+                // interprets, so the stamp is present.) The structural lanes
+                // fall through to `eval_binary_op`'s native `Value` equality,
+                // which is already field-wise and (`BTreeMap`/`BTreeSet`)
+                // order-independent. The key literal matches
+                // `bock_types::checker::USER_EQ_META_KEY` (bock-interp sits
+                // below bock-types in the crate graph, so the constant cannot
+                // be imported).
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && matches!(
+                        node.metadata.get("user_eq"),
+                        Some(bock_air::Value::String(kind)) if kind == "impl"
+                    )
+                {
+                    let l = self.eval_expr(left).await?;
+                    let r = self.eval_expr(right).await?;
+                    let eq = match self.try_call_impl_method(&l, "eq", vec![r.clone()]).await? {
+                        Some(outcome) => matches!(outcome.value, Value::Bool(true)),
+                        // No callable `eq` on this receiver shape (e.g. a
+                        // value form the method table does not cover): fall
+                        // back to structural equality rather than failing.
+                        None => l == r,
+                    };
+                    return Ok(Value::Bool(if matches!(op, BinOp::Eq) { eq } else { !eq }));
+                }
+                self.eval_binary_op(*op, left, right).await
+            }
 
             NodeKind::UnaryOp { op, operand } => self.eval_unary_op(*op, operand).await,
 
@@ -1588,6 +1618,23 @@ impl Interpreter {
         match (&recv, method.as_str()) {
             // ── Universal ─────────────────────────────────────────────────
             (_, "to_string") => Ok(Value::String(BockString::new(recv.to_string()))),
+
+            // DQ29 (§18.5 structural Equatable): `a.eq(b)` reached through an
+            // `Equatable` bound whose instantiation is a STRUCTURAL type — a
+            // record/enum/collection with no explicit `impl Equatable` (an
+            // impl would have been dispatched by the method-table check
+            // above), and not a primitive (the builtins' eq bridge above
+            // covers those). Falls back to the interpreter's structural
+            // `Value` equality, mirroring how the compiled targets lower the
+            // bridge natively. `Fn` values are excluded: functions are not
+            // Equatable, and the checker rejects such instantiations.
+            (recv_v, "eq") if !matches!(recv_v, Value::Function(_)) => {
+                let other = arg_values.first().ok_or(RuntimeError::ArityMismatch {
+                    expected: 1,
+                    got: 0,
+                })?;
+                Ok(Value::Bool(recv == *other))
+            }
 
             // ── List ──────────────────────────────────────────────────────
             (Value::List(items), "len") => Ok(Value::Int(items.len() as i64)),

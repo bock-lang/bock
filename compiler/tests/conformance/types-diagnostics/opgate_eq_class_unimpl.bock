@@ -1,0 +1,22 @@
+// TEST: opgate_eq_class_unimpl
+// EXPECT: error E4015 at 20:23
+//
+// DQ29 (§18.5 structural Equatable): CLASSES are excluded from structural
+// conformance (the data/identity line) — a class gets `==` only via an
+// explicit `impl Equatable`. `Account` declares none, so `a == b` is rejected
+// at type-check time with a suggestion to implement `Equatable for Account`.
+// The accepted with-impl case is pinned by exec/eq_class_with_impl.bock.
+// The location points at the `a == b` comparison (the `let` initializer).
+module main
+
+class Account {
+  id: Int,
+  balance: Int,
+}
+
+fn main() -> Void {
+  let a: Account = Account { id: 1, balance: 10 }
+  let b: Account = Account { id: 1, balance: 10 }
+  let same: Bool = a == b
+  println("${same}")
+}

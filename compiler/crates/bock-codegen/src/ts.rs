@@ -138,6 +138,77 @@ fn module_uses_range(items: &[AIRNode]) -> bool {
     items.iter().any(|n| format!("{n:?}").contains("Range {"))
 }
 
+/// Runtime helper for DQ29 structural equality in TypeScript — the typed twin
+/// of the JS backend's `__bockEq` (see `EQ_RUNTIME_JS` in `js.rs` for the full
+/// semantics): `===` on two objects is reference identity, so every stamped
+/// `==`/`!=` (lanes `"structural"`/`"deep"`/`"generic"` of
+/// [`crate::generator::user_eq_kind`]) and every `a.eq(b)` bridge call on an
+/// `Equatable`-bounded generic lowers through this deep, order-independent
+/// (for `Map`/`Set`), explicit-impl-honoring comparison. Non-objects fall back
+/// to `===`, preserving IEEE `NaN !== NaN`. Emitted once into the shared
+/// `_bock_runtime.ts` (per-module path) or inlined at most once
+/// (single-module path), gated on a ctx flag (mirrors [`RANGE_RUNTIME_TS`]).
+const EQ_RUNTIME_TS: &str = "\
+// ── Bock structural equality runtime ──
+const __bockEq = (a: unknown, b: unknown): boolean => {
+  if (a === b) return true;
+  if (typeof a !== \"object\" || typeof b !== \"object\" || a === null || b === null) {
+    return a === b;
+  }
+  const ea = (a as { eq?: unknown }).eq;
+  const eb = (b as { eq?: unknown }).eq;
+  if (typeof ea === \"function\" && typeof eb === \"function\") {
+    return (ea as (s: unknown, o: unknown) => boolean).call(a, a, b);
+  }
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) { if (!__bockEq(a[i], b[i])) return false; }
+    return true;
+  }
+  if (a instanceof Map) {
+    if (!(b instanceof Map) || a.size !== b.size) return false;
+    for (const [k, v] of a) {
+      if (b.has(k)) { if (!__bockEq(b.get(k), v)) return false; continue; }
+      let found = false;
+      for (const [bk, bv] of b) { if (__bockEq(k, bk) && __bockEq(v, bv)) { found = true; break; } }
+      if (!found) return false;
+    }
+    return true;
+  }
+  if (a instanceof Set) {
+    if (!(b instanceof Set) || a.size !== b.size) return false;
+    for (const x of a) {
+      if (b.has(x)) continue;
+      let found = false;
+      for (const y of b) { if (__bockEq(x, y)) { found = true; break; } }
+      if (!found) return false;
+    }
+    return true;
+  }
+  const ra = a as Record<string, unknown>;
+  const rb = b as Record<string, unknown>;
+  const ka = Object.keys(ra);
+  const kb = Object.keys(rb);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) { if (!__bockEq(ra[k], rb[k])) return false; }
+  return true;
+};
+";
+
+/// True if the module contains an equality that must lower through
+/// [`EQ_RUNTIME_TS`]'s `__bockEq` — a non-`"impl"` `user_eq` stamp or an
+/// `Equatable`-bounded bridge call. Mirrors the JS backend's scan (see
+/// `js_module_uses_eq` in `js.rs`).
+fn module_uses_eq(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let dbg = format!("{n:?}");
+        dbg.contains("\"user_eq\": String(\"structural\")")
+            || dbg.contains("\"user_eq\": String(\"deep\")")
+            || dbg.contains("\"user_eq\": String(\"generic\")")
+            || dbg.contains("TraitBound:Equatable")
+    })
+}
+
 /// The shared per-module runtime module name (without extension). In the
 /// per-module (native-import) emission path the Optional/Result runtime *types*
 /// (`BockOption`, `BockResult`) and the concurrency / range runtime *helpers*
@@ -293,6 +364,7 @@ impl CodeGenerator for TsGenerator {
         let mut runtime_result = false;
         let mut runtime_concurrency = false;
         let mut runtime_range = false;
+        let mut runtime_eq = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let own_path = crate::generator::module_path_string(module).unwrap_or_default();
@@ -329,6 +401,7 @@ impl CodeGenerator for TsGenerator {
             runtime_result |= ctx.needs_runtime_result;
             runtime_concurrency |= ctx.needs_runtime_concurrency;
             runtime_range |= ctx.needs_runtime_range;
+            runtime_eq |= ctx.needs_runtime_eq;
             let (mut content, mappings) = ctx.finish();
 
             if i == entry_idx && crate::generator::module_declares_main_fn(module) {
@@ -360,7 +433,8 @@ impl CodeGenerator for TsGenerator {
         // Shared runtime module: Optional/Result types and concurrency/range
         // helpers, each `export`ed (types via `export type`, values via `export
         // const`) so consuming modules `import` / `import type` them.
-        if runtime_optional || runtime_result || runtime_concurrency || runtime_range {
+        if runtime_optional || runtime_result || runtime_concurrency || runtime_range || runtime_eq
+        {
             let mut content = String::new();
             if runtime_optional {
                 content.push_str(&export_runtime_decls(OPTIONAL_RUNTIME_TS));
@@ -376,6 +450,10 @@ impl CodeGenerator for TsGenerator {
             }
             if runtime_range {
                 content.push_str(&export_runtime_decls(RANGE_RUNTIME_TS));
+                content.push('\n');
+            }
+            if runtime_eq {
+                content.push_str(&export_runtime_decls(EQ_RUNTIME_TS));
                 content.push('\n');
             }
             files.push(OutputFile {
@@ -598,6 +676,9 @@ struct TsEmitCtx {
     /// emitted; deduped exactly as [`Self::optional_runtime_emitted`] (a
     /// duplicate `const range` is a redeclaration error).
     range_runtime_emitted: bool,
+    /// Set once the structural-equality runtime ([`EQ_RUNTIME_TS`]) has been
+    /// emitted; deduped exactly as [`Self::range_runtime_emitted`].
+    eq_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Same role as the JS backend's: route
     /// a unit-variant reference to the `{enum}_{variant}` const, a struct/tuple
     /// construction to the factory, and recognise `RecordPat` arms as ADT.
@@ -663,10 +744,11 @@ struct TsEmitCtx {
     /// once into the shared `_bock_runtime.ts` and this module `import type`s them.
     needs_runtime_optional: bool,
     needs_runtime_result: bool,
-    /// As above, for the concurrency / range runtime *values*
-    /// (`__bockChannelNew` / `range`).
+    /// As above, for the concurrency / range / structural-equality runtime
+    /// *values* (`__bockChannelNew` / `range` / `__bockEq`).
     needs_runtime_concurrency: bool,
     needs_runtime_range: bool,
+    needs_runtime_eq: bool,
     /// Implicit cross-module imports for the per-module path — names this module
     /// references but neither declares locally nor imports via an explicit `use`.
     /// Computed in `generate_project`; emitted as ESM imports by the `Module` arm.
@@ -768,6 +850,7 @@ impl TsEmitCtx {
             result_runtime_emitted: false,
             concurrency_runtime_emitted: false,
             range_runtime_emitted: false,
+            eq_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
@@ -779,6 +862,7 @@ impl TsEmitCtx {
             needs_runtime_result: false,
             needs_runtime_concurrency: false,
             needs_runtime_range: false,
+            needs_runtime_eq: false,
             implicit_imports: Vec::new(),
             public_symbols: HashMap::new(),
             self_module_path: String::new(),
@@ -917,6 +1001,9 @@ impl TsEmitCtx {
         }
         if self.needs_runtime_range {
             value_names.extend(["range", "rangeInclusive"]);
+        }
+        if self.needs_runtime_eq {
+            value_names.push("__bockEq");
         }
         if !type_names.is_empty() || !value_names.is_empty() {
             let spec = crate::generator::esm_relative_specifier(
@@ -2349,6 +2436,20 @@ impl TsEmitCtx {
         else {
             return Ok(false);
         };
+        // DQ29: unlike the `Primitive:<Ty>` bridge (whose receiver is a known
+        // scalar, where `===` is correct), a bounded `T: Equatable` receiver
+        // may be instantiated with a RECORD — `===` would be reference
+        // identity — so `a.eq(b)` lowers through the `__bockEq` structural
+        // helper, which falls back to `===` for primitives.
+        if method == "eq" {
+            let Some(other) = rest.first() else {
+                return Ok(false);
+            };
+            let recv_str = self.expr_to_string(recv)?;
+            let other = self.expr_to_string(&other.value)?;
+            let _ = write!(self.buf, "__bockEq({recv_str}, {other})");
+            return Ok(true);
+        }
         self.emit_bridge_method(recv, method, rest)
     }
 
@@ -2639,6 +2740,9 @@ impl TsEmitCtx {
                     if module_uses_range(items) {
                         self.needs_runtime_range = true;
                     }
+                    if module_uses_eq(items) {
+                        self.needs_runtime_eq = true;
+                    }
                     self.emit_esm_imports(imports)?;
                 } else {
                     // Single-module self-contained emit (`generate_module`, used
@@ -2665,6 +2769,11 @@ impl TsEmitCtx {
                         self.buf.push_str(RANGE_RUNTIME_TS);
                         self.buf.push('\n');
                         self.range_runtime_emitted = true;
+                    }
+                    if !self.eq_runtime_emitted && module_uses_eq(items) {
+                        self.buf.push_str(EQ_RUNTIME_TS);
+                        self.buf.push('\n');
+                        self.eq_runtime_emitted = true;
                     }
                 }
                 // `@test` functions are transpiled separately into Vitest/Jest
@@ -4309,6 +4418,26 @@ impl TsEmitCtx {
                             self.buf,
                             "(({recv}).compare({recv}, {other})._tag {eq} \"{tag}\")"
                         );
+                        return Ok(());
+                    }
+                }
+                // DQ29 (§18.5 structural Equatable): a stamped `==`/`!=`
+                // cannot use native `===` (reference identity on objects).
+                // The `"impl"` lane dispatches through the explicit
+                // `impl Equatable`'s `eq` (receiver doubled as the explicit
+                // `self` argument, matching the method-call lowering —
+                // Q-js-user-equality-reference, #339); the structural lanes
+                // lower through the `__bockEq` runtime helper.
+                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    if let Some(kind) = crate::generator::user_eq_kind(node) {
+                        let recv = self.expr_to_string(left)?;
+                        let other = self.expr_to_string(right)?;
+                        let neg = if *op == BinOp::Ne { "!" } else { "" };
+                        if kind == "impl" {
+                            let _ = write!(self.buf, "{neg}(({recv}).eq({recv}, {other}))");
+                        } else {
+                            let _ = write!(self.buf, "{neg}__bockEq({recv}, {other})");
+                        }
                         return Ok(());
                     }
                 }

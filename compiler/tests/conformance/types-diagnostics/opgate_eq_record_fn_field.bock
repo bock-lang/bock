@@ -1,0 +1,26 @@
+// TEST: opgate_eq_record_fn_field
+// EXPECT: error E4015 at 24:23
+//
+// DQ29 (§18.5 structural Equatable): a non-Equatable leaf POISONS the
+// structural conformance — `Fn` types have no equality, so a record holding a
+// function field is not Equatable, and `==` on it is a compile-time error.
+// The diagnostic must name the offending FIELD PATH and TYPE (machine-
+// actionable per the diagnostics-review criterion): here `handler` of type
+// `Fn(Int) -> Int`, with the fix suggestion `impl Equatable for Callback` (or
+// removing the comparison). The location points at the `a == b` comparison
+// (the `let` initializer).
+module main
+
+record Callback {
+  name: String,
+  handler: Fn(Int) -> Int,
+}
+
+fn main() -> Void {
+  let double: Fn(Int) -> Int = (x) => x * 2
+  let triple: Fn(Int) -> Int = (x) => x * 3
+  let a: Callback = Callback { name: "d", handler: double }
+  let b: Callback = Callback { name: "t", handler: triple }
+  let same: Bool = a == b
+  println("${same}")
+}

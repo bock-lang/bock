@@ -279,6 +279,13 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             description: "A `use` declaration named a module path with neither a brace-list nor a wildcard (a bare `use core.error`). Per §12.2 this is not a v1 import form; module-qualified access is deferred to v1.x. Import the names you need with the braced form (`use core.error.{ Error }`) or the discouraged wildcard (`use core.error.*`).",
             spec_refs: &["§12.2"],
         },
+        DiagnosticCodeInfo {
+            code: "E4015",
+            severity: Severity::Error,
+            summary: "Operand or bound instantiation is not `Equatable`.",
+            description: "An `==`/`!=` operand (or a type instantiating an `Equatable` bound) does not conform to `Equatable` (DQ29). Records and enums conform STRUCTURALLY iff every field / variant payload type conforms (recursively); `List[T]`/`Set[T]`/`Optional[T]` iff `T`, `Map[K, V]` iff `K` and `V`, `Result[T, E]` iff `T` and `E`, tuples iff all components; generic user types decide per instantiation. A non-Equatable leaf (e.g. an `Fn` field) poisons the type, and the message names the offending field path and type. Classes are excluded from the structural default and need an explicit `impl Equatable`. An explicit impl always wins over the structural rules. Fix: implement `Equatable` for the type, or remove the comparison.",
+            spec_refs: &["§18.5"],
+        },
         // ── Ownership (5xxx) ───────────────────────────────────────────
         DiagnosticCodeInfo {
             code: "E5001",

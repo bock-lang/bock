@@ -58,6 +58,18 @@ const E_WHERE_CLAUSE: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 4005,
 };
+/// `E4015` — an `==`/`!=` operand (or an `Equatable` bound instantiation) is
+/// not `Equatable` (DQ29, §18.5). Records/enums conform structurally iff every
+/// field / variant payload type conforms; compound built-ins compose
+/// conditionally; classes are excluded (explicit `impl Equatable` only); a
+/// non-Equatable leaf (e.g. an `Fn` field) poisons the whole type. The message
+/// names the offending field path and type; the note suggests the fix
+/// (`impl Equatable for <T>` or removing the comparison). Sibling of the
+/// `Comparable` ordering-operator gate, which reuses `E4005`.
+const E_NOT_EQUATABLE: DiagnosticCode = DiagnosticCode {
+    prefix: 'E',
+    number: 4015,
+};
 /// `E4012` — a `.into()` call (or `from`/`try_from`) could not be resolved:
 /// no `From`/`Into`/`TryFrom` impl exists for the required source and target
 /// types. For `.into()` the target is taken from the expected type, so the
@@ -219,6 +231,55 @@ pub const BOOL_STRINGIFY_META_KEY: &str = "bool_stringify";
 /// lower correctly through the native operator / the trait-bound bridge.
 pub const USER_COMPARE_META_KEY: &str = "user_compare";
 
+/// Metadata key stamped on a `BinaryOp { op: Eq | Ne, .. }` node whose operands
+/// need a non-native equality lowering on at least one target (DQ29, §18.5
+/// structural Equatable). The value is a `Value::String` naming the lane:
+///
+/// - **`"impl"`** — the operand is a user (`Named`) type with an **explicit**
+///   `impl Equatable`. Every backend must dispatch `==`/`!=` through the
+///   impl's `eq(self, other) -> Bool` (negated for `!=`): native equality is
+///   reference identity on JS/TS, field-wise on Python/Go, and a compile error
+///   on Rust — none of which honor the user's `eq`
+///   (Q-js-user-equality-reference / #339 and siblings).
+/// - **`"structural"`** — the operand is a structurally-Equatable shape
+///   (record / enum / tuple) containing no collection. Targets whose native
+///   `==` is already field-wise (Python dataclasses, Go structs/interfaces,
+///   Rust with the [`DERIVE_EQ_META_KEY`] derive) keep the native operator;
+///   JS/TS lower through the `__bockEq` deep-equality runtime helper because
+///   `===` on two objects is reference identity.
+/// - **`"deep"`** — the operand (transitively) involves a `List`/`Map`/`Set`
+///   (or `Optional`/`Result` wrapper). Same JS/TS lowering as `"structural"`;
+///   Go must additionally route through its deep-equality runtime helper
+///   (slices and maps do not support `==` at all — a compile error), with
+///   `Map`/`Set` equality required to be order-independent.
+/// - **`"generic"`** — the operand is an unsolved type variable carrying an
+///   `Equatable` (or `Comparable`, via the supertrait edge) bound inside a
+///   generic fn body. JS/TS lower through `__bockEq` (the concrete
+///   instantiation may be a record); the other targets' native equality is
+///   correct under their bound mapping (`PartialEq` on Rust, `comparable` on
+///   Go, duck-typed `==` on Python).
+///
+/// Primitive operands are never stamped — every target's native `==` is
+/// correct for them (including the IEEE `NaN != NaN` Float semantics, which
+/// the structural lanes inherit per the DQ10 caveat).
+pub const USER_EQ_META_KEY: &str = "user_eq";
+
+/// Metadata key stamped on a `RecordDecl` / `EnumDecl` node that conforms to
+/// `Equatable` **structurally** (DQ29, §18.5): every field / variant payload
+/// type is Equatable and the type declares no explicit `impl Equatable` (the
+/// explicit impl suppresses the structural default, and its `==` routes through
+/// `eq` instead — see [`USER_EQ_META_KEY`]).
+///
+/// Consumed by the Rust backend, which adds `PartialEq` to the type's
+/// `#[derive(..)]` list so native `==`/`!=` (and containment like
+/// `Vec<T> == Vec<T>`) compile. For a generic record/enum the derive's
+/// conditional `where` bounds implement rule 4 (a `Pair[A, B]` instantiation
+/// is Equatable iff `A` and `B` are) natively. A type that is **not**
+/// structurally Equatable (e.g. an `Fn` field) is left underivable — the
+/// checker's operator gate already rejects every `==` over it, so the emitted
+/// code never needs `PartialEq`. The value is a `Value::Bool(true)`.
+pub const DERIVE_EQ_META_KEY: &str = "derive_structural_eq";
+
 /// Base node id for AIR nodes the checker synthesizes (the `for`-over-`Iterable`
 /// desugar). Chosen high enough to sit far above the dense, zero-based ids the
 /// lowerer assigns to real nodes, so synthesized nodes never collide with real
@@ -226,6 +287,12 @@ pub const USER_COMPARE_META_KEY: &str = "user_compare";
 /// headroom above this base for the handful of nodes one module's `for` loops
 /// expand to.
 const SYNTH_ID_BASE: NodeId = 0x4000_0000;
+
+/// One enum variant's payload entry in `TypeChecker::enum_variant_payloads`
+/// (DQ29): the variant name and its `(component_label, type)` list — field
+/// names for struct variants, `_0`-style indices for tuple payloads, empty
+/// for unit variants.
+type EnumVariantPayloadTypes = (String, Vec<(String, Type)>);
 
 /// Compute the receiver-kind tag for a resolved receiver [`Type`].
 ///
@@ -435,6 +502,25 @@ pub struct TypeChecker {
     /// and where-clause constraints. Used by the FieldAccess handler to
     /// resolve methods on bounded type parameters.
     type_var_bounds: HashMap<TypeVarId, Vec<String>>,
+    /// Names of locally-declared `class` types. Populated during `collect_sig`
+    /// for `ClassDecl` nodes. The DQ29 structural-Equatable predicate consults
+    /// this to EXCLUDE classes from the structural default (a class sits on
+    /// the data/identity line and gets `==` only via an explicit
+    /// `impl Equatable`); records and classes otherwise share
+    /// `record_field_types`, so the field table alone cannot distinguish them.
+    class_names: HashSet<String>,
+    /// Variant payload types for locally-declared enums:
+    /// enum_name → \[(variant_name, \[(component_label, type), …\]), …\].
+    /// Component labels are field names for struct variants and `_0`-style
+    /// indices for tuple payloads; unit variants contribute an empty list.
+    /// Generic param references are stored SYMBOLICALLY as `Named(param)` (the
+    /// same convention `record_field_types` uses for generic records) so the
+    /// DQ29 structural-Equatable predicate can substitute instantiation
+    /// arguments at the use site. Populated during `collect_sig` for
+    /// `EnumDecl` nodes; imported enums are absent (their payload types do not
+    /// cross the export ABI), which the predicate treats as conservatively
+    /// conforming.
+    enum_variant_payloads: HashMap<String, Vec<EnumVariantPayloadTypes>>,
     /// Monotonic node-id source for AIR nodes the checker *synthesizes* (today
     /// only the `for`-over-`Iterable` desugar, see
     /// [`TypeChecker::desugar_for_iterable`]). The checker is constructed
@@ -485,6 +571,8 @@ impl TypeChecker {
             type_aliases: HashMap::new(),
             trait_method_types: HashMap::new(),
             type_var_bounds: HashMap::new(),
+            class_names: HashSet::new(),
+            enum_variant_payloads: HashMap::new(),
             synth_id: std::cell::Cell::new(SYNTH_ID_BASE),
             synth_iter_var: std::cell::Cell::new(0),
             reported_undefined: HashSet::new(),
@@ -1354,6 +1442,53 @@ impl TypeChecker {
                         .insert(enum_name.clone(), gp_names.clone());
                 }
 
+                // DQ29: record every variant's payload component types for the
+                // structural-Equatable predicate (an enum conforms iff every
+                // payload type of every variant conforms). Generic params are
+                // stored SYMBOLICALLY as `Named(param)` — the convention
+                // `record_field_types` already uses for generic records — so
+                // the predicate can substitute the instantiation's type
+                // arguments at the use site (the template type vars in
+                // `gp_map` are reserved for constructor fn_sigs).
+                let symbolic_gp_map: HashMap<String, Type> = gp_names
+                    .iter()
+                    .map(|n| (n.clone(), Type::Named(crate::NamedType { name: n.clone() })))
+                    .collect();
+                let mut payloads: Vec<EnumVariantPayloadTypes> = Vec::new();
+                for variant in variants {
+                    if let NodeKind::EnumVariant {
+                        name: vname,
+                        payload,
+                    } = &variant.kind
+                    {
+                        let components: Vec<(String, Type)> = match payload {
+                            EnumVariantPayload::Unit => vec![],
+                            EnumVariantPayload::Tuple(param_nodes) => param_nodes
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| {
+                                    (
+                                        format!("_{i}"),
+                                        self.air_type_node_to_type(p, &symbolic_gp_map),
+                                    )
+                                })
+                                .collect(),
+                            EnumVariantPayload::Struct(fields) => fields
+                                .iter()
+                                .map(|f| {
+                                    (
+                                        f.name.name.clone(),
+                                        self.type_expr_to_type(&f.ty, &symbolic_gp_map),
+                                    )
+                                })
+                                .collect(),
+                        };
+                        payloads.push((vname.name.clone(), components));
+                    }
+                }
+                self.enum_variant_payloads
+                    .insert(enum_name.clone(), payloads);
+
                 // Register each variant as a value/constructor in scope.
                 for variant in variants {
                     if let NodeKind::EnumVariant {
@@ -1593,6 +1728,11 @@ impl TypeChecker {
             } => {
                 let class_name = name.name.clone();
 
+                // DQ29: classes are excluded from structural Equatable; record
+                // the name so the predicate can tell a class apart from a
+                // record (both populate `record_field_types`).
+                self.class_names.insert(class_name.clone());
+
                 // Register generic params if present.
                 let gp_names: Vec<String> =
                     generic_params.iter().map(|g| g.name.name.clone()).collect();
@@ -1770,10 +1910,52 @@ impl TypeChecker {
             NodeKind::ClassDecl { .. } => {
                 self.check_class_decl(node);
             }
+            // Record/enum declarations carry no body to check, but DQ29 stamps
+            // the structurally-Equatable ones for the Rust backend's
+            // `PartialEq` derive (see `DERIVE_EQ_META_KEY`).
+            NodeKind::RecordDecl { .. } | NodeKind::EnumDecl { .. } => {
+                self.stamp_derive_structural_eq(node);
+                self.record(node, Type::Primitive(PrimitiveType::Void));
+            }
             // Other top-level items: record as Void for now.
             _ => {
                 self.record(node, Type::Primitive(PrimitiveType::Void));
             }
+        }
+    }
+
+    /// Stamp a `RecordDecl` / `EnumDecl` with [`DERIVE_EQ_META_KEY`] when the
+    /// declared type conforms to `Equatable` structurally (DQ29) and declares
+    /// no explicit `impl Equatable` (the impl suppresses the structural
+    /// default — `==` routes through its `eq` instead, so the derive would
+    /// pin the WRONG equality into containers).
+    ///
+    /// The probe runs on the bare `Named` type: a generic decl's symbolic
+    /// `Named(param)` field placeholders are unknown to the predicate and thus
+    /// conservatively conforming, which matches Rust's conditional derive
+    /// semantics (`#[derive(PartialEq)]` on `Pair<A, B>` bounds each use site
+    /// on `A: PartialEq, B: PartialEq` — rule 4's per-instantiation decision).
+    fn stamp_derive_structural_eq(&mut self, node: &mut AIRNode) {
+        let name = match &node.kind {
+            NodeKind::RecordDecl { name, .. } | NodeKind::EnumDecl { name, .. } => {
+                name.name.clone()
+            }
+            _ => return,
+        };
+        let named = Type::Named(crate::NamedType { name });
+        if let Some(table) = self.impl_table.as_ref() {
+            if resolve_impl(&TraitRef::new("Equatable"), &named, table).is_some() {
+                return;
+            }
+        }
+        let mut in_progress = HashSet::new();
+        let mut path = Vec::new();
+        if self
+            .structural_equatable_witness(&named, &mut in_progress, &mut path)
+            .is_none()
+        {
+            node.metadata
+                .insert(DERIVE_EQ_META_KEY.to_string(), Value::Bool(true));
         }
     }
 
@@ -2272,6 +2454,40 @@ impl TypeChecker {
                 let satisfied = resolve_impl(&trait_ref, &concrete_ty, impl_table).is_some()
                     || impl_table.has_any_param_trait_impl(&trait_name, &concrete_key);
                 if !satisfied {
+                    // DQ29 (§18.5): an `Equatable` bound is ALSO satisfied by
+                    // structural conformance — a record/enum whose fields /
+                    // payloads are all Equatable passes without an explicit
+                    // impl, exactly as the `==` operator gate accepts it. A
+                    // structurally non-Equatable type is rejected with the
+                    // same witness-carrying diagnostic as the gate
+                    // (E4015 instead of the generic bound error).
+                    if trait_name == "Equatable" {
+                        let mut in_progress = HashSet::new();
+                        let mut path = Vec::new();
+                        match self.structural_equatable_witness(
+                            &concrete_ty,
+                            &mut in_progress,
+                            &mut path,
+                        ) {
+                            None => continue,
+                            Some(witness) => {
+                                let (detail, suggestion) =
+                                    equatable_failure_wording(&concrete_key, &witness);
+                                self.diags
+                                    .error(
+                                        E_NOT_EQUATABLE,
+                                        format!(
+                                            "type `{concrete_ty}` does not satisfy bound \
+                                             `Equatable` required by function `{fn_name}` \
+                                             — {detail}"
+                                        ),
+                                        span,
+                                    )
+                                    .note(suggestion);
+                                continue;
+                            }
+                        }
+                    }
                     self.diags.error(
                         E_WHERE_CLAUSE,
                         format!(
@@ -2409,6 +2625,23 @@ impl TypeChecker {
                     if self.is_user_comparable(probe) {
                         node.metadata
                             .insert(USER_COMPARE_META_KEY.to_string(), Value::Bool(true));
+                    }
+                }
+                // `==`/`!=` on operands whose native target equality is wrong
+                // (records/enums/collections/tuples, explicit `impl Equatable`,
+                // bounded generics) are stamped with the equality lane codegen
+                // must use (DQ29 — see `USER_EQ_META_KEY`). Same post-unify
+                // probe as the ordering stamp above.
+                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    let probe = match self.subst.apply(&lt) {
+                        Type::TypeVar(_) => &rt,
+                        _ => &lt,
+                    };
+                    if let Some(kind) = self.user_eq_kind(probe) {
+                        node.metadata.insert(
+                            USER_EQ_META_KEY.to_string(),
+                            Value::String(kind.to_string()),
+                        );
                     }
                 }
                 result
@@ -5317,6 +5550,415 @@ impl TypeChecker {
         resolve_impl(&trait_ref, &resolved, impl_table).is_some()
     }
 
+    // ── DQ29: structural Equatable (§18.5) ───────────────────────────────────
+
+    /// DQ29 (§18.5): decide whether `ty` conforms to `Equatable`, returning
+    /// `None` when it does and the poisoning [`NonEquatableWitness`] when it
+    /// does not.
+    ///
+    /// The decision is **structural and on-demand** (computed at the use site;
+    /// no conditional trait-table entries):
+    ///
+    /// 1. **Explicit impl wins** — any type with a resolvable `impl Equatable`
+    ///    conforms outright (the structural rules below are the compiler-provided
+    ///    default, suppressed by the impl).
+    /// 2. **Primitives** — decided by the canonical sealed conformances in
+    ///    `impl_table` (all v1 scalars conform; `Void` conforms vacuously).
+    /// 3. **Records** — conform iff every field type conforms (recursively).
+    /// 4. **Enums** — conform iff every payload type of every variant conforms.
+    /// 5. **Compound built-ins** — `List[T]`/`Set[T]`/`Optional[T]` iff `T`;
+    ///    `Map[K, V]` iff `K` and `V`; `Result[T, E]` iff `T` and `E`; tuples
+    ///    iff all components.
+    /// 6. **Generic user types** — instantiate conditionally: the constructor's
+    ///    declared field/payload types are checked with the instantiation's
+    ///    type arguments substituted for the symbolic `Named(param)`
+    ///    placeholders.
+    /// 7. **Classes** — never conform structurally (data/identity line); only
+    ///    rule 1 admits them.
+    /// 8. **`Fn` types** — never conform (the poisoning leaf).
+    ///
+    /// Unknowns are **conservatively conforming**: unsolved type vars /
+    /// flexible (sketch) types / `Error`, and `Named` types whose structure
+    /// this checker cannot see (imported enums' payloads do not cross the
+    /// export ABI; imported classes are not distinguishable from records).
+    /// The gate only rejects what it can *prove* non-Equatable — mirroring
+    /// [`Self::require_comparable_operand`]'s conservatism.
+    ///
+    /// Recursive types terminate co-inductively: a type currently being
+    /// checked (`in_progress`) is assumed conforming, so `record Tree { kids:
+    /// List[Tree] }` resolves to whatever its non-recursive leaves decide.
+    fn structural_equatable_witness(
+        &self,
+        ty: &Type,
+        in_progress: &mut HashSet<String>,
+        path: &mut Vec<String>,
+    ) -> Option<NonEquatableWitness> {
+        let resolved = self.subst.apply(ty);
+        let witness_here = |path: &[String], class_name: Option<String>| {
+            Some(NonEquatableWitness {
+                path: path.to_vec(),
+                leaf: resolved.clone(),
+                class_name,
+            })
+        };
+        match &resolved {
+            // Unknowns: conservatively conforming (cannot prove otherwise).
+            Type::TypeVar(_) | Type::Flexible(_) | Type::Error => None,
+            // The poisoning leaf: function types have no equality.
+            Type::Function(_) => witness_here(path, None),
+            Type::Primitive(p) => {
+                // `Void` is a vacuous unit — always equal to itself.
+                if matches!(p, PrimitiveType::Void) {
+                    return None;
+                }
+                let table = self.impl_table.as_ref()?;
+                if resolve_impl(&TraitRef::new("Equatable"), &resolved, table).is_some() {
+                    None
+                } else {
+                    witness_here(path, None)
+                }
+            }
+            Type::Named(n) => {
+                // Explicit impl wins (rule 1) — including impls folded in from
+                // imported modules.
+                if let Some(table) = self.impl_table.as_ref() {
+                    if resolve_impl(&TraitRef::new("Equatable"), &resolved, table).is_some() {
+                        return None;
+                    }
+                }
+                // Co-inductive assumption for recursive types.
+                if !in_progress.insert(n.name.clone()) {
+                    return None;
+                }
+                let result = if self.class_names.contains(&n.name) {
+                    // Rule 7: classes are excluded from the structural default.
+                    witness_here(path, Some(n.name.clone()))
+                } else if let Some(variants) = self.enum_variant_payloads.get(&n.name) {
+                    self.enum_payloads_witness(
+                        &variants.clone(),
+                        &HashMap::new(),
+                        in_progress,
+                        path,
+                    )
+                } else if let Some(fields) = self.record_field_types.get(&n.name) {
+                    self.record_fields_witness(&fields.clone(), &HashMap::new(), in_progress, path)
+                } else {
+                    // Unknown structure (imported enum/class, opaque type):
+                    // conservatively conforming.
+                    None
+                };
+                in_progress.remove(&n.name);
+                result
+            }
+            Type::Generic(g) => {
+                match (g.constructor.as_str(), g.args.as_slice()) {
+                    // Rule 5: compound built-ins compose conditionally.
+                    ("List" | "Set", [elem]) => {
+                        path.push("[..]".to_string());
+                        let w = self.structural_equatable_witness(elem, in_progress, path);
+                        path.pop();
+                        w
+                    }
+                    ("Map", [key, value]) => {
+                        path.push("[key]".to_string());
+                        if let Some(w) = self.structural_equatable_witness(key, in_progress, path) {
+                            path.pop();
+                            return Some(w);
+                        }
+                        path.pop();
+                        path.push("[value]".to_string());
+                        let w = self.structural_equatable_witness(value, in_progress, path);
+                        path.pop();
+                        w
+                    }
+                    // Rule 6: generic user types instantiate conditionally.
+                    _ => {
+                        if let Some(table) = self.impl_table.as_ref() {
+                            if resolve_impl(&TraitRef::new("Equatable"), &resolved, table).is_some()
+                            {
+                                return None;
+                            }
+                        }
+                        let key = crate::traits::type_key(&resolved);
+                        if !in_progress.insert(key.clone()) {
+                            return None;
+                        }
+                        let subst_map: HashMap<String, Type> = self
+                            .record_generic_params
+                            .get(&g.constructor)
+                            .map(|params| {
+                                params.iter().cloned().zip(g.args.iter().cloned()).collect()
+                            })
+                            .unwrap_or_default();
+                        let result = if let Some(variants) =
+                            self.enum_variant_payloads.get(&g.constructor)
+                        {
+                            self.enum_payloads_witness(
+                                &variants.clone(),
+                                &subst_map,
+                                in_progress,
+                                path,
+                            )
+                        } else if let Some(fields) = self.record_field_types.get(&g.constructor) {
+                            if self.class_names.contains(&g.constructor) {
+                                witness_here(path, Some(g.constructor.clone()))
+                            } else {
+                                self.record_fields_witness(
+                                    &fields.clone(),
+                                    &subst_map,
+                                    in_progress,
+                                    path,
+                                )
+                            }
+                        } else {
+                            // Unknown constructor: conservatively conforming.
+                            None
+                        };
+                        in_progress.remove(&key);
+                        result
+                    }
+                }
+            }
+            Type::Tuple(elems) => {
+                for (i, elem) in elems.iter().enumerate() {
+                    path.push(i.to_string());
+                    if let Some(w) = self.structural_equatable_witness(elem, in_progress, path) {
+                        path.pop();
+                        return Some(w);
+                    }
+                    path.pop();
+                }
+                None
+            }
+            Type::Optional(inner) => {
+                path.push("[..]".to_string());
+                let w = self.structural_equatable_witness(inner, in_progress, path);
+                path.pop();
+                w
+            }
+            Type::Result(ok, err) => {
+                path.push("[ok]".to_string());
+                if let Some(w) = self.structural_equatable_witness(ok, in_progress, path) {
+                    path.pop();
+                    return Some(w);
+                }
+                path.pop();
+                path.push("[err]".to_string());
+                let w = self.structural_equatable_witness(err, in_progress, path);
+                path.pop();
+                w
+            }
+            Type::Refined(base, _) => self.structural_equatable_witness(base, in_progress, path),
+        }
+    }
+
+    /// Probe every field of a record (or class admitted via explicit impl
+    /// elsewhere) for structural Equatable conformance, substituting
+    /// `subst_map` for symbolic `Named(param)` placeholders first (rule 6).
+    fn record_fields_witness(
+        &self,
+        fields: &[(String, Type)],
+        subst_map: &HashMap<String, Type>,
+        in_progress: &mut HashSet<String>,
+        path: &mut Vec<String>,
+    ) -> Option<NonEquatableWitness> {
+        for (fname, fty) in fields {
+            let fty = substitute_named_params(fty, subst_map);
+            path.push(fname.clone());
+            if let Some(w) = self.structural_equatable_witness(&fty, in_progress, path) {
+                path.pop();
+                return Some(w);
+            }
+            path.pop();
+        }
+        None
+    }
+
+    /// Probe every payload component of every enum variant for structural
+    /// Equatable conformance (rule 4), substituting `subst_map` for symbolic
+    /// `Named(param)` placeholders first (rule 6).
+    fn enum_payloads_witness(
+        &self,
+        variants: &[EnumVariantPayloadTypes],
+        subst_map: &HashMap<String, Type>,
+        in_progress: &mut HashSet<String>,
+        path: &mut Vec<String>,
+    ) -> Option<NonEquatableWitness> {
+        for (vname, components) in variants {
+            for (label, cty) in components {
+                let cty = substitute_named_params(cty, subst_map);
+                path.push(format!("{vname}.{label}"));
+                if let Some(w) = self.structural_equatable_witness(&cty, in_progress, path) {
+                    path.pop();
+                    return Some(w);
+                }
+                path.pop();
+            }
+        }
+        None
+    }
+
+    /// §18.5 operator gating (DQ29): require an `==`/`!=` operand to be
+    /// `Equatable`, mirroring [`Self::require_comparable_operand`]'s shape but
+    /// deciding conformance with the structural predicate
+    /// ([`Self::structural_equatable_witness`]) instead of an impl lookup
+    /// alone.
+    ///
+    /// Conservative skips match the Comparable gate: no `impl_table`, or an
+    /// operand that is still an inference variable / flexible / poison, emit
+    /// nothing (a bounded generic `T: Equatable` reaches `==` via its
+    /// where-clause obligation, not this gate).
+    ///
+    /// On failure it emits [`E_NOT_EQUATABLE`] naming the offending field path
+    /// and leaf type, with a note suggesting the fix.
+    fn require_equatable_operand(&mut self, operand: &Type, span: Span) {
+        let resolved = self.subst.apply(operand);
+        match &resolved {
+            Type::TypeVar(_) | Type::Flexible(_) | Type::Error => return,
+            _ => {}
+        }
+        if self.impl_table.is_none() {
+            return; // no table → cannot prove non-conformance.
+        }
+        let mut in_progress = HashSet::new();
+        let mut path = Vec::new();
+        if let Some(witness) =
+            self.structural_equatable_witness(&resolved, &mut in_progress, &mut path)
+        {
+            let key = crate::traits::type_key(&resolved);
+            let (detail, suggestion) = equatable_failure_wording(&key, &witness);
+            self.diags
+                .error(
+                    E_NOT_EQUATABLE,
+                    format!(
+                        "type `{resolved}` does not implement `Equatable`; the `==`/`!=` \
+                         operators require it — {detail}"
+                    ),
+                    span,
+                )
+                .note(suggestion);
+        }
+    }
+
+    /// Classify an `==`/`!=` operand for the [`USER_EQ_META_KEY`] codegen
+    /// stamp. Returns `None` when the native operator is already correct on
+    /// every target (primitives, unknowns without an `Equatable` bound, and
+    /// anything the gate rejected).
+    fn user_eq_kind(&self, operand: &Type) -> Option<&'static str> {
+        let resolved = self.subst.apply(operand);
+        match &resolved {
+            Type::TypeVar(id) => {
+                // Inside a generic fn body: `a == b` on a bounded param. Only
+                // an Equatable-implying bound warrants the JS/TS deep-equality
+                // routing ("generic"); an unbounded var stays native.
+                let bounds = self.type_var_bounds.get(id)?;
+                if bounds.iter().any(|b| b == "Equatable" || b == "Comparable") {
+                    Some("generic")
+                } else {
+                    None
+                }
+            }
+            Type::Flexible(_) | Type::Error | Type::Primitive(_) | Type::Function(_) => None,
+            Type::Named(_) => {
+                // Explicit impl (rule 1) → route through the user's `eq`.
+                if let Some(table) = self.impl_table.as_ref() {
+                    if resolve_impl(&TraitRef::new("Equatable"), &resolved, table).is_some() {
+                        return Some("impl");
+                    }
+                }
+                // Structural record/enum (a class without an impl is rejected
+                // by the gate; stamping is moot on an erroring program).
+                if self.type_needs_deep_eq(&resolved, &mut HashSet::new()) {
+                    Some("deep")
+                } else {
+                    Some("structural")
+                }
+            }
+            Type::Generic(_) | Type::Tuple(_) | Type::Optional(_) | Type::Result(_, _) => {
+                if self.type_needs_deep_eq(&resolved, &mut HashSet::new()) {
+                    Some("deep")
+                } else {
+                    Some("structural")
+                }
+            }
+            Type::Refined(base, _) => self.user_eq_kind(base),
+        }
+    }
+
+    /// True when equality over `ty` (transitively) involves a collection —
+    /// `List`/`Map`/`Set`, or an `Optional`/`Result` wrapper — so Go must
+    /// route `==` through its deep-equality runtime helper (native `==` on
+    /// slices/maps is a compile error). Walks record fields and enum payloads
+    /// with the same co-inductive guard as the conformance probe.
+    fn type_needs_deep_eq(&self, ty: &Type, in_progress: &mut HashSet<String>) -> bool {
+        let resolved = self.subst.apply(ty);
+        match &resolved {
+            Type::Generic(g) => match (g.constructor.as_str(), g.args.as_slice()) {
+                ("List" | "Set" | "Map", _) => true,
+                _ => {
+                    let key = crate::traits::type_key(&resolved);
+                    if !in_progress.insert(key.clone()) {
+                        return false;
+                    }
+                    let subst_map: HashMap<String, Type> = self
+                        .record_generic_params
+                        .get(&g.constructor)
+                        .map(|params| params.iter().cloned().zip(g.args.iter().cloned()).collect())
+                        .unwrap_or_default();
+                    let deep =
+                        if let Some(variants) = self.enum_variant_payloads.get(&g.constructor) {
+                            variants.clone().iter().any(|(_, components)| {
+                                components.iter().any(|(_, cty)| {
+                                    self.type_needs_deep_eq(
+                                        &substitute_named_params(cty, &subst_map),
+                                        in_progress,
+                                    )
+                                })
+                            })
+                        } else if let Some(fields) = self.record_field_types.get(&g.constructor) {
+                            fields.clone().iter().any(|(_, fty)| {
+                                self.type_needs_deep_eq(
+                                    &substitute_named_params(fty, &subst_map),
+                                    in_progress,
+                                )
+                            })
+                        } else {
+                            false
+                        };
+                    in_progress.remove(&key);
+                    deep
+                }
+            },
+            Type::Optional(_) | Type::Result(_, _) => true,
+            Type::Named(n) => {
+                if !in_progress.insert(n.name.clone()) {
+                    return false;
+                }
+                let deep = if let Some(variants) = self.enum_variant_payloads.get(&n.name) {
+                    variants.clone().iter().any(|(_, components)| {
+                        components
+                            .iter()
+                            .any(|(_, cty)| self.type_needs_deep_eq(cty, in_progress))
+                    })
+                } else if let Some(fields) = self.record_field_types.get(&n.name) {
+                    fields
+                        .clone()
+                        .iter()
+                        .any(|(_, fty)| self.type_needs_deep_eq(fty, in_progress))
+                } else {
+                    false
+                };
+                in_progress.remove(&n.name);
+                deep
+            }
+            Type::Tuple(elems) => elems
+                .iter()
+                .any(|e| self.type_needs_deep_eq(e, in_progress)),
+            Type::Refined(base, _) => self.type_needs_deep_eq(base, in_progress),
+            _ => false,
+        }
+    }
+
     fn infer_binop(&mut self, op: BinOp, lt: &Type, rt: &Type, span: Span) -> Type {
         match op {
             // Arithmetic: operands and result are numeric.
@@ -5334,21 +5976,25 @@ impl TypeChecker {
                 // (`<`, `>`, `<=`, `>=`) require `impl Comparable` for a
                 // *user* (Named) operand. Primitives are gated by the canonical
                 // conformances in `impl_table`; generic type variables are gated
-                // by their `where`-clause bounds. `==`/`!=` (Equatable) are NOT
-                // gated here — records carry structural equality (see the
-                // §18.5 Equatable follow-up).
+                // by their `where`-clause bounds. `==`/`!=` gate behind
+                // `Equatable` the same way (DQ29), with records/enums/compound
+                // built-ins conforming STRUCTURALLY — see
+                // `require_equatable_operand`.
+                //
+                // `unify_or_error` above already required the operands to
+                // share a type, so a single gate check on the (post-unify)
+                // left operand covers both sides without double-reporting.
+                // Fall back to the right operand only when the left stayed
+                // an inference variable (e.g. an open var unified *into* a
+                // concrete right-hand type).
+                let probe = match self.subst.apply(lt) {
+                    Type::TypeVar(_) => rt,
+                    _ => lt,
+                };
                 if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
-                    // `unify_or_error` above already required the operands to
-                    // share a type, so a single gate check on the (post-unify)
-                    // left operand covers both sides without double-reporting.
-                    // Fall back to the right operand only when the left stayed
-                    // an inference variable (e.g. an open var unified *into* a
-                    // concrete right-hand type).
-                    let probe = match self.subst.apply(lt) {
-                        Type::TypeVar(_) => rt,
-                        _ => lt,
-                    };
                     self.require_comparable_operand(probe, span);
+                } else if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    self.require_equatable_operand(probe, span);
                 }
                 Type::Primitive(PrimitiveType::Bool)
             }
@@ -5742,6 +6388,134 @@ impl Default for TypeChecker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ─── DQ29 structural-Equatable support types ─────────────────────────────────
+
+/// The witness a failed structural-Equatable probe returns: which leaf
+/// poisoned the conformance, and where it sits.
+///
+/// `path` is the chain of steps from the probed type to the offending leaf:
+/// record/class field names, `Variant._0`-style enum payload components,
+/// `0`-style tuple indices, and `[..]` / `[key]` / `[value]` / `[ok]` /
+/// `[err]` markers for collection/wrapper elements. Empty when the probed
+/// type itself is the offending leaf. `leaf` is the non-Equatable type found
+/// there. `class_name` is `Some` when the failure is a class without an
+/// explicit `impl Equatable` (rule 7 — classes are excluded from the
+/// structural default), which gets its own diagnostic wording.
+struct NonEquatableWitness {
+    path: Vec<String>,
+    leaf: Type,
+    class_name: Option<String>,
+}
+
+/// Replace symbolic `Named(param)` placeholders in `ty` with the concrete
+/// types `subst_map` assigns them — the use-site instantiation step for
+/// generic records/enums (DQ29 rule 6). Types without placeholders pass
+/// through unchanged; an empty map is the identity.
+fn substitute_named_params(ty: &Type, subst_map: &HashMap<String, Type>) -> Type {
+    if subst_map.is_empty() {
+        return ty.clone();
+    }
+    match ty {
+        Type::Named(n) => subst_map
+            .get(&n.name)
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        Type::Generic(g) => Type::Generic(GenericType {
+            constructor: g.constructor.clone(),
+            args: g
+                .args
+                .iter()
+                .map(|a| substitute_named_params(a, subst_map))
+                .collect(),
+        }),
+        Type::Tuple(elems) => Type::Tuple(
+            elems
+                .iter()
+                .map(|e| substitute_named_params(e, subst_map))
+                .collect(),
+        ),
+        Type::Function(f) => Type::Function(FnType {
+            params: f
+                .params
+                .iter()
+                .map(|p| substitute_named_params(p, subst_map))
+                .collect(),
+            ret: Box::new(substitute_named_params(&f.ret, subst_map)),
+            effects: f.effects.clone(),
+        }),
+        Type::Optional(inner) => {
+            Type::Optional(Box::new(substitute_named_params(inner, subst_map)))
+        }
+        Type::Result(ok, err) => Type::Result(
+            Box::new(substitute_named_params(ok, subst_map)),
+            Box::new(substitute_named_params(err, subst_map)),
+        ),
+        Type::Refined(base, pred) => Type::Refined(
+            Box::new(substitute_named_params(base, subst_map)),
+            pred.clone(),
+        ),
+        _ => ty.clone(),
+    }
+}
+
+/// Word a structural-Equatable failure for the [`E_NOT_EQUATABLE`] diagnostic:
+/// returns `(detail, suggestion)` where `detail` finishes the "… requires it —"
+/// sentence and `suggestion` is the trailing fix note.
+///
+/// `key` is the probed type's [`crate::traits::type_key`] rendering (used in
+/// the suggestion); the witness decides the wording:
+/// - class without impl → names the class and the exclusion rule;
+/// - poisoned field/payload → names the field path and the leaf type
+///   (machine-actionable per the diagnostics-review criterion);
+/// - the probed type itself the leaf → names its kind (function type /
+///   sealed primitive).
+fn equatable_failure_wording(key: &str, witness: &NonEquatableWitness) -> (String, String) {
+    if let Some(class_name) = &witness.class_name {
+        let detail = if witness.path.is_empty() {
+            format!(
+                "`{class_name}` is a class, and classes are excluded from structural \
+                 equality (data/identity line)"
+            )
+        } else {
+            format!(
+                "field `{}` is the class `{class_name}`, and classes are excluded from \
+                 structural equality (data/identity line)",
+                witness.path.join(".")
+            )
+        };
+        return (
+            detail,
+            format!("implement `Equatable` for `{class_name}` or remove the comparison"),
+        );
+    }
+    if witness.path.is_empty() {
+        let detail = match &witness.leaf {
+            Type::Function(_) => "function types have no equality".to_string(),
+            Type::Primitive(_) => format!(
+                "`{key}` has no canonical equality (the `(core trait, primitive)` \
+                 conformances are sealed)"
+            ),
+            other => format!("`{other}` is not Equatable"),
+        };
+        let suggestion = match &witness.leaf {
+            Type::Primitive(_) => format!(
+                "wrap `{key}` in a newtype with its own `impl Equatable`, or remove the \
+                 comparison"
+            ),
+            _ => "remove the comparison".to_string(),
+        };
+        return (detail, suggestion);
+    }
+    (
+        format!(
+            "field `{}` of type `{}` is not Equatable",
+            witness.path.join("."),
+            witness.leaf
+        ),
+        format!("implement `Equatable` for `{key}` or remove the comparison"),
+    )
 }
 
 // ─── NodeKind helpers ─────────────────────────────────────────────────────────

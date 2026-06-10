@@ -1,0 +1,33 @@
+// TEST: eq_record_structural
+// EXPECT: output "eq:true;ne:false;uneq:false;unne:true"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 (§18.5 structural Equatable): a record whose fields are all Equatable
+// conforms to `Equatable` structurally — `==`/`!=` compare field-wise, with no
+// explicit `impl Equatable` required. Two distinct `Point` values with equal
+// fields are `==` (and not `!=`); values differing in any field are `!=`.
+//
+// Codegen contract pinned here: structural record equality must not lower to
+// the target's reference/identity comparison (JS `===` on two distinct objects
+// is always false; Rust needs `PartialEq`). Field-wise equality is required on
+// every target.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+fn main() -> Void {
+  let a: Point = Point { x: 1, y: 2 }
+  let b: Point = Point { x: 1, y: 2 }
+  let c: Point = Point { x: 1, y: 9 }
+  let eq: Bool = a == b
+  let ne: Bool = a != b
+  let uneq: Bool = a == c
+  let unne: Bool = a != c
+  println("eq:${eq};ne:${ne};uneq:${uneq};unne:${unne}")
+}

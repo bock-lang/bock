@@ -355,6 +355,31 @@ fn go_module_uses_int_pow(items: &[AIRNode]) -> bool {
     items.iter().any(|n| format!("{n:?}").contains("op: Pow"))
 }
 
+/// Runtime helper for the DQ29 `"deep"` equality lane: `==`/`!=` whose operand
+/// (transitively) involves a `List`/`Map`/`Set` — Go has no `==` for slices or
+/// maps ("can only be compared to nil", a compile error). `reflect.DeepEqual`
+/// gives exactly the §18.5 semantics: element-wise for slices, content-based
+/// and ORDER-INDEPENDENT for maps (Bock `Map` and `Set` both lower to Go
+/// maps), recursive through struct fields, and IEEE for floats (`NaN`-holding
+/// values are not deeply equal — the DQ10 caveat). Needs `import "reflect"`
+/// wherever it is emitted. The shallow lanes never route here: Go struct /
+/// interface `==` is already field-wise.
+const DEEP_EQ_RUNTIME_GO: &str = "// ── Bock structural equality runtime ──
+func __bockDeepEq(a any, b any) bool {
+	return reflect.DeepEqual(a, b)
+}
+";
+
+/// True if the module contains a `"deep"`-lane equality (so
+/// [`DEEP_EQ_RUNTIME_GO`] must be emitted and `\"reflect\"` imported). Mirrors
+/// [`go_module_uses_range`]'s structural debug scan over the checker's
+/// `user_eq` metadata stamp.
+fn go_module_uses_deep_eq(items: &[AIRNode]) -> bool {
+    items
+        .iter()
+        .any(|n| format!("{n:?}").contains("\"user_eq\": String(\"deep\")"))
+}
+
 /// True if the module references `Optional`, `Some`, or `None` anywhere (so the
 /// Optional runtime prelude must be emitted). A cheap structural scan over the
 /// debug rendering, mirroring `go_module_uses_concurrency`.
@@ -882,6 +907,7 @@ impl GoGenerator {
         let mut uses_ordering = false;
         let mut uses_range = false;
         let mut uses_int_pow = false;
+        let mut uses_deep_eq = false;
         for (module, _) in modules {
             if let NodeKind::Module { items, .. } = &module.kind {
                 uses_concurrency |= go_module_uses_concurrency(items);
@@ -890,6 +916,7 @@ impl GoGenerator {
                 uses_ordering |= go_module_uses_ordering(items);
                 uses_range |= go_module_uses_range(items);
                 uses_int_pow |= go_module_uses_int_pow(items);
+                uses_deep_eq |= go_module_uses_deep_eq(items);
             }
         }
         // The real `core.compare.Ordering` enum is authoritative when reachable
@@ -911,6 +938,7 @@ impl GoGenerator {
             || uses_result
             || uses_range
             || uses_int_pow
+            || uses_deep_eq
             || emit_ordering
             || emit_ordered_constraint)
         {
@@ -918,6 +946,12 @@ impl GoGenerator {
         }
 
         let mut content = String::from("package main\n\n");
+        // `__bockDeepEq` is the only runtime helper with a stdlib dependency;
+        // its import lives here (Go imports are per-file, and the consuming
+        // modules only *call* the helper).
+        if uses_deep_eq {
+            content.push_str("import \"reflect\"\n\n");
+        }
         if uses_concurrency {
             content.push_str(CONCURRENCY_RUNTIME_GO);
             content.push('\n');
@@ -952,6 +986,10 @@ impl GoGenerator {
         }
         if uses_int_pow {
             content.push_str(INT_POW_RUNTIME_GO);
+            content.push('\n');
+        }
+        if uses_deep_eq {
+            content.push_str(DEEP_EQ_RUNTIME_GO);
             content.push('\n');
         }
         // Each runtime block is joined with a trailing `\n`, which leaves a blank
@@ -992,6 +1030,10 @@ struct GoEmitCtx {
     /// Track whether we need `"strconv"` import (`Int.try_from`/`Float.try_from`
     /// string parsing via `strconv.ParseInt`/`strconv.ParseFloat`).
     needs_strconv_import: bool,
+    /// Track whether we need `"reflect"` import (the DQ29 `__bockDeepEq`
+    /// structural-equality helper, single-module path only — the per-module
+    /// path imports it inside the shared `bock_runtime.go` instead).
+    needs_reflect_import: bool,
     /// Package name (defaults to "main").
     package_name: String,
     /// Maps effect operation name → effect type name (e.g., "log" → "Logger").
@@ -1211,6 +1253,9 @@ struct GoEmitCtx {
     /// emitted; deduped exactly as [`Self::range_runtime_emitted`] (a duplicate
     /// `func __bockIntPow` would not compile).
     int_pow_runtime_emitted: bool,
+    /// Set once the [`DEEP_EQ_RUNTIME_GO`] helper (`__bockDeepEq`) has been
+    /// emitted; deduped exactly as [`Self::range_runtime_emitted`].
+    deep_eq_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Go has no sum type, so a user enum is
     /// a sealed interface + per-variant structs named `{enum}{variant}`
     /// (e.g. `ShapeCircle`). The registry lets a construction emit the variant
@@ -1499,6 +1544,7 @@ struct GoImportNeeds {
     math: bool,
     unicode: bool,
     strconv: bool,
+    reflect: bool,
 }
 
 impl GoImportNeeds {
@@ -1513,6 +1559,9 @@ impl GoImportNeeds {
         }
         if self.math {
             imports.push("\"math\"");
+        }
+        if self.reflect {
+            imports.push("\"reflect\"");
         }
         if self.strconv {
             imports.push("\"strconv\"");
@@ -1567,6 +1616,7 @@ impl GoEmitCtx {
             needs_math_import: false,
             needs_unicode_import: false,
             needs_strconv_import: false,
+            needs_reflect_import: false,
             package_name: "main".into(),
             effect_ops: HashMap::new(),
             current_handler_vars: HashMap::new(),
@@ -1606,6 +1656,7 @@ impl GoEmitCtx {
             ordered_constraint_emitted: false,
             range_runtime_emitted: false,
             int_pow_runtime_emitted: false,
+            deep_eq_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             type_aliases: HashMap::new(),
             const_names: std::collections::HashSet::new(),
@@ -1659,6 +1710,7 @@ impl GoEmitCtx {
         c.needs_math_import = false;
         c.needs_unicode_import = false;
         c.needs_strconv_import = false;
+        c.needs_reflect_import = false;
         c.concurrency_runtime_emitted = false;
         c.optional_runtime_emitted = false;
         c.result_runtime_emitted = false;
@@ -1667,6 +1719,7 @@ impl GoEmitCtx {
         c.ordered_constraint_emitted = false;
         c.range_runtime_emitted = false;
         c.int_pow_runtime_emitted = false;
+        c.deep_eq_runtime_emitted = false;
         c.per_module = false;
         c
     }
@@ -4736,6 +4789,7 @@ impl GoEmitCtx {
                 math: self.needs_math_import,
                 unicode: self.needs_unicode_import,
                 strconv: self.needs_strconv_import,
+                reflect: self.needs_reflect_import,
             },
         )
     }
@@ -4751,6 +4805,7 @@ impl GoEmitCtx {
             math: self.needs_math_import,
             unicode: self.needs_unicode_import,
             strconv: self.needs_strconv_import,
+            reflect: self.needs_reflect_import,
         };
         header.push_str(&needs.render_block());
         header.push('\n');
@@ -6607,6 +6662,12 @@ impl GoEmitCtx {
                     self.buf.push_str(INT_POW_RUNTIME_GO);
                     self.buf.push('\n');
                     self.int_pow_runtime_emitted = true;
+                }
+                if !self.deep_eq_runtime_emitted && go_module_uses_deep_eq(items) {
+                    self.buf.push_str(DEEP_EQ_RUNTIME_GO);
+                    self.buf.push('\n');
+                    self.deep_eq_runtime_emitted = true;
+                    self.needs_reflect_import = true;
                 }
                 // `@test` functions are transpiled separately into `go test` files
                 // (project mode, §20.6.2 — see `generate_tests`), never into the
@@ -8656,6 +8717,39 @@ impl GoEmitCtx {
                             "func() bool {{ _, __ok := ({recv}.{method}({other})).(Ordering{tag}); return {neg}__ok }}()"
                         );
                         return Ok(());
+                    }
+                }
+                // DQ29 (§18.5 structural Equatable): a stamped `==`/`!=` whose
+                // operand has an explicit `impl Equatable` dispatches through
+                // its `Eq` method (Go's native struct `==` is field-wise and
+                // would silently ignore the user's custom equality). The
+                // `"deep"` lane — operands involving a `List`/`Map`/`Set`
+                // (no native `==`: "slice/map can only be compared to nil") —
+                // lowers through the `__bockDeepEq` runtime helper, whose
+                // `reflect.DeepEqual` is element-wise for slices and
+                // order-independent for maps (Bock `Map`/`Set`). The
+                // `"structural"` and `"generic"` lanes stay native: Go struct/
+                // interface equality is already field-wise (tag-then-payload
+                // for the enum interface form), and a `comparable`-constrained
+                // type param compares natively.
+                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    match crate::generator::user_eq_kind(node) {
+                        Some("impl") => {
+                            let recv = self.expr_to_string(left)?;
+                            let other = self.expr_to_string(right)?;
+                            let method = self.go_method_name("eq", true);
+                            let neg = if *op == BinOp::Ne { "!" } else { "" };
+                            let _ = write!(self.buf, "{neg}({recv}).{method}({other})");
+                            return Ok(());
+                        }
+                        Some("deep") => {
+                            let recv = self.expr_to_string(left)?;
+                            let other = self.expr_to_string(right)?;
+                            let neg = if *op == BinOp::Ne { "!" } else { "" };
+                            let _ = write!(self.buf, "{neg}__bockDeepEq({recv}, {other})");
+                            return Ok(());
+                        }
+                        _ => {}
                     }
                 }
                 self.buf.push('(');

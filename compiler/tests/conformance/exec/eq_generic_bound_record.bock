@@ -1,0 +1,48 @@
+// TEST: eq_generic_bound_record
+// EXPECT: output "same:true;diff:false;wsame:true;wdiff:false;prim:true"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 (§18.5 structural Equatable) — the generic-bounds half of the ruling:
+// an `Equatable` bound is satisfied by a record whose fields are all
+// Equatable (structural conformance feeds bound satisfaction, not just the
+// `==` gate). Both bound spellings are pinned: the inline `[T: Equatable]`
+// form and the `where (T: Equatable)` clause. Before DQ29 the checker
+// rejected `eq_where(p1, p2)` with a bound-violation error even though
+// `Point` has free structural equality. (The inline form was accepted only
+// vacuously — bracket bounds are not enforced at call sites; see the
+// session's FOUND notes.)
+//
+// Codegen contract pinned here: inside the generic fns, `a.eq(b)` dispatches
+// through the sealed-core TraitBound bridge; with `T` instantiated at a
+// RECORD the bridge's native `==` lowering must be structural on every target
+// (JS `===` on two record objects is reference equality — the same divergence
+// family as Q-js-user-equality-reference).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+fn eq_check[T: Equatable](a: T, b: T) -> Bool {
+  return a.eq(b)
+}
+
+fn eq_where[T](a: T, b: T) -> Bool where (T: Equatable) {
+  return a.eq(b)
+}
+
+fn main() -> Void {
+  let p1: Point = Point { x: 1, y: 2 }
+  let p2: Point = Point { x: 1, y: 2 }
+  let p3: Point = Point { x: 1, y: 3 }
+  let same: Bool = eq_check(p1, p2)
+  let diff: Bool = eq_check(p1, p3)
+  let wsame: Bool = eq_where(p1, p2)
+  let wdiff: Bool = eq_where(p1, p3)
+  let prim: Bool = eq_check(7, 7)
+  println("same:${same};diff:${diff};wsame:${wsame};wdiff:${wdiff};prim:${prim}")
+}

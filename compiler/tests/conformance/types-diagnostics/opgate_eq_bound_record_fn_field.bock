@@ -1,0 +1,30 @@
+// TEST: opgate_eq_bound_record_fn_field
+// EXPECT: error E4015 at 28:23
+//
+// DQ29 (§18.5 structural Equatable) — bound-satisfaction half: a
+// `where (T: Equatable)` bound is satisfied by structural conformance, so it
+// accepts a record of Equatable fields (exec/eq_generic_bound_record.bock)
+// but still REJECTS a poisoned record: `Callback` holds a function field, so
+// passing it to `eq_check` is a bound violation. The diagnostic carries the
+// same structural witness as the operator gate (field `handler` of type
+// `Fn(Int) -> Int`). The location points at the `eq_check(a, b)` call (the
+// `let` initializer).
+module main
+
+record Callback {
+  name: String,
+  handler: Fn(Int) -> Int,
+}
+
+fn eq_check[T](a: T, b: T) -> Bool where (T: Equatable) {
+  return a.eq(b)
+}
+
+fn main() -> Void {
+  let double: Fn(Int) -> Int = (x) => x * 2
+  let triple: Fn(Int) -> Int = (x) => x * 3
+  let a: Callback = Callback { name: "d", handler: double }
+  let b: Callback = Callback { name: "t", handler: triple }
+  let same: Bool = eq_check(a, b)
+  println("${same}")
+}
