@@ -2377,3 +2377,69 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
     whose environment could not commit/push; the operator hand-carried the work as a format-patch
     (temp/designaudittriage937e4f8.patch) and the local orchestrator landed it via the standard
     chore/tracking-20260610-1321 branch → PR. Content is the cloud block's, unchanged except this note.
+
+[2026-06-10 15:31 UTC] ✦ DESIGN-AUDIT FOLLOW-UP WAVE — all four R3/R8 items dispatched, landed; defect harvest triaged
+  Input: operator ("apply temp/designaudittriage937e4f8.patch then pick up next steps") after the prior local session ended
+    abruptly. Recovery findings: the patch was ALREADY on main as #335 (bef33b7 — the prior session landed it before dying);
+    four worktrees existed for the four ready queue items, two with substantial untracked work (tools/corpus/ pipeline ~80%;
+    tools/examples-matrix/ ~70%), two untouched. Board at start: main bef33b7, 0 open PRs, CI green.
+  Options: (a) restart the partial work clean — rejected, the recovered code was sound (both resumed cleanly); (b) dispatch
+    sequentially — rejected, all four lanes are file-disjoint per routing (tools/corpus · tools/examples-matrix ·
+    context-pack+tools/scripts · .claude/conventions), full fan-out endorsed; (c) fold the four into one session — rejected,
+    ownership boundaries and PR review granularity. Chose: 4 concurrent engineer sub-agents, one per worktree, resume-don't-
+    restart, synchronous completion, orchestrator merges.
+  Decision: dispatched 4 lanes; all 4 returned green and opened PRs; merged after per-PR scope verification (diffs matched
+    declared ownership exactly; OQ2 checked mechanically — nothing under tools/corpus/out/ in #337) + CI green:
+    #336 Q-diagnostics-agent-audit (.claude/conventions/diagnostics-review.md; 70 codes/85 sites mapped, exit codes verified
+    correct everywhere — the historical lesson is fixed); #337 Q-synthetic-corpus (261 verified records, 1054/1054 pairs ok,
+    deterministic, output gitignored per OQ2); #338 Q-dogfood-tool (examples-matrix in pure Bock; executed on ALL 5 targets,
+    stdout byte-identical ×5); #339 Q-context-pack (BOCK-CONTEXT-PACK.md v0.1.0, 15/15 examples verified, drift-guard script).
+    Cargo gate: no applicable surface on any (zero compiler/docs files — stated per PR; CI ran the full matrix anyway on
+    #337-#339: green incl. blocking examples lane).
+  Reasoning: all four were ready/un-gated queue items filed by the #335 triage — routine dispatch within authority. The wave
+    doubled as the deepest off-fixture compiler probe yet; per the FOUND-triage contract the harvest is filed, not fixed here:
+    20 new queue items (6 codegen-correctness incl. the SILENT go %-interpolation cross-target divergence, Q-go-percent-
+    interpolation HIGH; 3 interp-parity ranked per R11 incl. Q-interp-question-propagation `?`-abort; 7 diagnostics-quality
+    from the #336 rubric; 2 test-infra incl. the systemic Q-conformance-directive-wiring — only effects/ + types-diagnostics/
+    ErrorAt directives are live; 2 fixture repairs), 2 new divergences (DV20 §21.11 qualified variant patterns; DV21 §6.7
+    fieldless-variant static acceptance — both → Design), and a validation-ledger caveat on the §20.4 equivalence row
+    (claim holds on the covered surface; the probe found divergence outside it).
+  Follow-up: NEXT BLOCK (dispatchable, no gates): the harvest's HIGH items — Q-go-percent-interpolation,
+    Q-python-ifelse-truncation, Q-interp-question-propagation, Q-diag-e4001-message-quality, Q-diag-effect-violation-errors,
+    Q-diag-ansi-no-color, Q-conformance-directive-wiring — are correctness work (R11/§20.4); a 4-6 lane codegen/interp fix
+    wave is the obvious next dispatch. AWAITING OPERATOR (unchanged): the 6-item escalation bundle (R1/R6/OQ1-OQ4) +
+    DQ29/DQ30 + DV19; DV20/DV21 newly routed to Design. INCIDENT: gh API auth degraded mid-block (~15:30 UTC — GraphQL then
+    REST writes 401, reads fine, token file untouched since May 8). Post-mortem: the 15:28 `gh pr merge 339` actually
+    LANDED (main 9ee050a, committed 15:28:13 UTC) — its 401 came from a post-merge step and masked success; verified
+    single squash commit, linear history, no duplicate. The failure is INTERMITTENT (later REST branch-deletes 401'd;
+    git-protocol pushes/deletes worked throughout — used `git push origin --delete` for cleanup). If it recurs: operator
+    should `gh auth refresh`/`gh auth login`; meanwhile prefer git-protocol ops and treat gh write errors as UNRELIABLE
+    signals — re-verify actual state before retrying writes.
+
+═══ DAILY DIGEST — 2026-06-10 (session close) ═══
+Merged: 5 PRs — #335 (the hand-carried cloud triage patch: design-audit #334 → hub + R2/R4 spec touches; landed by the
+  prior local session before it aborted) + the DESIGN-AUDIT FOLLOW-UP WAVE #336–#339 (all four ready R3/R8 items, one
+  4-lane file-disjoint fan-out, two lanes resuming work recovered from the aborted session): #336 diagnostics audit +
+  standing criterion (.claude/conventions/diagnostics-review.md) · #337 synthetic-corpus pipeline (tools/corpus/, output
+  OQ2-gated/uncommitted) · #338 examples-matrix dogfood tool (pure Bock, executed ×5, stdout byte-identical) ·
+  #339 context pack v0.1.0 (context-pack/, 15/15 examples verified, drift-guard script). + this tracking PR.
+Dispatched: 4 engineer lanes (concurrent, worktree-isolated); 4/4 green first pass; 0 red merges; scope verified
+  diff-exact per PR before landing.
+THE HEADLINE — defect harvest: the wave was the deepest off-fixture probe of the compiler yet and it BIT: 20 new queue
+  items (Dogfood/context-pack defect harvest section), led by a SILENT cross-target output divergence
+  (Q-go-percent-interpolation — go %-interpolation corrupts output while building clean; exactly the §20.4 failure class)
+  + Q-python-ifelse-truncation (silent wrong code) + Q-interp-question-propagation (the Tier-1 oracle diverges on `?`,
+  R11-ranked) + 3 diagnostics HIGHs + the systemic Q-conformance-directive-wiring (only effects/ + types-diagnostics/
+  ErrorAt directives are CI-asserted — every other category's diagnostic directives are inert). 2 new divergences
+  DV20/DV21 (qualified variant patterns; fieldless-variant static acceptance) → Design. §20.4 validation-ledger row now
+  carries the coverage caveat. NEXT BLOCK: a 4–6 lane correctness fix wave on the HIGHs — dispatchable, no gates.
+Queued/blocked/awaiting (unchanged): operator bundle (R1, R6, OQ1–OQ4) + DQ29/DQ30 (compiler v1 backlog Design-gated);
+  Design: DV19 + new DV20/DV21.
+Ops: gh API auth degraded INTERMITTENTLY mid-block (GraphQL + REST writes 401, reads + git protocol fine; one 401
+  masked a SUCCESSFUL #339 merge — state re-verified before retrying). If it recurs: `gh auth refresh`. Maintenance:
+  all 4 wave worktrees/branches (local + remote) pruned; per-branch cargo caches reclaimed (disk 36%); temp patch
+  (temp/designaudittriage937e4f8.patch) confirmed fully landed as #335 — safe for the operator to delete.
+State at close: main 9ee050a + this tracking PR, 0 open feature PRs, working tree clean, views regenerated (--check
+  clean). Per-PR CI green ×4 (incl. blocking examples-exec lane); main-HEAD full CI run 27287028774 queued behind #338's
+  run at close — compiler surface untouched all day, so the run is confirmatory, not at-risk. Workspace 2854/0 ·
+  conformance 824/0/0 ×5 · extension 435 / bock-lsp 98 (all unchanged — zero compiler/docs/extension commits today).
