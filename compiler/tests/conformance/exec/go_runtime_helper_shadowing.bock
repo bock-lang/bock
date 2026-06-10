@@ -1,0 +1,50 @@
+// TEST: exec_go_runtime_helper_shadowing
+// EXPECT: output "6;5;30"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-go-runtime-helper-shadowing — a user local/parameter must shadow a
+// same-named `core.string` helper on the Go backend.
+//
+// When any `core.string` item is imported, the whole module is reached and its
+// *public* functions (`lines`, `repeat`, `pad_left`, ...) enter the Go
+// backend's public-fn rename set (Bock `lines` → Go `Lines`). The identifier
+// emitter applied that rename to EVERY bare reference — including a parameter
+// or `let` binding that happens to share a helper's name — so `for line in
+// lines` over a `lines: List[String]` parameter emitted `range Lines` (the
+// helper *function*), which Go rejects (`cannot range over Lines (value of
+// type func(s string) []string)`). Locals must win: the rename now yields to
+// any in-scope value binding of the same name.
+//
+// Shadow shapes covered (none of the shadowing names are themselves imported —
+// the helpers enter the rename set just by the module being reached):
+//   * a parameter named `lines` used in for-in position (the dogfood repro)
+//     and as a call argument
+//   * a `let` named `lines` used as a call argument and a method receiver
+//   * a `let` named `repeat` used in arithmetic value position
+//   * a loop variable named `pad_left` read inside its loop body
+module main
+
+use core.string.{is_blank}
+
+fn count_nonblank(lines: List[String]) -> Int {
+  let mut n = 0
+  for line in lines {
+    if (is_blank(line) == false) {
+      n = n + 1
+    }
+  }
+  return n
+}
+
+fn main() -> Void {
+  let lines = ["a", " ", "b", "", "c"]
+  let repeat = 2
+  let total = count_nonblank(lines) * repeat
+
+  let mut acc = 0
+  for pad_left in [10, 20] {
+    acc = acc + pad_left
+  }
+
+  println("${total};${lines.len()};${acc}")
+}

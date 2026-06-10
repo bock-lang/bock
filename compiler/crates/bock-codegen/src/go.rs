@@ -1751,6 +1751,37 @@ impl GoEmitCtx {
         }
     }
 
+    /// Whether `name` is bound as a *local value* (parameter, `let`, match /
+    /// guard bind, typed loop var) at the current emission point, in which case
+    /// it must shadow a same-named public module function
+    /// (Q-go-runtime-helper-shadowing). When any `core.string` item is imported
+    /// the whole module is reached and its public fns (`lines`, `repeat`, …)
+    /// enter [`Self::public_fns`]; without this check the identifier emitter
+    /// PascalCased EVERY bare reference, so a `lines: List[String]` parameter
+    /// used in `for line in lines` emitted `range Lines` — the helper
+    /// *function* — which Go rejects. Bock scoping says the local wins; the
+    /// checker already resolved it that way, so the Go spelling must too.
+    ///
+    /// Locals are tracked in two places, both keyed by the Go-escaped name and
+    /// both populated only as emission *reaches* the binding (so a reference
+    /// preceding a later same-named `let` still resolves to the module fn):
+    /// [`Self::var_go_type`] (params on fn/method/lambda entry, typed loop vars,
+    /// typed binds — saved/restored per scope) and the
+    /// [`Self::go_declared_scopes`] frames (every `let`/bind the open blocks
+    /// declared, seeded with the parameter names). Checked across *all* open
+    /// frames — an outer fn-scope binding shadows inside nested blocks too.
+    fn local_shadows_public_fn(&self, name: &str) -> bool {
+        if !self.public_fns.contains(name) {
+            return false;
+        }
+        let key = go_value_ident(name);
+        self.var_go_type.contains_key(&key)
+            || self
+                .go_declared_scopes
+                .iter()
+                .any(|frame| frame.contains(&key))
+    }
+
     /// The Go identifier for a top-level Bock function reference, applying the
     /// public/private PascalCase/camelCase rule and then disambiguating a public
     /// name that collides with a top-level type. Go has a single namespace for
@@ -2884,6 +2915,13 @@ impl GoEmitCtx {
                 return Some(elem.to_string());
             }
         }
+        // A builtin String-method call returning a concretely-typed list
+        // (`s.split(..)` → `[]string`): the binding's element is known without
+        // any combinator analysis (Q-go-split-combinator-typing — lets a `let
+        // raw = s.split(..)` record `string` so a chain on the binding types).
+        if let Some(elem) = Self::string_list_builtin_elem(value) {
+            return Some(elem);
+        }
         // A list combinator (`xs.map(..)`, `xs.filter(..)`) reaches codegen as the
         // desugared `Call(FieldAccess(xs, "map"), [cb])`, not a `MethodCall`;
         // recognise it through the shared desugar resolver.
@@ -2892,7 +2930,15 @@ impl GoEmitCtx {
         };
         let (recv, method, rest) =
             crate::generator::desugared_list_functional_method(value, callee, args)?;
-        let recv_elem = self.list_receiver_elem_go_type(recv)?;
+        // The cheap `&self` receiver resolver covers bindings/literals and the
+        // element-preserving chained combinators; recurse through this *value*
+        // resolver otherwise so a `map`/`flat_map` link in the chain (whose
+        // element is its closure's return type) doesn't sever element recovery
+        // for everything chained after it (`split(..).map(..).filter(..)`,
+        // Q-go-split-combinator-typing).
+        let recv_elem = self
+            .list_receiver_elem_go_type(recv)
+            .or_else(|| self.value_list_elem_go_type(recv))?;
         match method {
             "filter" => Some(recv_elem),
             "map" | "flat_map" => {
@@ -3120,8 +3166,57 @@ impl GoEmitCtx {
             }
             NodeKind::ListLiteral { elems } => self.infer_homogeneous_elem_type(elems),
             NodeKind::Range { .. } => Some("int64".to_string()),
-            _ => None,
+            // `for p in s.split(",")`: the builtin lowers to `strings.Split`,
+            // a concrete `[]string` (Q-go-split-combinator-typing).
+            _ => Self::string_list_builtin_elem(iterable),
         }
+    }
+
+    /// The concrete Go type a builtin *String-method* call lowers to, keyed off
+    /// the same checker receiver-kind annotation [`Self::try_emit_string_method`]
+    /// dispatches on (so a user method named `trim` on a non-String receiver is
+    /// never mistaken for the builtin). This table mirrors that emitter's
+    /// lowerings exactly: `split` → `strings.Split` (`[]string`), the
+    /// string-transforming methods → `string`, the length queries → `int64`, the
+    /// predicates → `bool`, and the optional-returning lookups → the
+    /// `__bockOption` runtime struct. Previously codegen had no return type for
+    /// any of these, so a combinator chained onto `split()` — or a `.map((p) =>
+    /// p.trim())` link feeding a chain — erased to `interface{}`, which Go
+    /// rejects against the lowering's concrete types
+    /// (Q-go-split-combinator-typing — the builtin-method sibling of the #256
+    /// chained-combinator fix).
+    fn string_builtin_return_go_type(
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Option<String> {
+        if crate::generator::primitive_recv_kind(node) != Some("String") {
+            return None;
+        }
+        let (_, field, _) = crate::generator::desugared_self_call(callee, args)?;
+        let ty = match field.name.as_str() {
+            "to_upper" | "to_lower" | "trim" | "trim_start" | "trim_end" | "reverse" | "repeat"
+            | "replace" | "slice" | "substring" | "to_string" | "display" => "string",
+            "split" => "[]string",
+            "len" | "length" | "count" | "byte_len" => "int64",
+            "is_empty" | "contains" | "starts_with" | "ends_with" => "bool",
+            "char_at" | "index_of" => "__bockOption",
+            _ => return None,
+        };
+        Some(ty.to_string())
+    }
+
+    /// The Go element type of a builtin *String-method* call returning a
+    /// `List` — today only `split`, whose lowering is a concrete `[]string`
+    /// (Q-go-split-combinator-typing). The slice-element view of
+    /// [`Self::string_builtin_return_go_type`] for the list-element resolvers.
+    fn string_list_builtin_elem(recv: &AIRNode) -> Option<String> {
+        let NodeKind::Call { callee, args, .. } = &recv.kind else {
+            return None;
+        };
+        Self::string_builtin_return_go_type(recv, callee, args)?
+            .strip_prefix("[]")
+            .map(str::to_string)
     }
 
     /// The Go slice element type of a `List` *value* expression used as the
@@ -3163,11 +3258,19 @@ impl GoEmitCtx {
             // receivers (whose element is the closure's return type) are recovered
             // by the `&mut self` fallback in `try_emit_list_functional_method`.
             NodeKind::Call { callee, args, .. } => {
-                let (inner_recv, method, _) =
-                    crate::generator::desugared_list_functional_method(recv, callee, args)?;
-                match method {
-                    "filter" | "find" => self.list_receiver_elem_go_type(inner_recv),
-                    _ => None,
+                if let Some((inner_recv, method, _)) =
+                    crate::generator::desugared_list_functional_method(recv, callee, args)
+                {
+                    match method {
+                        "filter" | "find" => self.list_receiver_elem_go_type(inner_recv),
+                        _ => None,
+                    }
+                } else {
+                    // Not a list combinator: a builtin String-method call that
+                    // returns a concretely-typed list (`s.split(..)` →
+                    // `strings.Split` → `[]string`) still carries a known
+                    // element (Q-go-split-combinator-typing).
+                    Self::string_list_builtin_elem(recv)
                 }
             }
             // A `self.field` list receiver inside an impl method (`self.xs.get(i)`
@@ -3829,6 +3932,15 @@ impl GoEmitCtx {
             // (`ListIterator[int64]`), so a downstream call (`filter(it, ..)`)
             // can in turn bind its own params and specialise its lambda arg.
             NodeKind::Call { callee, args, .. } => {
+                // A builtin String-method call types to its lowering's concrete
+                // Go type (`p.trim()` → `string`, `s.split(..)` → `[]string`),
+                // so a closure body / binding built from one infers concretely
+                // (Q-go-split-combinator-typing). Checked before the user-method
+                // return lookup: the receiver-kind annotation proves this is the
+                // builtin, not a same-named user method.
+                if let Some(t) = Self::string_builtin_return_go_type(node, callee, args) {
+                    return Some(t);
+                }
                 let name = match &callee.kind {
                     NodeKind::Identifier { name } => name,
                     // A method call `recv.method(...)` lowers to a `Call` whose
@@ -8461,6 +8573,11 @@ impl GoEmitCtx {
                 }
                 let emitted = if is_prelude_ctor(&name.name) {
                     name.name.clone()
+                } else if self.local_shadows_public_fn(&name.name) {
+                    // An in-scope local (param/`let`/bind) shadows a same-named
+                    // public module fn — spell the *local*, not the PascalCased
+                    // helper (Q-go-runtime-helper-shadowing).
+                    go_value_ident(&name.name)
                 } else {
                     // Routes a public name colliding with a type through the
                     // `Fn`-suffix rename (`key` → `KeyFn`); a private name is
@@ -9320,7 +9437,16 @@ impl GoEmitCtx {
                 for part in parts {
                     match part {
                         AirInterpolationPart::Literal(s) => {
-                            self.buf.push_str(&escape_go_string(s));
+                            // This literal lands inside a `fmt.Sprintf` FORMAT
+                            // string, so a literal `%` must be doubled to `%%` —
+                            // unescaped it pairs with the following bytes as a
+                            // verb (`"${n}% pass"` → format `"%v% pass"` →
+                            // `95%!p(MISSING)ass`), a SILENT cross-target output
+                            // divergence: the build stays green and only Go
+                            // corrupts (Q-go-percent-interpolation).
+                            // `escape_go_string` never emits `%`, so escaping
+                            // before doubling cannot double an escape.
+                            self.buf.push_str(&escape_go_string(s).replace('%', "%%"));
                         }
                         AirInterpolationPart::Expr(expr) => {
                             self.buf.push_str("%v");
@@ -13299,6 +13425,157 @@ mod tests {
         assert!(out.contains("fmt.Sprintf"), "got: {out}");
         assert!(out.contains("Hello, %v!"), "got: {out}");
         assert!(out.contains("import \"fmt\""), "got: {out}");
+    }
+
+    /// Q-go-percent-interpolation: a literal `%` inside an interpolated string
+    /// lands in a `fmt.Sprintf` FORMAT string and must double to `%%` — left
+    /// single it pairs with the following bytes as a verb (`"${n}% pass"` →
+    /// `95%!p(MISSING)ass`), a silent cross-target output divergence (the build
+    /// stays green and only Go corrupts).
+    #[test]
+    fn interpolation_escapes_literal_percent() {
+        let interp = node(
+            1,
+            NodeKind::Interpolation {
+                parts: vec![
+                    AirInterpolationPart::Expr(Box::new(id_node(2, "n"))),
+                    AirInterpolationPart::Literal("% pass, 100%% raw".into()),
+                ],
+            },
+        );
+        let out = gen(&module(vec![], vec![interp]));
+        assert!(
+            out.contains(r#"fmt.Sprintf("%v%% pass, 100%%%% raw", n)"#),
+            "literal % must be doubled in the Sprintf format string, got: {out}"
+        );
+    }
+
+    /// Q-go-runtime-helper-shadowing: a parameter named after a public module
+    /// fn (`lines` — the `core.string` helper shape) must be spelled as the
+    /// LOCAL (`lines`) at every reference, not the PascalCased helper
+    /// (`Lines`) — here in for-in iterable position, the dogfood repro.
+    #[test]
+    fn local_param_shadows_public_fn_rename() {
+        let pub_lines = node(
+            10,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("lines"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(11, vec![], None)),
+            },
+        );
+        let loop_stmt = node(
+            20,
+            NodeKind::For {
+                pattern: Box::new(bind_pat(21, "line")),
+                iterable: Box::new(id_node(22, "lines")),
+                body: Box::new(block(23, vec![id_node(24, "line")], None)),
+            },
+        );
+        let count_fn = node(
+            30,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("count"),
+                generic_params: vec![],
+                params: vec![param_node(31, "lines")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(32, vec![loop_stmt], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![pub_lines, count_fn]));
+        assert!(
+            out.contains("range lines {"),
+            "an in-scope param must shadow the public-fn rename, got: {out}"
+        );
+        assert!(
+            !out.contains("range Lines"),
+            "the PascalCased helper must not be referenced for the local, got: {out}"
+        );
+    }
+
+    /// Q-go-split-combinator-typing: the builtin String-method return table
+    /// mirrors `try_emit_string_method`'s lowerings (`split` → `[]string`,
+    /// transforms → `string`, …), gated on the checker's receiver-kind
+    /// annotation so a same-named user method is never mistaken for the
+    /// builtin.
+    #[test]
+    fn string_builtin_return_type_mirrors_lowering() {
+        let build = |method: &str, tag: Option<&str>| {
+            let object = id_node(5, "s");
+            let callee = node(
+                6,
+                NodeKind::FieldAccess {
+                    object: Box::new(object),
+                    field: ident(method),
+                },
+            );
+            // The lowerer clones the receiver into the leading self arg: same
+            // NodeId as the field-access object (see `desugared_self_call`).
+            let args = vec![
+                AirArg {
+                    label: None,
+                    value: id_node(5, "s"),
+                },
+                AirArg {
+                    label: None,
+                    value: str_lit(7, ","),
+                },
+            ];
+            let mut call = node(
+                8,
+                NodeKind::Call {
+                    callee: Box::new(callee.clone()),
+                    args: args.clone(),
+                    type_args: vec![],
+                },
+            );
+            if let Some(tag) = tag {
+                call.metadata.insert(
+                    bock_types::checker::RECV_KIND_META_KEY.to_string(),
+                    bock_air::Value::String(tag.to_string()),
+                );
+            }
+            (call, callee, args)
+        };
+        for (method, expect) in [
+            ("split", Some("[]string")),
+            ("trim", Some("string")),
+            ("to_upper", Some("string")),
+            ("len", Some("int64")),
+            ("contains", Some("bool")),
+            ("char_at", Some("__bockOption")),
+            ("frobnicate", None),
+        ] {
+            let (call, callee, args) = build(method, Some("Primitive:String"));
+            assert_eq!(
+                GoEmitCtx::string_builtin_return_go_type(&call, &callee, &args).as_deref(),
+                expect,
+                "method {method}"
+            );
+        }
+        // No checker annotation / non-String receiver → not the builtin.
+        let (call, callee, args) = build("split", None);
+        assert_eq!(
+            GoEmitCtx::string_builtin_return_go_type(&call, &callee, &args),
+            None
+        );
+        let (call, callee, args) = build("split", Some("User:Tokenizer"));
+        assert_eq!(
+            GoEmitCtx::string_builtin_return_go_type(&call, &callee, &args),
+            None
+        );
     }
 
     #[test]
