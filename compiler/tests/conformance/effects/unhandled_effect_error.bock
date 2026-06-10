@@ -1,20 +1,20 @@
 // TEST: effect_unhandled_no_handler_in_scope
-// EXPECT: error E1001 at 25:8
-// §10.3: a function that invokes an effect operation with NO Layer-1 (`handling`
-// block) and NO Layer-2 (`handle ... with`) handler in scope, and which does not
-// declare the effect in its own `with` clause, is a compile-time error. Here
-// `main` invokes the `Log` effect operation `log` with no handler installed and
-// no `with Log` clause.
+// EXPECT: error E6005 at 25:3
+// Section 10.3: a function that invokes an effect operation with NO Layer-1
+// (`handling` block) and NO Layer-2 (`handle ... with`) handler in scope, and
+// which does not declare the effect in its own `with` clause, is a
+// compile-time error. Here `main` invokes the `Log` effect operation `log`
+// with no handler installed and no `with Log` clause.
 //
-// Observed diagnostic: a genuinely-unhandled bare op surfaces as the resolver's
-// undefined-name error E1001 (at the `log(...)` call site, 25:8), NOT the
-// capability pass's E8020. Effect ops are injected into scope ONLY in
-// handler-in-scope contexts — a `with` clause, an effect impl method, a
-// `handling` block, or a module with a matching `handle` — so with none of
-// those present, `log` is simply an undefined name. E8020 fires only on
-// `EffectOp` AIR nodes, which are never constructed from a surface bare-op
-// `Call`; unifying the two (so an unhandled op reports E8020) is a separate
-// follow-up (Q-effect-op-node-lowering) and is intentionally out of scope here.
+// Observed diagnostic: E6005 (effect operation called without its effect
+// declared or handled), emitted by the resolver at the `log(...)` call site
+// (25:3). The message names the op and its effect; the note states the fix
+// (`with Log` on `main`, or a `handling` block). Historically this surfaced
+// as the generic undefined-name E1001 with a misleading "did you mean `Log`?"
+// suggestion (Q-diag-effect-violation-errors). Effect ops are in scope ONLY
+// in handler-in-scope contexts (a `with` clause, an effect impl method, a
+// `handling` block, or a module-level `handle`); with none present, the
+// resolver recognizes the op name and reports the effect-system rule.
 module effects_unhandled_effect_error
 
 effect Log {

@@ -28,12 +28,15 @@ pub struct DiagnosticCodeInfo {
 
 /// The full catalog of diagnostic codes.
 ///
-/// Codes are grouped by crate of origin:
+/// Codes are grouped by the *domain* of the violated rule (which usually,
+/// but not always, matches the crate of origin):
 /// - `1xxx` — lexer (`bock-lexer`) and name resolution (`bock-air`)
 /// - `2xxx` — parser (`bock-parser`)
 /// - `4xxx` — type checker (`bock-types/checker`)
 /// - `5xxx` — ownership (`bock-types/ownership`)
-/// - `6xxx` — effects (`bock-types/effects`)
+/// - `6xxx` — effects (`bock-types/effects`; E6005 is emitted by the
+///   `bock-air` resolver and E6006 by the checker, but both report
+///   effect-system rules so they live in this family)
 /// - `7xxx` — capabilities (`bock-types/capabilities`)
 #[must_use]
 pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
@@ -210,7 +213,7 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             code: "E4001",
             severity: Severity::Error,
             summary: "Type mismatch.",
-            description: "Expected and actual types do not unify.",
+            description: "Expected and actual types do not unify. The message reads `expected `T`, found `U``: `T` is the type the surrounding context requires and `U` is the type the expression actually has, both in surface Bock syntax. When a direct conversion to the expected type exists, a note suggests it (`.to_float()`, `.to_int()`, `.to_string()`, or `Int.try_from`/`Float.try_from` for parsing a String).",
             spec_refs: &["§2"],
         },
         DiagnosticCodeInfo {
@@ -326,6 +329,20 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             summary: "Public function propagates undeclared effect (development mode).",
             description: "A public function calls a function whose effects escape its declared clause.",
             spec_refs: &["§8"],
+        },
+        DiagnosticCodeInfo {
+            code: "E6005",
+            severity: Severity::Error,
+            summary: "Effect operation called without its effect declared or handled.",
+            description: "An effect operation (e.g. `log(...)` of `effect Log`) was called, but the operation's effect is neither declared by the enclosing function (`with <Effect>`) nor handled in an enclosing scope (a `handling (<Effect> with <handler>) { ... }` block or a module-level `handle <Effect> with <handler>`). Fix by declaring the effect on the function or installing a handler. Emitted by the name-resolution pass: effect operations are only in scope in those contexts.",
+            spec_refs: &["§8", "§10.3", "§10.4"],
+        },
+        DiagnosticCodeInfo {
+            code: "E6006",
+            severity: Severity::Error,
+            summary: "Lambda-handler form is reserved until v1.x.",
+            description: "The lambda-based handler surface `Effect.handler(op: (args) => ...)` is reserved for v1.x and is not a v1 form. v1 supports exactly one handler form: declare a record, `impl <Effect> for <Record>`, and install it with `handle <Effect> with <record>` (module level) or `handling (<Effect> with <record>) { ... }` (block level).",
+            spec_refs: &["§10.4"],
         },
         // ── Capabilities (7xxx) ────────────────────────────────────────
         DiagnosticCodeInfo {

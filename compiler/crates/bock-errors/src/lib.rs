@@ -3,7 +3,9 @@
 //! `Span` and `FileId` are defined here (not in `bock-source`) to avoid circular
 //! dependencies. Every crate in the pipeline uses these types transitively.
 
-use ariadne::{Color, Label as AriadneLabel, Report, ReportKind, Source};
+use std::io::IsTerminal;
+
+use ariadne::{Color, Config, Label as AriadneLabel, Report, ReportKind, Source};
 
 pub mod catalog;
 
@@ -14,7 +16,7 @@ pub mod catalog;
 pub struct FileId(pub u32);
 
 /// A byte-offset span within a source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     pub file: FileId,
     /// Start byte offset (inclusive).
@@ -284,13 +286,59 @@ where
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
 
+/// Decide whether diagnostic rendering should include ANSI color escapes.
+///
+/// This is the pure decision core (injectable for tests):
+/// - **`NO_COLOR`** (<https://no-color.org>): the *presence* of the
+///   environment variable — any value, including the empty string —
+///   disables color.
+/// - **TTY**: color is only used when the stream that carries diagnostics
+///   is an interactive terminal. Piped/redirected output (CI logs, agents
+///   parsing `bock check` output) must never contain escape sequences.
+#[must_use]
+pub fn should_colorize(no_color_present: bool, stream_is_terminal: bool) -> bool {
+    !no_color_present && stream_is_terminal
+}
+
+/// [`should_colorize`] wired to the real environment: reads `NO_COLOR` and
+/// probes **stderr** (the stream the CLI prints rendered diagnostics to).
+#[must_use]
+pub fn color_enabled_for_diagnostics() -> bool {
+    should_colorize(
+        std::env::var_os("NO_COLOR").is_some(),
+        std::io::stderr().is_terminal(),
+    )
+}
+
 /// Render a slice of diagnostics to a string using ariadne for source context.
 ///
 /// `filename` and `source` must correspond to the file referenced by the
 /// diagnostics' spans. This function is intentionally decoupled from
 /// `bock-source` types so that `bock-errors` stays dependency-free.
+///
+/// Color is decided automatically via [`color_enabled_for_diagnostics`]:
+/// ANSI escapes are emitted only when stderr is an interactive terminal and
+/// `NO_COLOR` is unset. Use [`render_with_color`] to force the decision.
 #[must_use]
 pub fn render(diagnostics: &[Diagnostic], filename: &str, source: &str) -> String {
+    render_with_color(
+        diagnostics,
+        filename,
+        source,
+        color_enabled_for_diagnostics(),
+    )
+}
+
+/// Render diagnostics with an explicit color decision.
+///
+/// `color: false` guarantees the output contains no ANSI escape sequences.
+#[must_use]
+pub fn render_with_color(
+    diagnostics: &[Diagnostic],
+    filename: &str,
+    source: &str,
+    color: bool,
+) -> String {
     let mut out = Vec::new();
     let cache = (filename, Source::from(source));
 
@@ -299,6 +347,7 @@ pub fn render(diagnostics: &[Diagnostic], filename: &str, source: &str) -> Strin
         let span_range = diag.span.start..diag.span.end;
 
         let mut builder = Report::build(kind, filename, diag.span.start)
+            .with_config(Config::default().with_color(color))
             .with_message(format!("[{}] {}", diag.code, diag.message))
             .with_label(
                 AriadneLabel::new((filename, span_range))
@@ -532,6 +581,68 @@ mod tests {
     fn suggest_similar_rejects_far_matches() {
         let names = vec!["elephant", "giraffe"];
         assert_eq!(suggest_similar("cat", names, 2), None);
+    }
+
+    // ── color decision ────────────────────────────────────────────────────────
+
+    #[test]
+    fn should_colorize_only_on_tty_without_no_color() {
+        // Interactive TTY, NO_COLOR unset → color on.
+        assert!(should_colorize(false, true));
+        // NO_COLOR present (any value, per https://no-color.org) → off,
+        // even on a TTY.
+        assert!(!should_colorize(true, true));
+        // Piped / redirected output (not a terminal) → off.
+        assert!(!should_colorize(false, false));
+        // Both: off.
+        assert!(!should_colorize(true, false));
+    }
+
+    fn ansi_test_diag() -> Diagnostic {
+        Diagnostic {
+            severity: Severity::Error,
+            code: DiagnosticCode {
+                prefix: 'E',
+                number: 1,
+            },
+            message: "unexpected token".into(),
+            span: Span {
+                file: FileId(1),
+                start: 8,
+                end: 9,
+            },
+            labels: vec![],
+            notes: vec![],
+        }
+    }
+
+    #[test]
+    fn render_without_color_has_no_ansi_escapes() {
+        let out = render_with_color(&[ansi_test_diag()], "test.bock", "let x = ;", false);
+        assert!(
+            !out.contains('\u{1b}'),
+            "expected no ANSI escapes, got: {out:?}"
+        );
+        assert!(out.contains("unexpected token"), "output: {out}");
+        assert!(out.contains("E0001"), "output: {out}");
+    }
+
+    #[test]
+    fn render_with_color_emits_ansi_escapes() {
+        let out = render_with_color(&[ansi_test_diag()], "test.bock", "let x = ;", true);
+        assert!(
+            out.contains('\u{1b}'),
+            "expected ANSI escapes when color is forced on, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn render_with_note_without_color_keeps_note_text() {
+        let mut diag = ansi_test_diag();
+        diag.note("declare the variable first");
+        let out = render_with_color(&[diag], "test.bock", "let x = ;", false);
+        assert!(out.contains("declare the variable first"), "output: {out}");
+        assert!(!out.contains('\u{1b}'), "output: {out:?}");
     }
 
     #[test]

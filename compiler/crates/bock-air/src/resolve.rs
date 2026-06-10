@@ -29,6 +29,21 @@ const E_UNDEFINED: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 1001,
 };
+/// `E6005` — an effect **operation** was called, but the operation's effect is
+/// neither declared by the enclosing function (`with <Effect>`) nor handled in
+/// an enclosing scope (a `handling` block or a module-level `handle`). Effect
+/// ops are injected into scope only in those contexts, so the bare op name
+/// does not resolve — but reporting that as a generic "undefined name"
+/// (E1001) mis-categorizes an effect-system violation as a name-resolution
+/// miss, and the near-name suggestion (`did you mean `Log`?`) steers an agent
+/// toward a rename instead of the real fix (Q-diag-effect-violation-errors).
+/// Lives in the `6xxx` effects family because the violated rule is an
+/// effect-system rule (§8/§10), even though the emitting pass is the
+/// resolver.
+const E_EFFECT_OP_UNAVAILABLE: DiagnosticCode = DiagnosticCode {
+    prefix: 'E',
+    number: 6005,
+};
 const E_MODULE_NOT_FOUND: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 1005,
@@ -339,6 +354,24 @@ impl SymbolTable {
             .unwrap_or(false)
     }
 
+    /// Returns the names of all known effects that **directly declare** an
+    /// operation called `op_name`, sorted for deterministic diagnostics.
+    ///
+    /// Used by the undefined-name path to recognize an effect-op call whose
+    /// effect is neither declared (`with <Effect>`) nor handled in scope —
+    /// an effect-system violation (E6005), not a name-resolution miss.
+    #[must_use]
+    pub fn effects_declaring_op(&self, op_name: &str) -> Vec<String> {
+        let mut effects: Vec<String> = self
+            .effect_info
+            .iter()
+            .filter(|(_, info)| info.operations.iter().any(|(name, _, _)| name == op_name))
+            .map(|(effect_name, _)| effect_name.clone())
+            .collect();
+        effects.sort();
+        effects
+    }
+
     /// Returns all import bindings from the module scope that were never used.
     #[must_use]
     pub fn unused_imports(&self) -> Vec<&Binding> {
@@ -365,6 +398,10 @@ struct Resolver<'a> {
     /// Optional cross-file module registry for resolving imports.
     /// When `Some`, named and glob imports are resolved from registered modules.
     registry: Option<&'a ModuleRegistry>,
+    /// Name of the function whose body is currently being resolved, if any.
+    /// Used to make the E6005 fix suggestion concrete (`add `with Log` to
+    /// the signature of `main``).
+    current_fn: Option<String>,
 }
 
 impl<'a> Resolver<'a> {
@@ -374,6 +411,7 @@ impl<'a> Resolver<'a> {
             diag,
             synthetic_id: u32::MAX / 2,
             registry: None,
+            current_fn: None,
         }
     }
 
@@ -811,6 +849,7 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_fn(&mut self, d: &FnDecl) {
+        let prev_fn = self.current_fn.replace(d.name.name.clone());
         self.symbols.push_scope();
         for param in &d.params {
             self.resolve_param(param);
@@ -825,6 +864,7 @@ impl<'a> Resolver<'a> {
             self.resolve_block_body(body);
         }
         self.symbols.pop_scope();
+        self.current_fn = prev_fn;
     }
 
     /// For each effect in the `with` clause, look up its operations and
@@ -1052,6 +1092,42 @@ impl<'a> Resolver<'a> {
                 if let Some(resolved) = self.symbols.lookup(&name.name) {
                     self.symbols.record_resolution(*id, resolved);
                 } else if !self.symbols.has_wildcard_import() {
+                    // An unresolved name that matches a known effect's
+                    // operation is an *effect-system* violation, not a
+                    // name-resolution miss: ops are injected into scope only
+                    // where their effect is declared (`with <Effect>`) or
+                    // handled (`handling` block / module `handle`). Report
+                    // it as E6005 with the actual rule and fix — the generic
+                    // E1001 plus its near-name suggestion (`did you mean
+                    // `Log`?`) would steer the repair toward a rename.
+                    let owning_effects = self.symbols.effects_declaring_op(&name.name);
+                    if !owning_effects.is_empty() {
+                        let effect_list = owning_effects
+                            .iter()
+                            .map(|e| format!("`{e}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let effect = &owning_effects[0];
+                        let fix_target = match &self.current_fn {
+                            Some(fn_name) => {
+                                format!("the signature of the enclosing function `{fn_name}`")
+                            }
+                            None => "the enclosing function's signature".to_string(),
+                        };
+                        self.diag
+                            .error(
+                                E_EFFECT_OP_UNAVAILABLE,
+                                format!(
+                                    "`{}` is an operation of effect {effect_list}, but the effect is neither declared by the enclosing function nor handled here",
+                                    name.name
+                                ),
+                                name.span,
+                            )
+                            .note(format!(
+                                "add `with {effect}` to {fix_target}, or wrap the call in a handler: `handling ({effect} with <handler>) {{ ... }}`"
+                            ));
+                        return;
+                    }
                     let visible = self.symbols.visible_names();
                     let diag = self.diag.error(
                         E_UNDEFINED,
@@ -1772,6 +1848,158 @@ mod tests {
         assert!(diag.has_errors());
         let msgs: Vec<_> = diag.iter().map(|d| d.message.as_str()).collect();
         assert!(msgs.iter().any(|m| m.contains("undefined_thing")));
+    }
+
+    // ── Effect-op violations (Q-diag-effect-violation-errors) ────────────────
+
+    fn effect_log_item(id: NodeId) -> Item {
+        Item::Effect(bock_ast::EffectDecl {
+            id,
+            span: sp(),
+            annotations: vec![],
+            visibility: Visibility::Private,
+            name: ident("Log"),
+            generic_params: vec![],
+            components: vec![],
+            operations: vec![FnDecl {
+                id: id + 1,
+                span: sp(),
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("log"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: None,
+            }],
+        })
+    }
+
+    fn main_calling(id: NodeId, callee: &str) -> Item {
+        Item::Fn(FnDecl {
+            id,
+            span: sp(),
+            annotations: vec![],
+            visibility: Visibility::Private,
+            is_async: false,
+            name: ident("main"),
+            generic_params: vec![],
+            params: vec![],
+            return_type: None,
+            effect_clause: vec![],
+            where_clause: vec![],
+            body: Some(Block {
+                id: id + 100,
+                span: sp(),
+                stmts: vec![],
+                tail: Some(Box::new(Expr::Identifier {
+                    id: id + 101,
+                    span: sp(),
+                    name: ident(callee),
+                })),
+            }),
+        })
+    }
+
+    /// Calling an effect op whose effect is neither declared (`with`) nor
+    /// handled is an effect-system violation: E6005 naming the op, the
+    /// effect, and the fix — not a generic E1001 with a `did you mean
+    /// `Log`?` rename suggestion.
+    #[test]
+    fn undeclared_effect_op_reports_e6005_with_fix() {
+        let module = simple_module(vec![], vec![effect_log_item(1), main_calling(10, "log")]);
+        let mut st = SymbolTable::new();
+        let diag = resolve_names(&module, &mut st);
+        assert!(diag.has_errors());
+        let d = diag
+            .iter()
+            .find(|d| d.severity == bock_errors::Severity::Error)
+            .expect("an error diagnostic");
+        assert_eq!(d.code.to_string(), "E6005");
+        assert!(
+            d.message.contains("`log`") && d.message.contains("`Log`"),
+            "message must name the op and the effect: {}",
+            d.message
+        );
+        assert!(
+            d.notes
+                .iter()
+                .any(|n| n.contains("with Log") && n.contains("`main`") && n.contains("handling")),
+            "note must state the concrete fix: {:?}",
+            d.notes
+        );
+        assert!(
+            !d.notes.iter().any(|n| n.contains("did you mean")),
+            "must not suggest a rename for an effect violation: {:?}",
+            d.notes
+        );
+        // Exactly one error for one root cause.
+        assert_eq!(diag.error_count(), 1);
+    }
+
+    /// A genuinely-undefined name (no effect declares such an op) still
+    /// reports the resolver's E1001.
+    #[test]
+    fn non_effect_op_typo_still_reports_e1001() {
+        let module = simple_module(
+            vec![],
+            vec![effect_log_item(1), main_calling(10, "totally_unknown")],
+        );
+        let mut st = SymbolTable::new();
+        let diag = resolve_names(&module, &mut st);
+        let d = diag
+            .iter()
+            .find(|d| d.severity == bock_errors::Severity::Error)
+            .expect("an error diagnostic");
+        assert_eq!(d.code.to_string(), "E1001");
+    }
+
+    /// The op resolves fine when the function declares the effect — E6005
+    /// only fires for the violation.
+    #[test]
+    fn declared_effect_op_resolves_without_error() {
+        let mut main_fn = main_calling(10, "log");
+        if let Item::Fn(f) = &mut main_fn {
+            f.effect_clause = vec![bock_ast::TypePath {
+                segments: vec![ident("Log")],
+                span: sp(),
+            }];
+        }
+        let module = simple_module(vec![], vec![effect_log_item(1), main_fn]);
+        let mut st = SymbolTable::new();
+        let diag = resolve_names(&module, &mut st);
+        assert!(
+            !diag.has_errors(),
+            "declared effect op must resolve: {:?}",
+            diag.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn effects_declaring_op_is_sorted_and_filtered() {
+        let mut st = SymbolTable::new();
+        for effect in ["Zeta", "Alpha"] {
+            st.effect_info.insert(
+                effect.to_string(),
+                EffectInfo {
+                    operations: vec![("log".to_string(), 1, sp())],
+                    components: vec![],
+                },
+            );
+        }
+        st.effect_info.insert(
+            "Clock".to_string(),
+            EffectInfo {
+                operations: vec![("now".to_string(), 2, sp())],
+                components: vec![],
+            },
+        );
+        assert_eq!(st.effects_declaring_op("log"), vec!["Alpha", "Zeta"]);
+        assert_eq!(st.effects_declaring_op("now"), vec!["Clock"]);
+        assert!(st.effects_declaring_op("missing").is_empty());
     }
 
     // ── Import resolution ─────────────────────────────────────────────────────

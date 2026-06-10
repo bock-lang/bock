@@ -1,16 +1,16 @@
 // TEST: effect_lambda_handler_reserved_v1x
-// EXPECT: error E4002 at 21:18
-// §10.4 Reserved-for-v1.x: v1 supports exactly ONE handler form (record + impl).
-// The lambda-based `Effect.handler(...)` constructor surface is Reserved for
-// v1.x. In v1 it fails at NAME RESOLUTION because the effect name is not bound
-// in the value namespace: the effect `Log` is a type, not a value, so the
-// `Log.handler` reference resolves to an undefined value. The observed
-// diagnostic is the undefined-variable error (E4002, per the type checker)
-// at the `Log` reference on the `let silent = ...` line below (21:18): the
-// effect `Log` is nameable as a TYPE but not as a VALUE, so reading it in
-// value position (`Log.handler(...)`) is an undefined-variable error. The
-// spec (§10.4) requires only that lambda handlers fail at name resolution;
-// E4002 satisfies that.
+// EXPECT: error E6006 at 21:16
+// Section 10.4 Reserved-for-v1.x: v1 supports exactly ONE handler form
+// (record + impl). The lambda-based `Effect.handler(...)` constructor surface
+// is Reserved for v1.x. The checker recognizes the shape - an unbound
+// identifier naming a known effect, used in value position with `.handler` -
+// and reports E6006, naming the actual rule with a note stating what v1 DOES
+// support: a record + `impl Log for <Record>`, installed via `handle Log
+// with <record>` or `handling (Log with <record>) { ... }`. The diagnostic
+// spans the whole `Log.handler(...)` expression starting at the `Log`
+// reference (21:16) and is emitted exactly ONCE. (Historically: a doubled,
+// rule-less `E4002 undefined variable` at the same span; the method-call
+// desugar duplicates the receiver node - Q-diag-effect-violation-errors.)
 module effects_lambda_handler_reserved
 
 effect Log {
