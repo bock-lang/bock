@@ -1,0 +1,77 @@
+// TEST: exec_record_field_target_keywords
+// EXPECT: output "direct=7;sum=8;destructured=7 ci;spread=9 ci;variant=3;shorthand=7"
+// EXPECT: targets js, python
+//
+// Record / enum-struct-variant fields whose names collide with a *target*
+// keyword (Q-python-keyword-record-fields, 2026-06-10 dogfood probe — found by
+// tools/examples-matrix, PR #338). `pass` and `lambda` are Python keywords, so
+// the Python backend must escape them in **field position** the same way #162's
+// general reserved-keyword escaping already handles value bindings (`pass` →
+// `pass_`). Before the fix the field name was emitted verbatim at every site —
+// `pass: int` in the dataclass declaration is a SyntaxError, so the module
+// didn't even import.
+//
+// ts/rust/go are excluded for PRE-EXISTING defects unrelated to keyword
+// fields (each reproduces with ordinary field names / on untouched emitters;
+// reported as FOUND in the PR that added this fixture):
+//   - ts: bare `print` → `process.stdout.write` fails the harness's
+//     `tsc --noEmit` validation (TS2591, no `@types/node` in the scaffolded
+//     tsconfig — why no all-target exec fixture uses `print`), and the
+//     `match g { Shut => … }` arm trips TS2678 (`'"Shut"' is not comparable
+//     to type '"Open"'`): the ts emitter types `g` by its construction
+//     variant, not its declared `Gate` union.
+//   - rust: a by-value record-pattern destructure of a `String` field
+//     (`Tally { label: l }`) moves `t.label`, so any later use of `t` (the
+//     `..t` spread, a second match) is E0382 — the same missing-clone family
+//     as the #338 examples-matrix findings.
+//   - go: a *tail-position* `match` over a plain (non-enum) record runs the
+//     arm, then panics `unreachable` (minimal repro: `match t { Pt { x } =>
+//     print(..) }` as a function tail).
+//
+// Every field-position site must agree on the escaped spelling or the program
+// breaks at runtime instead:
+//   - dataclass field declaration            (`pass_: int`)
+//   - constructor keyword args               (`Tally(pass_=7, ...)`)
+//   - spread construction dict keys          (`{**vars(t), "pass_": 9}`)
+//   - field access (incl. interpolation)     (`t.pass_`, `f"...{t.pass_}"`)
+//   - match-pattern destructuring, explicit  (`case Tally(pass_=p)`)
+//   - match-pattern destructuring, shorthand (`case Tally(pass_=pass_)` — the
+//     bound name then resolves through the same value-identifier escape)
+//   - enum struct-variant payload fields     (`Gate_Open(lambda_=3)`)
+//
+// `pass`/`lambda` are ordinary identifiers on js, so the cross-target run also
+// guards that the Python escape never leaks into another backend's spelling.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Tally {
+  pass: Int
+  label: String
+}
+
+enum Gate {
+  Open { lambda: Int }
+  Shut
+}
+
+fn main() -> Void {
+  let t = Tally { pass: 7, label: "ci" }
+  print("direct=${t.pass};")
+  let total = t.pass + 1
+  print("sum=${total};")
+  match t {
+    Tally { pass: p, label: l } => print("destructured=${p} ${l};")
+  }
+  let s: Tally = Tally { pass: 9, ..t }
+  print("spread=${s.pass} ${s.label};")
+  let g: Gate = Open { lambda: 3 }
+  match g {
+    Open { lambda: v } => print("variant=${v};")
+    Shut => print("shut;")
+  }
+  match t {
+    Tally { pass, label } => print("shorthand=${pass}")
+  }
+}
