@@ -1,0 +1,16 @@
+// TEST: list_reverse_non_mut_receiver
+// EXPECT: error E5004 at 14:5
+//
+// DQ30: `reverse` is an in-place mutator (`reverse(mut self) -> Void`) — it
+// reverses the receiver in place, so it requires a `mut` receiver exactly like
+// DQ18's `push`/`append`. Calling it on a plain (non-`mut`) `let` binding is a
+// checker error (`E5004`, the ownership pass) that points at the receiver and
+// suggests `let mut`. The value-returning alternative named by the diagnostic
+// family is `core.collections.reversed`, which copies instead of mutating.
+module main
+
+fn main() -> Void {
+  let xs: List[Int] = [1, 2, 3]
+  xs.reverse()
+  println("${xs.len()}")
+}

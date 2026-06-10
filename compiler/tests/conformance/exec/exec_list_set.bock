@@ -1,0 +1,35 @@
+// TEST: exec_list_set
+// EXPECT: output "3;10;20;30"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3): indexed `set(mut self, index: Int, value: T) -> Void` replaces
+// the element at `index` in place. It is in the ratified §18.3 floor
+// (changelog 20260529-2251 lists List "get/set"); DQ30 pins its previously
+// unspecified out-of-bounds behavior to **abort** (see
+// exec_list_set_oob_abort) and its receiver contract to `mut self` + `Void`,
+// the same model as the other in-place mutators. First / middle / last
+// positions are exercised; `set` never changes the length.
+//
+//   js / ts:  bounds-check + arr[i] = x
+//   python:   pre-check + lst[i] = x
+//   rust:     (xs)[i as usize] = x — native index assign
+//   go:       bounds-check + s[i] = x (length unchanged → no pointer)
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = ""
+  for v in xs {
+    out = "${out};${v}"
+  }
+  return out
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = [1, 2, 3]
+  xs.set(0, 10)
+  xs.set(1, 20)
+  xs.set(2, 30)
+  println("${xs.len()}${join(xs)}")
+}

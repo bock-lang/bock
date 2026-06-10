@@ -1,0 +1,37 @@
+// TEST: exec_list_remove_at
+// EXPECT: output "10;40;50;2;20;30"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3): `remove_at(mut self, index: Int) -> T` removes and returns the
+// element at `index`, shifting the suffix left. The name is by-index explicit
+// (the Kotlin `removeAt` / Swift `remove(at:)` resolution); `remove(value)` is
+// reserved for a future by-value form. First / middle / last positions are all
+// exercised, and the final list state is pinned:
+//
+//   [10,20,30,40,50] --remove_at(0)→ 10, [20,30,40,50]
+//                    --remove_at(2)→ 40, [20,30,50]
+//                    --remove_at(2)→ 50, [20,30]      (last position)
+//
+//   js / ts:  bounds-check + arr.splice(i, 1)[0]
+//   python:   pre-check + lst.pop(i)
+//   rust:     (xs).remove(i as usize) — native
+//   go:       bounds-check + grab + append-shrink reassign via pointer
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = ""
+  for v in xs {
+    out = "${out};${v}"
+  }
+  return out
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = [10, 20, 30, 40, 50]
+  let a: Int = xs.remove_at(0)
+  let b: Int = xs.remove_at(2)
+  let c: Int = xs.remove_at(2)
+  println("${a};${b};${c};${xs.len()}${join(xs)}")
+}

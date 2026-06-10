@@ -1,0 +1,28 @@
+// TEST: exec_list_insert_oob_abort
+// EXPECT: output "before"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3 / §10.5): `insert` past the append position (`index > len`) is a
+// **runtime abort** (a Panic ambient effect), equivalent on every target. THIS
+// fixture is the one that catches Python's native clamp: `lst.insert(3, x)` on
+// a length-2 Python list silently appends (Python clamps out-of-range insert
+// indices), so a lowering without the explicit `0 <= i <= len` pre-check would
+// print `after` and fail here. The program prints `before`, then
+// `xs.insert(3, 9)` on a length-2 list must abort: trimmed stdout is exactly
+// `before`. The index flows through `opaque` so it cannot be folded. Rust
+// keeps `Vec::insert`'s native panic (which carries the index and length), per
+// the DQ23 native-abort convention.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn opaque(n: Int) -> Int {
+  return n
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = [1, 2]
+  println("before")
+  xs.insert(opaque(3), 9)
+  println("after ${xs.len()}")
+}

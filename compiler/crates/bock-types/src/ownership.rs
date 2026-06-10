@@ -35,21 +35,32 @@ const E_LOOP_MOVE: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 5003,
 };
-/// `E5004` — an in-place `List` mutator (`push`/`append`, DQ18) was called on a
-/// receiver that is not a mutable lvalue. These methods mutate the list in place
-/// and return `Void`, so they require a `mut` binding (a `let mut` list, a `mut`
-/// parameter, or a field reachable through a `mut` receiver). Functional
-/// list-building (`+` / `concat`) stays value-returning and needs no `mut`.
+/// `E5004` — an in-place `List` mutator (`push`/`append`, DQ18;
+/// `pop`/`remove_at`/`insert`/`reverse`/`set`, DQ30) was called on a receiver
+/// that is not a mutable lvalue. These methods mutate the list in place — most
+/// return `Void`; `pop` returns `Optional[T]` and `remove_at` the removed `T`,
+/// but the receiver contract is identical — so they require a `mut` binding (a
+/// `let mut` list, a `mut` parameter, or a field reachable through a `mut`
+/// receiver). Functional list-building (`+` / `concat`) stays value-returning
+/// and needs no `mut`.
 const E_MUT_RECEIVER_NEEDED: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 5004,
 };
 
-/// The in-place `List` mutators (DQ18) that require a `mut` receiver and return
-/// `Void`. Kept narrow to the decided methods; the other in-place mutators
-/// (`pop`/`insert`/`remove`/`reverse`/`sort`/…) still return the receiver and
-/// are left to a follow-up.
-const MUT_LIST_RECEIVER_METHODS: &[&str] = &["push", "append"];
+/// The in-place `List` mutators that require a `mut` receiver: DQ18's
+/// `push`/`append` plus DQ30's `pop`/`remove_at`/`insert`/`reverse` and the
+/// pinned indexed `set`. The remaining receiver-returning combinators
+/// (`sort`/`dedup`/`concat`/…) are value-returning and stay `mut`-free.
+const MUT_LIST_RECEIVER_METHODS: &[&str] = &[
+    "push",
+    "append",
+    "pop",
+    "remove_at",
+    "insert",
+    "reverse",
+    "set",
+];
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -230,8 +241,9 @@ impl OwnershipAnalyzer {
         }
     }
 
-    /// Enforce DQ18's `mut`-receiver requirement for the in-place `List`
-    /// mutators (`push`/`append`).
+    /// Enforce the `mut`-receiver requirement for the in-place `List` mutators
+    /// (`push`/`append`, DQ18; `pop`/`remove_at`/`insert`/`reverse`/`set`,
+    /// DQ30).
     ///
     /// The lowerer desugars `recv.push(x)` to
     /// `Call { callee: FieldAccess(recv, "push"), args: [recv, x] }` and the
@@ -1711,6 +1723,41 @@ mod tests {
             !diags.iter().any(|d| d.code == E_MUT_RECEIVER_NEEDED),
             "push on a `mut` parameter must not error"
         );
+    }
+
+    #[test]
+    fn dq30_mutators_on_non_mut_let_binding_error() {
+        // DQ30: `pop`/`remove_at`/`insert`/`reverse`/`set` are held to the same
+        // `mut`-receiver rule as DQ18's `push`/`append`.
+        for method in ["pop", "remove_at", "insert", "reverse", "set"] {
+            let gen = NodeIdGen::new();
+            let let_acc = let_binding(&gen, "acc", false, lit_node(&gen));
+            let call = desugared_list_call(&gen, id_node(&gen, "acc"), method, lit_node(&gen));
+            let b = block(&gen, vec![let_acc, call], None);
+            let m = module(&gen, vec![fn_decl(&gen, b)]);
+            let diags = analyze_ownership(&m);
+            assert!(
+                diags.iter().any(|d| d.code == E_MUT_RECEIVER_NEEDED),
+                "`{method}` on a non-`mut` binding must emit E5004"
+            );
+        }
+    }
+
+    #[test]
+    fn dq30_mutators_on_mut_let_binding_ok() {
+        for method in ["pop", "remove_at", "insert", "reverse", "set"] {
+            let gen = NodeIdGen::new();
+            let let_acc = let_binding(&gen, "acc", true, lit_node(&gen));
+            let call = desugared_list_call(&gen, id_node(&gen, "acc"), method, lit_node(&gen));
+            let b = block(&gen, vec![let_acc, call], None);
+            let m = module(&gen, vec![fn_decl(&gen, b)]);
+            let diags = analyze_ownership(&m);
+            assert!(
+                !diags.iter().any(|d| d.code == E_MUT_RECEIVER_NEEDED),
+                "`{method}` on a `mut` binding must not emit E5004: {:?}",
+                diags.iter().collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

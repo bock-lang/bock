@@ -1,0 +1,16 @@
+// TEST: list_remove_at_non_mut_receiver
+// EXPECT: error E5004 at 14:5
+//
+// DQ30: `remove_at` is an in-place mutator
+// (`remove_at(mut self, index: Int) -> T`) — it removes the element at the
+// index from the receiver, so it requires a `mut` receiver exactly like
+// DQ18's `push`/`append`. Calling it on a plain (non-`mut`) `let` binding is a
+// checker error (`E5004`, the ownership pass) that points at the receiver and
+// suggests `let mut`.
+module main
+
+fn main() -> Void {
+  let xs: List[Int] = [1, 2, 3]
+  xs.remove_at(0)
+  println("${xs.len()}")
+}

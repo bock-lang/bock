@@ -1,0 +1,37 @@
+// TEST: exec_list_insert
+// EXPECT: output "5;1;2;3;4;5"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3): `insert(mut self, index: Int, value: T) -> Void` inserts
+// `value` *before* the element at `index`, shifting the suffix right. The
+// valid range is `0..=len` — `len` is the append position, so inserting at
+// `len` appends (pinned by the final insert below). All three positions:
+//
+//   [2,4] --insert(0, 1)→ [1,2,4]      (front)
+//         --insert(2, 3)→ [1,2,3,4]    (middle)
+//         --insert(4, 5)→ [1,2,3,4,5]  (index == len: append position)
+//
+//   js / ts:  bounds-check + arr.splice(i, 0, x)
+//   python:   pre-check REQUIRED + lst.insert(i, x) — Python's native insert
+//             CLAMPS out-of-range indices; the contract does not
+//   rust:     (xs).insert(i as usize, x) — native
+//   go:       bounds-check + append-shift reassign via pointer
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = ""
+  for v in xs {
+    out = "${out};${v}"
+  }
+  return out
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = [2, 4]
+  xs.insert(0, 1)
+  xs.insert(2, 3)
+  xs.insert(4, 5)
+  println("${xs.len()}${join(xs)}")
+}

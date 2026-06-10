@@ -48,10 +48,13 @@ type BockOption<T> =
   | { readonly _tag: \"None\" };
 ";
 
-/// True if the module references `Optional`, `Some`, or `None` anywhere, so the
-/// Optional runtime type prelude must be emitted. A cheap structural scan over
-/// the debug rendering, mirroring [`module_uses_concurrency`] and the Go
-/// backend's `go_module_uses_optional`.
+/// True if the module references `Optional`, `Some`, or `None` anywhere — or
+/// calls `pop`, whose DQ30 lowering produces a `BockOption<T>`-typed IIFE —
+/// so the Optional runtime type prelude must be emitted. A cheap structural
+/// scan over the debug rendering, mirroring [`module_uses_concurrency`] and
+/// the Go backend's `go_module_uses_optional`. Over-matching (e.g. a user
+/// method named `pop`) only emits/imports an unused type alias, which is
+/// harmless under the scaffolded tsconfig.
 fn module_uses_optional(items: &[AIRNode]) -> bool {
     items.iter().any(|n| {
         let s = format!("{n:?}");
@@ -59,6 +62,7 @@ fn module_uses_optional(items: &[AIRNode]) -> bool {
             || s.contains("TypeOptional")
             || s.contains("\"Some\"")
             || s.contains("\"None\"")
+            || s.contains("\"pop\"")
     })
 }
 
@@ -1771,6 +1775,100 @@ impl TsEmitCtx {
         self.buf.push_str(").push(");
         self.emit_expr(&x.value)?;
         self.buf.push(')');
+        Ok(true)
+    }
+
+    /// Emit a DQ30 in-place `List` mutator
+    /// (`pop`/`remove_at`/`insert`/`reverse`/`set`) to its TS form.
+    ///
+    /// Mirrors the JS lowering (arrays are reference values, so the IIFE
+    /// parameter aliases the receiver and mutations are caller-visible) but
+    /// stays strict-mode clean: the IIFEs are *generic* arrows over a mutable
+    /// `T[]` parameter (not the read-only methods' `ReadonlyArray<T>`), `pop`
+    /// returns the typed `BockOption<T>` union (the `T | undefined` from
+    /// native `.pop()` is narrowed by the length guard and asserted `as T`),
+    /// and `remove_at`'s `splice(i, 1)[0]` is asserted `as T` for
+    /// `noUncheckedIndexedAccess` robustness. The bounds checks throw with the
+    /// normalized abort message `List.<op>: index <i> out of bounds (len <n>)`
+    /// (the DQ23 zero-check convention); `set`'s check is load-bearing because
+    /// native index-assign past the end silently extends the array.
+    fn try_emit_list_inplace_mutator(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_inplace_mutator(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "pop" => {
+                self.buf.push_str(
+                    "(<T,>(__r: T[]): BockOption<T> => __r.length > 0 ? \
+                     { _tag: \"Some\" as const, _0: __r.pop() as T } : \
+                     { _tag: \"None\" as const })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "remove_at" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<T,>(__r: T[], __i: number): T => { \
+                     if (__i < 0 || __i >= __r.length) { throw new Error(\
+                     \"List.remove_at: index \" + __i + \" out of bounds (len \" + __r.length + \")\"); } \
+                     return __r.splice(__i, 1)[0] as T; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push(')');
+            }
+            "insert" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<T,>(__r: T[], __i: number, __x: T): void => { \
+                     if (__i < 0 || __i > __r.length) { throw new Error(\
+                     \"List.insert: index \" + __i + \" out of bounds (len \" + __r.length + \")\"); } \
+                     __r.splice(__i, 0, __x); })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "reverse" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").reverse()");
+            }
+            "set" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(<T,>(__r: T[], __i: number, __x: T): void => { \
+                     if (__i < 0 || __i >= __r.length) { throw new Error(\
+                     \"List.set: index \" + __i + \" out of bounds (len \" + __r.length + \")\"); } \
+                     __r[__i] = __x; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
         Ok(true)
     }
 
@@ -4517,6 +4615,9 @@ impl TsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_mutating_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_inplace_mutator(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {

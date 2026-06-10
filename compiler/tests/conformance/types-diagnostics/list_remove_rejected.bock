@@ -1,0 +1,16 @@
+// TEST: list_remove_rejected
+// EXPECT: error E4013 at 14:23
+//
+// DQ30: the by-index removal method is `remove_at`, NOT `remove` — by-index
+// explicit (the Kotlin `removeAt` / Swift `remove(at:)` resolution).
+// `List.remove(value)` stays free for a future by-value removal, so bare
+// `xs.remove(i)` on a `List` is rejected with `E4013` and a "did you mean
+// `remove_at`?" suggestion — it is NOT aliased. `Set.remove` (element) and
+// `Map.delete` (key) keep their unambiguous receiver semantics.
+module main
+
+fn main() -> Void {
+  let mut xs: List[Int] = [1, 2, 3]
+  let v: Int = xs.remove(0)
+  println("${xs.len()};${v}")
+}

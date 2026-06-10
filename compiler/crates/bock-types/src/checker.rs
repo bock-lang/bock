@@ -4535,6 +4535,7 @@ impl TypeChecker {
             "pop",
             "insert",
             "remove",
+            "remove_at",
             "concat",
             "clear",
             "reverse",
@@ -4700,14 +4701,23 @@ impl TypeChecker {
                     "first" | "last" | "find" | "get" => Type::Optional(Box::new(elem_ty.clone())),
                     "index_of" => Type::Optional(Box::new(Type::Primitive(PrimitiveType::Int))),
                     "contains" | "is_empty" | "any" | "all" => Type::Primitive(PrimitiveType::Bool),
-                    // DQ18: `push`/`append` are in-place mutators — they require
-                    // a `mut` receiver (enforced in `ownership.rs`) and return
-                    // `Void`. Functional list-building stays on `+`/`concat`.
-                    "push" | "append" => Type::Primitive(PrimitiveType::Void),
-                    "pop" | "insert" | "remove" | "concat" | "reverse" | "sort" | "filter"
-                    | "dedup" | "take" | "skip" | "flat_map" | "slice" | "flatten" => {
-                        receiver_ty.clone()
+                    // DQ18 + DQ30: the in-place mutators require a `mut` receiver
+                    // (enforced in `ownership.rs`, E5004). `push`/`append` (DQ18)
+                    // and `insert`/`reverse`/`set` (DQ30) return `Void`;
+                    // `pop` returns `Optional[T]` (`None` on empty — emptiness is
+                    // a normal state); `remove_at` returns the removed `T`
+                    // (out-of-bounds aborts at runtime, §10.5 Panic). Functional
+                    // list-building stays on `+`/`concat`. `remove` is NOT a
+                    // `List` method (the by-index form is `remove_at`; by-value
+                    // `remove(value)` is reserved) — it falls through to the
+                    // unknown-method diagnostic.
+                    "push" | "append" | "insert" | "reverse" | "set" => {
+                        Type::Primitive(PrimitiveType::Void)
                     }
+                    "pop" => Type::Optional(Box::new(elem_ty.clone())),
+                    "remove_at" => elem_ty.clone(),
+                    "concat" | "sort" | "filter" | "dedup" | "take" | "skip" | "flat_map"
+                    | "slice" | "flatten" => receiver_ty.clone(),
                     "clear" | "for_each" => Type::Primitive(PrimitiveType::Void),
                     "join" | "display" => Type::Primitive(PrimitiveType::String),
                     "enumerate" => Type::Generic(GenericType {
@@ -4931,20 +4941,28 @@ impl TypeChecker {
                     "push" | "append" => {
                         mk(r, vec![elem.clone()], Type::Primitive(PrimitiveType::Void))
                     }
-                    "pop" => mk(r, vec![], receiver_ty.clone()),
+                    // DQ30: the remaining in-place mutators. `pop` returns
+                    // `Optional[T]` (`None` on empty); `remove_at` returns the
+                    // removed `T` (OOB aborts, §10.5); `insert` (valid range
+                    // `0..=len`) / `reverse` / indexed `set` return `Void`.
+                    // `remove` is intentionally absent: the by-index form is
+                    // `remove_at`, and by-value `remove(value)` is reserved.
+                    "pop" => mk(r, vec![], Type::Optional(Box::new(elem.clone()))),
+                    "remove_at" => mk(r, vec![Type::Primitive(PrimitiveType::Int)], elem.clone()),
                     "insert" => mk(
                         r,
                         vec![Type::Primitive(PrimitiveType::Int), elem.clone()],
-                        receiver_ty.clone(),
+                        Type::Primitive(PrimitiveType::Void),
                     ),
-                    "remove" => mk(
+                    "reverse" => mk(r, vec![], Type::Primitive(PrimitiveType::Void)),
+                    "set" => mk(
                         r,
-                        vec![Type::Primitive(PrimitiveType::Int)],
-                        receiver_ty.clone(),
+                        vec![Type::Primitive(PrimitiveType::Int), elem.clone()],
+                        Type::Primitive(PrimitiveType::Void),
                     ),
                     "concat" => mk(r, vec![receiver_ty.clone()], receiver_ty.clone()),
                     "clear" => mk(r, vec![], Type::Primitive(PrimitiveType::Void)),
-                    "reverse" | "sort" | "dedup" | "flatten" => mk(r, vec![], receiver_ty.clone()),
+                    "sort" | "dedup" | "flatten" => mk(r, vec![], receiver_ty.clone()),
                     "take" | "skip" => mk(
                         r,
                         vec![Type::Primitive(PrimitiveType::Int)],

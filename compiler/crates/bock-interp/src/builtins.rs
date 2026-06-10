@@ -296,7 +296,9 @@ impl BuiltinRegistry {
     /// This provides just enough to make the interpreter functional:
     /// - Globals: `print`, `println`, `debug`
     /// - String: `len`, `to_string`
-    /// - List: `len`, `get`, `push`
+    /// - List: `len`, `get` (the in-place mutators — `push`/`pop`/… — are
+    ///   dispatched by the interpreter itself with receiver write-back, never
+    ///   through this value-returning registry; DQ18/DQ30)
     /// - Map: `get`, `set`, `len`
     pub fn register_defaults(&mut self) {
         // ── Global functions ──────────────────────────────────────────────
@@ -314,7 +316,6 @@ impl BuiltinRegistry {
         // ── List methods ──────────────────────────────────────────────────
         self.register(TypeTag::List, "len", list_len);
         self.register(TypeTag::List, "get", list_get);
-        self.register(TypeTag::List, "push", list_push);
 
         // ── Map methods ───────────────────────────────────────────────────
         self.register(TypeTag::Map, "len", map_len);
@@ -574,25 +575,6 @@ fn list_get(args: &[Value]) -> Result<Value, RuntimeError> {
             "List.get expects an Int index".to_string(),
         )),
     }
-}
-
-/// `list.push(value)` — return a new list with the value appended.
-fn list_push(args: &[Value]) -> Result<Value, RuntimeError> {
-    let items = match args.first() {
-        Some(Value::List(items)) => items,
-        _ => {
-            return Err(RuntimeError::TypeError(
-                "List.push called on non-List".to_string(),
-            ))
-        }
-    };
-    let val = args.get(1).ok_or(RuntimeError::ArityMismatch {
-        expected: 1,
-        got: 0,
-    })?;
-    let mut new_list = items.clone();
-    new_list.push(val.clone());
-    Ok(Value::List(new_list))
 }
 
 // ─── Map methods ──────────────────────────────────────────────────────────────
@@ -948,17 +930,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result, Value::Optional(None));
-    }
-
-    #[test]
-    fn list_push_appends() {
-        let reg = make_registry();
-        let recv = Value::List(vec![Value::Int(1)]);
-        let result = reg
-            .call(TypeTag::List, "push", &[recv, Value::Int(2)])
-            .unwrap()
-            .unwrap();
-        assert_eq!(result, Value::List(vec![Value::Int(1), Value::Int(2)]));
     }
 
     // ── Map methods ──────────────────────────────────────────────────────

@@ -1,0 +1,16 @@
+// TEST: list_set_non_mut_receiver
+// EXPECT: error E5004 at 14:5
+//
+// DQ30: indexed `set` is an in-place mutator
+// (`set(mut self, index: Int, value: T) -> Void`) — it overwrites an element
+// of the receiver, so it requires a `mut` receiver exactly like DQ18's
+// `push`/`append` and the DQ30 four. Calling it on a plain (non-`mut`) `let`
+// binding is a checker error (`E5004`, the ownership pass) that points at the
+// receiver and suggests `let mut`.
+module main
+
+fn main() -> Void {
+  let xs: List[Int] = [1, 2, 3]
+  xs.set(0, 9)
+  println("${xs.len()}")
+}

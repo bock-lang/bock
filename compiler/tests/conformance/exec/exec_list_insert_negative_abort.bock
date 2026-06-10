@@ -1,0 +1,25 @@
+// TEST: exec_list_insert_negative_abort
+// EXPECT: output "before"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3 / §10.5): a **negative** `insert` index is out of bounds — the
+// valid range is `0..=len`, with no Python-style from-the-end indexing.
+// Python's native `lst.insert(-1, x)` would insert before the last element
+// (and clamp any further-negative index to 0), so the Python lowering's
+// `0 <= i` pre-check is load-bearing. The program prints `before`, then
+// `xs.insert(-1, 9)` must abort before the `after` print: trimmed stdout is
+// exactly `before`. The index flows through `opaque` so it cannot be folded.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn opaque(n: Int) -> Int {
+  return n
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = [1, 2]
+  println("before")
+  xs.insert(opaque(-1), 9)
+  println("after ${xs.len()}")
+}

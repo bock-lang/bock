@@ -30,6 +30,19 @@ pub enum RuntimeError {
     #[error("index out of bounds: index {index} for length {len}")]
     IndexOutOfBounds { index: i64, len: usize },
 
+    /// DQ30 (§18.3 / §10.5): an in-place `List` mutator
+    /// (`remove_at`/`insert`/`set`) was called with an out-of-bounds index —
+    /// a violated index contract, surfaced as a runtime abort. The message is
+    /// the normalized cross-target form `List.<op>: index <i> out of bounds
+    /// (len <n>)`, matching the synthesized js/ts/python/go aborts (R11
+    /// interpreter parity).
+    #[error("List.{op}: index {index} out of bounds (len {len})")]
+    ListIndexAbort {
+        op: &'static str,
+        index: i64,
+        len: usize,
+    },
+
     #[error("field not found: {field} on {type_name}")]
     FieldNotFound { field: String, type_name: String },
 

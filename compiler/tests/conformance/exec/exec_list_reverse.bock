@@ -1,0 +1,43 @@
+// TEST: exec_list_reverse
+// EXPECT: output "4;3;2;1|3;2;1|7|0"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3): `reverse(mut self) -> Void` reverses the list **in place** —
+// it requires a `mut` receiver and returns `Void` (previously it typed as
+// returning a new `List[T]`; the value-returning form is `core.collections`'
+// free function `reversed`). Even-length, odd-length, single-element, and
+// empty lists are all exercised — the latter two are the identity cases:
+//
+//   js / ts:  arr.reverse()    (native, in-place)
+//   python:   lst.reverse()    (native, in-place)
+//   rust:     (xs).reverse()   (native, in-place)
+//   go:       in-place two-index swap loop (length unchanged → no pointer)
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = ""
+  let mut first: Bool = true
+  for v in xs {
+    if (first) {
+      out = "${v}"
+      first = false
+    } else {
+      out = "${out};${v}"
+    }
+  }
+  return out
+}
+
+fn main() -> Void {
+  let mut even: List[Int] = [1, 2, 3, 4]
+  let mut odd: List[Int] = [1, 2, 3]
+  let mut single: List[Int] = [7]
+  let mut empty: List[Int] = []
+  even.reverse()
+  odd.reverse()
+  single.reverse()
+  empty.reverse()
+  println("${join(even)}|${join(odd)}|${join(single)}|${empty.len()}")
+}

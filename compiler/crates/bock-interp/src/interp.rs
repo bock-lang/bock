@@ -1279,6 +1279,20 @@ impl Interpreter {
                     return Ok(outcome.value);
                 }
             }
+            // DQ18/DQ30: an in-place `List` mutator mutates the receiver
+            // *place* (and `pop`/`remove_at` return non-list values), so it is
+            // intercepted BEFORE the builtin registry, whose legacy List
+            // entries return new lists without any write-back.
+            if let Value::List(items) = &recv {
+                if Self::LIST_INPLACE_MUTATORS.contains(&field.name.as_str()) {
+                    let items = items.clone();
+                    let mut m_args = Vec::with_capacity(args.len().saturating_sub(1));
+                    for a in args.iter().skip(1) {
+                        m_args.push(self.eval_expr(&a.value).await?);
+                    }
+                    return self.run_list_inplace_mutator(object, items, &field.name, m_args);
+                }
+            }
             if self.builtins.has_method(type_tag, &field.name) {
                 let mut builtin_args = Vec::with_capacity(args.len());
                 builtin_args.push(recv);
@@ -1600,6 +1614,16 @@ impl Interpreter {
             }
         }
 
+        // DQ18/DQ30: in-place `List` mutators mutate the receiver place —
+        // intercept before the value-returning builtin registry (see
+        // `run_list_inplace_mutator`).
+        if let Value::List(items) = &recv {
+            if Self::LIST_INPLACE_MUTATORS.contains(&method.as_str()) {
+                let items = items.clone();
+                return self.run_list_inplace_mutator(receiver, items, &method, arg_values);
+            }
+        }
+
         // Check the builtin registry first.
         let type_tag = TypeTag::of(&recv);
         {
@@ -1663,29 +1687,15 @@ impl Interpreter {
                     ))
                 }
             }
-            (Value::List(items), "push") => {
-                let v = arg_values
-                    .into_iter()
-                    .next()
-                    .ok_or(RuntimeError::ArityMismatch {
-                        expected: 1,
-                        got: 0,
-                    })?;
-                let mut new_list = items.clone();
-                new_list.push(v);
-                Ok(Value::List(new_list))
-            }
+            // The in-place mutators (`push`/`append`/`pop`/`remove_at`/
+            // `insert`/`reverse`/`set`) are intercepted before this match —
+            // see `run_list_inplace_mutator`.
             (Value::List(items), "contains") => {
                 let v = arg_values.first().ok_or(RuntimeError::ArityMismatch {
                     expected: 1,
                     got: 0,
                 })?;
                 Ok(Value::Bool(items.contains(v)))
-            }
-            (Value::List(items), "reverse") => {
-                let mut v = items.clone();
-                v.reverse();
-                Ok(Value::List(v))
             }
             (Value::List(items), "map") => {
                 let fn_val = arg_values
@@ -2028,57 +2038,6 @@ impl Interpreter {
                 Ok(Value::List(result))
             }
             (Value::List(items), "count") => Ok(Value::Int(items.len() as i64)),
-            (Value::List(items), "pop") => {
-                if items.is_empty() {
-                    Ok(Value::List(vec![]))
-                } else {
-                    Ok(Value::List(items[..items.len() - 1].to_vec()))
-                }
-            }
-            (Value::List(items), "insert") => {
-                if arg_values.len() < 2 {
-                    return Err(RuntimeError::ArityMismatch {
-                        expected: 2,
-                        got: arg_values.len(),
-                    });
-                }
-                let idx = match &arg_values[0] {
-                    Value::Int(i) => *i as usize,
-                    _ => {
-                        return Err(RuntimeError::TypeError(
-                            "List.insert expects Int index".to_string(),
-                        ))
-                    }
-                };
-                if idx > items.len() {
-                    return Err(RuntimeError::IndexOutOfBounds {
-                        index: idx as i64,
-                        len: items.len(),
-                    });
-                }
-                let mut new_list = items.clone();
-                new_list.insert(idx, arg_values[1].clone());
-                Ok(Value::List(new_list))
-            }
-            (Value::List(items), "remove") => {
-                let idx = match arg_values.first() {
-                    Some(Value::Int(i)) => *i,
-                    _ => {
-                        return Err(RuntimeError::TypeError(
-                            "List.remove expects Int index".to_string(),
-                        ))
-                    }
-                };
-                if idx < 0 || idx as usize >= items.len() {
-                    return Err(RuntimeError::IndexOutOfBounds {
-                        index: idx,
-                        len: items.len(),
-                    });
-                }
-                let mut new_list = items.clone();
-                new_list.remove(idx as usize);
-                Ok(Value::List(new_list))
-            }
             (Value::List(items), "index_of") => {
                 let needle = arg_values.first().ok_or(RuntimeError::ArityMismatch {
                     expected: 1,
@@ -2551,6 +2510,131 @@ impl Interpreter {
             other => other?,
         };
         Ok((value, updated_self))
+    }
+
+    /// The in-place `List` mutator names (DQ18 `push`/`append`; DQ30
+    /// `pop`/`remove_at`/`insert`/`reverse`/`set`). These mutate the receiver
+    /// *place* (via [`Self::write_back_receiver`]) instead of returning a new
+    /// list, so they are intercepted before the value-returning builtin
+    /// registry — whose legacy `push`/`pop`/`insert`/`remove`/`reverse`
+    /// entries (returning new lists) are unreachable from checked Bock source
+    /// for these names.
+    const LIST_INPLACE_MUTATORS: &'static [&'static str] = &[
+        "push",
+        "append",
+        "pop",
+        "remove_at",
+        "insert",
+        "reverse",
+        "set",
+    ];
+
+    /// Execute an in-place `List` mutator against the receiver lvalue,
+    /// mirroring the compiled targets exactly (R11 oracle parity):
+    ///
+    /// - `push`/`append` (DQ18): append; `Void`;
+    /// - `pop`: remove/return the **last** element as `Optional[T]` — `None`
+    ///   on empty (emptiness is a normal state, never an abort);
+    /// - `remove_at(i)`: remove/return the element at `i`; out-of-bounds
+    ///   (including negative) aborts with [`RuntimeError::ListIndexAbort`];
+    /// - `insert(i, x)`: insert before `i`; valid range `0..=len` (`len` is
+    ///   the append position); out-of-bounds aborts — never Python's clamp;
+    /// - `reverse`: reverse in place; `Void`;
+    /// - `set(i, x)`: overwrite the element at `i`; out-of-bounds aborts.
+    ///
+    /// The mutated list is written back through
+    /// [`Self::write_back_receiver`]; a non-assignable receiver (temporary)
+    /// mutates an unobservable copy, matching the compiled targets.
+    fn run_list_inplace_mutator(
+        &mut self,
+        receiver: &AIRNode,
+        mut items: Vec<Value>,
+        method: &str,
+        mut args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let arity = |expected: usize, args: &[Value]| -> Result<(), RuntimeError> {
+            if args.len() < expected {
+                return Err(RuntimeError::ArityMismatch {
+                    expected,
+                    got: args.len(),
+                });
+            }
+            Ok(())
+        };
+        let int_index = |v: &Value, method: &str| -> Result<i64, RuntimeError> {
+            match v {
+                Value::Int(i) => Ok(*i),
+                other => Err(RuntimeError::TypeError(format!(
+                    "List.{method} expects an Int index, got {other}"
+                ))),
+            }
+        };
+        match method {
+            "push" | "append" => {
+                arity(1, &args)?;
+                items.push(args.remove(0));
+                self.write_back_receiver(receiver, Value::List(items));
+                Ok(Value::Void)
+            }
+            "pop" => match items.pop() {
+                Some(last) => {
+                    self.write_back_receiver(receiver, Value::List(items));
+                    Ok(Value::Optional(Some(Box::new(last))))
+                }
+                None => Ok(Value::Optional(None)),
+            },
+            "remove_at" => {
+                arity(1, &args)?;
+                let i = int_index(&args[0], "remove_at")?;
+                if i < 0 || i as usize >= items.len() {
+                    return Err(RuntimeError::ListIndexAbort {
+                        op: "remove_at",
+                        index: i,
+                        len: items.len(),
+                    });
+                }
+                let removed = items.remove(i as usize);
+                self.write_back_receiver(receiver, Value::List(items));
+                Ok(removed)
+            }
+            "insert" => {
+                arity(2, &args)?;
+                let i = int_index(&args[0], "insert")?;
+                // Valid range 0..=len: `len` is the append position.
+                if i < 0 || i as usize > items.len() {
+                    return Err(RuntimeError::ListIndexAbort {
+                        op: "insert",
+                        index: i,
+                        len: items.len(),
+                    });
+                }
+                items.insert(i as usize, args.remove(1));
+                self.write_back_receiver(receiver, Value::List(items));
+                Ok(Value::Void)
+            }
+            "reverse" => {
+                items.reverse();
+                self.write_back_receiver(receiver, Value::List(items));
+                Ok(Value::Void)
+            }
+            "set" => {
+                arity(2, &args)?;
+                let i = int_index(&args[0], "set")?;
+                if i < 0 || i as usize >= items.len() {
+                    return Err(RuntimeError::ListIndexAbort {
+                        op: "set",
+                        index: i,
+                        len: items.len(),
+                    });
+                }
+                items[i as usize] = args.remove(1);
+                self.write_back_receiver(receiver, Value::List(items));
+                Ok(Value::Void)
+            }
+            other => Err(RuntimeError::TypeError(format!(
+                "method '{other}' is not an in-place List mutator"
+            ))),
+        }
     }
 
     /// Write a (possibly mutated) `self` value back to the receiver lvalue
@@ -5771,8 +5855,9 @@ mod tests {
         interp.env.define("m", Value::Map(map));
         interp.env.define("result", Value::List(vec![]));
 
-        // for (k, v) in m { result = result.push(k) }
-        // Simplified: just iterate and collect keys
+        // for (k, v) in m { result.push(k) }
+        // (DQ18/DQ30: `push` mutates the receiver place in place and returns
+        // `Void`, so the loop body is a bare statement — no reassignment.)
         let for_expr = node(
             g.next(),
             NodeKind::For {
@@ -5800,21 +5885,14 @@ mod tests {
                 iterable: Box::new(var(&g, "m")),
                 body: Box::new(node(
                     g.next(),
-                    NodeKind::Assign {
-                        op: AssignOp::Assign,
-                        target: Box::new(var(&g, "result")),
-                        value: Box::new(node(
-                            g.next(),
-                            NodeKind::MethodCall {
-                                receiver: Box::new(var(&g, "result")),
-                                method: ident("push"),
-                                args: vec![AirArg {
-                                    label: None,
-                                    value: var(&g, "k"),
-                                }],
-                                type_args: vec![],
-                            },
-                        )),
+                    NodeKind::MethodCall {
+                        receiver: Box::new(var(&g, "result")),
+                        method: ident("push"),
+                        args: vec![AirArg {
+                            label: None,
+                            value: var(&g, "k"),
+                        }],
+                        type_args: vec![],
                     },
                 )),
             },
@@ -5862,7 +5940,7 @@ mod tests {
         interp.env.define("it", Value::Iterator(iter_val));
         interp.env.define("result", Value::List(vec![]));
 
-        // for x in it { result = result.push(x) }
+        // for x in it { result.push(x) }   (push mutates in place; DQ18/DQ30)
         let for_expr = node(
             g.next(),
             NodeKind::For {
@@ -5876,21 +5954,14 @@ mod tests {
                 iterable: Box::new(var(&g, "it")),
                 body: Box::new(node(
                     g.next(),
-                    NodeKind::Assign {
-                        op: AssignOp::Assign,
-                        target: Box::new(var(&g, "result")),
-                        value: Box::new(node(
-                            g.next(),
-                            NodeKind::MethodCall {
-                                receiver: Box::new(var(&g, "result")),
-                                method: ident("push"),
-                                args: vec![AirArg {
-                                    label: None,
-                                    value: var(&g, "item"),
-                                }],
-                                type_args: vec![],
-                            },
-                        )),
+                    NodeKind::MethodCall {
+                        receiver: Box::new(var(&g, "result")),
+                        method: ident("push"),
+                        args: vec![AirArg {
+                            label: None,
+                            value: var(&g, "item"),
+                        }],
+                        type_args: vec![],
                     },
                 )),
             },
@@ -5944,7 +6015,7 @@ mod tests {
         interp.env.define("it", Value::Iterator(iter_val));
         interp.env.define("result", Value::List(vec![]));
 
-        // for item in it { result = result.push(item) }
+        // for item in it { result.push(item) }   (push mutates in place; DQ18/DQ30)
         let for_expr = node(
             g.next(),
             NodeKind::For {
@@ -5958,21 +6029,14 @@ mod tests {
                 iterable: Box::new(var(&g, "it")),
                 body: Box::new(node(
                     g.next(),
-                    NodeKind::Assign {
-                        op: AssignOp::Assign,
-                        target: Box::new(var(&g, "result")),
-                        value: Box::new(node(
-                            g.next(),
-                            NodeKind::MethodCall {
-                                receiver: Box::new(var(&g, "result")),
-                                method: ident("push"),
-                                args: vec![AirArg {
-                                    label: None,
-                                    value: var(&g, "item"),
-                                }],
-                                type_args: vec![],
-                            },
-                        )),
+                    NodeKind::MethodCall {
+                        receiver: Box::new(var(&g, "result")),
+                        method: ident("push"),
+                        args: vec![AirArg {
+                            label: None,
+                            value: var(&g, "item"),
+                        }],
+                        type_args: vec![],
                     },
                 )),
             },

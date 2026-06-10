@@ -1,0 +1,51 @@
+// TEST: exec_list_mutators_interleaved
+// EXPECT: output "2;1;3;5;3;9"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3): state correctness across MIXED in-place mutations — the DQ18
+// mutators (`push`/`append`) interleaved with the DQ30 four
+// (`insert`/`remove_at`/`reverse`/`pop`) and the pinned `set`, all against one
+// `let mut` accumulator. Each step's state:
+//
+//   []           --push(2)→        [2]
+//                --append(4)→      [2,4]      (append = push alias)
+//                --insert(0, 1)→   [1,2,4]
+//                --insert(2, 3)→   [1,2,3,4]
+//                --set(3, 5)→      [1,2,3,5]
+//                --remove_at(1)→ 2, [1,3,5]
+//                --reverse()→      [5,3,1]
+//                --pop()→ Some(1),  [5,3]
+//                --push(9)→        [5,3,9]
+//
+// Every backend must thread the same evolving state through its mix of native
+// ops (js push/splice/reverse, py append/insert/pop, rust push/insert/remove/
+// reverse, go append/copy/swap reassigns) — a backend that copies instead of
+// mutating anywhere in the chain diverges immediately.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = ""
+  for v in xs {
+    out = "${out};${v}"
+  }
+  return out
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = []
+  xs.push(2)
+  xs.append(4)
+  xs.insert(0, 1)
+  xs.insert(2, 3)
+  xs.set(3, 5)
+  let r: Int = xs.remove_at(1)
+  xs.reverse()
+  let p: Int = match xs.pop() {
+    Some(v) => v
+    None => -1
+  }
+  xs.push(9)
+  println("${r};${p};${xs.len()}${join(xs)}")
+}

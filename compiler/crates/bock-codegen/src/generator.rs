@@ -3361,10 +3361,10 @@ pub fn desugared_self_call<'a>(
 }
 
 /// The read-only / non-mutating `List` built-in methods this codegen lowers
-/// natively per target (see [`desugared_list_method`]). The remaining mutating
-/// methods (`pop`/`insert`/`remove`/…) are intentionally excluded — their
-/// value-vs-`mut self` semantics is a follow-up (DQ18 ruled only on
-/// `push`/`append`, lowered via [`desugared_list_mutating_method`]).
+/// natively per target (see [`desugared_list_method`]). The in-place mutators
+/// are excluded: `push`/`append` lower via [`desugared_list_mutating_method`]
+/// (DQ18) and `pop`/`remove_at`/`insert`/`reverse`/`set` via
+/// [`desugared_list_inplace_mutator`] (DQ30).
 pub const READ_ONLY_LIST_METHODS: &[&str] = &[
     "len", "length", "count", "is_empty", "get", "contains", "first", "last", "concat", "index_of",
     "join",
@@ -3751,6 +3751,68 @@ pub fn desugared_list_mutating_method<'a>(
     let (recv, field, rest) = desugared_self_call(callee, args)?;
     let method = field.name.as_str();
     if MUTATING_LIST_METHODS.contains(&method) {
+        Some((recv, method, rest))
+    } else {
+        None
+    }
+}
+
+/// The DQ30 in-place `List` mutators, lowered natively per target via
+/// [`desugared_list_inplace_mutator`]. All are `mut self`
+/// (`E5004`-enforced like DQ18's `push`/`append`); the per-method contracts:
+///
+/// - `pop() -> Optional[T]` — removes/returns the **last** element; `None` on
+///   empty (emptiness is a normal state, never an abort);
+/// - `remove_at(index) -> T` — removes/returns the element at `index`;
+///   out-of-bounds (including negative) **aborts** (§10.5 Panic);
+/// - `insert(index, value) -> Void` — inserts before `index`; valid range
+///   `0..=len` (`len` is the append position); out-of-bounds aborts —
+///   explicitly NOT Python's native clamp;
+/// - `reverse() -> Void` — reverses in place;
+/// - `set(index, value) -> Void` — overwrites the element at `index`;
+///   out-of-bounds aborts (JS's native silent array extension and Python's
+///   negative indexing are both excluded by explicit bounds checks).
+///
+/// The synthesized abort checks (js/ts/python/go) throw/raise/panic with the
+/// normalized message `List.<op>: index <i> out of bounds (len <n>)`; the Rust
+/// backend keeps `Vec`'s native panics (which carry the index and length), per
+/// the DQ23 native-abort convention.
+pub const INPLACE_LIST_MUTATORS: &[&str] = &["pop", "remove_at", "insert", "reverse", "set"];
+
+/// Recognise a *desugared DQ30 in-place `List` mutator call*
+/// (`pop`/`remove_at`/`insert`/`reverse`/`set`).
+///
+/// The DQ30 sibling of [`desugared_list_mutating_method`]: same desugared shape
+/// (`Call { callee: FieldAccess(recv, method), args: [recv, ...rest] }`), but
+/// the method must be one of [`INPLACE_LIST_MUTATORS`] — and `set` additionally
+/// requires the **explicit** `recv_kind = "List"` stamp (never the absent-stamp
+/// fall-through), because `set(k, v)` is also a live `Map` method and an
+/// unstamped receiver must not be claimed by the `List` lowering. The other
+/// four names are `List`-only today, so they keep the DQ18 `None | "List"`
+/// gating (the checker leaves an unresolved-inference receiver unstamped).
+///
+/// Returns the receiver, the validated method name, and the remaining
+/// (non-self) arguments. The ownership pass guarantees the receiver is a `mut`
+/// lvalue (E5004), so each backend may mutate the receiver *place* in its
+/// lowering (JS/TS/Python mutate the reference; Go reassigns through a
+/// pointer where the length changes; Rust borrows `&mut` natively).
+#[must_use]
+pub fn desugared_list_inplace_mutator<'a>(
+    call_node: &'a AIRNode,
+    callee: &'a AIRNode,
+    args: &'a [AirArg],
+) -> Option<(&'a AIRNode, &'a str, &'a [AirArg])> {
+    let (recv, field, rest) = desugared_self_call(callee, args)?;
+    let method = field.name.as_str();
+    if !INPLACE_LIST_MUTATORS.contains(&method) {
+        return None;
+    }
+    let gate_ok = if method == "set" {
+        matches!(raw_recv_kind(call_node), Some("List"))
+    } else {
+        matches!(raw_recv_kind(call_node), None | Some("List"))
+    };
+    if gate_ok {
         Some((recv, method, rest))
     } else {
         None
@@ -6406,13 +6468,89 @@ mod tests {
 
     #[test]
     fn desugared_list_method_rejects_mutating_and_unknown_methods() {
-        // Mutating built-ins (deferred to DQ18) and arbitrary method names are
-        // NOT recognised — they fall through to each backend's generic path.
+        // Mutating built-ins (DQ18/DQ30 — recognised by their own dedicated
+        // recognisers) and arbitrary method names are NOT recognised — they
+        // fall through to each backend's generic path.
         for &m in &["push", "pop", "insert", "remove", "clear", "frobnicate"] {
             let (callee, args, call_node) = desugared_call(m, vec![]);
             assert!(
                 desugared_list_method(&call_node, &callee, &args).is_none(),
                 "{m} should not be recognised as a read-only List method"
+            );
+        }
+    }
+
+    #[test]
+    fn desugared_list_inplace_mutator_matches_dq30_methods() {
+        // Every DQ30 in-place mutator is recognised (with the `set` exception
+        // tested separately), returning receiver, method, and non-self args.
+        for &m in INPLACE_LIST_MUTATORS {
+            let extra = match m {
+                "pop" | "reverse" => vec![],
+                "remove_at" => vec![n(7, NodeKind::Identifier { name: ident("i") })],
+                _ => vec![
+                    n(7, NodeKind::Identifier { name: ident("i") }),
+                    n(9, NodeKind::Identifier { name: ident("x") }),
+                ],
+            };
+            let n_extra = extra.len();
+            let (callee, args, mut call_node) = desugared_call(m, extra);
+            call_node.metadata.insert(
+                bock_types::checker::RECV_KIND_META_KEY.to_string(),
+                bock_air::Value::String("List".to_string()),
+            );
+            let (recv, got_method, rest) =
+                desugared_list_inplace_mutator(&call_node, &callee, &args).expect("should match");
+            assert_eq!(got_method, m);
+            assert!(matches!(&recv.kind, NodeKind::Identifier { name } if name.name == "nums"));
+            assert_eq!(rest.len(), n_extra);
+        }
+    }
+
+    #[test]
+    fn desugared_list_inplace_mutator_set_requires_explicit_list_stamp() {
+        // `set(k, v)` is also a live `Map` method, so the List lowering must
+        // only claim it under an explicit `recv_kind = "List"` stamp: an
+        // unstamped or Map-stamped `set` falls through to the Map path.
+        let extra = vec![
+            n(7, NodeKind::Identifier { name: ident("i") }),
+            n(9, NodeKind::Identifier { name: ident("x") }),
+        ];
+        let (callee, args, call_node) = desugared_call("set", extra);
+        assert!(
+            desugared_list_inplace_mutator(&call_node, &callee, &args).is_none(),
+            "unstamped `set` must not be claimed by the List mutator lowering"
+        );
+        let mut map_stamped = call_node.clone();
+        map_stamped.metadata.insert(
+            bock_types::checker::RECV_KIND_META_KEY.to_string(),
+            bock_air::Value::String("Map".to_string()),
+        );
+        assert!(
+            desugared_list_inplace_mutator(&map_stamped, &callee, &args).is_none(),
+            "Map-stamped `set` must not be claimed by the List mutator lowering"
+        );
+        // `pop` (List-only name) keeps the DQ18 absent-stamp fall-through.
+        let (callee_p, args_p, call_p) = desugared_call("pop", vec![]);
+        assert!(
+            desugared_list_inplace_mutator(&call_p, &callee_p, &args_p).is_some(),
+            "unstamped `pop` keeps the absent-stamp fall-through"
+        );
+    }
+
+    #[test]
+    fn desugared_list_inplace_mutator_rejects_user_stamp() {
+        // A user record's same-named method (`recv_kind = "User:<name>"`) is
+        // never claimed by the built-in mutator lowering.
+        for &m in INPLACE_LIST_MUTATORS {
+            let (callee, args, mut call_node) = desugared_call(m, vec![]);
+            call_node.metadata.insert(
+                bock_types::checker::RECV_KIND_META_KEY.to_string(),
+                bock_air::Value::String("User:Counter".to_string()),
+            );
+            assert!(
+                desugared_list_inplace_mutator(&call_node, &callee, &args).is_none(),
+                "{m} on a user record must not route to the List mutator lowering"
             );
         }
     }

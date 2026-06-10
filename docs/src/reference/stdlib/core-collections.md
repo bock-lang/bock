@@ -21,12 +21,35 @@ These lower as built-in **methods** on the value — use them directly:
 - **`List`** (read-only): `len`/`length`/`count`, `is_empty`, `get`
   (→ `Optional[T]`), `contains`, `first`/`last`, `concat`, `index_of`,
   `join`.
-- **`List`** (in-place mutators): `push`/`append` mutate the list in
-  place — they require a **`mut` receiver** (a `let mut` list, a `mut`
-  parameter, or a field reached through a `mut` receiver) and return
-  **`Void`**. To build a list *functionally* (a new list, no `mut`),
-  use `+` / `concat` instead. `append` is the spelling alias for
-  `push`. See the spec, §18.3.
+- **`List`** (in-place mutators): all of these mutate the list in
+  place and require a **`mut` receiver** (a `let mut` list, a `mut`
+  parameter, or a field reached through a `mut` receiver):
+  - `push(value)` / `append(value)` → `Void` — append (`append` is the
+    spelling alias for `push`);
+  - `pop()` → `Optional[T]` — remove and return the **last** element;
+    `None` when the list is empty (emptiness is a normal state, never
+    an abort) — the canonical drain loop is
+    `loop { match xs.pop() { Some(v) => …, None => break } }`;
+  - `remove_at(index)` → `T` — remove and return the element at
+    `index`; an out-of-bounds (or negative) index **aborts** at
+    runtime. The name is by-index explicit; bare `remove` is not a
+    `List` method (`remove(value)` is reserved for a future by-value
+    form — the compiler suggests `remove_at`);
+  - `insert(index, value)` → `Void` — insert before `index`; the valid
+    range is `0..=len` (`insert(len, x)` appends); past it the call
+    **aborts** — Bock never clamps the index;
+  - `reverse()` → `Void` — reverse in place (the *value-returning*
+    form is this module's [`reversed`](#reversed));
+  - `set(index, value)` → `Void` — overwrite the element at `index`;
+    out-of-bounds **aborts** (no silent extension, no negative
+    indexing).
+
+  The rule of thumb (spec §18.3): *queries that can miss return
+  `Optional`* (`get`, `first`/`last`, `index_of`, `pop`); *violated
+  index contracts abort* (`remove_at`/`insert`/`set` out of bounds, a
+  Panic ambient effect — the same principle as integer division by
+  zero). To build a list *functionally* (a new list, no `mut`), use
+  `+` / `concat` instead. See the spec, §18.3.
 - **`Set`**: `add`/`remove`, `union`/`intersection`/`difference`,
   `contains`, `is_subset`/`is_superset`, `len`, `is_empty`, `to_list`,
   `filter`/`map`. `contains` (element membership) is a `Set` method.

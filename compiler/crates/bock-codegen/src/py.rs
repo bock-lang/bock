@@ -34,10 +34,13 @@ fn py_module_uses_concurrency(items: &[AIRNode]) -> bool {
     })
 }
 
-/// True if the module references `Optional`, `Some`, or `None` anywhere, so the
-/// Optional runtime prelude must be emitted. A cheap structural scan over the
-/// debug rendering, mirroring [`py_module_uses_concurrency`] and the Go/TS
-/// backends' `*_module_uses_optional`.
+/// True if the module references `Optional`, `Some`, or `None` anywhere — or
+/// calls `pop`, whose DQ30 lowering builds the tagged Optional values
+/// (`_BockSome(...)` / `_bock_none`) — so the Optional runtime prelude must be
+/// emitted. A cheap structural scan over the debug rendering, mirroring
+/// [`py_module_uses_concurrency`] and the Go/TS backends'
+/// `*_module_uses_optional`. Over-matching only emits unused runtime classes,
+/// which is harmless.
 fn py_module_uses_optional(items: &[AIRNode]) -> bool {
     items.iter().any(|n| {
         let s = format!("{n:?}");
@@ -45,6 +48,21 @@ fn py_module_uses_optional(items: &[AIRNode]) -> bool {
             || s.contains("TypeOptional")
             || s.contains("\"Some\"")
             || s.contains("\"None\"")
+            || s.contains("\"pop\"")
+    })
+}
+
+/// True if the module uses a DQ30 in-place `List` mutator whose Python
+/// lowering pre-checks bounds and aborts through the
+/// [`LIST_MUTATOR_RUNTIME_PY`] helper (`remove_at`/`insert`/`set`). Gates
+/// emission of that prelude, mirroring [`py_module_uses_optional`]. `pop`
+/// (no abort path) and `reverse` (native `lst.reverse()`) need no helper, so
+/// they don't gate here. `set` over-matches `Map.set`, which only emits an
+/// unused helper function — harmless.
+fn py_module_uses_list_mutators(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let s = format!("{n:?}");
+        s.contains("\"remove_at\"") || s.contains("\"insert\"") || s.contains("\"set\"")
     })
 }
 
@@ -220,6 +238,24 @@ class _BockOrderingGreater:
 _bock_less = _BockOrderingLess()
 _bock_equal = _BockOrderingEqual()
 _bock_greater = _BockOrderingGreater()
+";
+
+/// Runtime helper for the DQ30 in-place `List` mutators whose Python lowering
+/// pre-checks bounds (`remove_at`/`insert`/`set`): Python cannot `raise` in an
+/// expression (the lowerings are single-evaluation `lambda` IIFEs), so the
+/// violated-contract branch calls this raising helper instead. The message is
+/// the normalized cross-target abort form `List.<op>: index <i> out of bounds
+/// (len <n>)` (op, index, and length — the DQ30 contract), raised as an
+/// `IndexError` so the abort kind matches Python's native indexing aborts (the
+/// DQ23 convention of using the target's idiomatic abort channel). The
+/// pre-checks themselves are load-bearing on Python: native `lst.insert`
+/// CLAMPS out-of-range indices and native `lst.pop(i)` / `lst[i] = x` accept
+/// negative indices — all excluded by the `0 <= i` checks at the call sites.
+/// Gated by [`py_module_uses_list_mutators`].
+const LIST_MUTATOR_RUNTIME_PY: &str = "\
+# ── Bock List in-place-mutator runtime ──
+def _bock_list_abort(op, i, n):
+    raise IndexError(f'List.{op}: index {i} out of bounds (len {n})')
 ";
 
 /// Runtime helpers for the closure-taking `List` combinators whose Python form
@@ -1290,6 +1326,7 @@ impl CodeGenerator for PyGenerator {
         let mut runtime_ordering = false;
         let mut runtime_concurrency = false;
         let mut runtime_list_functional = false;
+        let mut runtime_list_mutators = false;
         let mut runtime_propagate = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
@@ -1315,6 +1352,7 @@ impl CodeGenerator for PyGenerator {
             runtime_ordering |= ctx.needs_runtime_ordering;
             runtime_concurrency |= ctx.needs_runtime_concurrency;
             runtime_list_functional |= ctx.needs_runtime_list_functional;
+            runtime_list_mutators |= ctx.needs_runtime_list_mutators;
             runtime_propagate |= ctx.needs_runtime_propagate;
             let mut content = ctx.finish();
 
@@ -1352,6 +1390,7 @@ impl CodeGenerator for PyGenerator {
             || runtime_ordering
             || runtime_concurrency
             || runtime_list_functional
+            || runtime_list_mutators
             || runtime_propagate
         {
             let mut content = String::new();
@@ -1401,6 +1440,11 @@ impl CodeGenerator for PyGenerator {
                 content.push_str(LIST_FUNCTIONAL_RUNTIME_PY);
                 content.push('\n');
                 all_names.extend(["_bock_reduce", "_bock_fold", "_bock_find", "_bock_for_each"]);
+            }
+            if runtime_list_mutators {
+                content.push_str(LIST_MUTATOR_RUNTIME_PY);
+                content.push('\n');
+                all_names.push("_bock_list_abort");
             }
             if runtime_propagate {
                 // `_bock_try` tests success tags by class *name*, so it has no
@@ -1674,6 +1718,10 @@ struct PyEmitCtx {
     /// Set once the [`LIST_FUNCTIONAL_RUNTIME_PY`] prelude has been emitted;
     /// deduped exactly as [`Self::optional_runtime_emitted`].
     list_functional_runtime_emitted: bool,
+    /// Set once the [`LIST_MUTATOR_RUNTIME_PY`] prelude (`_bock_list_abort`)
+    /// has been emitted; deduped exactly as
+    /// [`Self::optional_runtime_emitted`].
+    list_mutator_runtime_emitted: bool,
     /// Set once the [`PROPAGATE_RUNTIME_PY`] prelude (`_bock_try` /
     /// `_BockPropagate`) has been emitted; deduped exactly as
     /// [`Self::optional_runtime_emitted`].
@@ -1729,6 +1777,11 @@ struct PyEmitCtx {
     needs_runtime_ordering: bool,
     needs_runtime_concurrency: bool,
     needs_runtime_list_functional: bool,
+    /// In the per-module path, set when this module uses a DQ30 in-place
+    /// `List` mutator with a bounds pre-check (`remove_at`/`insert`/`set`),
+    /// so it imports `_bock_list_abort` from the shared `RUNTIME_MODULE_PY`.
+    /// Mirrors [`Self::needs_runtime_optional`].
+    needs_runtime_list_mutators: bool,
     /// In the per-module path, set when this module uses the `?` propagate
     /// operator, so it imports `_bock_try` / `_BockPropagate` from the shared
     /// `RUNTIME_MODULE_PY`. Mirrors [`Self::needs_runtime_optional`].
@@ -1845,6 +1898,7 @@ impl PyEmitCtx {
             ordering_runtime_emitted: false,
             concurrency_runtime_emitted: false,
             list_functional_runtime_emitted: false,
+            list_mutator_runtime_emitted: false,
             propagate_runtime_emitted: false,
             needs_union_import: false,
             needs_typing_callable: Cell::new(false),
@@ -1861,6 +1915,7 @@ impl PyEmitCtx {
             needs_runtime_ordering: false,
             needs_runtime_concurrency: false,
             needs_runtime_list_functional: false,
+            needs_runtime_list_mutators: false,
             needs_runtime_propagate: false,
             implicit_imports: Vec::new(),
             field_method_collisions: std::collections::HashSet::new(),
@@ -1951,6 +2006,7 @@ impl PyEmitCtx {
                 || self.needs_runtime_ordering
                 || self.needs_runtime_concurrency
                 || self.needs_runtime_list_functional
+                || self.needs_runtime_list_mutators
                 || self.needs_runtime_propagate)
         {
             let _ = writeln!(preamble, "from {RUNTIME_MODULE_PY} import *");
@@ -2513,6 +2569,102 @@ impl PyEmitCtx {
         self.buf.push_str(").append(");
         self.emit_expr(&x.value)?;
         self.buf.push(')');
+        Ok(true)
+    }
+
+    /// Emit a DQ30 in-place `List` mutator
+    /// (`pop`/`remove_at`/`insert`/`reverse`/`set`) to its Python form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_inplace_mutator`].
+    /// Python lists mutate in place natively, and a `lambda` parameter aliases
+    /// the receiver, so each lowering is a single-evaluation conditional
+    /// expression:
+    ///
+    /// - `pop` → `(lambda __r: _BockSome(__r.pop()) if len(__r) > 0 else
+    ///   _bock_none)(recv)` — emptiness is `None`, never an abort;
+    /// - `remove_at(i)` → pre-check + `__r.pop(__i)` — the `0 <= __i` half is
+    ///   load-bearing (native `pop(-1)` would remove from the end);
+    /// - `insert(i, x)` → pre-check (`0 <= __i <= len`) + `__r.insert(__i,
+    ///   __x)` — the pre-check is REQUIRED: native `insert` clamps
+    ///   out-of-range indices instead of failing;
+    /// - `reverse` → native in-place `(recv).reverse()`;
+    /// - `set(i, x)` → pre-check + `__r.__setitem__(__i, __x)` (the statement
+    ///   form `__r[__i] = __x` is not an expression; the dunder call is) —
+    ///   `0 <= __i` again excludes Python's negative indexing.
+    ///
+    /// The violated-contract branches call the raising helper
+    /// `_bock_list_abort(op, i, len)` ([`LIST_MUTATOR_RUNTIME_PY`]), producing
+    /// the normalized abort message `List.<op>: index <i> out of bounds
+    /// (len <n>)`.
+    fn try_emit_list_inplace_mutator(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_inplace_mutator(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "pop" => {
+                self.buf.push_str(
+                    "(lambda __r: _BockSome(__r.pop()) if len(__r) > 0 else _bock_none)(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "remove_at" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(lambda __r, __i: __r.pop(__i) if 0 <= __i < len(__r) \
+                     else _bock_list_abort('remove_at', __i, len(__r)))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push(')');
+            }
+            "insert" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(lambda __r, __i, __x: __r.insert(__i, __x) if 0 <= __i <= len(__r) \
+                     else _bock_list_abort('insert', __i, len(__r)))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "reverse" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").reverse()");
+            }
+            "set" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "(lambda __r, __i, __x: __r.__setitem__(__i, __x) if 0 <= __i < len(__r) \
+                     else _bock_list_abort('set', __i, len(__r)))(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
         Ok(true)
     }
 
@@ -3468,6 +3620,9 @@ impl PyEmitCtx {
                         // the Optional prelude must be present alongside it.
                         self.needs_runtime_optional = true;
                     }
+                    if py_module_uses_list_mutators(items) {
+                        self.needs_runtime_list_mutators = true;
+                    }
                     if py_module_uses_propagate(items) {
                         self.needs_runtime_propagate = true;
                     }
@@ -3510,6 +3665,11 @@ impl PyEmitCtx {
                         self.buf.push_str(LIST_FUNCTIONAL_RUNTIME_PY);
                         self.buf.push('\n');
                         self.list_functional_runtime_emitted = true;
+                    }
+                    if !self.list_mutator_runtime_emitted && py_module_uses_list_mutators(items) {
+                        self.buf.push_str(LIST_MUTATOR_RUNTIME_PY);
+                        self.buf.push('\n');
+                        self.list_mutator_runtime_emitted = true;
                     }
                     if !self.propagate_runtime_emitted && py_module_uses_propagate(items) {
                         self.buf.push_str(PROPAGATE_RUNTIME_PY);
@@ -5243,6 +5403,9 @@ impl PyEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_mutating_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_inplace_mutator(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {
