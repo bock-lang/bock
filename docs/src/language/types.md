@@ -428,6 +428,14 @@ fn main() {
 
 <!-- verify: bock-check -->
 
+An `Equatable` bound is satisfied not just by an explicit
+`impl Equatable` but by **structural conformance** (§18.5, DQ29): a
+record or enum whose fields/payloads are all `Equatable` passes a
+`T: Equatable` parameter as-is — no impl required. See
+[core.compare](../reference/stdlib/core-compare.md) for the full
+structural rule and its boundaries (classes excluded; `Fn` fields
+poison; an explicit impl overrides the default).
+
 ## Function Types
 
 A first-class function is described by `Fn(ArgTypes) -> Ret`,

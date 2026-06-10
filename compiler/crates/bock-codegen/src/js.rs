@@ -70,6 +70,86 @@ fn js_module_uses_range(items: &[AIRNode]) -> bool {
     items.iter().any(|n| format!("{n:?}").contains("Range {"))
 }
 
+/// Runtime helper for DQ29 structural equality (`==`/`!=` on records, enums,
+/// tuples, `List`/`Map`/`Set`, `Optional`/`Result`, and bounded generics): JS
+/// `===` on two objects is reference identity, so every stamped equality (see
+/// [`crate::generator::user_eq_kind`], lanes `"structural"`/`"deep"`/
+/// `"generic"`) lowers to `__bockEq(a, b)` instead.
+///
+/// Semantics:
+/// - non-objects fall through to `===` — which keeps the IEEE `NaN !== NaN`
+///   Float behavior (the DQ10 caveat) and native string/number/boolean
+///   equality;
+/// - a value carrying an `eq` method (an explicit `impl Equatable` attached to
+///   the prototype) dispatches through it, so custom equality is honored even
+///   for elements *inside* collections;
+/// - arrays (Bock `List` and tuples) compare element-wise;
+/// - `Map`/`Set` compare by content, ORDER-INDEPENDENTLY, with a fast path via
+///   native key lookup (primitive keys) and a deep-equality scan fallback;
+/// - everything else (records, tagged enum/Optional/Result objects) compares
+///   by own enumerable properties, which includes the `_tag` discriminant.
+///
+/// Emitted once into the shared `_bock_runtime.js` (per-module path) or
+/// inlined at most once (single-module path), gated on a ctx flag (mirrors the
+/// range runtime).
+const EQ_RUNTIME_JS: &str = "\
+// ── Bock structural equality runtime ──
+const __bockEq = (a, b) => {
+  if (a === b) return true;
+  if (typeof a !== \"object\" || typeof b !== \"object\" || a === null || b === null) {
+    return a === b;
+  }
+  if (typeof a.eq === \"function\" && typeof b.eq === \"function\") return a.eq(a, b);
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) { if (!__bockEq(a[i], b[i])) return false; }
+    return true;
+  }
+  if (a instanceof Map) {
+    if (!(b instanceof Map) || a.size !== b.size) return false;
+    for (const [k, v] of a) {
+      if (b.has(k)) { if (!__bockEq(b.get(k), v)) return false; continue; }
+      let found = false;
+      for (const [bk, bv] of b) { if (__bockEq(k, bk) && __bockEq(v, bv)) { found = true; break; } }
+      if (!found) return false;
+    }
+    return true;
+  }
+  if (a instanceof Set) {
+    if (!(b instanceof Set) || a.size !== b.size) return false;
+    for (const x of a) {
+      if (b.has(x)) continue;
+      let found = false;
+      for (const y of b) { if (__bockEq(x, y)) { found = true; break; } }
+      if (!found) return false;
+    }
+    return true;
+  }
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) { if (!__bockEq(a[k], b[k])) return false; }
+  return true;
+};
+";
+
+/// True if the module contains an equality that must lower through
+/// [`EQ_RUNTIME_JS`]'s `__bockEq`: a `BinaryOp` the checker stamped with a
+/// non-`"impl"` [`bock_types::checker::USER_EQ_META_KEY`] lane, or an
+/// `a.eq(b)` bridge call on an `Equatable`-bounded generic receiver (whose
+/// instantiation may be a record). Cheap debug-rendering scan, mirroring
+/// [`js_module_uses_range`]. The `"impl"` lane dispatches through the type's
+/// own `eq` method and needs no helper.
+fn js_module_uses_eq(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let dbg = format!("{n:?}");
+        dbg.contains("\"user_eq\": String(\"structural\")")
+            || dbg.contains("\"user_eq\": String(\"deep\")")
+            || dbg.contains("\"user_eq\": String(\"generic\")")
+            || dbg.contains("TraitBound:Equatable")
+    })
+}
+
 /// The shared per-module runtime module name (without extension). In the
 /// per-module (native-import) emission path the concurrency and range runtime
 /// helpers live in one file — `_bock_runtime.js` at the build root — and every
@@ -233,6 +313,7 @@ impl CodeGenerator for JsGenerator {
         let mut files: Vec<OutputFile> = Vec::with_capacity(modules.len() + 2);
         let mut runtime_concurrency = false;
         let mut runtime_range = false;
+        let mut runtime_eq = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let own_path = crate::generator::module_path_string(module).unwrap_or_default();
@@ -269,6 +350,7 @@ impl CodeGenerator for JsGenerator {
             ctx.emit_node(module)?;
             runtime_concurrency |= ctx.needs_runtime_concurrency;
             runtime_range |= ctx.needs_runtime_range;
+            runtime_eq |= ctx.needs_runtime_eq;
             let (mut content, mappings) = ctx.finish();
 
             // The entry file gets the `main()` invocation appended exactly once.
@@ -300,7 +382,7 @@ impl CodeGenerator for JsGenerator {
 
         // Shared runtime module with exactly the helpers referenced, each
         // `export`ed so consuming modules can `import { … }` them.
-        if runtime_concurrency || runtime_range {
+        if runtime_concurrency || runtime_range || runtime_eq {
             let mut content = String::new();
             if runtime_concurrency {
                 content.push_str(&export_runtime_consts(CONCURRENCY_RUNTIME_JS));
@@ -308,6 +390,10 @@ impl CodeGenerator for JsGenerator {
             }
             if runtime_range {
                 content.push_str(&export_runtime_consts(RANGE_RUNTIME_JS));
+                content.push('\n');
+            }
+            if runtime_eq {
+                content.push_str(&export_runtime_consts(EQ_RUNTIME_JS));
                 content.push('\n');
             }
             files.push(OutputFile {
@@ -508,6 +594,10 @@ struct EmitCtx {
     /// range` would be a redeclaration error). Deduped exactly as
     /// [`Self::concurrency_runtime_emitted`].
     range_runtime_emitted: bool,
+    /// Set once the structural-equality runtime ([`EQ_RUNTIME_JS`]) has been
+    /// emitted in the single-module self-contained path. Deduped exactly as
+    /// [`Self::range_runtime_emitted`].
+    eq_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Maps a variant name to its enum so a
     /// unit-variant reference lowers to the frozen `{enum}_{variant}` const, a
     /// struct/tuple construction lowers to the `{enum}_{variant}(..)` factory,
@@ -541,6 +631,9 @@ struct EmitCtx {
     /// As [`Self::needs_runtime_concurrency`], for the range runtime
     /// (`range`/`rangeInclusive`).
     needs_runtime_range: bool,
+    /// As [`Self::needs_runtime_concurrency`], for the DQ29 structural-equality
+    /// runtime (`__bockEq`).
+    needs_runtime_eq: bool,
     /// Implicit cross-module imports for the per-module path — names this module
     /// references but neither declares locally nor imports via an explicit `use`
     /// (e.g. a §18.2-prelude trait used as a base in an `impl`). Computed in
@@ -638,11 +731,13 @@ impl EmitCtx {
             match_temp_counter: 0,
             concurrency_runtime_emitted: false,
             range_runtime_emitted: false,
+            eq_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
             per_module: false,
             needs_runtime_concurrency: false,
             needs_runtime_range: false,
+            needs_runtime_eq: false,
             implicit_imports: Vec::new(),
             public_symbols: HashMap::new(),
             self_module_path: String::new(),
@@ -764,13 +859,16 @@ impl EmitCtx {
         let ext = "js";
 
         // Shared runtime: `import { … } from "./…/_bock_runtime.js"`.
-        if self.needs_runtime_concurrency || self.needs_runtime_range {
+        if self.needs_runtime_concurrency || self.needs_runtime_range || self.needs_runtime_eq {
             let mut names: Vec<&str> = Vec::new();
             if self.needs_runtime_concurrency {
                 names.extend(["__bockChannelNew", "__bockSpawn"]);
             }
             if self.needs_runtime_range {
                 names.extend(["range", "rangeInclusive"]);
+            }
+            if self.needs_runtime_eq {
+                names.push("__bockEq");
             }
             let spec = crate::generator::esm_relative_specifier(
                 &self.self_module_path,
@@ -2207,6 +2305,20 @@ impl EmitCtx {
         else {
             return Ok(false);
         };
+        // DQ29: unlike the `Primitive:<Ty>` bridge (whose receiver is a known
+        // scalar, where `===` is correct), a bounded `T: Equatable` receiver
+        // may be instantiated with a RECORD — JS `===` would be reference
+        // identity — so `a.eq(b)` lowers through the `__bockEq` structural
+        // helper, which falls back to `===` for primitives.
+        if method == "eq" {
+            let Some(other) = rest.first() else {
+                return Ok(false);
+            };
+            let recv_str = self.expr_to_string(recv)?;
+            let other = self.expr_to_string(&other.value)?;
+            let _ = write!(self.buf, "__bockEq({recv_str}, {other})");
+            return Ok(true);
+        }
         self.emit_bridge_method(recv, method, rest)
     }
 
@@ -2278,6 +2390,9 @@ impl EmitCtx {
                     if js_module_uses_range(items) {
                         self.needs_runtime_range = true;
                     }
+                    if js_module_uses_eq(items) {
+                        self.needs_runtime_eq = true;
+                    }
                     // Real ESM imports (runtime, explicit `use`, implicit prelude)
                     // at the top of the file, before any declaration.
                     self.emit_esm_imports(imports)?;
@@ -2296,6 +2411,11 @@ impl EmitCtx {
                         self.buf.push_str(RANGE_RUNTIME_JS);
                         self.buf.push('\n');
                         self.range_runtime_emitted = true;
+                    }
+                    if !self.eq_runtime_emitted && js_module_uses_eq(items) {
+                        self.buf.push_str(EQ_RUNTIME_JS);
+                        self.buf.push('\n');
+                        self.eq_runtime_emitted = true;
                     }
                 }
                 // `@test` functions are transpiled separately into Vitest/Jest
@@ -3279,6 +3399,27 @@ impl EmitCtx {
                             self.buf,
                             "(({recv}).compare({recv}, {other})._tag {eq} \"{tag}\")"
                         );
+                        return Ok(());
+                    }
+                }
+                // DQ29 (§18.5 structural Equatable): a stamped `==`/`!=`
+                // cannot use native `===` (reference identity on objects).
+                // The `"impl"` lane dispatches through the explicit
+                // `impl Equatable`'s `eq` — receiver passed as both the JS
+                // method receiver and the explicit `self` argument, matching
+                // how a hand-written `a.eq(b)` lowers (Q-js-user-equality-
+                // reference, #339). The structural lanes lower through the
+                // `__bockEq` runtime helper.
+                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    if let Some(kind) = crate::generator::user_eq_kind(node) {
+                        let recv = self.expr_to_string(left)?;
+                        let other = self.expr_to_string(right)?;
+                        let neg = if *op == BinOp::Ne { "!" } else { "" };
+                        if kind == "impl" {
+                            let _ = write!(self.buf, "{neg}(({recv}).eq({recv}, {other}))");
+                        } else {
+                            let _ = write!(self.buf, "{neg}__bockEq({recv}, {other})");
+                        }
                         return Ok(());
                     }
                 }

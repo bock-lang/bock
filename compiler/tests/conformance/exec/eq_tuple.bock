@@ -1,0 +1,24 @@
+// TEST: eq_tuple
+// EXPECT: output "eq:true;ne:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 (§18.5 structural Equatable): a tuple is Equatable iff all of its
+// component types are, and tuple equality is component-wise. `(Int, String)`
+// composes two Equatable primitives.
+//
+// Codegen contract pinned here: JS lowers tuples to arrays, which compare by
+// reference under `===` — tuple equality must be component-wise on every
+// target.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let t1: (Int, String) = (1, "x")
+  let t2: (Int, String) = (1, "x")
+  let t3: (Int, String) = (1, "y")
+  let eq: Bool = t1 == t2
+  let ne: Bool = t1 == t3
+  println("eq:${eq};ne:${ne}")
+}

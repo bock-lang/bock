@@ -37,6 +37,37 @@ ordering operator lowers through the type's `compare`, mapping `a < b` to
 `Char`, the sized numerics — **not `Bool`**) are gated the same way through
 `core`'s sealed conformances (and use the target's native ordering operator).
 
+`==`/`!=` gate behind `Equatable` the same way, but `Equatable` has a
+**structural default** (§18.5, DQ29): a record is `Equatable` iff every field
+type is, an enum iff every payload type of every variant is (both recursive),
+and the compound built-ins compose conditionally — `List[T]`/`Set[T]`/
+`Optional[T]` iff `T`, `Map[K, V]` iff `K` and `V`, `Result[T, E]` iff `T` and
+`E`, tuples iff all components (`Map`/`Set` equality is order-independent). A
+generic type decides per instantiation (`Pair[Int, String]` is `Equatable`;
+`Pair[Int, Fn(Int) -> Int]` is not). So `Point` above supports `==` with **no
+impl at all** — field-wise equality — and a record of `Equatable` fields also
+satisfies an `Equatable` *bound* (`fn dedupe[T: Equatable](items: List[T])`).
+A non-`Equatable` leaf poisons the type: `==` on a record holding an `Fn`
+field is rejected with an `E4015` diagnostic naming the offending field path
+and type:
+
+```bock
+record Callback { name: String, handler: Fn(Int) -> Int }
+
+let _ = a == b
+//      ^ error[E4015]: type `Callback` does not implement `Equatable`; the
+//        `==`/`!=` operators require it — field `handler` of type
+//        `Fn(Int) -> Int` is not Equatable
+```
+
+Two boundaries: **classes never conform structurally** (a class gets `==` only
+via an explicit `impl Equatable`), and an **explicit impl suppresses the
+structural default** — its `eq` then defines the type's equality everywhere
+`==`/`!=` apply, on every target. The structural default does **not** extend
+to `Comparable` (ordering has no canonical structural meaning) or `Hashable`
+(deferred to the v1.x derive design pass). `Float` fields keep IEEE semantics:
+a record holding `NaN` is `!=` itself.
+
 ## Enums
 
 ### `Ordering`
@@ -69,8 +100,15 @@ public trait Equatable {
 The interface for types whose values can be compared for equality. The
 `other` operand has the implementing type, so an impl for `T` compares a
 `T` against a `T`. `eq` returns `true` when `self` and `other` are
-considered equal. Implementing `Equatable` enables `==` and `!=` on the
-type (§18.5).
+considered equal.
+
+Records and enums whose fields/payloads are all `Equatable` conform
+**structurally** (§18.5, DQ29) — they support `==`/`!=` with field-wise
+equality and satisfy `Equatable` bounds without an impl. Write an explicit
+`impl Equatable` to **override** that default with custom equality (the impl
+wins; `==`/`!=` dispatch through its `eq`), to opt a **class** into equality
+(classes never conform structurally), or to define equality for a type the
+structural rule rejects.
 
 ### `Comparable`
 

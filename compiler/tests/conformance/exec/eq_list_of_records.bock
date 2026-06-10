@@ -1,0 +1,32 @@
+// TEST: eq_list_of_records
+// EXPECT: output "eq:true;len:false;elem:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 (§18.5 structural Equatable): compound built-ins compose conditionally —
+// `List[T]` is Equatable iff `T` is, and list equality is element-wise (same
+// length, every element pair `==`). Here `T` is itself a structurally-Equatable
+// record, so the element comparison recurses through record fields.
+//
+// Codegen contract pinned here: JS arrays compare by reference under `===`;
+// Go slices do not support `==` at all (compile error) — both must lower to a
+// deep element-wise comparison.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+fn main() -> Void {
+  let l1: List[Point] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+  let l2: List[Point] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+  let l3: List[Point] = [Point { x: 1, y: 2 }]
+  let l4: List[Point] = [Point { x: 1, y: 2 }, Point { x: 3, y: 9 }]
+  let eq: Bool = l1 == l2
+  let len: Bool = l1 == l3
+  let elem: Bool = l1 == l4
+  println("eq:${eq};len:${len};elem:${elem}")
+}

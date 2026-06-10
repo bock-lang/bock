@@ -1,0 +1,30 @@
+// TEST: eq_map_set_order_independent
+// EXPECT: output "map:true;map_ne:false;set:true;set_ne:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 (§18.5 structural Equatable): `Map[K, V]` is Equatable iff `K` and `V`
+// are; `Set[T]` iff `T` is. Map and Set equality is ORDER-INDEPENDENT: two
+// maps are `==` when they hold the same key→value associations regardless of
+// insertion order, and two sets are `==` when they hold the same elements.
+//
+// Codegen contract pinned here: JS `Map`/`Set` compare by reference under
+// `===`; Go maps do not support `==` (compile error) — both must lower to a
+// content comparison.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let m1: Map[String, Int] = { "a": 1, "b": 2 }
+  let m2: Map[String, Int] = { "b": 2, "a": 1 }
+  let m3: Map[String, Int] = { "a": 1, "b": 9 }
+  let s1: Set[Int] = #{1, 2, 3}
+  let s2: Set[Int] = #{3, 1, 2}
+  let s3: Set[Int] = #{1, 2}
+  let map: Bool = m1 == m2
+  let map_ne: Bool = m1 == m3
+  let set: Bool = s1 == s2
+  let set_ne: Bool = s1 == s3
+  println("map:${map};map_ne:${map_ne};set:${set};set_ne:${set_ne}")
+}

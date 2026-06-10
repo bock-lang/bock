@@ -3082,12 +3082,26 @@ impl RsEmitCtx {
                 // synthesizes `where T: Clone` (GAP-B). `#[derive(Clone)]` adds
                 // the standard per-field bound (a generic `Box<T>` derives
                 // `Clone where T: Clone`), so this never over-constrains a
-                // concrete instantiation whose fields are all `Clone`. It is the
-                // only derive the backend emits, so there is no conflicting-derive
-                // risk. `clone_target_records`/`clone_bound_records` continue to
+                // concrete instantiation whose fields are all `Clone`. The
+                // `clone_target_records`/`clone_bound_records` sets continue to
                 // govern the *impl bound* + `self.field.clone()` rewrite, which is
                 // independent of the struct derive.
-                self.writeln("#[derive(Clone)]");
+                //
+                // DQ29 (§18.5 structural Equatable): a record the checker
+                // stamped structurally Equatable additionally derives
+                // `PartialEq`, so native `==`/`!=` (and containment such as
+                // `Vec<T> == Vec<T>`) compile with field-wise semantics. The
+                // derive's conditional per-field bounds give generic records
+                // rule 4's per-instantiation conformance for free. A record
+                // with an explicit `impl Equatable` is NOT stamped — its `==`
+                // routes through `eq` (see `user_eq_kind`), and deriving a
+                // structural `PartialEq` besides it would pin the wrong
+                // equality into container comparisons.
+                if crate::generator::derives_structural_eq(node) {
+                    self.writeln("#[derive(Clone, PartialEq)]");
+                } else {
+                    self.writeln("#[derive(Clone)]");
+                }
                 self.writeln(&format!("{vis}struct {}{generics} {{", name.name));
                 self.indent += 1;
                 for f in fields {
@@ -3110,7 +3124,14 @@ impl RsEmitCtx {
                 // Derive `Clone` on every generated enum, for the same reason as
                 // records (GAP-B): a user enum used as the type argument of a
                 // generic fn with a synthesized `T: Clone` bound must be `Clone`.
-                self.writeln("#[derive(Clone)]");
+                // DQ29: structurally-Equatable enums additionally derive
+                // `PartialEq` (tag-then-payload equality) — see the RecordDecl
+                // arm for the full rationale.
+                if crate::generator::derives_structural_eq(node) {
+                    self.writeln("#[derive(Clone, PartialEq)]");
+                } else {
+                    self.writeln("#[derive(Clone)]");
+                }
                 self.writeln(&format!("{vis}enum {}{generics} {{", name.name));
                 self.indent += 1;
                 for variant in variants {
@@ -4379,6 +4400,26 @@ impl RsEmitCtx {
                         let _ = write!(self.buf, "), Ordering::{tag})");
                         return Ok(());
                     }
+                }
+                // DQ29: `==`/`!=` on a type with an explicit `impl Equatable`
+                // dispatch through its `eq` (native `==` would need a
+                // `PartialEq` the type intentionally does not derive — the
+                // user's `eq` IS the type's equality). The operand is borrowed
+                // exactly as `compare` above (`eq(&self, other: &Self)`). The
+                // "structural"/"deep" lanes stay native: the stamped derive
+                // gives records/enums field-wise `==`, and `Vec`/`HashMap`/
+                // `HashSet`/tuples are already structural in Rust.
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && crate::generator::user_eq_kind(node) == Some("impl")
+                {
+                    if *op == BinOp::Ne {
+                        self.buf.push('!');
+                    }
+                    self.emit_expr(left)?;
+                    self.buf.push_str(".eq(");
+                    self.emit_call_arg(right, true)?;
+                    self.buf.push(')');
+                    return Ok(());
                 }
                 self.buf.push('(');
                 self.emit_expr(left)?;

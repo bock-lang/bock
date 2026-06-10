@@ -1,0 +1,32 @@
+// TEST: eq_record_nested
+// EXPECT: output "outer_eq:true;outer_ne:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 (§18.5 structural Equatable): structural conformance is computed
+// recursively — a record containing another record is Equatable iff the inner
+// record is, and `==` recurses field-wise through the nesting. `Line` holds
+// two `Point`s; two `Line`s built from equal points are `==`, and differing in
+// a single leaf field makes them `!=`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+record Line {
+  from: Point,
+  to: Point,
+}
+
+fn main() -> Void {
+  let l1: Line = Line { from: Point { x: 0, y: 0 }, to: Point { x: 3, y: 4 } }
+  let l2: Line = Line { from: Point { x: 0, y: 0 }, to: Point { x: 3, y: 4 } }
+  let l3: Line = Line { from: Point { x: 0, y: 0 }, to: Point { x: 3, y: 5 } }
+  let outer_eq: Bool = l1 == l2
+  let outer_ne: Bool = l1 == l3
+  println("outer_eq:${outer_eq};outer_ne:${outer_ne}")
+}

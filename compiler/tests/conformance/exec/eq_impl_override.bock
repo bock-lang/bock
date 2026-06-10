@@ -1,0 +1,40 @@
+// TEST: eq_impl_override
+// EXPECT: output "custom_eq:true;custom_ne:false;op_ne:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ29 (§18.5 structural Equatable): an explicit `impl Equatable` SUPPRESSES
+// the structural default (skip-if-occupied, the same precedence as the #110
+// `From` ⇒ `Into` blanket). `Bucket` declares a custom `eq` that compares
+// `v % 10` — so `Bucket{12} == Bucket{2}` is TRUE under the impl even though
+// the two values differ structurally, pinning that `==` routes through the
+// user's `eq` rather than field-wise equality.
+//
+// Codegen contract pinned here (Q-js-user-equality-reference, #339): JS
+// lowered user-type `==` with an explicit Equatable impl to reference
+// equality; every target must dispatch `==`/`!=` through the impl's `eq`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Equatable}
+
+record Bucket {
+  v: Int,
+}
+
+impl Equatable for Bucket {
+  public fn eq(self, other: Bucket) -> Bool {
+    self.v % 10 == other.v % 10
+  }
+}
+
+fn main() -> Void {
+  let a: Bucket = Bucket { v: 12 }
+  let b: Bucket = Bucket { v: 2 }
+  let c: Bucket = Bucket { v: 3 }
+  let custom_eq: Bool = a == b
+  let custom_ne: Bool = a == c
+  let op_ne: Bool = a != b
+  println("custom_eq:${custom_eq};custom_ne:${custom_ne};op_ne:${op_ne}")
+}

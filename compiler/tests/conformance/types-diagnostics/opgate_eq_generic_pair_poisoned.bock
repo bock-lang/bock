@@ -1,0 +1,25 @@
+// TEST: opgate_eq_generic_pair_poisoned
+// EXPECT: error E4015 at 23:23
+//
+// DQ29 (§18.5 structural Equatable): a GENERIC user type instantiates
+// conditionally — `Pair[A, B]` is Equatable iff both `A` and `B` are, decided
+// at the use site on the INSTANTIATED type. `Pair[Int, Fn(Int) -> Int]`
+// poisons the second field with a function type, so `==` on it is rejected
+// even though `Pair[Int, String]` (exec/eq_generic_pair.bock) is accepted.
+// The diagnostic names the poisoned field and its type. The location points
+// at the `p1 == p2` comparison (the `let` initializer).
+module main
+
+record Pair[A, B] {
+  first: A,
+  second: B,
+}
+
+fn main() -> Void {
+  let double: Fn(Int) -> Int = (x) => x * 2
+  let triple: Fn(Int) -> Int = (x) => x * 3
+  let p1: Pair[Int, Fn(Int) -> Int] = Pair { first: 1, second: double }
+  let p2: Pair[Int, Fn(Int) -> Int] = Pair { first: 1, second: triple }
+  let same: Bool = p1 == p2
+  println("${same}")
+}

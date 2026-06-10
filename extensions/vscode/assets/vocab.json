@@ -930,6 +930,7 @@
         "methods": [
           "compare",
           "display",
+          "eq",
           "equals",
           "hash_code",
           "negate",
@@ -951,6 +952,7 @@
         "methods": [
           "compare",
           "display",
+          "eq",
           "equals",
           "hash_code",
           "is_alpha",
@@ -999,6 +1001,7 @@
           "compare",
           "display",
           "div",
+          "eq",
           "equals",
           "floor",
           "hash_code",
@@ -1045,6 +1048,7 @@
           "compare",
           "display",
           "div",
+          "eq",
           "equals",
           "hash_code",
           "max",
@@ -1224,6 +1228,7 @@
           "contains",
           "display",
           "ends_with",
+          "eq",
           "equals",
           "format",
           "hash_code",
@@ -1531,7 +1536,7 @@
         "code": "E4001",
         "severity": "error",
         "summary": "Type mismatch.",
-        "description": "Expected and actual types do not unify.",
+        "description": "Expected and actual types do not unify. The message reads `expected `T`, found `U``: `T` is the type the surrounding context requires and `U` is the type the expression actually has, both in surface Bock syntax. When a direct conversion to the expected type exists, a note suggests it (`.to_float()`, `.to_int()`, `.to_string()`, or `Int.try_from`/`Float.try_from` for parsing a String).",
         "spec_refs": [
           "§2"
         ],
@@ -1592,6 +1597,46 @@
         "severity": "error",
         "summary": "Cannot implement a core trait for a primitive type.",
         "description": "Core traits (`Equatable`, `Comparable`, `Displayable`, `Hashable`) have sealed, compiler-provided conformances for primitive types. User code may not add its own `impl` of a core trait for a primitive (an orphan-rule violation). Wrap the primitive in a newtype and implement the trait for that instead.",
+        "spec_refs": [
+          "§18.5"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4012",
+        "severity": "error",
+        "summary": "Conversion could not be resolved.",
+        "description": "A `.into()` call (or `from`/`try_from`) could not be resolved: no `From`/`Into`/`TryFrom` impl relates the source and target types. For `.into()` the target comes from the expected type, so the call site must have a reachable annotation (a `let y: U =`, an `fn -> U` return position, or a typed argument).",
+        "spec_refs": [
+          "§18.4"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4013",
+        "severity": "error",
+        "summary": "No such method on a concrete type.",
+        "description": "A method that does not exist on the receiver's concrete type was called. The receiver resolved to a fully-known type (a primitive, a built-in collection, an `Optional`/`Result`, or a user record/class/enum in scope) and the method is in none of that type's method sets (intrinsic, canonical-trait, inherent/trait impl, or inherited trait default). When a near-miss name exists a \"did you mean `…`?\" suggestion is offered. Not raised for unresolved inference variables or §4.9 sketch-mode receivers.",
+        "spec_refs": [
+          "§18.3"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4014",
+        "severity": "error",
+        "summary": "Bare module-qualified import.",
+        "description": "A `use` declaration named a module path with neither a brace-list nor a wildcard (a bare `use core.error`). Per §12.2 this is not a v1 import form; module-qualified access is deferred to v1.x. Import the names you need with the braced form (`use core.error.{ Error }`) or the discouraged wildcard (`use core.error.*`).",
+        "spec_refs": [
+          "§12.2"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E4015",
+        "severity": "error",
+        "summary": "Operand or bound instantiation is not `Equatable`.",
+        "description": "An `==`/`!=` operand (or a type instantiating an `Equatable` bound) does not conform to `Equatable` (DQ29). Records and enums conform STRUCTURALLY iff every field / variant payload type conforms (recursively); `List[T]`/`Set[T]`/`Optional[T]` iff `T`, `Map[K, V]` iff `K` and `V`, `Result[T, E]` iff `T` and `E`, tuples iff all components; generic user types decide per instantiation. A non-Equatable leaf (e.g. an `Fn` field) poisons the type, and the message names the offending field path and type. Classes are excluded from the structural default and need an explicit `impl Equatable`. An explicit impl always wins over the structural rules. Fix: implement `Equatable` for the type, or remove the comparison.",
         "spec_refs": [
           "§18.5"
         ],
@@ -1664,6 +1709,28 @@
         "description": "A public function calls a function whose effects escape its declared clause.",
         "spec_refs": [
           "§8"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E6005",
+        "severity": "error",
+        "summary": "Effect operation called without its effect declared or handled.",
+        "description": "An effect operation (e.g. `log(...)` of `effect Log`) was called, but the operation's effect is neither declared by the enclosing function (`with <Effect>`) nor handled in an enclosing scope (a `handling (<Effect> with <handler>) { ... }` block or a module-level `handle <Effect> with <handler>`). Fix by declaring the effect on the function or installing a handler. Emitted by the name-resolution pass: effect operations are only in scope in those contexts.",
+        "spec_refs": [
+          "§8",
+          "§10.3",
+          "§10.4"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E6006",
+        "severity": "error",
+        "summary": "Lambda-handler form is reserved until v1.x.",
+        "description": "The lambda-based handler surface `Effect.handler(op: (args) => ...)` is reserved for v1.x and is not a v1 form. v1 supports exactly one handler form: declare a record, `impl <Effect> for <Record>`, and install it with `handle <Effect> with <record>` (module level) or `handling (<Effect> with <record>) { ... }` (block level).",
+        "spec_refs": [
+          "§10.4"
         ],
         "related_codes": []
       },
