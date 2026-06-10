@@ -2500,3 +2500,47 @@ State at close: main 16e0486 + this tracking PR, 0 open feature PRs, tree clean,
   green at HEAD. Worktrees/branches/caches: all 5 lanes pruned. gh-API auth: intermittent 401s persisted through the
   block (merges/PR-creates done via REST with idempotent state-checked retries; git protocol unaffected).
 Awaiting operator (unchanged): R1/R6/OQ1–OQ4 + DQ29/DQ30. Awaiting Design: DV19–DV23.
+
+[2026-06-10 20:55 UTC] ✦ DQ29 RULING RECEIVED → IMPLEMENTED (#347) — structural Equatable + ==/!= gating; backlog gate now DQ30-only
+  Input: operator delivered the Design chat's DQ29 ruling (timestamped 02:08 UTC): R1 with a conditional structural rule
+    — records/enums Equatable iff all parts are (recursive), compiler-provided default suppressed by explicit impl,
+    classes excluded, ==/!= gated per §18.5 exactly as #296 gated Comparable; asymmetry normative (no structural
+    Comparable/Hashable). Ruling authorized spec reconciliation + ONE scoped engineer session. Board at start:
+    main ae5ff6d, 0 open PRs, CI green.
+  Options: (a) split spec + impl into two sessions — rejected: the doc-sync rule wants behavior + spec in one PR, and the
+    ruling's own framing is "one scoped session"; (b) one session owning checker + codegen-equality + fixtures + §18.5 +
+    changelog + docs, with the vocab regen folded in opportunistically. Chose (b).
+  Decision: dispatched one engineer to a fresh worktree; landed as #347 (29 files, CI 15/15, merged ba338d4).
+    Substance: recursive structural_equatable_witness mirroring #296's probe (co-inductive termination; explicit-impl
+    skip-if-occupied; class exclusion), wired into infer_binop AND check_trait_bounds_at_call (bounded generics now
+    accept structural records — the ruling's "half the point"); E4015 catalog-registered, names the poisoned field path
+    per the diagnostics rubric; 11 exec fixtures ×5 + 4 diagnostic fixtures, all failing-first; codegen divergences
+    found+fixed per backend (js/ts __bockEq deep-eq + impl-routing [closes Q-js-user-equality-reference, FOUND #339];
+    rust conditional derive(PartialEq); go collection == was a COMPILE ERROR, now __bockDeepEq; python/interp impl
+    routing; interp structural bridge for bounded generics); §18.5 normative paragraph + changelog
+    20260610-dq29-structural-equatable; docs pages updated; vocab.json regenerated (also closes
+    Q-vocab-regen-diagnostics — picks up E4015 + stale E6005/E6006/E4001). Breaking-change assessment per the ruling:
+    examples 20/20 clean, stdlib unaffected, zero explicit impls needed.
+  Verification: engineer gate fmt/clippy/test/doc all clean + conformance REQUIRE=all ×2 = 905/0/0 both + mdbook clean +
+    examples 20/20; PR CI 15/15 green (incl. blocking examples lane). Single-PR block (no cross-lane merge interactions)
+    → per-PR verification + CI green suffices; no separate combined-tree rerun.
+  Reasoning: the ruling is Design's decision — my role was reconciliation + dispatch, both within authority. The two
+    spec-adjacent surprises #347 surfaced were FILED, not decided: DQ31 (container element-eq under custom impl — targets
+    disagree; corner deliberately left un-pinned until ruled) and DV24 (interp NaN total-order — R11 divergence with a
+    load-bearing OrdF64/BTreeMap constraint; fix queued as Q-interp-float-ieee-equality, boundary-split shape).
+  Follow-up: hub reconciled (DQ29 DECIDED in design-questions + escalation resolved; Q-equatable-gating-user-types,
+    Q-js-user-equality-reference, Q-vocab-regen-diagnostics DONE; DQ31 escalated; DV24 filed; 4 new queue items incl.
+    HIGH Q-bracket-bounds-unenforced — bracket-form bounds silently unenforced at call sites for ALL traits,
+    pre-existing). The v1 compiler backlog is now Design-gated on DQ30 ONLY — Design's note says DQ30 is next; when that
+    ruling arrives, Q-list-mut-pop-insert-remove unblocks the same way. Dispatchable meanwhile: the fix-wave follow-up
+    HIGHs (Q-go-tailmatch-unreachable-panic, Q-interp-list-concat, Q-bracket-bounds-unenforced) + the chore tail.
+
+═══ DAILY DIGEST ADDENDUM 2 — 2026-06-10 (DQ29 block, third session close) ═══
+Merged since the 18:25 addendum: #347 (DQ29 implementation) + this tracking PR. The day's third block: Design's DQ29
+  ruling (R1 conditional structural Equatable) arrived and was implemented, spec-reconciled, and hub-reconciled SAME DAY.
+  ==/!= now gate behind Equatable with structural auto-conformance; T: Equatable bounds accept structural records;
+  E4015; equality pinned ×5 with per-backend fixes; vocab regenerated. Conformance 905/0/0 ×2 · examples 20/20.
+Probe layer: 4 new items (HIGH: bracket-form bounds unenforced for ALL traits) + DQ31 (escalated) + DV24 (queued fix).
+State at close: main ba338d4 + this tracking PR, 0 open feature PRs, tree clean, views regenerated (--check clean),
+  worktrees/branches/caches pruned. CI green at HEAD per PR-watch; main-push run confirmatory.
+Awaiting operator: R1/R6/OQ1–OQ4. Awaiting Design: DQ30 (next per the ruling), DQ31, DV19–DV24.

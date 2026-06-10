@@ -42,13 +42,42 @@ decided→link)`
 > language decision). **DQ1** (`bock check` default strictness) stays the non-core CLI track (orchestrator + operator). Remaining
 > work is implementation + the v1.x deferrals recorded in the entries below, not open decisions.
 >
-> **★ NEW 2026-06-08 — DQ29** reopens one core-spec decision (Equatable `==`/`!=` operator-gating for user types). **★ NEW
-> 2026-06-09 — DQ30** (List mutator `pop`/`insert`/`remove`/`reverse` return contracts, §18.3-silent). Board is no longer fully
-> clear: **DQ29 + DQ30 both need a Design ruling** (surfaced to owner 2026-06-09, deferred — owner will circle back); DQ10/DQ11
-> remain ratification-pending. With those two pending there is **no autonomous `ready` engineering left in the queue** — the v1
-> backlog is fully Design-gated.
+> **★ 2026-06-10 — DQ29 DECIDED + IMPLEMENTED** (Design ruling 02:08 UTC → #347 same day; entry below). **DQ30** (List
+> mutator return contracts, §18.3-silent) remains the open ruling — Design's note says it is next. **★ NEW 2026-06-10 —
+> DQ31** (container element-equality semantics under an explicit `impl Equatable` — rule-3 corner surfaced by #347's
+> cross-target pinning; entry below, escalated). DQ10/DQ11 remain ratification-pending. The compiler v1 backlog is
+> Design-gated on DQ30 only.
 
-### DQ29 — does structural record/enum equality satisfy `Equatable` for `==`/`!=` operator-gating?
+### DQ31 — container `==` element semantics when elements carry an explicit `impl Equatable`
+
+- **Question:** DQ29's rule 3 makes `List[T]`/`Map[K,V]`/`Set[T]` Equatable iff their parameters are, but does not pin
+  WHICH equality the container comparison uses when `T` has an explicit (custom) `impl Equatable`: the impl's `eq` or
+  the structural default? Targets disagree today: js/ts honor the element `eq`; rust (container `PartialEq`) and go
+  (`reflect.DeepEqual`) compare elements structurally — a custom case-insensitive-key record inside a `List` compares
+  differently per target.
+- **§:** §18.5 (DQ29 paragraph) · **context:** FOUND by #347's cross-target fixture pinning (the explicit-impl-override
+  fixture passes ×5 only at top level; the in-container case is the divergent corner — deliberately not pinned). The
+  consistent reading of DQ29 rule 6 (explicit impl wins) suggests element `eq` should be honored inside containers too,
+  but rust/go would then need per-element loops instead of native equality — a codegen-cost decision Design should weigh.
+- **Status:** escalated → Design (escalations.md, 2026-06-10)
+
+### DQ29 — does structural record/enum equality satisfy `Equatable` for `==`/`!=` operator-gating? — DECIDED (Design, 2026-06-10)
+
+**RULING (Design chat, 2026-06-10 02:08 UTC): R1 with a conditional structural rule.** Records/enums conform to
+`Equatable` structurally iff ALL field/payload types conform (recursive; compound built-ins and generic instantiations
+compose conditionally; non-Equatable leaves poison with a named-field diagnostic). The conformance is a
+compiler-provided default, suppressed by an explicit `impl Equatable` (skip-if-occupied, the #110 blanket precedence).
+With it, `==`/`!=` gate behind Equatable exactly as `<`/`>`/`<=`/`>=` gate behind Comparable (#296). **Classes are
+excluded** (data/identity line — explicit impl only). Float fields compose with the DQ10 IEEE caveat. The asymmetry is
+deliberate and normative: NO structural conformance for Comparable (no canonical structural order) nor Hashable
+(v1.x derive-era, paired with `@derive`). Rationale highlights: fixes `T: Equatable` bounds rejecting types whose `==`
+works (the #106 bridge bug class); closes the latent cross-target divergence on non-Equatable-leaf `==`; lands §18.5
+uniformity pre-1.0 instead of as a v1.x breaking change. **IMPLEMENTED same day: #347** (structural-Equatable witness
+predicate, E4015, codegen pinning + divergence fixes ×5, §18.5 normative paragraph + changelog
+`20260610-dq29-structural-equatable.md`). Closed Q-equatable-gating-user-types, Q-js-user-equality-reference.
+Follow-on: DQ31 (container element-eq corner), DV24 (interp NaN total-order).
+
+### DQ29 (original question, for the record)
 - **Question:** §18.5's rule is "implementing the trait gates the operator." It landed for `Comparable` →
   `<`/`>`/`<=`/`>=` on user types (#296 checker gate + #299 codegen). Should `==`/`!=` likewise be gated behind
   `Equatable` for user types? The blocker: records/enums get **free structural `==`** at the codegen level (e.g.
@@ -62,7 +91,7 @@ decided→link)`
   then gate; **(R2)** defer `==`/`!=` gating to the v1.x `@derive` era; **(R3)** strict gate requiring explicit
   `impl Equatable` — **rejected** (breaks idiomatic record equality, no v1 escape). Impl is ready to wire (same
   `infer_binop` mechanism as #296) the moment Design rules. Unblocks queue item Q-equatable-gating-user-types.
-- **Status:** escalated → Design (escalations.md)
+- **Status:** DECIDED — see the ruling block above (R1 conditional structural rule; implemented #347).
 
 ### DQ30 — return-contract for the in-place `List` mutators `pop`/`insert`/`remove`/`reverse`
 - **Question:** DQ18 ruled `push`/`append` are `mut self` → `Void` in-place mutators (§18.3, changelog

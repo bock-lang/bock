@@ -393,7 +393,27 @@ prioritization for the rest of the open queue (folded into design-questions.md; 
 **Options:** **(R1)** structurally auto-conform records/enums to `Equatable`, then gate `==`/`!=`; **(R2)** defer `==`/`!=` gating to the v1.x `@derive` era (leave `==`/`!=` ungated for now); **(R3)** strict gate requiring explicit `impl Equatable` — **rejected** (breaks idiomatic record equality, no v1 escape hatch).
 **Recommendation:** none on the merits (Design's call). Note R1 and R2 both keep current code working; R1 also enables the gate now. The impl is ready to wire (same `infer_binop` mechanism as #296) once ruled. Non-blocking — `==`/`!=` stays ungated meanwhile (status quo), so nothing regresses.
 **Awaiting:** Design ruling on DQ29 (R1 / R2 / other).
-**Status:** pending — re-surfaced to owner 2026-06-09 14:47 UTC alongside DQ30; owner deferred ("will follow-up with a decision").
+**Status:** **RESOLVED 2026-06-10** — Design ruled **R1 with a conditional structural rule** (ruling delivered 02:08 UTC;
+full text reconciled into design-questions.md DQ29-DECIDED). Implemented same day: **#347** (E4015, structural witness
+predicate, `==`/`!=` gate, ×5 codegen pinning + fixes, §18.5 paragraph + changelog `20260610-dq29-structural-equatable`).
+Q-equatable-gating-user-types CLOSED. Follow-on filings: DQ31 (container element-eq corner, NEW below), DV24 (interp
+NaN total-order). DQ30 remains pending — Design's note says it is next.
+
+## [2026-06-10 20:45 UTC] DQ31 — container `==` element semantics under an explicit `impl Equatable`
+
+**Type:** core-spec
+**Severity:** low (corner case; top-level explicit-impl behavior is pinned ×5 and consistent)
+**Trigger:** #347's cross-target equality pinning found targets disagree on whether a container comparison uses an
+element's custom `impl Equatable` `eq` (js/ts: yes) or structural equality (rust container `PartialEq` / go
+`reflect.DeepEqual`: no). DQ29 rule 3 composes CONFORMANCE conditionally but doesn't pin which equality the container
+USES for elements carrying a custom impl — a case-insensitive-key record inside a `List` compares differently per target.
+**Options:** **(a)** element `eq` honored inside containers — consistent with rule 6 "explicit impl wins"; costs rust/go
+per-element comparison loops instead of native equality; **(b)** containers always compare structurally — cheap, but a
+custom-eq record behaves differently inside vs outside a container; **(c)** reject `==` on containers whose element type
+carries a custom impl — strict, surfaces the ambiguity.
+**Recommendation:** none on the merits (Design's call); (a) is the reading most consistent with the DQ29 ruling text.
+**Awaiting:** Design ruling on DQ31.
+**Status:** pending — filed 2026-06-10. The divergent corner is deliberately NOT fixture-pinned until ruled.
 
 ## [2026-06-09 14:47 UTC] DQ30 — return-contract for the in-place `List` mutators `pop`/`insert`/`remove`/`reverse`
 
