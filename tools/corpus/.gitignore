@@ -1,0 +1,4 @@
+# Generated corpus output. Publication is operator-gated (OQ2) — the
+# generated dataset must NOT be committed; only the pipeline ships.
+out/
+__pycache__/
