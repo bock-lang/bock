@@ -2443,3 +2443,60 @@ State at close: main 9ee050a + this tracking PR, 0 open feature PRs, working tre
   clean). Per-PR CI green ×4 (incl. blocking examples-exec lane); main-HEAD full CI run 27287028774 queued behind #338's
   run at close — compiler surface untouched all day, so the run is confirmatory, not at-risk. Workspace 2854/0 ·
   conformance 824/0/0 ×5 · extension 435 / bock-lsp 98 (all unchanged — zero compiler/docs/extension commits today).
+
+[2026-06-10 18:17 UTC] ✦ HARVEST FIX WAVE — 5 lanes dispatched, 5 landed (#341–#345); all 7 harvest HIGHs closed same-day
+  Input: operator ("let's move on the next fix wave") — the next block queued by the 15:31 entry: the defect-harvest HIGHs.
+    Board at start: main 4e0b9bb, 0 open PRs, CI green at HEAD.
+  Options: (a) one mega-session — rejected (ownership boundaries, review granularity, the single-fixer convention applies to
+    SHARED codegen files, not per-backend files); (b) sequential lanes — rejected (all five are file-disjoint: go.rs ·
+    py.rs · bock-interp+cli-test · bock-errors/types/air resolve · tests/harness — per-backend parallel fan-out is
+    precedented from #216–#220); (c) 5 concurrent engineer lanes, fixture-first, full gate + conformance ×2 each,
+    orchestrator merges + combined-tree re-verify. Chose (c).
+  Decision: dispatched 5; merged 5 after scope verification (file lists diff-exact vs ownership) + CI green per PR:
+    #343 go codegen (Q-go-percent-interpolation %→%% with a ×5 byte-pinning fixture · Q-go-split-combinator-typing via a
+    string-builtin return-type table · Q-go-runtime-helper-shadowing — locals now shadow PascalCase module-fn renames);
+    #344 python codegen (Q-python-ifelse-truncation — generalized #259's flag via emit_stmt_if, + an el+indented-if
+    SyntaxError in the same arm, + the prompted same-pattern audit caught non-diverging guard-else truncation too [→ DV22];
+    Q-python-keyword-record-fields — py_field_ident at all 7 field sites);
+    #342 interp parity (Q-interp-question-propagation — Propagated now carries the value, caught at all 3 call boundaries,
+    parity PROVEN interp≡js≡×5; Q-interp-assert-primitives — interp registers primitive_eq, root cause is bock-core's dead
+    `equals` registration; Q-test-interp-crossfile-use — test path now mirrors run's project resolution, expense-tracker
+    0→6/7); #345 diagnostics quality (E4001 ``expected `T`, found `U``` + direction-aware hints, 23 unify sites audited;
+    NEW E6005 [undeclared effect op, names both fixes] + E6006 [reserved lambda-handler, single emission — the method-call
+    desugar duplicated the receiver node]; NO_COLOR/TTY honored, unit-tested); #341 conformance wiring (2→9 categories,
+    whole-tree walk + auto-wire, multi-directive truncation fixed, unknown-EXPECT now a hard LoadError, tripwire constants;
+    the 2 fixture repairs; corpus HARNESS_WIRED_DIAGNOSTIC_CATEGORIES lockstep → diagnostics 14/0/0).
+  STALL RECOVERY (process): the diagnostics lane completed all code changes then backgrounded its workspace-test run and
+    died (the known background-and-wait failure mode — the dispatch prompt forbade it; it did it at the verification step
+    anyway). Recovery agent dispatched into the same worktree: validated the diff against acceptance criteria (found
+    NOTHING to finish — the original work was complete), ran the full gate + conformance ×2 fresh, opened #345. Future
+    dispatch prompts now say "no backgrounding cargo runs — this is exactly how the previous engineer died".
+  Verification (mine, post-merge, on merged main 16e0486 — the false-green lesson): fmt clean · clippy -D warnings clean ·
+    cargo test --workspace 0 failed · rustdoc -D warnings clean · conformance BOCK_CONFORMANCE_REQUIRE=all ×2 — BOTH
+    "suite passed" 0 failed (wall 331.7s / 341.0s, baseline-consistent; ~850 fixture×target pairs incl. the wave's new
+    fixtures). GitHub CI green at HEAD 16e0486 (all checks; intermediate merge-push runs auto-cancelled per supersession).
+  Reasoning: all 13 items were ready, un-gated, within authority (impl bugs vs settled spec; the two spec-adjacent
+    surprises — §8.4 guard divergence, §10.4 wording — were FILED as DV22/DV23, not decided). New codes E6005/E6006 are
+    catalog/impl surface (§20.1 non-normative); no existing codes renumbered.
+  Follow-up: 11 new queue items filed (Fix-wave follow-ups): HIGHs Q-go-tailmatch-unreachable-panic +
+    Q-interp-list-concat (R11); ready chores incl. Q-context-pack-reconcile (0.1.1 — reconcile lists carried in #342/#345
+    PR bodies), Q-vocab-regen-diagnostics (vocab.json stale for E6005/E6006; NO CI drift check exists), and
+    Q-examples-matrix-undodge (partial — rust dodges stay until Q-rust-clone-insertion-gaps). DV22/DV23 → Design
+    (now DV19–DV23 pending there). Rust clone-insertion extended to 3 repro shapes (#344's by-value destructure).
+    AWAITING OPERATOR (unchanged): R1/R6/OQ1–OQ4 bundle + DQ29/DQ30.
+
+═══ DAILY DIGEST ADDENDUM — 2026-06-10 (fix wave, second session close) ═══
+Merged since the 15:35 digest: 5 fix PRs (#341–#345) + tracking. ALL SEVEN defect-harvest HIGHs closed the same day they
+  were filed: the silent go %-interpolation cross-target divergence (now byte-pinned ×5), the python statement-if/else +
+  guard silent truncation, the interp ?-propagation oracle divergence (parity proven), the E4001/effect-violation/ANSI
+  diagnostics trio (new codes E6005/E6006), and the systemic directive-wiring gap (2→9 categories CI-asserted; 46
+  fixtures' declarations newly enforced). 13 queue items DONE.
+Dispatched: 5 concurrent engineer lanes + 1 recovery agent (one lane stalled at verification by backgrounding cargo —
+  recovered without rewriting anything; 0 red merges; scope diff-exact on all 5).
+Probe layer continues to pay: 11 new items filed (HIGHs: go tail-match runtime panic · interp List+List rejection [R11]);
+  DV22 (§8.4 non-diverging guard accepted) + DV23 (§10.4 mechanism wording) → Design; rust clone-insertion now 3 shapes.
+State at close: main 16e0486 + this tracking PR, 0 open feature PRs, tree clean, views regenerated (--check clean).
+  Combined-tree verify (orchestrator-run): gate 4/4 clean + conformance ×2 0 failed (331.7/341.0s, ~850 pairs). GitHub CI
+  green at HEAD. Worktrees/branches/caches: all 5 lanes pruned. gh-API auth: intermittent 401s persisted through the
+  block (merges/PR-creates done via REST with idempotent state-checked retries; git protocol unaffected).
+Awaiting operator (unchanged): R1/R6/OQ1–OQ4 + DQ29/DQ30. Awaiting Design: DV19–DV23.
