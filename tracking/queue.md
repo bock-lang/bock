@@ -12,7 +12,22 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-10 — main 9ee050a, 0 open PRs, clean. ★ DESIGN-AUDIT FOLLOW-UP WAVE COMPLETE (#336–#339) + DEFECT HARVEST.**
+_**Last reconciled 2026-06-10 — main 16e0486, 0 open PRs, clean. ★★ HARVEST FIX WAVE COMPLETE (#341–#345) — all 7 HIGHs closed, 5 lanes, 0 red merges.**
+The 2026-06-10 defect-harvest HIGHs all landed same-day via a 5-lane file-disjoint fan-out (one stalled engineer
+recovered by the orchestrator — gate re-run + PR by a recovery agent, nothing rewritten): **#343** go codegen (the SILENT
+`%`-interpolation divergence + split-combinator typing + helper shadowing) · **#344** python codegen (statement-if/else +
+guard truncation [the prompted audit found the guard instance], keyword record fields) · **#342** interp parity per R11
+(`?` propagation — parity PROVEN interp ≡ js ≡ ×5 — + primitive eq + cross-file `bock test`; expense-tracker 0→6/7) ·
+**#345** diagnostics quality (E4001 ``expected `T`, found `U``` + direction-aware hints; NEW CODES **E6005/E6006** for
+effect violations; NO_COLOR/TTY honored) · **#341** conformance directive wiring 2→**9 (ALL)** categories + typo-guard +
+the 2 fixture repairs (46 fixtures' declarations newly CI-enforced; corpus lockstep 14/0/0). 13 harvest items DONE
+(detail per item below). **The wave's own probe layer → "Fix-wave follow-ups" below: 11 new items** (HIGHs:
+Q-go-tailmatch-unreachable-panic · Q-interp-list-concat [R11]; + Q-interp-compare-ordering, 2 ts items, render
+byte-col drift, output-directive wiring, dead-equals chore, context-pack 0.1.1 reconcile, vocab regen, examples-matrix
+un-dodge) + **DV22/DV23 → Design** + the rust clone-insertion item extended to 3 repro shapes. Combined-tree re-verified
+by the orchestrator post-merge (full gate + conformance ×2 on merged main). AWAITING OPERATOR (unchanged): the 6-item
+bundle (R1/R6/OQ1–OQ4) + DQ29/DQ30; Design: DV19–DV23. ↓ —
+PRIOR: **Last reconciled 2026-06-10 — main 9ee050a, 0 open PRs, clean. ★ DESIGN-AUDIT FOLLOW-UP WAVE COMPLETE (#336–#339) + DEFECT HARVEST.**
 All four ready R3/R8 items dispatched as one 4-lane file-disjoint fan-out and landed same-block: **#336**
 Q-diagnostics-agent-audit (standing criterion at `.claude/conventions/diagnostics-review.md`; 70 codes/85 sites mapped;
 exit codes verified correct everywhere) · **#337** Q-synthetic-corpus (`tools/corpus/generate.py` — 261 verified records,
@@ -414,30 +429,41 @@ verified primer examples + 43 diagnostic runs). Everything below is off-conforma
 
 **Codegen correctness (silent-wrong-output items first):**
 
-- **[Q-go-percent-interpolation] go: literal `%` in interpolated strings unescaped in `fmt.Sprintf` lowering** — bug · ready ·
-  **HIGH** · `compiler/crates/bock-codegen/` (go) + a conformance fixture · — · links #338 · note: builds clean, corrupts
-  output (`95%!p(MISSING)ass` vs `95% pass` on the other 4) — a SILENT cross-target divergence, exactly what §20.4 exists to
-  prevent; needs a fixture so the mechanism catches the class. Repro: `println("${n}% pass")`. FOUND 2026-06-10 (#338).
+- **[Q-go-percent-interpolation] go: literal `%` in interpolated strings unescaped in `fmt.Sprintf` lowering** — bug ·
+  **DONE (#343)** · **HIGH** · `compiler/crates/bock-codegen/src/go.rs` · — · links #338, #343 · note: **DONE 2026-06-10
+  (#343)** — literal format segments double `%`→`%%` (Interpolation arm); fixture `exec/go_interp_percent_literal.bock`
+  pins exact bytes ×5 (leading/trailing/doubled `%`, `%v %s %d` lookalikes) so the mechanism now catches the class.
+  ORIG: FOUND 2026-06-10 (#338) — silent cross-target divergence (`95%!p(MISSING)ass`).
 - **[Q-python-ifelse-truncation] python: function truncated after statement-position `if/else` whose arms end in `println`** —
-  bug · ready · **HIGH** · `compiler/crates/bock-codegen/` (python) · — · links #339, #259 (the prior py-truncation lesson) ·
-  note: `return print(...)` lowering ends the function early — silent wrong code, same family as the #259 statement-`match`
-  bug. FOUND 2026-06-10 (#339).
-- **[Q-python-keyword-record-fields] python: record fields colliding with Python keywords emitted verbatim** — bug · ready ·
-  `compiler/crates/bock-codegen/` (python) · — · links #338 · note: `record Tally { pass: Int }` → `SyntaxError`; keyword
-  escape missing in field position (check go/js/ts/rust reserved-word handling for the same class). FOUND 2026-06-10 (#338).
-- **[Q-rust-clone-insertion-gaps] rust: by-value clone insertion misses two reuse shapes (E0382)** — bug · ready ·
-  `compiler/crates/bock-codegen/` (rust) · — · links #338 · note: (a) local passed by value twice inside a record-literal
-  trailing expression (same double-use compiles when let-bound in `main` — position-sensitive); (b) nested `for` over a local
-  List with the outer loop var passed by value in the inner loop (liveness-based insertion misses loop-carried reuse).
-  FOUND 2026-06-10 (#338).
+  bug · **DONE (#344)** · **HIGH** · `compiler/crates/bock-codegen/src/py.rs` · — · links #339, #259, #344, DV22 · note:
+  **DONE 2026-06-10 (#344)** — generalized #259's statement-match flag to `in_stmt_construct_arm` via new `emit_stmt_if`
+  (also fixed a second defect in the same arm: mid-block `else if` emitted `el` + indented `if` → SyntaxError). The
+  prompted same-pattern audit FOUND + FIXED one more instance: non-diverging `guard` else also truncated via
+  `return print(...)` (`emit_stmt_guard`) — and exposed that the checker ACCEPTS non-diverging guard else at all → DV22.
+  Fixture `exec/stmt_ifelse_no_early_return.bock` + unit tests. ORIG: FOUND 2026-06-10 (#339).
+- **[Q-python-keyword-record-fields] python: record fields colliding with Python keywords emitted verbatim** — bug ·
+  **DONE (#344)** · `compiler/crates/bock-codegen/src/py.rs` · — · links #338, #162, #344 · note: **DONE 2026-06-10
+  (#344)** — new `py_field_ident` (extends #162's keyword-escape mechanism) applied at all 7 field sites: dataclass decl,
+  `__init__`, enum struct-variant payload, field access, constructor kwargs + spread + shorthand, record-pattern
+  destructuring. Fixture `exec/record_field_target_keywords.bock`. ORIG: FOUND 2026-06-10 (#338).
+- **[Q-rust-clone-insertion-gaps] rust: by-value clone insertion misses three reuse shapes (E0382)** — bug · ready ·
+  `compiler/crates/bock-codegen/` (rust) · — · links #338, #344 · note: (a) local passed by value twice inside a
+  record-literal trailing expression (same double-use compiles when let-bound in `main` — position-sensitive); (b) nested
+  `for` over a local List with the outer loop var passed by value in the inner loop (liveness-based insertion misses
+  loop-carried reuse); (c) by-value record-pattern destructure of a `String` field moves it — later use of the record is
+  E0382 (FOUND #344). FOUND 2026-06-10 (#338, c: #344).
 - **[Q-go-split-combinator-typing] go: `.map`/`.filter` lambda element types erase to `interface{}` over `split()` results** —
-  bug · ready · `compiler/crates/bock-codegen/src/go.rs` · — · links #338, Q-go-chained-combinator-typing (#256 fixed the
-  combinator-call-receiver case) · note: builtin-method receiver (`"a,b".split(",")` → List[String]) doesn't propagate element
-  type into the chained lambda — does not compile. Sibling of the #256 fix, different receiver shape. FOUND 2026-06-10 (#338).
-- **[Q-go-runtime-helper-shadowing] go: user identifier `lines` in for-in position resolves to runtime helper `Lines`** — bug ·
-  ready · `compiler/crates/bock-codegen/` (go) · — · links #338 · note: with `core.string` imported, `for line in lines`
-  (param `lines: List[String]`) emits the helper, not the local — does not compile; name-resolution/shadowing in the go
-  emitter. FOUND 2026-06-10 (#338).
+  bug · **DONE (#343)** · `compiler/crates/bock-codegen/src/go.rs` · — · links #338, #343, Q-go-chained-combinator-typing
+  (#256) · note: **DONE 2026-06-10 (#343)** — new `string_builtin_return_go_type` table mirrors `try_emit_string_method`'s
+  lowerings (gated on the checker's `Primitive:String` annotation), threaded through element-type inference incl.
+  `map`/`flat_map` chain links and for-loop element typing. Fixture `exec/go_split_combinator_typing.bock` + unit test
+  pinning table↔lowering consistency. ORIG: FOUND 2026-06-10 (#338) — sibling of #256, builtin-method receiver shape.
+- **[Q-go-runtime-helper-shadowing] go: user identifier `lines` in for-in position resolves to runtime helper `Lines`** —
+  bug · **DONE (#343)** · `compiler/crates/bock-codegen/src/go.rs` · — · links #338, #343 · note: **DONE 2026-06-10
+  (#343)** — new `local_shadows_public_fn` check (var types + open scope frames, populated as emission reaches each
+  binding): locals/params now win over the public-fn PascalCase rename, matching checker resolution; use-before-`let`
+  still resolves to the module fn. Fixture `exec/go_runtime_helper_shadowing.bock` (param/let/loop-var shadows).
+  ORIG: FOUND 2026-06-10 (#338).
 - **[Q-js-user-equality-reference] js: user-type `==` with an Equatable impl lowers to reference equality** — bug · ready ·
   `compiler/crates/bock-codegen/` (js/ts) · — · links #339, Q-equatable-gating-user-types, DQ29 · note: distinct from the
   DQ29 *gating* question — this is the lowering: interp compares correctly, js compares references. FOUND 2026-06-10 (#339).
@@ -456,31 +482,46 @@ verified primer examples + 43 diagnostic runs). Everything below is off-conforma
 
 **Interpreter parity (rank with correctness per routing.md R11 — the Tier-1 oracle is diverging):**
 
-- **[Q-interp-question-propagation] interp: `?` aborts instead of propagating `Err` at the call boundary** — bug · ready ·
-  **HIGH (R11)** · `compiler/crates/bock-interp/` · — · links #339, routing R11 · note: js early-returns correctly; the
-  reference interpreter aborts — the oracle diverges from targets on a core §9 operator. FOUND 2026-06-10 (#339).
-- **[Q-interp-assert-primitives] interp: `assert_eq`/`assert_ne` fail at runtime on primitives** — bug · ready ·
-  `compiler/crates/bock-interp/` · — · links #339 · note: `method 'eq' not found on Int`; `expect().to_equal()` works —
-  inconsistent test-surface support in the interpreter path. FOUND 2026-06-10 (#339).
-- **[Q-test-interp-crossfile-use] `bock test` interpreter path can't resolve cross-file `use main.{…}`** — bug · ready ·
-  `compiler/crates/bock-interp/` / test runner · — · links #339 · note: affects the in-repo `examples/*/test/` layout —
-  test files importing the module under test fail at resolution in interp mode. FOUND 2026-06-10 (#339).
+- **[Q-interp-question-propagation] interp: `?` aborts instead of propagating `Err` at the call boundary** — bug ·
+  **DONE (#342)** · **HIGH (R11)** · `compiler/crates/bock-interp/` · — · links #339, #342, routing R11 · note:
+  **DONE 2026-06-10 (#342)** — `eval_propagate` now carries the propagating value (`Err`/`None`) and all three
+  function-call boundaries catch `Propagated` like `Return`; parity PROVEN (same program byte-identical interp ≡ js ≡ ×5).
+  Fixtures `exec/exec_question_propagation.bock` (×5) + `interp/question_propagation.bock` + 4 unit/integration tests.
+  Governing spec is §7.10 Error Propagation (this item's original "§9" was stale numbering); text is clear — plain impl
+  bug, no divergence. ORIG: FOUND 2026-06-10 (#339).
+- **[Q-interp-assert-primitives] interp: `assert_eq`/`assert_ne` fail at runtime on primitives** — bug · **DONE (#342)** ·
+  `compiler/crates/bock-interp/` · — · links #339, #342, Q-core-dead-equals-registration · note: **DONE 2026-06-10
+  (#342)** — root cause: bock-core registers the Equatable primitive bridge as `equals`, which nothing dispatches; the
+  surface uses `eq`. Interp now registers `primitive_eq` for Int/Float/Bool/String/Char (bock-core untouched — its dead
+  `equals` registration filed as follow-up). Fixture `interp/primitive_eq_bridge.bock` + 5 tests incl. negative path.
+  ORIG: FOUND 2026-06-10 (#339).
+- **[Q-test-interp-crossfile-use] `bock test` interpreter path can't resolve cross-file `use main.{…}`** — bug ·
+  **DONE (#342)** · `compiler/crates/bock-cli/src/test.rs` · — · links #339, #342, Q-interp-list-concat · note:
+  **DONE 2026-06-10 (#342)** — `compile_test_file` parsed only core + the single test file; now mirrors `bock run`'s
+  project resolution (bock.project root marker + sibling discovery → dep-sort → ModuleRegistry); single-file behavior
+  outside projects unchanged. `examples/real-world/expense-tracker` went 0 → 6/7 passing (the 7th is the new
+  Q-interp-list-concat). 3 integration tests. ORIG: FOUND 2026-06-10 (#339).
 
 **Diagnostics quality (apply `.claude/conventions/diagnostics-review.md` to each fix):**
 
 - **[Q-diag-e4001-message-quality] E4001 message leaks Rust `Debug` type names, doubles the prefix, never says
-  expected-vs-found; conversion hint can be directionally wrong** — bug · ready · **HIGH** · `compiler/crates/bock-types/` +
-  `bock-errors` · — · links #336 · note: `type mismatch in expression: type mismatch: Primitive(String) vs Primitive(Int)`
-  (lib.rs:210 via checker.rs:1045); checker.rs:5920 suggests `.to_string()` when Int is expected. The highest-traffic
-  diagnostic in agent repair loops. FOUND 2026-06-10 (#336).
-- **[Q-diag-effect-violation-errors] effect-op violations mis-categorized and double-emitted** — bug · ready · **HIGH** ·
-  `compiler/crates/bock-air/src/resolve.rs` + `bock-types/src/checker.rs` · — · links #336 · note: undeclared effect op →
-  E1001 ``undefined name `log`; did you mean `Log`?`` (wrong category, misleading casing suggestion, slot-collides with the
-  lexer's E1001); v1.x-reserved lambda-handler → E4002 ``undefined variable`` emitted TWICE at the same span, never naming
-  the reserved rule (checker.rs:2265 — some path type-checks the expression twice). FOUND 2026-06-10 (#336).
-- **[Q-diag-ansi-no-color] unconditional ANSI escapes — `NO_COLOR` ignored, no TTY detection** — bug · ready · **HIGH** ·
-  `compiler/crates/bock-errors/src/lib.rs:293` · — · links #336 · note: escapes land in piped output — directly hostile to
-  agent consumption (and to CI logs). FOUND 2026-06-10 (#336).
+  expected-vs-found; conversion hint can be directionally wrong** — bug · **DONE (#345)** · **HIGH** ·
+  `compiler/crates/bock-types/` + `bock-errors` · — · links #336, #345, Q-context-pack-reconcile · note: **DONE 2026-06-10
+  (#345)** — message is now ``expected `T`, found `U``` via user-facing Display rendering (no Debug, no doubled prefix);
+  hint is direction-aware (`Int.try_from(...)` when Int expected, `.to_string()` only when String expected, none when no
+  conversion exists). All 23 `unify_or_error` sites audited for orientation. Verified live both directions; effects/ +
+  types-diagnostics/ fixtures re-pinned. ORIG: FOUND 2026-06-10 (#336).
+- **[Q-diag-effect-violation-errors] effect-op violations mis-categorized and double-emitted** — bug · **DONE (#345)** ·
+  **HIGH** · `compiler/crates/bock-air/src/resolve.rs` + `bock-types/src/checker.rs` · — · links #336, #345, DV23,
+  Q-context-pack-reconcile, Q-vocab-regen-diagnostics · note: **DONE 2026-06-10 (#345)** — undeclared effect op now
+  **E6005** (catalog-registered; names the effect, the op, and both fixes: declare on the function or handle); reserved
+  lambda-handler now **E6006**, emitted exactly once (the method-call desugar duplicated the receiver node; deduped via
+  `(name, span)` set) and names the v1.x-reserved rule. No existing codes renumbered. Surfaced DV23 (§10.4 prose says
+  "fails at name resolution"; mechanism is the checker). ORIG: FOUND 2026-06-10 (#336).
+- **[Q-diag-ansi-no-color] unconditional ANSI escapes — `NO_COLOR` ignored, no TTY detection** — bug · **DONE (#345)** ·
+  **HIGH** · `compiler/crates/bock-errors/src/lib.rs` · — · links #336, #345 · note: **DONE 2026-06-10 (#345)** — pure
+  `should_colorize` honors NO_COLOR (any value, incl. empty) + TTY detection; measured matrix: TTY ANSI / NO_COLOR 0 /
+  piped 0; unit-tested. ORIG: FOUND 2026-06-10 (#336).
 - **[Q-diag-brief-span-format] `--brief` emits byte offsets (`(at file:129..134)`), not `line:col`** — bug · ready ·
   `compiler/crates/bock-cli/src/check.rs:634` · — · links #336, §20.1.1 · note: inconsistent with rich mode and with the
   conformance directive format; CLI-shape (§20.1 non-normative) so fixable without Design. FOUND 2026-06-10 (#336).
@@ -503,15 +544,72 @@ verified primer examples + 43 diagnostic runs). Everything below is off-conforma
 **Test-infra (the systemic finding):**
 
 - **[Q-conformance-directive-wiring] only `effects/` + `types-diagnostics/` ErrorAt directives are asserted via `bock
-  check`; every other category's diagnostic directives are inert** — chore · ready · **HIGH (meta)** ·
-  `compiler/tests/execution.rs` / harness · — · links #336, #337 · note: proven by Q-conformance-fixture-repairs (a stale
-  fixture nobody noticed). Wire the remaining categories (or per-category opt-in) and keep
-  `tools/corpus/generate.py::HARNESS_WIRED_DIAGNOSTIC_CATEGORIES` in lockstep. FOUND 2026-06-10 (#336 + #337 independently).
-- **[Q-conformance-fixture-repairs] two defective fixtures** — chore · ready · LOW ·
-  `compiler/tests/conformance/types/` · — · links #336, #337, Q-conformance-directive-wiring · note:
-  `type_mismatch.bock` declares `// EXPECT: error E0205 at 3:10`, compiler reports E4001 at 3:22 (stale, never asserted);
-  `fn_type_param.bock` has `// EXPECT: no errors` (typo for `no_errors`, silently ignored → expectation-free fixture).
-  FOUND 2026-06-10 (#336/#337).
+  check`; every other category's diagnostic directives are inert** — chore · **DONE (#341)** · **HIGH (meta)** ·
+  `compiler/tests/execution.rs` / harness · — · links #336, #337, #341 · note: **DONE 2026-06-10 (#341)** — wired
+  2 → **9 (ALL) categories** via a whole-tree walk (future categories auto-wire; no exclusions); multi-directive
+  truncation fixed (only first-per-fixture was asserted); typo-guard: unknown/malformed `// EXPECT:` is now a hard
+  LoadError (the `no errors` class is impossible to silently ignore); tripwire constants fail loudly on discovery
+  shrink. 46 fixtures' declarations newly enforced (6 error directives + 40 `no_errors`); wiring exposed NO further
+  stale fixtures and no compiler regressions. Corpus `HARNESS_WIRED_DIAGNOSTIC_CATEGORIES` lockstep → diagnostics
+  14 verified / 0 unverified / 0 warnings. Remaining gap → Q-exec-output-directive-wiring.
+  ORIG: FOUND 2026-06-10 (#336 + #337 independently).
+- **[Q-conformance-fixture-repairs] two defective fixtures** — chore · **DONE (#341)** · LOW ·
+  `compiler/tests/conformance/types/` · — · links #336, #337, #341 · note: **DONE 2026-06-10 (#341)** —
+  `type_mismatch.bock` re-pinned to current-truth E4001 at 3:22 with `// NOTE:` provenance (E0205 is emitted nowhere —
+  harness-doc placeholder, not a regression); `fn_type_param.bock` typo fixed to `no_errors` (checks clean).
+  ORIG: FOUND 2026-06-10 (#336/#337).
+
+### Fix-wave follow-ups (filed 2026-06-10, FOUND via #341–#345)
+
+The five-lane correctness wave (#341–#345) closed the harvest HIGHs and — being itself a deep probe (5 new fixtures ×5
+targets, an examples test-suite un-broken, every diagnostic re-rendered) — surfaced the next layer:
+
+- **[Q-go-tailmatch-unreachable-panic] go: tail-position `match` over a plain record runs the arm then panics
+  `unreachable`** — bug · ready · **HIGH** · `compiler/crates/bock-codegen/` (go) · — · links #344 · note: runtime panic
+  AFTER correct arm execution — wrong-output class; reproduces with ordinary field names (min repro in
+  `exec/record_field_target_keywords.bock` header notes). FOUND 2026-06-10 (#344).
+- **[Q-interp-list-concat] `List + List` checks clean and runs ×5 targets but is an interp runtime error** — bug · ready ·
+  **HIGH (R11)** · `compiler/crates/bock-interp/` (`eval_binary_op`) · — · links #342, routing R11 · note: the one
+  remaining expense-tracker test failure after #342; the oracle rejects a program every target accepts.
+  FOUND 2026-06-10 (#342).
+- **[Q-interp-compare-ordering] interp: primitive `compare` returns Int (-1/0/1) instead of `Ordering`** — bug · ready ·
+  **(R11)** · `compiler/crates/bock-core/` primitives · — · links #342, routing R11 · note: `match (1).compare(2)
+  { Less => … }` fails interp-only; targets return the Ordering enum. Fix belongs in bock-core's primitive bridge.
+  FOUND 2026-06-10 (#342).
+- **[Q-ts-variant-constructed-let-typing] ts: `let g: Gate = Open{...}` typed by construction variant, not the declared
+  union** — bug · ready · `compiler/crates/bock-codegen/` (ts) · — · links #344 · note: a later `match` on the other
+  variant is TS2678; the declared annotation must win. FOUND 2026-06-10 (#344).
+- **[Q-ts-print-scaffold-types] ts: bare `print` fails `tsc --noEmit` (TS2591 — no `@types/node` in the scaffolded
+  tsconfig)** — bug/chore · ready · `compiler/crates/bock-build/` scaffolding (or the print lowering) · — · links #344 ·
+  note: makes any `print` fixture un-runnable on ts (why no all-target fixture uses `print`); decide: scaffold
+  `@types/node`, lower `print` to something self-contained, or document the boundary. FOUND 2026-06-10 (#344).
+- **[Q-errors-render-byte-col-drift] diagnostic render treats byte offsets as char columns — multibyte chars shift
+  rendered spans** — bug · ready · `compiler/crates/bock-errors/` (`render`) · — · links #345 · note: the old
+  effects-fixture columns encoded the drift (fixtures now ASCII); fix = byte→char conversion at the render boundary.
+  FOUND 2026-06-10 (#345).
+- **[Q-exec-output-directive-wiring] `// EXPECT: output` outside `exec/` is not executed by the conformance execution
+  lane** — chore · ready · LOW · `compiler/tests/` harness · — · links #341 · note: 5 fixtures (3 stdlib `*_output_smoke`
+  with bock-cli mirrors, `interp/hello_world.bock`, `time/basic.bock`) declare output nothing runs; sibling of the closed
+  directive-wiring item. Minor: the corpus generator's Python parser still tolerates unknown EXPECT values (harmless —
+  the Rust harness now hard-errors first). FOUND 2026-06-10 (#341).
+- **[Q-core-dead-equals-registration] bock-core registers primitive Equatable bridge as `equals`, which nothing
+  dispatches** — chore · ready · LOW · `compiler/crates/bock-core/src/primitives/` · — · links #342,
+  Q-interp-assert-primitives · note: dead registration (the surface dispatches `eq`); rename/remove on the next
+  bock-core touch — natural pairing with Q-interp-compare-ordering. FOUND 2026-06-10 (#342).
+- **[Q-context-pack-reconcile] context pack 0.1.1 — reconcile against #342/#345** — chore · ready ·
+  `context-pack/BOCK-CONTEXT-PACK.md` + version bump · — · links #339, #342, #345 · note: apply the reconcile lists
+  carried in the #342 + #345 PR bodies: Known-Divergences entries #1 (`?` aborts), #6 (assert_eq/ne primitives),
+  #8 (bock test cross-file) now FIXED; E1001 row's effect-op guidance moves to new E6005 + E6006 rows (~578); the
+  "unintuitive E1001" prose (~465, ~1004) now false; E4001 row (~605) gains the ``expected `T`, found `U``` format.
+  Bump pack version 0.1.0 → 0.1.1, re-run `tools/scripts/verify-context-pack.sh` (must stay 15/15).
+- **[Q-vocab-regen-diagnostics] regenerate vocab.json for E6005/E6006 + new E4001 description** — chore · ready · LOW ·
+  `extensions/vscode/assets/vocab.json` via `/project:update-vocab` · — · links #345 · note: vocab is stale post-#345
+  (missing E6005/E6006; old E4001 text); NO CI check guards vocab↔catalog drift — consider adding one while there.
+- **[Q-examples-matrix-undodge] revert examples-matrix workaround idioms for NOW-FIXED bugs** — chore · ready · LOW ·
+  `tools/examples-matrix/` · — · links #338, #343, #344, Q-rust-clone-insertion-gaps · note: the dogfood tool dodged the
+  bugs it found; with #343/#344 landed, revert the go/py dodges (`percent_str` % workaround, `raw_lines` rename, explicit
+  split loop, `pass_count`/`build_count` renames) so the tool becomes living regression proof. KEEP the rust
+  single-pass/let-bound dodges until Q-rust-clone-insertion-gaps lands.
 
 ### Editor v1.1 feature-wave follow-ups (filed 2026-06-09)
 

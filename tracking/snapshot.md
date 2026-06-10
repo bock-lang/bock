@@ -11,7 +11,7 @@ changes.
 
 ---
 
-## Build status (as of main 9ee050a, 2026-06-10 — measured at 0567568; #335–#339 touched zero compiler/docs surface, so the figures carry)
+## Build status (as of main 16e0486, 2026-06-10 — combined-tree re-verified post fix-wave #341–#345: fmt/clippy/test/doc all clean, conformance 0 failed ×2 [~850 pairs incl. the wave's new fixtures; wall 332/341s, baseline-consistent]; row detail below measured at 0567568 + the wave's ~36 new tests)
 
 | What | State |
 |------|-------|
@@ -150,7 +150,7 @@ Standing ledger distinguishing designed bets from proven capabilities
 
 | Pillar | Status |
 |--------|--------|
-| Cross-target conformance equivalence (§20.4) | **validated** — 824 fixture×target pairs / 0 failed ×5; divergences (Int division, Bool spelling) caught + eliminated by the mechanism. **⚠ Bounded by fixture coverage (2026-06-10):** the first off-fixture dogfood probe (#338/#339) found a SILENT cross-target output divergence (go `%`-interpolation, Q-go-percent-interpolation) and an interp-vs-targets `?`-propagation divergence (Q-interp-question-propagation) — the claim holds *on the covered surface*; the harvest queue items + Q-conformance-directive-wiring widen the surface |
+| Cross-target conformance equivalence (§20.4) | **validated** — ~850 fixture×target pairs / 0 failed ×5 (824 + the #341–#345 fix-wave fixtures); divergences caught + eliminated by the mechanism (Int division, Bool spelling; and on 2026-06-10 the mechanism's blind spots were probed and CLOSED same-day: the silent go `%`-interpolation divergence and the interp `?`-propagation divergence found off-fixture by #338/#339 are now fixture-pinned and fixed [#342/#343], and ALL conformance categories' diagnostic directives are CI-asserted [#341]). **⚠ Standing caveat:** the claim holds on the covered surface — each probe layer keeps finding off-fixture defects (latest: go tail-`match` runtime panic, ts variant-typed `let`; queue Fix-wave follow-ups) — so dogfood-driven widening (R8/R-A) remains a load-bearing practice, not a one-time event |
 | Deterministic codegen substrate (Tier 2, §17.2) | **validated** — the entire v1 compiler/stdlib/examples surface runs on it; no API key in CI |
 | Decision manifests / pins / deterministic fallback (§17.4, §19) | **validated at build time** — manifest plumbing live; runtime promote-from-runtime path unexercised |
 | Effects + capabilities as checked semantics (§10, §14) | **validated** — checked + executing ×5 (incl. the §10 invocation forms, #155) |

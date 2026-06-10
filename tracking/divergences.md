@@ -17,6 +17,33 @@ status(open | resolved→link)`
 
 ## Open
 
+### DV23 — §10.4 prose says lambda handlers "fail at name resolution"; they fail in the type checker
+- **§:** §10.4 · **spec-says:** the v1.x-reserved lambda-handler form
+  "fails at name resolution" · **impl-does:** the failure mechanism is
+  the type checker (was E4002, now the dedicated E6006 per #345); the
+  normative outcome (the form does not compile) is preserved and
+  conformance-pinned (`effects/lambda_handler_reserved.bock`).
+- **Classification:** spec-stale (mechanism wording only; behavior
+  conforms)
+- **Disposition:** reconcile-spec — Design-routed wording update
+  ("rejected during checking" or mechanism-neutral phrasing). Low
+  priority; no behavior change.
+- **Status:** open (FOUND by #345, 2026-06-10)
+
+### DV22 — §8.4 checker accepts a non-diverging `guard` else
+- **§:** §8.4 · **spec-says:** a `guard` else-block must diverge
+  (return/propagate/abort) · **impl-does:** the checker accepts a
+  non-diverging else; all five targets + the interpreter fall through
+  and continue (python USED to silently truncate instead — fixed as
+  part of #344, so runtime behavior is now at least uniform).
+- **Classification:** impl-bug (checker under-rejects)
+- **Disposition:** route to Design to confirm the §8.4 reading, then
+  fix-impl → queue (checker-side divergence check; existing
+  fall-through programs become compile errors — note the breakage
+  surface when filing).
+- **Status:** open (FOUND by the #344 statement-position audit,
+  2026-06-10)
+
 ### DV21 — §6.7 fieldless enum-variant expression accepted statically, rejected at interp runtime
 - **§:** §6.7 · **spec-says:** enum-variant construction/usage rules are
   checked statically · **impl-does:** a fieldless `Status.Active`
