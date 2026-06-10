@@ -12,7 +12,20 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-10 — main 16e0486, 0 open PRs, clean. ★★ HARVEST FIX WAVE COMPLETE (#341–#345) — all 7 HIGHs closed, 5 lanes, 0 red merges.**
+_**Last reconciled 2026-06-10 — main ba338d4, 0 open PRs, clean. ★ DQ29 RULED + IMPLEMENTED SAME DAY (#347): structural Equatable conformance + `==`/`!=` gating.**
+Design delivered the DQ29 ruling (02:08 UTC; R1 with a conditional structural rule — full text in design-questions
+DQ29-DECIDED) and the one scoped session it authorizes landed it: recursive `structural_equatable_witness` (records/enums
+iff all parts Equatable; compound built-ins + generic instantiations compose; explicit impl wins; classes excluded;
+NO structural Comparable/Hashable — deliberate asymmetry), wired into BOTH the `==`/`!=` gate and `T: Equatable` bound
+satisfaction; new **E4015** names the poisoned field path; equality pinned ×5 (15 fixtures) with per-backend divergence
+fixes (js/ts `__bockEq` + impl routing — closed Q-js-user-equality-reference; rust conditional derive; go collection `==`
+un-broken; interp bridges); §18.5 normative paragraph + changelog `20260610-dq29-structural-equatable`; vocab regen
+folded (closed Q-vocab-regen-diagnostics). Conformance 905/0/0 ×2 · examples 20/20 · CI 15/15. **The v1 compiler backlog
+is now Design-gated on DQ30 only** (Design says it's next). #347's probe layer → "DQ29-implementation follow-ups" below:
+4 items (HIGH: Q-bracket-bounds-unenforced — `[T: Trait]` call-site bounds silently unenforced for ALL traits) +
+**DQ31 filed/escalated** (container element-eq corner) + **DV24** (interp NaN total-order → Q-interp-float-ieee-equality).
+AWAITING OPERATOR: R1/R6/OQ1–OQ4 bundle. Design: DQ30 (next), DQ31, DV19–DV24. ↓ —
+PRIOR: **Last reconciled 2026-06-10 — main 16e0486, 0 open PRs, clean. ★★ HARVEST FIX WAVE COMPLETE (#341–#345) — all 7 HIGHs closed, 5 lanes, 0 red merges.**
 The 2026-06-10 defect-harvest HIGHs all landed same-day via a 5-lane file-disjoint fan-out (one stalled engineer
 recovered by the orchestrator — gate re-run + PR by a recovery agent, nothing rewritten): **#343** go codegen (the SILENT
 `%`-interpolation divergence + split-combinator typing + helper shadowing) · **#344** python codegen (statement-if/else +
@@ -464,9 +477,11 @@ verified primer examples + 43 diagnostic runs). Everything below is off-conforma
   binding): locals/params now win over the public-fn PascalCase rename, matching checker resolution; use-before-`let`
   still resolves to the module fn. Fixture `exec/go_runtime_helper_shadowing.bock` (param/let/loop-var shadows).
   ORIG: FOUND 2026-06-10 (#338).
-- **[Q-js-user-equality-reference] js: user-type `==` with an Equatable impl lowers to reference equality** — bug · ready ·
-  `compiler/crates/bock-codegen/` (js/ts) · — · links #339, Q-equatable-gating-user-types, DQ29 · note: distinct from the
-  DQ29 *gating* question — this is the lowering: interp compares correctly, js compares references. FOUND 2026-06-10 (#339).
+- **[Q-js-user-equality-reference] js: user-type `==` with an Equatable impl lowers to reference equality** — bug ·
+  **DONE (#347)** · `compiler/crates/bock-codegen/` (js/ts) · — · links #339, #347, DQ29 · note: **DONE 2026-06-10
+  (#347, subsumed by the DQ29 implementation)** — explicit-impl `==` now routes through the impl's `eq` on js/ts,
+  pinned ×5 by the explicit-impl-override fixture; the same pass added the `__bockEq` deep-equality runtime for the
+  structural/generic lanes. ORIG: FOUND 2026-06-10 (#339).
 - **[Q-bounded-comparable-codegen] `T: Comparable` generic comparisons broken (js wrong result; python emits undefined
   trait-base classes)** — bug · ready · `compiler/crates/bock-codegen/` (js, python) · — · links #339, #299
   (Q-user-comparison-codegen — which explicitly left `T: Comparable` untouched) · note: js wrong on both the operator and
@@ -602,14 +617,38 @@ targets, an examples test-suite un-broken, every diagnostic re-rendered) — sur
   #8 (bock test cross-file) now FIXED; E1001 row's effect-op guidance moves to new E6005 + E6006 rows (~578); the
   "unintuitive E1001" prose (~465, ~1004) now false; E4001 row (~605) gains the ``expected `T`, found `U``` format.
   Bump pack version 0.1.0 → 0.1.1, re-run `tools/scripts/verify-context-pack.sh` (must stay 15/15).
-- **[Q-vocab-regen-diagnostics] regenerate vocab.json for E6005/E6006 + new E4001 description** — chore · ready · LOW ·
-  `extensions/vscode/assets/vocab.json` via `/project:update-vocab` · — · links #345 · note: vocab is stale post-#345
-  (missing E6005/E6006; old E4001 text); NO CI check guards vocab↔catalog drift — consider adding one while there.
+- **[Q-vocab-regen-diagnostics] regenerate vocab.json for E6005/E6006 + new E4001 description** — chore · **DONE (#347)** ·
+  LOW · `extensions/vscode/assets/vocab.json` · — · links #345, #347 · note: **DONE 2026-06-10 (#347, folded into the
+  DQ29 session's vocab regen)** — picks up E4015 + the stale E4012–E4014, E6005/E6006, and the new E4001 description.
+  Residual: NO CI check guards vocab↔catalog drift, and `sync-vocab.sh`'s `spec/sections` copy step is broken vs the
+  current repo layout → Q-sync-vocab-script-stale. ORIG: FOUND 2026-06-10 (#345).
 - **[Q-examples-matrix-undodge] revert examples-matrix workaround idioms for NOW-FIXED bugs** — chore · ready · LOW ·
   `tools/examples-matrix/` · — · links #338, #343, #344, Q-rust-clone-insertion-gaps · note: the dogfood tool dodged the
   bugs it found; with #343/#344 landed, revert the go/py dodges (`percent_str` % workaround, `raw_lines` rename, explicit
   split loop, `pass_count`/`build_count` renames) so the tool becomes living regression proof. KEEP the rust
   single-pass/let-bound dodges until Q-rust-clone-insertion-gaps lands.
+
+### DQ29-implementation follow-ups (filed 2026-06-10, FOUND via #347)
+
+- **[Q-bracket-bounds-unenforced] bracket-form generic bounds `[T: Trait]` are not enforced at call sites (ALL
+  traits)** — bug · ready · **HIGH** · `compiler/crates/bock-types/` (`check_trait_bounds_at_call`) · — · links #347 ·
+  note: pre-existing, surfaced by #347's bounds work — `where (T: Trait)` clauses enforce; the bracket syntax silently
+  doesn't, so a `fn f[T: Comparable](…)` accepts any `T`. A checker-side wiring gap, not a design question (§4 treats
+  the forms as equivalent). FOUND 2026-06-10 (#347).
+- **[Q-prelude-impl-missing-import] `impl <PreludeTrait> for X` without importing `core.compare` emits an undefined
+  trait/base class on rust/python** — bug · ready · `compiler/crates/bock-codegen/` (rust, python) · — · links #347,
+  Q-bounded-comparable-codegen · note: pre-existing; hits Comparable too (it is plausibly the root of
+  Q-bounded-comparable-codegen's python half — investigate together). The prelude makes the trait name resolvable
+  without the import (§18.2), so codegen must emit/import the base itself. FOUND 2026-06-10 (#347).
+- **[Q-sync-vocab-script-stale] `sync-vocab.sh`'s `spec/sections` copy step is broken vs the current repo layout** —
+  chore · ready · LOW · `tools/scripts/sync-vocab.sh` · — · links #347, K04 (single-file spec consolidation) · note:
+  the vocab regen itself works (#347 ran it); the stale step references the pre-K04 sectioned-spec layout. Fix the step
+  (or remove it) + consider the vocab↔catalog CI drift check noted on Q-vocab-regen-diagnostics. FOUND 2026-06-10 (#347).
+- **[Q-interp-float-ieee-equality] interp: IEEE Float equality at the `==` boundary (NaN == NaN must be false)** — bug ·
+  ready · **(R11)** · `compiler/crates/bock-interp/` · — · links #347, DV24, DQ10, routing R11 · note: the fix for DV24 —
+  the total-order `OrdF64` wrapper is load-bearing for `BTreeMap`/`Set` internals; split the boundary (IEEE semantics at
+  `==` evaluation, total order inside containers), don't remove the wrapper. Pin with an interp-side NaN fixture when
+  fixed (the ×5 target fixture already exists from #347). FOUND 2026-06-10 (#347).
 
 ### Editor v1.1 feature-wave follow-ups (filed 2026-06-09)
 
@@ -817,13 +856,18 @@ targets, an examples test-suite un-broken, every diagnostic re-rendered) — sur
   programs using neither stay dep-free. Features `["rt-multi-thread","macros","sync","time"]`, pinned `"1"`. New
   `hostsleep_no_handler` fixture runs ×5; conformance 819/0. NOTE: the scaffold lives in **bock-codegen** (not bock-build as
   originally filed). ORIG: FOUND 2026-06-08 (#297).
-- **[Q-equatable-gating-user-types] gate `==`/`!=` on user types behind Equatable** — bug · **blocked · escalated → Design (DQ29)** · LOW ·
-  `compiler/crates/bock-types/` · — · blocked-by DQ29 · links #296, #300, DQ29, §18.5, Q-list-operator-gating-user-types · note:
-  **ESCALATED 2026-06-08 (DQ29).** The wave-6 investigation (PR #300, doc-only — NOT merged) confirmed scenario (B): records/enums
-  have FREE structural `==` at codegen but NO checker-visible `Equatable` conformance (only primitives are registered), and
-  `@derive` is v1.x-reserved — so a strict `require_equatable_operand` gate would reject idiomatic `record == record` with no v1
-  escape. That's a design decision, not impl-completeness → **DQ29** (candidate resolutions R1 auto-conform / R2 defer-to-derive /
-  R3 strict-reject[rejected]). Un-block + implement once Design rules. Same `infer_binop` mechanism as #296 once ruled.
+- **[Q-equatable-gating-user-types] gate `==`/`!=` on user types behind Equatable** — bug · **DONE (#347)** ·
+  `compiler/crates/bock-types/` + `bock-codegen` + `bock-interp` · — · links #296, #300, DQ29, DQ31, DV24, §18.5, #347,
+  Q-list-operator-gating-user-types · note: **DONE 2026-06-10 (#347) per the DQ29 ruling (R1, conditional structural
+  rule — see design-questions DQ29-DECIDED).** Recursive `structural_equatable_witness` in the checker (mirrors #296's
+  probe; co-inductive on recursive types; explicit impl wins via skip-if-occupied; classes excluded); wired into BOTH
+  the `==`/`!=` gate and `T: Equatable` bound satisfaction (bounded generics now accept structural records — the #106
+  bridge-bug class). New **E4015** names the poisoned field path + type. Codegen pinned ×5 (11 exec fixtures + 4
+  diagnostic): js/ts `__bockEq` deep-eq runtime + impl routing (closed Q-js-user-equality-reference), rust conditional
+  `derive(PartialEq)`, go `__bockDeepEq` (collection `==` was a compile error), python + interp impl routing, interp
+  structural bridge for bounded generics. §18.5 normative paragraph + changelog `20260610-dq29-structural-equatable.md`;
+  spec asymmetry recorded (no structural Comparable/Hashable). Examples 20/20 unaffected; conformance 905/0/0 ×2.
+  Follow-on: DQ31 (container element-eq corner) + DV24 (interp NaN total-order). ORIG: ESCALATED 2026-06-08 (DQ29).
 - **[Q-list-mut-pop-insert-remove] `pop`/`insert`/`remove`/`reverse` mutating-method semantics** — impl/design · **blocked · escalated → Design (DQ30)** ·
   `compiler/crates/bock-types`, `compiler/crates/bock-codegen` · — · blocked-by DQ30 · links DQ18, DQ30, #269 · note:
   **ESCALATED 2026-06-09 (DQ30).** DQ18 ruled `push`/`append` (`mut self` Void); these four were left value-returning

@@ -17,6 +17,25 @@ status(open | resolved→link)`
 
 ## Open
 
+### DV24 — interp Float equality is total-order: `NaN == NaN` is true under `bock run`
+- **§:** §18.5 (DQ10 IEEE caveat; reaffirmed by the DQ29 ruling rule 8) ·
+  **spec-says:** Float equality is IEEE — a record containing NaN is
+  `!=` itself · **impl-does:** the interpreter compares Floats via a
+  total-order wrapper (`OrdF64`, required for `BTreeMap` keys), so
+  `NaN == NaN` evaluates true under `bock run`; all five compiled
+  targets are IEEE-correct.
+- **Classification:** impl-bug (interp-parity — R11: the Tier-1 oracle
+  diverges)
+- **Disposition:** fix-impl → queue `Q-interp-float-ieee-equality`
+  (IEEE semantics at the `==` evaluation boundary while keeping the
+  total-order wrapper for container internals). Constraint flagged by
+  #347: the wrapper is load-bearing for `BTreeMap`/`Set` — the fix is a
+  boundary split, not a wrapper removal. Design consult only if the
+  boundary split proves impossible.
+- **Status:** open (FOUND by #347's NaN fixture work, 2026-06-10; the
+  NaN exec fixture pins the five targets — the interp divergence is
+  documented, not pinned, pending the fix)
+
 ### DV23 — §10.4 prose says lambda handlers "fail at name resolution"; they fail in the type checker
 - **§:** §10.4 · **spec-says:** the v1.x-reserved lambda-handler form
   "fails at name resolution" · **impl-does:** the failure mechanism is
