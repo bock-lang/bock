@@ -2344,3 +2344,36 @@ AWAITING OPERATOR: nothing blocking. NEXT session (operator's call): the shared-
     Extension tests 435 · bock-lsp 98 · workspace 2854/0 · conformance 824/0/0 ×5 (last conformance-touching merge: #306).
     Maintenance: all session worktrees + branches pruned; per-branch cargo caches reclaimed (all cached branches merged +
     deleted; disk 87% → 44%).
+
+[2026-06-10 06:03 UTC] ✦ DESIGN-AUDIT TRIAGE — #334 folded into the hub; R2/R4 spec touches; operator bundle filed
+  Input: operator ("review status and check-in as orchestrator" → "let's tackle #334"). #334 landed the Design chat's
+    strategic audit (tracking/designs/2026-06-09-design-audit.md) after the 2026-06-09 digest; its R1–R12 recommendations
+    were untriaged. Board state at start: main dd5e770, 0 open PRs, CI green, compiler v1 backlog Design-gated (DQ29/DQ30).
+  Options: (a) triage only the tracking-file routes and defer the two spec touches to a Design session — rejected: R2 was
+    RULED by Design in the audit itself (§4.5) and R4's spec touch is the exact non-normative note the audit's routing
+    table prescribes; both are within "reconcile the spec as Design decides". (b) also apply the §1.1 identity amendment —
+    REJECTED: R1 explicitly requires operator sign-off; filed in escalations instead. (c) ask the operator all six
+    R1/R6/OQ1–OQ4 questions inline before triaging — rejected: escalate-to-file-then-move-on; the operator answers on
+    their cadence. Chose: full within-authority triage + escalation bundle.
+  Decision: (1) SPEC — §17.2 tier labels amended (Tier 1 "when configured" / Tier 2 "default and fallback", + the
+    --deterministic sentence clarified to "forces Tier-2-ONLY") and §20.3 gained the non-normative MCP-first v1.x
+    sequencing note; one changelog 20260610-design-audit-spec-touches.md (clarification, no behavior change).
+    (2) QUEUE — filed Q-context-pack, Q-synthetic-corpus, Q-diagnostics-agent-audit, Q-dogfood-tool (ready) +
+    Q-mcp-server, Q-ai-loop-design-pass (deferred, v1.x leads) under "Design-audit follow-ups"; header reconciled to
+    main dd5e770. (3) MILESTONES — v1.0 gains the R12 ship-on-current-scope affirmation; v1.1 gains the R4/R5/R6/R7
+    reorientation (R6 marked PROPOSED pending operator ratification). (4) SNAPSHOT — R9 validation ledger added
+    (§10.8 + §17.7 specced-unvalidated; equivalence/determinism/effects validated). (5) ROUTING — R11 interpreter-as-
+    oracle prioritization rule added (surfaced here per the routing-changes-are-process-decisions rule; source is a
+    Design-audit recommendation the operator directed the orchestrator to land). (6) ESCALATIONS — the six operator
+    decisions (R1 identity, R6 ratification, OQ1 wedge, OQ2 corpus publication, OQ3 v1 timing, OQ4 §10.8 demo) filed
+    as one pending bundle. R10 was already satisfied by #334 itself.
+  Reasoning: every change is either Design-ruled (R2), audit-prescribed routing (R3/R4/R5/R7/R8/R9/R11/R12), or an
+    escalation filing (R1/R6/OQ*) — nothing here decides core spec or external positioning. Markdown-only change set
+    (spec/ + tracking/ + regenerated views): the verification gate has no applicable compile surface; Tracking Views
+    --check run locally after regenerating STATUS/ROADMAP.
+  Follow-up: AWAITING OPERATOR — the 6-item bundle (escalations 2026-06-10) + the pre-existing DQ29/DQ30 + DV19 (Design).
+    Dispatchable without any of those: Q-context-pack, Q-synthetic-corpus, Q-diagnostics-agent-audit, Q-dogfood-tool,
+    + the editor LOW follow-ups. NOTE (environment): this block ran in a cloud session (claude/zen-archimedes-7vx1sb)
+    whose environment could not commit/push; the operator hand-carried the work as a format-patch
+    (temp/designaudittriage937e4f8.patch) and the local orchestrator landed it via the standard
+    chore/tracking-20260610-1321 branch → PR. Content is the cloud block's, unchanged except this note.

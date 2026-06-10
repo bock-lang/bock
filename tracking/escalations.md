@@ -405,3 +405,36 @@ prioritization for the rest of the open queue (folded into design-questions.md; 
 **Recommendation:** **(A) Optional-safe** — most consistent with Bock's Optional-everywhere ethos and the existing List read methods; no new panic surface. Non-blocking — the four methods stay placeholder-typed meanwhile (no regression; no example/stdlib calls them as mutators yet).
 **Awaiting:** Design ruling on DQ30 (A / B / C / other).
 **Status:** pending — surfaced to owner 2026-06-09 14:47 UTC; owner deferred ("will circle back with the design decision").
+
+## [2026-06-10 06:03 UTC] Design audit (#334) — operator-decision bundle (R1, R6, OQ1–OQ4)
+
+**Type:** strategic
+**Severity:** medium (nothing blocks today; OQ3 is the time-sensitive one — the audit argues the governance window is open NOW)
+**Trigger:** the 2026-06-09 strategic design audit (`tracking/designs/2026-06-09-design-audit.md`, landed #334) routes six
+items to the operator. The orchestrator triaged everything within its authority (R2/R4 spec touches; R3/R8 queue items;
+R4/R5/R7 milestones; R9 validation ledger; R11 routing rule; R12 nothing-added-to-v1.0) in the same block; these six are the
+remainder only the operator can decide.
+**Context — the six decisions:**
+1. **R1 — identity sign-off.** Proposed one-sentence identity (audit §5): "Bock is the deterministic substrate for AI-built
+   software — an executable specification language whose compiler produces idiomatic code for five platforms and *proves* the
+   five behave identically, with every AI decision in the pipeline logged, pinned, and reproducible." Plus the §1.1
+   one-sentence equivalence amendment (audit-proposed wording in §5). Marketing owns downstream copy; Design supplied the
+   truth basis; the spec touch + external copy wait on this sign-off.
+2. **R6 — ratify the v1.x prioritization principle:** verification features over surface-area features (`@property` →
+   §15.4 runtime guardrails → §4.7 refinement predicates, ahead of new targets / FFI breadth). Recorded as PROPOSED in
+   milestones pending this ratification.
+3. **OQ1 — which wedge leads marketing:** SDK/library vendors vs polyglot platform teams vs audit-critical orgs. Audit's
+   read: SDK vendors (the equivalence guarantee IS their product promise).
+4. **OQ2 — open corpus:** publish the context pack + synthetic corpus as open artifacts, or hold? (The Q-synthetic-corpus
+   *pipeline* is queued regardless; only publication is gated.)
+5. **OQ3 — v1 timing.** Audit lean (R12/R-B): release-prep now; engineering is done; the risk is polish-perfectionism.
+   Release *actions* remain escalate-individually per the standing rule.
+6. **OQ4 — the runtime-AI pillar:** fund the §10.8 adaptive-handlers end-to-end demonstration early in v1.x, or quietly
+   defer and let compile-time governance carry positioning until there's pull. (R9 ledger holds either way.)
+**Options:** per item above; all six are independent.
+**Recommendation:** the orchestrator offers none on R1/OQ1/OQ2 (external/strategic). On R6: ratifying matches the audit's
+logic and the project's verification-first track record. On OQ3: the audit's argument is sound and v1.0's runway has been
+clear since MS-projectmode. On OQ4: OQ2/OQ3 decide the context — if v1 ships now, defer the §10.8 demo behind the
+release-window work and revisit at the first v1.x planning pass.
+**Awaiting:** operator responses (any subset; items are independent).
+**Status:** pending

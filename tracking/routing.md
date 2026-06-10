@@ -73,6 +73,16 @@ them when declaring owned-files or instructing sessions:
 A session prompt that instructs creating a central CLI test
 directory is wrong — extend the colocated crate tests instead.
 
+## Prioritization rules
+
+- **Interpreter-as-oracle guard (2026-06-09 design audit, R11):**
+  interpreter parity items (the `Q-interp-*` pattern) are
+  **correctness work, not polish** — the interpreter is the Tier 1
+  semantics oracle, and if it lags checker/codegen the equivalence
+  claim silently degrades to "targets agree with each other".
+  Rank interpreter-parity items with correctness bugs, not with
+  ergonomic backlog, when sequencing dispatch.
+
 ## Escalation-fast triggers
 
 - Any external-facing artifact → escalate before publish

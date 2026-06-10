@@ -1602,9 +1602,9 @@ Source → Parse → Type Check → Context Resolve → Target Analyze
 
 ### 17.2 — AI-First with Deterministic Fallback
 
-**Tier 1 — AI Generation (default):** The AI model receives TR-AIR + target profile + project context and generates idiomatic target code. AI generation is invoked selectively at capability gap points identified by §17.6 and at AIR constructs the target profile flags as requiring idiomatic synthesis (e.g., complex pattern translations, effect handler composition). Trivial constructs with stable rule-based translations (literals, arithmetic, direct function calls) are handled by Tier 2 rules without AI involvement, even when Tier 1 is enabled. This keeps compilation cost bounded and ensures most AIR nodes compile deterministically.
+**Tier 1 — AI Generation (when configured):** The AI model receives TR-AIR + target profile + project context and generates idiomatic target code. AI generation is invoked selectively at capability gap points identified by §17.6 and at AIR constructs the target profile flags as requiring idiomatic synthesis (e.g., complex pattern translations, effect handler composition). Trivial constructs with stable rule-based translations (literals, arithmetic, direct function calls) are handled by Tier 2 rules without AI involvement, even when Tier 1 is enabled. This keeps compilation cost bounded and ensures most AIR nodes compile deterministically.
 
-**Tier 2 — Rule-Based Generation (fallback):** Traditional deterministic transpilation via syntax rules and templates. Handles the common case by default and serves as the fallback when Tier 1 fails or is unavailable. Activated exclusively via `bock build --deterministic` or `@deterministic`.
+**Tier 2 — Rule-Based Generation (default and fallback):** Traditional deterministic transpilation via syntax rules and templates. This is the default generation path (§20.7: AI configuration is opt-in), and it serves as the fallback when Tier 1 fails or is unavailable. Tier-2-only operation — AI disabled even where configured — is forced via `bock build --deterministic` or `@deterministic`.
 
 **Tier 3 — AI Optimization (optional):** A second AI pass reviewing generated code for performance and idiomaticness. Activated via `bock build --optimize`, which is **Reserved for v1.x** per §20.1 (it ships with the project-mode build work).
 
@@ -2096,6 +2096,8 @@ v1 ships a Full LSP implementation supporting standard protocol capabilities: co
 - **Inline Diagnostics:** Ownership transfer warnings, capability narrowing hints, AI decision previews.
 
 These extensions go beyond standard LSP and require dedicated UX design work. v1 users get the basic LSP surface; the Bock-specific augmentations ship in v1.x.
+
+**v1.x sequencing note (non-normative, 2026-06-09 design audit):** the v1.x editor-adjacent work is ordered agent-first. The lead tooling item is a `bock-mcp` server exposing the compiler surface (`check` / `build` / `test` / `inspect` / conformance) as MCP tools, making any agentic environment a competent Bock environment; the human-facing panels above follow behind it. Target Preview has meanwhile shipped early as a VS Code extension feature (built on `--source-only`), as have several editor capabilities beyond the v1 floor (find-references, rename, document symbols, inlay hints, semantic tokens) — see changelog `20260610-design-audit-spec-touches.md`.
 
 ### 20.4 — Testing Tiers
 

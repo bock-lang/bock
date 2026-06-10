@@ -12,7 +12,18 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-09 — main 0567568, 0 open PRs, clean. ★★ v1.1 EDITOR-FEATURE WAVE COMPLETE — 12 PRs (#320–#331), 3 waves, operator-directed acceleration.**
+_**Last reconciled 2026-06-10 — main dd5e770, 0 open PRs, clean, CI green. ★ DESIGN-AUDIT TRIAGE (#334 → hub).**
+The Design chat's strategic audit (`designs/2026-06-09-design-audit.md`, landed #334) is folded into the hub: **R2+R4 spec
+touches landed** (§17.2 tier-default labels fixed per the audit's §4.5 ruling; §20.3 v1.x note reoriented MCP-first; changelog
+`20260610-design-audit-spec-touches.md`); **R3+R8 filed as queue items below** (Q-context-pack, Q-synthetic-corpus,
+Q-diagnostics-agent-audit, Q-dogfood-tool); **R4/R5/R7 + proposed-R6 folded into milestones** (bock-mcp lead v1.x tooling item;
+repair-loop/AI-composability first v1.x design pass; target demand-gate; verification-over-surface-area principle pending
+operator ratification); **R9 validation ledger added to snapshot** (§10.8 + §17.7 specced-unvalidated); **R11 interpreter-as-
+oracle prioritization rule added to routing.md**; **R12** = ship v1 on current scope (nothing added to v1.0). **Operator-decision
+bundle filed in escalations** (R1 identity sentence + §1.1 amendment · R6 ratification · OQ1 wedge · OQ2 corpus publication ·
+OQ3 v1 timing [audit leans NOW] · OQ4 §10.8 demo funding). Board otherwise unchanged: compiler v1 backlog Design-gated
+(DQ29/DQ30, awaiting owner; DV19 → Design); editor LOW follow-ups dispatchable. ↓ —
+PRIOR: **Last reconciled 2026-06-09 — main 0567568, 0 open PRs, clean. ★★ v1.1 EDITOR-FEATURE WAVE COMPLETE — 12 PRs (#320–#331), 3 waves, operator-directed acceleration.**
 The operator un-gated Q-ext-feature-opportunities and directed maximum fan-out on v1.1 features not blocked by Bock-language v1.x.
 **WAVE 1 (6 file-disjoint lanes):** **#321** richer hover (the cached-but-never-rendered vocab now renders: operators, builtin
 methods w/ receiver candidates, in-file effect-operation hovers) · **#322** spec-panel ranked search (multi-term AND, title>body,
@@ -339,6 +350,32 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 ---
 
 ## Ready
+
+### Design-audit follow-ups (filed 2026-06-10, from `designs/2026-06-09-design-audit.md`)
+
+- **[Q-context-pack] versioned model-familiarity context pack** — feature · ready ·
+  new top-level artifact (CLAUDE.md-shaped primer: spec + idiom guide + error-code table + worked examples) + `tools/scripts/` ·
+  — · links audit R3(1), R-A · note: the dominant-risk (model familiarity) mitigation; the single-file spec + vocab-sync
+  pipeline are the existing primitives. Versioned, shipped in-repo.
+- **[Q-synthetic-corpus] synthetic-corpus pipeline from conformance fixtures** — feature · ready ·
+  `tools/` (new pipeline; reads `compiler/tests/conformance/`) · — · links audit R3(2), R-A · note: mass-produce *verified*
+  (Bock source ↔ 5 target outputs ↔ expected behavior) triples from the compiler + conformance suite; 824 passing pairs are
+  the seed. **Publication of the corpus is OQ2 (operator) — the pipeline itself is unblocked.**
+- **[Q-diagnostics-agent-audit] diagnostics-as-agent-affordance audit + standing review criterion** — chore/audit · ready ·
+  read-only audit over error emission sites + a review-criterion note in `.claude/` conventions · — · links audit R3(3) ·
+  note: audit error messages for machine-actionability (the `bock check` exit-code bug was this lesson once); outcome = a
+  FOUND list of weak diagnostics + the standing criterion. Docs are training data; diagnostics are agent UX.
+- **[Q-dogfood-tool] one real tool written in Bock** — feature · ready ·
+  new `tools/` or `examples/` project (candidates: conformance-report generator, examples-matrix renderer) · — · links audit
+  R8 · note: yields corpus, credibility, and the first genuine user. Candidate choice is the dispatching session's call;
+  output should run via project mode on ≥1 shipping target.
+- **[Q-mcp-server] `bock-mcp` server — compiler surface as MCP tools** — feature · deferred (v1.x lead tooling item) ·
+  new crate `compiler/crates/bock-mcp/` (or a bock-cli subcommand — a scoping pass decides) · — · links audit R4, §20.3 note,
+  changelog `20260610-design-audit-spec-touches.md` · note: `check`/`build`/`test`/`inspect`/conformance as agent tools;
+  LEADS the v1.x tooling list (human panels behind it). Needs a small scoping pass before dispatch.
+- **[Q-ai-loop-design-pass] agentic repair-loop / AI-layer composability design pass** — design · deferred (FIRST v1.x design
+  pass) · `spec/` §17 + a design doc · — · links audit R5, §17.7/§17.8 · note: loop budgets, convergence detection,
+  fallback policy — composing Generate/Repair/verify into a first-class pipeline stage. Routes to Design when v1.x opens.
 
 ### Editor v1.1 feature-wave follow-ups (filed 2026-06-09)
 
