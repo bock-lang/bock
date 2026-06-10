@@ -1340,7 +1340,12 @@ impl Interpreter {
                     let handle: tokio::task::JoinHandle<Result<Value, RuntimeError>> =
                         tokio::spawn(async move {
                             match sub.eval_expr(&body).await {
-                                Err(RuntimeError::Return(v)) => Ok(*v),
+                                // `return` and `?`-propagation (§7.10) both
+                                // surface their carried value as the async
+                                // function's result.
+                                Err(RuntimeError::Return(v) | RuntimeError::Propagated(v)) => {
+                                    Ok(*v)
+                                }
                                 other => other,
                             }
                         });
@@ -1360,9 +1365,15 @@ impl Interpreter {
                 }
                 let result = self.eval_expr(&body).await;
                 self.env = saved_env;
-                // Convert a `return` signal into the return value.
+                // Convert a `return` signal into the return value. A
+                // `?`-propagation signal (§7.10) is likewise caught HERE, at
+                // the function-call boundary: the propagated `Err(e)`/`None`
+                // becomes the function's return value, which the caller
+                // observes as a normal `Result`/`Optional` — matching the
+                // compiled targets' early-return lowering instead of aborting
+                // the whole program (Q-interp-question-propagation).
                 match result {
-                    Err(RuntimeError::Return(v)) => Ok(*v),
+                    Err(RuntimeError::Return(v) | RuntimeError::Propagated(v)) => Ok(*v),
                     other => other,
                 }
             }
@@ -2484,8 +2495,12 @@ impl Interpreter {
             None
         };
         self.env = saved_env;
+        // Like `call_closure`: a `return` signal becomes the method's value,
+        // and so does a `?`-propagation signal (§7.10) — methods are function
+        // boundaries too, so a propagated `Err(e)`/`None` is returned to the
+        // method's caller rather than escaping further.
         let value = match result {
-            Err(RuntimeError::Return(v)) => *v,
+            Err(RuntimeError::Return(v) | RuntimeError::Propagated(v)) => *v,
             other => other?,
         };
         Ok((value, updated_self))
@@ -2603,6 +2618,13 @@ impl Interpreter {
 
     // ── Error propagation (`?`) ────────────────────────────────────────────
 
+    /// Evaluate `expr?` (§7.10): unwrap `Ok(v)`/`Some(v)` in place; for
+    /// `Err(e)`/`None` raise [`RuntimeError::Propagated`] carrying the **whole
+    /// propagating value** (`Result(Err(e))` / `Optional(None)`), so the
+    /// enclosing function-call boundary ([`Self::call_closure`] /
+    /// [`Self::run_method_body`]) can hand it to the caller unchanged — the
+    /// caller observes a normal `Result`/`Optional` value, exactly as the
+    /// compiled targets early-return it.
     #[async_recursion]
     async fn eval_propagate(&mut self, expr: &AIRNode) -> Result<Value, RuntimeError> {
         let val = self.eval_expr(expr).await?;
@@ -2610,7 +2632,7 @@ impl Interpreter {
             Value::Optional(Some(inner)) => Ok(*inner),
             Value::Optional(None) => Err(RuntimeError::Propagated(Box::new(Value::Optional(None)))),
             Value::Result(Ok(inner)) => Ok(*inner),
-            Value::Result(Err(e)) => Err(RuntimeError::Propagated(e)),
+            Value::Result(Err(e)) => Err(RuntimeError::Propagated(Box::new(Value::Result(Err(e))))),
             other => Err(RuntimeError::TypeError(format!(
                 "? applied to non-Optional/Result: {other}"
             ))),
@@ -4285,6 +4307,124 @@ mod tests {
             interp.eval_expr(&prop).await,
             Err(RuntimeError::Propagated(_))
         ));
+    }
+
+    /// §7.10: `?` on `Err(e)` early-returns the `Err` from the *enclosing
+    /// function* — the caller observes a normal `Result` value, and the
+    /// statements after the propagation site never run
+    /// (Q-interp-question-propagation).
+    #[tokio::test]
+    async fn call_returns_propagated_err_to_caller() {
+        let mut interp = Interpreter::new();
+        let g = gen();
+        // fn fails() { Err("boom")?  99 }  — must return Err("boom"), not 99,
+        // and must not abort the evaluation.
+        let err_node = node(
+            g.next(),
+            NodeKind::ResultConstruct {
+                variant: ResultVariant::Err,
+                value: Some(Box::new(str_lit(&g, "boom"))),
+            },
+        );
+        let prop = node(
+            g.next(),
+            NodeKind::Propagate {
+                expr: Box::new(err_node),
+            },
+        );
+        let body = node(
+            g.next(),
+            NodeKind::Block {
+                stmts: vec![prop],
+                tail: Some(Box::new(int_lit(&g, 99))),
+            },
+        );
+        interp.register_fn("fails", vec![], body);
+        let call = node(
+            g.next(),
+            NodeKind::Call {
+                callee: Box::new(var(&g, "fails")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        assert_eq!(
+            interp.eval_expr(&call).await,
+            Ok(Value::Result(Err(Box::new(Value::String(
+                BockString::new("boom")
+            )))))
+        );
+    }
+
+    /// §7.10: `?` on `None` early-returns `None` from the enclosing function;
+    /// the caller observes a normal `Optional` value.
+    #[tokio::test]
+    async fn call_returns_propagated_none_to_caller() {
+        let mut interp = Interpreter::new();
+        let g = gen();
+        interp.env.define("opt", Value::Optional(None));
+        let prop = node(
+            g.next(),
+            NodeKind::Propagate {
+                expr: Box::new(var(&g, "opt")),
+            },
+        );
+        let body = node(
+            g.next(),
+            NodeKind::Block {
+                stmts: vec![prop],
+                tail: Some(Box::new(int_lit(&g, 99))),
+            },
+        );
+        interp.register_fn("fails_opt", vec![], body);
+        let call = node(
+            g.next(),
+            NodeKind::Call {
+                callee: Box::new(var(&g, "fails_opt")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        assert_eq!(interp.eval_expr(&call).await, Ok(Value::Optional(None)));
+    }
+
+    /// The `Ok`-path complement: `?` on `Ok(v)` unwraps in place, the function
+    /// continues, and the caller sees the function's own (non-propagated)
+    /// result.
+    #[tokio::test]
+    async fn call_with_ok_propagation_continues_to_tail() {
+        let mut interp = Interpreter::new();
+        let g = gen();
+        let ok_node = node(
+            g.next(),
+            NodeKind::ResultConstruct {
+                variant: ResultVariant::Ok,
+                value: Some(Box::new(int_lit(&g, 42))),
+            },
+        );
+        let prop = node(
+            g.next(),
+            NodeKind::Propagate {
+                expr: Box::new(ok_node),
+            },
+        );
+        let body = node(
+            g.next(),
+            NodeKind::Block {
+                stmts: vec![prop],
+                tail: Some(Box::new(int_lit(&g, 99))),
+            },
+        );
+        interp.register_fn("succeeds", vec![], body);
+        let call = node(
+            g.next(),
+            NodeKind::Call {
+                callee: Box::new(var(&g, "succeeds")),
+                args: vec![],
+                type_args: vec![],
+            },
+        );
+        assert_eq!(interp.eval_expr(&call).await, Ok(Value::Int(99)));
     }
 
     // ── String interpolation ──────────────────────────────────────────────

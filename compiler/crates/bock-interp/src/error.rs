@@ -41,8 +41,15 @@ pub enum RuntimeError {
     ArityMismatch { expected: usize, got: usize },
 
     // ── Error propagation (`?`) ───────────────────────────────────────────
-    /// Raised when `?` is applied to `None` or `Err(e)`. Caught by the
-    /// enclosing function body to propagate the error outward.
+    /// Raised when `?` is applied to `None` or `Err(e)` (§7.10). Carries the
+    /// **whole propagating value** — `Value::Optional(None)` or
+    /// `Value::Result(Err(e))` — and is caught at the enclosing
+    /// **function-call boundary** (`call_closure` / `run_method_body`), where
+    /// it becomes the function's return value: the caller observes a normal
+    /// `Result`/`Optional`, exactly as the compiled targets early-return it.
+    /// Like `Return`/`Break`/`Continue`, this is a control-flow signal, not a
+    /// true error; it only surfaces as a runtime error if `?` executes outside
+    /// any function boundary (e.g. a top-level REPL expression).
     #[error("propagated error: {0}")]
     Propagated(Box<Value>),
 

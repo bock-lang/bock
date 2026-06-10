@@ -327,6 +327,20 @@ impl BuiltinRegistry {
         self.register(TypeTag::Bool, "to_int", bool_to_int);
         self.register(TypeTag::Char, "to_int", char_to_int);
 
+        // ── Equatable primitive bridge (`eq`) ─────────────────────────────
+        // The compiled targets lower `a.eq(b)` on a primitive receiver — and
+        // on a primitive reached through a generic `T: Equatable` bound — to
+        // the target's native equality (`PRIMITIVE_BRIDGE_METHODS` in
+        // bock-codegen). The interpreter mirrors that here so the same call
+        // dispatches under `bock run`/`bock test`; this is the dispatch
+        // `core.test.assert_eq[T: Equatable]` reaches for primitive `T`
+        // (Q-interp-assert-primitives).
+        self.register(TypeTag::Int, "eq", primitive_eq);
+        self.register(TypeTag::Float, "eq", primitive_eq);
+        self.register(TypeTag::Bool, "eq", primitive_eq);
+        self.register(TypeTag::String, "eq", primitive_eq);
+        self.register(TypeTag::Char, "eq", primitive_eq);
+
         // ── Universal ─────────────────────────────────────────────────────
         // to_string for all types (registered per type for non-String)
         self.register(TypeTag::Int, "to_string", universal_to_string);
@@ -477,6 +491,25 @@ fn char_to_int(args: &[Value]) -> Result<Value, RuntimeError> {
             "Char.to_int called on non-Char".to_string(),
         )),
     }
+}
+
+// ─── Equatable primitive bridge ──────────────────────────────────────────────
+
+/// `a.eq(b)` on a primitive receiver — the `Equatable` bridge method.
+///
+/// Compares with the same value equality the `==` operator uses, mirroring the
+/// compiled targets' lowering of the primitive bridge (`===` on js/ts, `==` on
+/// python/rust/go). Registered for `Int`/`Float`/`Bool`/`String`/`Char`, the
+/// primitive set the checker's `Primitive:<Ty>` / sealed `TraitBound:Equatable`
+/// receiver-kind stamps cover.
+fn primitive_eq(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() != 2 {
+        return Err(RuntimeError::ArityMismatch {
+            expected: 2,
+            got: args.len(),
+        });
+    }
+    Ok(Value::Bool(args[0] == args[1]))
 }
 
 // ─── String methods ───────────────────────────────────────────────────────────
@@ -820,6 +853,69 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result, recv);
+    }
+
+    // ── Equatable primitive bridge (`eq`) ────────────────────────────────
+
+    /// The Equatable bridge method `eq` must be registered for every
+    /// primitive type tag and mirror native equality (the compiled targets
+    /// lower `a.eq(b)` on primitives to `===`/`==`). This is the dispatch
+    /// `core.test.assert_eq[T: Equatable]` lands on for primitive `T`
+    /// (Q-interp-assert-primitives).
+    #[test]
+    fn primitive_eq_dispatches_for_all_primitive_tags() {
+        let reg = make_registry();
+        let cases: Vec<(TypeTag, Value, Value)> = vec![
+            (TypeTag::Int, Value::Int(3), Value::Int(3)),
+            (
+                TypeTag::Float,
+                Value::Float(2.5.into()),
+                Value::Float(2.5.into()),
+            ),
+            (TypeTag::Bool, Value::Bool(true), Value::Bool(true)),
+            (
+                TypeTag::String,
+                Value::String(BockString::new("ab")),
+                Value::String(BockString::new("ab")),
+            ),
+            (TypeTag::Char, Value::Char('x'), Value::Char('x')),
+        ];
+        for (tag, a, b) in cases {
+            let result = reg
+                .call(tag, "eq", &[a, b])
+                .unwrap_or_else(|| panic!("`eq` not registered for {tag}"))
+                .unwrap();
+            assert_eq!(result, Value::Bool(true), "{tag}.eq of equal values");
+        }
+    }
+
+    #[test]
+    fn primitive_eq_is_false_for_unequal_values() {
+        let reg = make_registry();
+        let result = reg
+            .call(TypeTag::Int, "eq", &[Value::Int(3), Value::Int(4)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+        let result = reg
+            .call(
+                TypeTag::String,
+                "eq",
+                &[
+                    Value::String(BockString::new("ab")),
+                    Value::String(BockString::new("ac")),
+                ],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[test]
+    fn primitive_eq_arity_mismatch_is_error() {
+        let reg = make_registry();
+        let result = reg.call(TypeTag::Int, "eq", &[Value::Int(3)]).unwrap();
+        assert!(matches!(result, Err(RuntimeError::ArityMismatch { .. })));
     }
 
     // ── List methods ─────────────────────────────────────────────────────

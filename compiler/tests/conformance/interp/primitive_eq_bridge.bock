@@ -1,0 +1,25 @@
+// TEST: interpreter_primitive_eq_bridge
+// EXPECT: output "int=true;float=true;bool=true;string=true;char=true;neq=false"
+//
+// The Equatable primitive bridge under the reference interpreter: `a.eq(b)`
+// on a concrete primitive receiver must dispatch to native equality, exactly
+// as the compiled targets lower it via PRIMITIVE_BRIDGE_METHODS (js `===`,
+// rust `==`, …). This is the dispatch `core.test.assert_eq[T: Equatable]`
+// reaches when `T` is instantiated with a primitive, so it is the root of
+// Q-interp-assert-primitives: before the fix the interpreter had no `eq`
+// builtin on the primitive type tags (only the never-referenced `equals`)
+// and every call died with `method 'eq' not found on Int`.
+//
+// The end-to-end `bock test` runs of `assert_eq`/`assert_ne` over primitives
+// are asserted by `bock-cli/tests/test_command.rs`.
+module main
+
+fn main() -> Void {
+  let i = (3).eq(3)
+  let f = (2.5).eq(2.5)
+  let b = (true).eq(true)
+  let s = "ab".eq("ab")
+  let c = ('x').eq('x')
+  let n = (3).eq(4)
+  println("int=${i};float=${f};bool=${b};string=${s};char=${c};neq=${n}")
+}
