@@ -1,3 +1,12 @@
 // TEST: type_error_string_as_int
-// EXPECT: error E0205 at 3:10
+// EXPECT: error E4001 at 3:22
 fn broken() -> Int { "not an int" }
+// NOTE: this fixture declared `error E0205 at 3:10` from its creation until
+// 2026-06-10, but E0205 is emitted nowhere in the compiler (it survives only
+// as a documentation example in the harness) — the directive was never
+// asserted because `types/` was not wired through `bock check`
+// (Q-conformance-directive-wiring). The compiler reports the body/return
+// mismatch as E4001 at 3:22 (the string literal). Repaired to current truth;
+// E0205 appears to have been a placeholder from the harness docs rather than
+// a code the checker ever emitted, so this is recorded as a stale
+// declaration, not a regression.

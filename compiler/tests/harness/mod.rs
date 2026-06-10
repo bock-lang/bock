@@ -17,6 +17,12 @@
 //! All directives must appear at the **top** of the file (before any
 //! non-directive, non-blank lines).
 //!
+//! An `// EXPECT:` line in directive position whose value is not one of the
+//! known forms is a **load error** (typo guard): `// EXPECT: no errors`
+//! (typo for `no_errors`) was once silently ignored and the fixture ran
+//! expectation-free (Q-conformance-directive-wiring). New expectation types
+//! must be added to [`expectation::parse_expectation`] first.
+//!
 //! `// EXPECT: targets <ids>` restricts an execution fixture to the listed
 //! transpilation targets (`js`, `ts`, `python`, `rust`, `go`); when absent the
 //! fixture runs on every target. It lets a fixture exercise a backend-specific
@@ -112,8 +118,10 @@ pub fn parse_test_file(path: &Path, content: &str) -> Result<TestCase, LoadError
 
         if let Some(rest) = trimmed.strip_prefix("// EXPECT: ") {
             match expectation::parse_expectation(rest, line_number) {
-                Ok(Some(exp)) => expectations.push(exp),
-                Ok(None) => {} // unknown — ignore for forward compat
+                Ok(exp) => expectations.push(exp),
+                // Malformed AND unknown values are both load errors — the typo
+                // guard (see the module docs): nothing in directive position
+                // may be silently ignored.
                 Err(e) => return Err(LoadError::BadExpectation(path.to_path_buf(), e)),
             }
             source_start += line.len() + 1;
@@ -248,6 +256,16 @@ mod tests {
         let src = "// EXPECT: no_errors\nfn foo() {}\n";
         let result = parse_test_file(&fake_path(), src);
         assert!(matches!(result, Err(LoadError::MissingTestDirective(_))));
+    }
+
+    #[test]
+    fn unknown_expectation_value_is_load_error() {
+        // Typo guard end to end: `no errors` (typo for `no_errors`) in
+        // directive position must fail the load, not vanish. This exact typo
+        // ran unasserted in types/fn_type_param.bock until 2026-06-10.
+        let src = "// TEST: typo\n// EXPECT: no errors\nfn foo() {}\n";
+        let result = parse_test_file(&fake_path(), src);
+        assert!(matches!(result, Err(LoadError::BadExpectation(_, _))));
     }
 
     #[test]

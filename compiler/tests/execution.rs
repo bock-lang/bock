@@ -231,21 +231,64 @@ fn conformance_exec_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/exec")
 }
 
-/// Resolve the conformance directory that holds effect-system fixtures whose
-/// expectation is a *diagnostic* (an `// EXPECT: error E<code> at <l>:<c>`),
-/// not runnable output. These are driven through `bock check`, not the
-/// per-target execution path.
-fn conformance_effects_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/effects")
+/// Resolve the **root** of the conformance fixture tree — every category.
+///
+/// The check-driven tests below walk this whole tree, so a diagnostic or
+/// `no_errors` expectation declared in ANY category (present or future) is
+/// asserted against the live compiler. Until 2026-06-10 only `effects/` and
+/// `types-diagnostics/` were driven through `bock check`; the `error E<code>
+/// at <l>:<c>` directives everywhere else were parsed but never executed,
+/// which let `types/type_mismatch.bock` declare a code the compiler does not
+/// emit (E0205) for weeks (Q-conformance-directive-wiring).
+fn conformance_root_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance")
 }
 
-/// Resolve the conformance directory that holds type-checker *diagnostic*
-/// fixtures whose expectation is an `// EXPECT: error E<code> at <l>:<c>` for a
-/// type error the checker must report (e.g. a type error inside an impl/class
-/// method body, per Q-impl-body-typecheck). Driven through `bock check`.
-fn conformance_types_diagnostics_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/types-diagnostics")
+/// The conformance category (top-level directory under `conformance/`) a
+/// fixture lives in, e.g. `types-diagnostics` or `stdlib` (subdirectories like
+/// `stdlib/convert` all report as `stdlib`).
+fn fixture_category(root: &Path, fixture: &Path) -> String {
+    fixture
+        .strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .unwrap_or_else(|| {
+            panic!(
+                "fixture {} is not under {}",
+                fixture.display(),
+                root.display()
+            )
+        })
 }
+
+/// Categories that must each contribute at least one check-driven *diagnostic*
+/// fixture (an `// EXPECT: error E<code> at <l>:<c>`).
+///
+/// This is a **tripwire, not a filter**: the diagnostic test walks the entire
+/// conformance tree, so every category — including ones not listed here — is
+/// wired automatically. The list pins the categories that are known to carry
+/// diagnostic fixtures today, so a discovery regression (a directory rename, a
+/// walk bug, fixtures silently dropping out) fails loudly instead of shrinking
+/// coverage. When a fixture set legitimately moves, update this list in the
+/// same PR. Keep it in lockstep with `HARNESS_WIRED_DIAGNOSTIC_CATEGORIES` in
+/// `tools/corpus/generate.py` (which mirrors the harness's enforcement scope).
+const DIAGNOSTIC_FIXTURE_CATEGORIES: &[&str] = &[
+    "context",
+    "effects",
+    "parse",
+    "stdlib",
+    "types",
+    "types-diagnostics",
+];
+
+/// Floor on the number of fixtures the diagnostic test must drive (the count
+/// on 2026-06-10). Falling below it means discovery silently lost fixtures.
+const MIN_DIAGNOSTIC_FIXTURES: usize = 14;
+
+/// Floor on the number of fixtures the `no_errors` test must drive (the count
+/// on 2026-06-10). Falling below it means discovery silently lost fixtures.
+const MIN_NO_ERRORS_FIXTURES: usize = 40;
 
 /// Build `case`'s source for `target` into `project_dir`, returning the
 /// directory containing the emitted `main.<ext>` (i.e. `project_dir/build/<target>`).
@@ -487,161 +530,213 @@ fn conformance_fixtures_execute_on_every_present_target() {
     );
 }
 
-/// The effect-system *diagnostic* fixtures under `conformance/effects/` are
-/// driven through `bock check` (they have no runnable output): each declares
-/// an `// EXPECT: error E<code> at <line>:<col>` directive for an effect-system
-/// error path the spec (§10) defines — a genuinely-unhandled bare op (E1001),
-/// and the v1.x-reserved lambda handler surface (E4002). This test wires the
-/// previously-inert suite into the harness: every such fixture must `bock
-/// check`-fail and surface its declared error code.
+/// Run `bock check` against a fixture's ORIGINAL on-disk path (not the
+/// directive-stripped `case.source`): a diagnostic directive's `<line>:<col>`
+/// refers to the file as written on disk, including the leading `// TEST:` /
+/// `// EXPECT:` comment lines. Returns `(success, combined stdout+stderr)`.
 ///
-/// (The *positive* effect forms — §10.4 bare-op-in-`handling`, §10.3 Layer-1/2
-/// resolution, innermost-shadow, `with`-clause propagation, cross-module — are
-/// covered end to end on every target by the `exec_effect_*` execution fixtures
-/// above; those assert real runtime output, which a diagnostic fixture cannot.)
+/// The check-driven paths only support **single-file** fixtures: `bock check
+/// <path>` cannot resolve a `// FILE:` auxiliary module, and materializing the
+/// sections elsewhere would break the on-disk `<line>:<col>` contract. This is
+/// the one explicit limitation of the wiring — `kind` names the calling test
+/// so the panic points at the right place to extend if a multi-file
+/// diagnostic fixture is ever needed (none exists as of 2026-06-10).
+fn bock_check_fixture(case: &TestCase, kind: &str) -> (bool, String) {
+    assert!(
+        case.aux_files.is_empty(),
+        "{kind} fixture `{}` is multi-file (`// FILE:` sections); the \
+         check-driven conformance path only supports single-file fixtures — \
+         see `bock_check_fixture` in execution.rs",
+        case.name,
+    );
+    let output = Command::new(bock_binary())
+        .arg("check")
+        .arg(&case.path)
+        .output()
+        .expect("failed to spawn bock check");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    (output.status.success(), combined)
+}
+
+/// Every conformance fixture — in EVERY category — that declares one or more
+/// `// EXPECT: error E<code> at <line>:<col>` directives is driven through
+/// `bock check` and must fail, surfacing **each** declared code and location.
+///
+/// Before 2026-06-10 only `conformance/effects/` and
+/// `conformance/types-diagnostics/` were wired (two near-identical tests);
+/// the same directives under `context/`, `parse/`, `stdlib/`, and `types/`
+/// were parsed but never asserted, which let `types/type_mismatch.bock`
+/// declare a code the compiler does not emit — E0205 — without any test
+/// noticing (Q-conformance-directive-wiring). This test replaces the
+/// per-category pair with one uniform walk of the whole conformance tree, so
+/// no category can be silently unwired again.
+///
+/// What the wired fixtures pin (provenance of the former per-category tests):
+/// - `effects/` — §10 effect-system error paths: a genuinely-unhandled bare
+///   op (E1001) and the v1.x-reserved lambda handler surface (E4002). The
+///   *positive* effect forms are covered on every target by the
+///   `exec_effect_*` execution fixtures above.
+/// - `types-diagnostics/` — type errors the checker must report but cannot
+///   run, e.g. method-body type errors inside `impl`/`class` blocks
+///   (Q-impl-body-typecheck: `check_item` used to silently skip them).
+/// - `context/`, `parse/`, `stdlib/`, `types/` — newly live: `@performance`
+///   unit enforcement (E8003), the deferred tuple-index diagnostic (E2092),
+///   primitive core-trait sealing (E4011), narrowing-conversion exclusion
+///   (E4012), and the body/return type mismatch (E4001).
 #[test]
-fn conformance_effect_diagnostic_fixtures_check_as_declared() {
-    let dir = conformance_effects_dir();
-    let discovered = discover_tests(&dir);
+fn conformance_diagnostic_fixtures_check_as_declared() {
+    let root = conformance_root_dir();
+    let discovered = discover_tests(&root);
     assert!(
         !discovered.is_empty(),
-        "no effect diagnostic fixtures discovered under {}",
-        dir.display()
+        "no conformance fixtures discovered under {}",
+        root.display()
     );
 
     let mut checked = 0usize;
+    let mut by_category: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
     for result in discovered {
-        let case = result.expect("effect diagnostic fixture failed to load");
+        let case = result.expect("conformance fixture failed to load");
 
-        // Pull the single `error E<code> at <l>:<c>` expectation.
-        let Some((code, location)) = case.expectations.iter().find_map(|e| match e {
-            Expectation::ErrorAt { code, location } => Some((code.clone(), location.clone())),
-            _ => None,
-        }) else {
-            panic!(
-                "effect diagnostic fixture `{}` declares no `// EXPECT: error ...` directive",
-                case.name
-            );
-        };
+        // Collect EVERY declared `error E<code> at <l>:<c>` — a fixture may
+        // declare several (e.g. context/performance_bare_int_rejected.bock
+        // declares two E8003 sites on one line).
+        let errors: Vec<_> = case
+            .expectations
+            .iter()
+            .filter_map(|e| match e {
+                Expectation::ErrorAt { code, location } => Some((code, location)),
+                _ => None,
+            })
+            .collect();
+        if errors.is_empty() {
+            continue;
+        }
 
-        // Run `bock check` on the ORIGINAL fixture path (not the
-        // directive-stripped `case.source`): the directive's `<line>:<col>`
-        // refers to the file as written on disk, including the leading
-        // `// TEST:` / `// EXPECT:` comment lines.
-        let output = Command::new(bock_binary())
-            .arg("check")
-            .arg(&case.path)
-            .output()
-            .expect("failed to spawn bock check");
+        // A fixture cannot promise an error and a clean check at once.
+        assert!(
+            !case.expectations.contains(&Expectation::NoErrors),
+            "diagnostic fixture `{}` declares BOTH `no_errors` and `error ...` \
+             directives — contradictory; fix the fixture",
+            case.name,
+        );
+
+        let (success, combined) = bock_check_fixture(&case, "diagnostic");
 
         // A diagnostic fixture must FAIL to check.
         assert!(
-            !output.status.success(),
-            "effect diagnostic fixture `{}` checked clean but expected `{code}`:\nstdout:\n{}\nstderr:\n{}",
+            !success,
+            "diagnostic fixture `{}` ({}) checked clean but expected {}:\n{combined}",
             case.name,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
+            case.path.display(),
+            errors
+                .iter()
+                .map(|(code, loc)| format!("`{code}` at {loc}"))
+                .collect::<Vec<_>>()
+                .join(", "),
         );
 
-        // The expected error code must appear in the combined output, and the
-        // reported location must match the `<line>:<col>` the directive names.
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        assert!(
-            combined.contains(&code),
-            "effect diagnostic fixture `{}` did not surface `{code}`:\n{combined}",
-            case.name,
-        );
-        let loc_str = format!("{}:{}", location.line, location.col);
-        assert!(
-            combined.contains(&loc_str),
-            "effect diagnostic fixture `{}` did not report location `{loc_str}`:\n{combined}",
-            case.name,
-        );
+        // Every declared code must appear in the combined output, and every
+        // declared `<line>:<col>` must be reported.
+        for (code, location) in &errors {
+            assert!(
+                combined.contains(code.as_str()),
+                "diagnostic fixture `{}` ({}) did not surface `{code}`:\n{combined}",
+                case.name,
+                case.path.display(),
+            );
+            let loc_str = format!("{}:{}", location.line, location.col);
+            assert!(
+                combined.contains(&loc_str),
+                "diagnostic fixture `{}` ({}) did not report location `{loc_str}`:\n{combined}",
+                case.name,
+                case.path.display(),
+            );
+        }
+
         checked += 1;
+        *by_category
+            .entry(fixture_category(&root, &case.path))
+            .or_default() += 1;
     }
 
+    eprintln!("\n=== conformance diagnostic (bock check) summary ===");
+    for (category, count) in &by_category {
+        eprintln!("  {category}: {count} fixture(s)");
+    }
+
+    // Tripwires against silent coverage shrink (see the constants' docs).
+    for category in DIAGNOSTIC_FIXTURE_CATEGORIES {
+        assert!(
+            by_category.contains_key(*category),
+            "category `{category}` contributed no diagnostic fixtures — \
+             coverage shrank (or fixtures moved; update \
+             DIAGNOSTIC_FIXTURE_CATEGORIES and the corpus generator's \
+             HARNESS_WIRED_DIAGNOSTIC_CATEGORIES in lockstep)",
+        );
+    }
     assert!(
-        checked >= 2,
-        "expected >= 2 effect diagnostic fixtures, checked {checked}"
+        checked >= MIN_DIAGNOSTIC_FIXTURES,
+        "expected >= {MIN_DIAGNOSTIC_FIXTURES} diagnostic fixtures, checked {checked}"
     );
 }
 
-/// The type-checker *diagnostic* fixtures under `conformance/types-diagnostics/`
-/// pin type errors the checker must report but cannot run (they fail to check):
-/// each declares an `// EXPECT: error E<code> at <line>:<col>`. These are driven
-/// through `bock check`, mirroring [`conformance_effect_diagnostic_fixtures_check_as_declared`].
+/// Every conformance fixture — in EVERY category — that declares
+/// `// EXPECT: no_errors` is driven through `bock check` and must check
+/// clean (exit 0).
 ///
-/// Q-impl-body-typecheck: before the fix, `check_item` dispatched only `FnDecl`
-/// and `ConstDecl`; `ImplBlock`/`ClassDecl` fell through to a `record Void` arm,
-/// so type errors inside impl/class method bodies were silently missed. These
-/// fixtures assert a method-body type error now surfaces its declared `E4001`
-/// at the body expression's location — for both an `impl` and a `class`.
+/// Until 2026-06-10 NOTHING asserted `no_errors` against the live compiler:
+/// the harness lib tests only checked that the directive *parses*. Fixing the
+/// `// EXPECT: no errors` typo in types/fn_type_param.bock (silently ignored
+/// since the file was written) is only meaningful if the repaired directive
+/// is actually enforced — this test is that enforcement.
 #[test]
-fn conformance_method_body_diagnostic_fixtures_check_as_declared() {
-    let dir = conformance_types_diagnostics_dir();
-    let discovered = discover_tests(&dir);
+fn conformance_no_errors_fixtures_check_clean() {
+    let root = conformance_root_dir();
+    let discovered = discover_tests(&root);
     assert!(
         !discovered.is_empty(),
-        "no type diagnostic fixtures discovered under {}",
-        dir.display()
+        "no conformance fixtures discovered under {}",
+        root.display()
     );
 
     let mut checked = 0usize;
     for result in discovered {
-        let case = result.expect("type diagnostic fixture failed to load");
+        let case = result.expect("conformance fixture failed to load");
+        if !case.expectations.contains(&Expectation::NoErrors) {
+            continue;
+        }
+        // Contradictory combinations are rejected by the diagnostic test
+        // above; here just skip them so each defect is reported once.
+        if case
+            .expectations
+            .iter()
+            .any(|e| matches!(e, Expectation::ErrorAt { .. }))
+        {
+            continue;
+        }
 
-        let Some((code, location)) = case.expectations.iter().find_map(|e| match e {
-            Expectation::ErrorAt { code, location } => Some((code.clone(), location.clone())),
-            _ => None,
-        }) else {
-            panic!(
-                "type diagnostic fixture `{}` declares no `// EXPECT: error ...` directive",
-                case.name
-            );
-        };
-
-        // Run `bock check` on the ORIGINAL fixture path so the directive's
-        // `<line>:<col>` lines up with the file as written on disk (including
-        // the leading `// TEST:` / `// EXPECT:` comment lines).
-        let output = Command::new(bock_binary())
-            .arg("check")
-            .arg(&case.path)
-            .output()
-            .expect("failed to spawn bock check");
-
+        let (success, combined) = bock_check_fixture(&case, "no_errors");
         assert!(
-            !output.status.success(),
-            "type diagnostic fixture `{}` checked clean but expected `{code}`:\nstdout:\n{}\nstderr:\n{}",
+            success,
+            "fixture `{}` ({}) declares `no_errors` but `bock check` failed:\n{combined}",
             case.name,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        assert!(
-            combined.contains(&code),
-            "type diagnostic fixture `{}` did not surface `{code}`:\n{combined}",
-            case.name,
-        );
-        let loc_str = format!("{}:{}", location.line, location.col);
-        assert!(
-            combined.contains(&loc_str),
-            "type diagnostic fixture `{}` did not report location `{loc_str}`:\n{combined}",
-            case.name,
+            case.path.display(),
         );
         checked += 1;
     }
 
+    eprintln!("\n=== conformance no_errors (bock check) summary ===");
+    eprintln!("  checked clean: {checked} fixture(s)");
+
     assert!(
-        checked >= 2,
-        "expected >= 2 type diagnostic fixtures, checked {checked}"
+        checked >= MIN_NO_ERRORS_FIXTURES,
+        "expected >= {MIN_NO_ERRORS_FIXTURES} no_errors fixtures, checked {checked}"
     );
 }

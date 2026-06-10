@@ -1,5 +1,5 @@
 // TEST: function_typed_parameter_callable
-// EXPECT: no errors
+// EXPECT: no_errors
 fn apply(f: Fn(Int) -> Int, x: Int) -> Int {
   f(x)
 }
