@@ -65,7 +65,7 @@ struct CompiledTestFile {
 /// isolated interpreter, and prints a summary. Returns exit code 1 if any test fails.
 pub async fn run(filter: Option<String>, files: Vec<PathBuf>) -> anyhow::Result<()> {
     let files = if files.is_empty() {
-        discover_bock_files(".")?
+        discover_bock_files(Path::new("."))?
     } else {
         files
     };
@@ -215,6 +215,30 @@ fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
     for src in crate::stdlib::core_sources() {
         let pf = parse_stdlib_source(&src, &mut source_map)?;
         parsed_files.push(pf);
+    }
+
+    // Sibling-module discovery (Q-test-interp-crossfile-use): mirror the
+    // project resolution `bock run` performs. Walking up from the test file,
+    // a `bock.project` marker pins the project root; every `.bock` file under
+    // it is parsed alongside the test file so cross-file imports (`use
+    // main.{...}` from `test/<name>_test.bock` against `src/main.bock` — the
+    // standard `examples/*/test/` layout) resolve through the same dependency
+    // sort → per-module compile → `ModuleRegistry` path the compiled-target
+    // project build uses. Outside any project the behavior is unchanged: the
+    // test file compiles alone (sweeping the CWD would slurp unrelated `.bock`
+    // files, exactly the hazard `bock run` avoids for explicit entries).
+    let entry_canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if let Some(root) = find_project_root(path) {
+        for sibling in discover_bock_files(&root)? {
+            let sibling_canonical = sibling.canonicalize().unwrap_or_else(|_| sibling.clone());
+            if sibling_canonical == entry_canonical {
+                continue;
+            }
+            let sibling_content = std::fs::read_to_string(&sibling)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", sibling.display()))?;
+            let pf = parse_user_file(&sibling, &sibling_content, &mut source_map)?;
+            parsed_files.push(pf);
+        }
     }
 
     // The user test file is the entry; remember which parsed index it lands at.
@@ -734,10 +758,26 @@ fn register_builtins(symbols: &mut SymbolTable) {
     }
 }
 
+/// Walk up from the test file's parent directory looking for a `bock.project`
+/// marker. Returns the directory containing it, or `None` if no project file
+/// is found before reaching the filesystem root. Mirrors `run.rs`, so the
+/// `bock test` interpreter path resolves sibling modules from the same root
+/// the other commands use.
+fn find_project_root(entry: &Path) -> Option<PathBuf> {
+    let canonical = entry.canonicalize().ok()?;
+    let mut current = canonical.parent()?;
+    loop {
+        if current.join("bock.project").is_file() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
 /// Recursively discover `.bock` files in the given directory.
-fn discover_bock_files(dir: &str) -> anyhow::Result<Vec<PathBuf>> {
+fn discover_bock_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    discover_bock_files_recursive(Path::new(dir), &mut files)?;
+    discover_bock_files_recursive(dir, &mut files)?;
     files.sort();
     Ok(files)
 }
@@ -885,7 +925,7 @@ fn not_a_test() {
         fs::write(sub.join("b.bock"), "").unwrap();
         fs::write(dir.path().join("c.txt"), "").unwrap();
 
-        let files = discover_bock_files(&dir.path().to_string_lossy()).unwrap();
+        let files = discover_bock_files(dir.path()).unwrap();
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|f| f.extension().unwrap() == "bock"));
     }

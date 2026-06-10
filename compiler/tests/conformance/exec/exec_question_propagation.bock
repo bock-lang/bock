@@ -1,0 +1,64 @@
+// TEST: exec_question_propagation
+// EXPECT: output "ok=4;err=too-big;none;some=3;done"
+// EXPECT: targets js, ts, python, rust, go
+//
+// §7.10 error propagation: `expr?` on `Err(e)` (and `None`) early-returns the
+// `Err`/`None` from the *enclosing function*; the caller observes it as a
+// normal `Result`/`Optional` value and execution continues. This pins the
+// cross-target behavior that the reference interpreter must also match
+// (Q-interp-question-propagation: the interpreter previously aborted the whole
+// program on the first propagated `Err` instead of returning it to the
+// caller — `bock run` on this program died with `runtime error: propagated
+// error: too-big` while every compiled target printed the full line).
+//
+// Fields:
+//   * ok:   double_len("ab")      = Ok(4)        (`?` unwraps Ok(2), doubled)
+//   * err:  double_len("toolong") = Err(too-big) (`?` early-returns the Err)
+//   * none: first_or_none("")     = None         (`?` early-returns None)
+//   * some: first_or_none("xy")   = Some(3)      (`?` unwraps Some(2), +1)
+//   * done: control flow continues in `main` after observing the Err/None
+module main
+
+fn parse_small(s: String) -> Result[Int, String] {
+  if (s.len() > 3) {
+    return Err("too-big")
+  }
+  Ok(s.len())
+}
+
+fn double_len(s: String) -> Result[Int, String] {
+  let n = parse_small(s)?
+  Ok(n * 2)
+}
+
+fn first_or_none(s: String) -> Optional[Int] {
+  let n = lookup(s)?
+  Some(n + 1)
+}
+
+fn lookup(s: String) -> Optional[Int] {
+  if (s.len() == 0) {
+    return None
+  }
+  Some(s.len())
+}
+
+fn main() -> Void {
+  let ok_part = match double_len("ab") {
+    Ok(n) => "ok=${n}"
+    Err(e) => "ok-err=${e}"
+  }
+  let err_part = match double_len("toolong") {
+    Ok(n) => "err-ok=${n}"
+    Err(e) => "err=${e}"
+  }
+  let none_part = match first_or_none("") {
+    Some(n) => "some=${n}"
+    None => "none"
+  }
+  let some_part = match first_or_none("xy") {
+    Some(n) => "some=${n}"
+    None => "none2"
+  }
+  println("${ok_part};${err_part};${none_part};${some_part};done")
+}

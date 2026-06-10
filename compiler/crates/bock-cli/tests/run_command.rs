@@ -497,3 +497,111 @@ fn run_mut_self_persists_across_calls() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("a=1 b=2 d=3 final=3"), "stdout: {stdout}",);
 }
+
+/// Regression (Q-interp-question-propagation): `expr?` on an `Err`/`None` must
+/// early-return the `Err`/`None` from the *enclosing function* (§7.10) — the
+/// caller observes it as a normal `Result`/`Optional` value and execution
+/// continues — instead of aborting the whole program. Before the fix this
+/// program died after the first line with `runtime error: propagated error:
+/// too big`, while every compiled target (js verified as the parity reference)
+/// printed all four lines. Mirrors the conformance pair
+/// `conformance/interp/question_propagation.bock` (interpreter) and
+/// `conformance/exec/exec_question_propagation.bock` (compiled targets ×5).
+#[test]
+fn run_question_propagation_returns_err_to_caller() {
+    let f = write_temp_file(
+        "module main\n\
+         \n\
+         fn parse_small(s: String) -> Result[Int, String] {\n\
+         \x20\x20if (s.len() > 3) {\n\
+         \x20\x20\x20\x20return Err(\"too big\")\n\
+         \x20\x20}\n\
+         \x20\x20Ok(s.len())\n\
+         }\n\
+         \n\
+         fn double_len(s: String) -> Result[Int, String] {\n\
+         \x20\x20let n = parse_small(s)?\n\
+         \x20\x20Ok(n * 2)\n\
+         }\n\
+         \n\
+         fn lookup(s: String) -> Optional[Int] {\n\
+         \x20\x20if (s.len() == 0) {\n\
+         \x20\x20\x20\x20return None\n\
+         \x20\x20}\n\
+         \x20\x20Some(s.len())\n\
+         }\n\
+         \n\
+         fn first_or_none(s: String) -> Optional[Int] {\n\
+         \x20\x20let n = lookup(s)?\n\
+         \x20\x20Some(n + 1)\n\
+         }\n\
+         \n\
+         fn main() -> Void {\n\
+         \x20\x20match double_len(\"ab\") {\n\
+         \x20\x20\x20\x20Ok(n) => println(\"ok: ${n}\")\n\
+         \x20\x20\x20\x20Err(e) => println(\"err: ${e}\")\n\
+         \x20\x20}\n\
+         \x20\x20match double_len(\"toolong\") {\n\
+         \x20\x20\x20\x20Ok(n) => println(\"ok: ${n}\")\n\
+         \x20\x20\x20\x20Err(e) => println(\"err: ${e}\")\n\
+         \x20\x20}\n\
+         \x20\x20match first_or_none(\"\") {\n\
+         \x20\x20\x20\x20Some(n) => println(\"some: ${n}\")\n\
+         \x20\x20\x20\x20None => println(\"none\")\n\
+         \x20\x20}\n\
+         \x20\x20println(\"done\")\n\
+         }\n",
+    );
+    let output = bock_bin().arg("run").arg(f.path()).output().unwrap();
+    assert!(
+        output.status.success(),
+        "expected exit 0 (propagated Err must be observed by the caller, not \
+         abort the program), got {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Pin the full stdout: the js/compiled-target reference output for this
+    // program, including the lines *after* the first propagated Err.
+    assert_eq!(
+        stdout, "ok: 4\nerr: too big\nnone\ndone\n",
+        "interpreter output diverged from the compiled-target reference"
+    );
+}
+
+/// The Equatable primitive bridge under `bock run`
+/// (Q-interp-assert-primitives root cause): `a.eq(b)` on concrete primitive
+/// receivers must dispatch to native equality, as the compiled targets lower
+/// it (js `===`, rust `==`, …). Before the fix the interpreter registered the
+/// bridge under the never-referenced name `equals`, so `.eq` died with
+/// `method 'eq' not found on Int`.
+#[test]
+fn run_primitive_eq_bridge_dispatches() {
+    let f = write_temp_file(
+        "module main\n\
+         \n\
+         fn main() -> Void {\n\
+         \x20\x20let i = (3).eq(3)\n\
+         \x20\x20let f = (2.5).eq(2.5)\n\
+         \x20\x20let b = (true).eq(true)\n\
+         \x20\x20let s = \"ab\".eq(\"ab\")\n\
+         \x20\x20let c = ('x').eq('x')\n\
+         \x20\x20let n = (3).eq(4)\n\
+         \x20\x20println(\"int=${i};float=${f};bool=${b};string=${s};char=${c};neq=${n}\")\n\
+         }\n",
+    );
+    let output = bock_bin().arg("run").arg(f.path()).output().unwrap();
+    assert!(
+        output.status.success(),
+        "expected exit 0, got {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("int=true;float=true;bool=true;string=true;char=true;neq=false"),
+        "stdout: {stdout}"
+    );
+}
