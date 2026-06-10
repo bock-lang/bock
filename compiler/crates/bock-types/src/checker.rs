@@ -23,7 +23,7 @@
 //! to the inference result for single nodes (no mutation — useful in tests
 //! and for downstream passes that want to query type of a specific node).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bock_air::stubs::{TypeInfo, Value};
@@ -32,7 +32,9 @@ use bock_ast::{BinOp, GenericParam, Literal, TypeConstraint, TypeExpr, TypePath,
 use bock_errors::{DiagnosticBag, DiagnosticCode, Span};
 
 use crate::traits::{resolve_impl, ImplTable, TraitRef};
-use crate::{unify, EffectRef, FnType, GenericType, PrimitiveType, Substitution, Type, TypeVarId};
+use crate::{
+    unify, EffectRef, FnType, GenericType, PrimitiveType, Substitution, Type, TypeError, TypeVarId,
+};
 
 // ─── Diagnostic codes ─────────────────────────────────────────────────────────
 
@@ -93,6 +95,19 @@ const E_NO_SUCH_METHOD: DiagnosticCode = DiagnosticCode {
 const E_BARE_MODULE_IMPORT: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
     number: 4014,
+};
+/// `E6006` — the lambda-handler surface `Effect.handler(...)` is **reserved
+/// until v1.x** (§10.4). v1 supports exactly one handler form: a record with
+/// an `impl <Effect> for <Record>`, installed via `handle <Effect> with
+/// <record>` (module level) or `handling (<Effect> with <record>) { ... }`
+/// (block level). Before this code existed the form surfaced as a doubled,
+/// rule-less `E4002 undefined variable` at the effect name
+/// (Q-diag-effect-violation-errors); it now names the actual rule. Lives in
+/// the `6xxx` effects family because the violated rule is an effect-system
+/// rule, even though the emitting pass is the type checker.
+const E_RESERVED_LAMBDA_HANDLER: DiagnosticCode = DiagnosticCode {
+    prefix: 'E',
+    number: 6006,
 };
 
 // ─── Receiver-type annotation (checker → codegen) ──────────────────────────────
@@ -433,6 +448,18 @@ pub struct TypeChecker {
     /// binding name (`__bock_iter_<n>`) unique, so nested desugared `for` loops
     /// do not shadow one another.
     synth_iter_var: std::cell::Cell<u32>,
+    /// `(name, span)` pairs for which an undefined-name diagnostic has
+    /// already been emitted. The AIR lowerer desugars a method call
+    /// `recv.m(args)` into `Call { callee: FieldAccess(recv, m), args:
+    /// [recv, args…] }`, **duplicating the receiver node** — so the same
+    /// source expression is inferred twice (once inside the callee's
+    /// `FieldAccess`, once as `args[0]`). For well-typed code the double
+    /// inference is harmless, but an undefined receiver used to produce the
+    /// same `E4002` twice at the identical span
+    /// (Q-diag-effect-violation-errors). One root cause must emit one
+    /// diagnostic (diagnostics-review rubric #6), so emission sites consult
+    /// this set first.
+    reported_undefined: HashSet<(String, Span)>,
 }
 
 impl TypeChecker {
@@ -460,6 +487,7 @@ impl TypeChecker {
             type_var_bounds: HashMap::new(),
             synth_id: std::cell::Cell::new(SYNTH_ID_BASE),
             synth_iter_var: std::cell::Cell::new(0),
+            reported_undefined: HashSet::new(),
         }
     }
 
@@ -1032,20 +1060,38 @@ impl TypeChecker {
 
     // ── Unification helper ───────────────────────────────────────────────────
 
-    /// Try to unify `a` and `b`. On failure emit a diagnostic at `span` and
-    /// return `Type::Error`.
-    fn unify_or_error(&mut self, a: &Type, b: &Type, span: Span, context: &str) -> Type {
-        let a = self.resolve_alias(&self.subst.apply(a));
-        let b = self.resolve_alias(&self.subst.apply(b));
-        match unify(&a, &b, &mut self.subst) {
-            Ok(()) => self.subst.apply(&a),
+    /// Try to unify `found` (the type the expression actually has) with
+    /// `expected` (the type the surrounding context requires). On failure
+    /// emit an `E4001` at `span` and return `Type::Error`.
+    ///
+    /// The argument orientation is part of the diagnostic contract: the
+    /// message reads ``expected `T`, found `U``` with `T` taken from
+    /// `expected` and `U` from `found`, and the conversion hint (when one
+    /// exists) suggests the conversion that produces the **expected** type.
+    /// Call sites must pass the established/required type as `expected`
+    /// (for operand pairs, the left/first operand establishes the
+    /// expectation). Types render in surface Bock syntax via [`Type`]'s
+    /// `Display` — never `Debug`.
+    fn unify_or_error(&mut self, found: &Type, expected: &Type, span: Span, context: &str) -> Type {
+        let found = self.resolve_alias(&self.subst.apply(found));
+        let expected = self.resolve_alias(&self.subst.apply(expected));
+        // `unify` is symmetric for solving, but its error payloads describe
+        // the first argument as `left`/`expected` — pass `expected` first so
+        // arity errors (`expected a function taking N parameters, …`) read
+        // with the right orientation.
+        match unify(&expected, &found, &mut self.subst) {
+            Ok(()) => self.subst.apply(&found),
             Err(e) => {
-                let diag = self.diags.error(
-                    E_TYPE_MISMATCH,
-                    format!("type mismatch in {context}: {e}"),
-                    span,
-                );
-                if let Some(hint) = conversion_hint(&a, &b) {
+                let msg = match &e {
+                    TypeError::Mismatch { .. } => {
+                        format!(
+                            "type mismatch in {context}: expected `{expected}`, found `{found}`"
+                        )
+                    }
+                    other => format!("type mismatch in {context}: {other}"),
+                };
+                let diag = self.diags.error(E_TYPE_MISMATCH, msg, span);
+                if let Some(hint) = conversion_hint(&found, &expected) {
                     diag.note(hint);
                 }
                 Type::Error
@@ -2260,11 +2306,17 @@ impl TypeChecker {
                         self.subst.apply(&ty)
                     }
                     None => {
-                        self.diags.error(
-                            E_UNDEFINED_VAR,
-                            format!("undefined variable `{name}`"),
-                            span,
-                        );
+                        // The lowerer's method-call desugar duplicates the
+                        // receiver node (see `reported_undefined`), so the
+                        // same undefined identifier can be inferred twice at
+                        // one span. Emit once per `(name, span)`.
+                        if self.reported_undefined.insert((name.clone(), span)) {
+                            self.diags.error(
+                                E_UNDEFINED_VAR,
+                                format!("undefined variable `{name}`"),
+                                span,
+                            );
+                        }
                         Type::Error
                     }
                 }
@@ -2376,6 +2428,42 @@ impl TypeChecker {
             // ── Field access ──────────────────────────────────────────────────
             NodeKind::FieldAccess { field, .. } => {
                 let field_name = field.name.clone();
+                // §10.4 reserved surface: `Effect.handler(...)`. An effect
+                // name is a *type*, not a value, so `Log` in value position
+                // would otherwise fall through to a rule-less "undefined
+                // variable" error. When the object is an unbound identifier
+                // that names a known effect and the accessed member is
+                // `handler`, report the actual rule (the lambda-handler
+                // form is reserved until v1.x) instead — and suppress the
+                // generic E4002 for the effect name (the lowerer's
+                // method-call desugar also duplicates it as `args[0]`; see
+                // `reported_undefined`).
+                if field_name == "handler" {
+                    if let NodeKind::FieldAccess { object, .. } = &node.kind {
+                        if let NodeKind::Identifier { name } = &object.kind {
+                            let effect_name = name.name.clone();
+                            if self.env.lookup(&effect_name).is_none()
+                                && (self.effect_op_types.contains_key(&effect_name)
+                                    || self.effect_components.contains_key(&effect_name))
+                            {
+                                self.reported_undefined
+                                    .insert((effect_name.clone(), object.span));
+                                self.diags
+                                    .error(
+                                        E_RESERVED_LAMBDA_HANDLER,
+                                        format!(
+                                            "the lambda-handler form `{effect_name}.handler(...)` is reserved until v1.x"
+                                        ),
+                                        span,
+                                    )
+                                    .note(format!(
+                                        "v1 supports one handler form: declare a record, `impl {effect_name} for <Record>`, then install it with `handle {effect_name} with <record>` (module level) or `handling ({effect_name} with <record>) {{ ... }}` (block level)"
+                                    ));
+                                return self.record(node, Type::Error);
+                            }
+                        }
+                    }
+                }
                 let obj_ty = if let NodeKind::FieldAccess { object, .. } = &mut node.kind {
                     self.infer_node(object)
                 } else {
@@ -2971,7 +3059,9 @@ impl TypeChecker {
                 } else {
                     unreachable!()
                 };
-                self.unify_or_error(&tty, &vty, span, "assignment");
+                // Orientation: the assignment target establishes the
+                // expected type; the assigned value is the found type.
+                self.unify_or_error(&vty, &tty, span, "assignment");
                 Type::Primitive(PrimitiveType::Void)
             }
 
@@ -2984,7 +3074,9 @@ impl TypeChecker {
                 } else {
                     unreachable!()
                 };
-                self.unify_or_error(&lty, &hty, span, "range bounds");
+                // Orientation: the low bound establishes the expected type;
+                // the high bound is the found type.
+                self.unify_or_error(&hty, &lty, span, "range bounds");
                 Type::Generic(GenericType {
                     constructor: "Range".into(),
                     args: vec![lty],
@@ -3479,7 +3571,9 @@ impl TypeChecker {
                 } else {
                     (&then_ty, &else_ty)
                 };
-                self.unify_or_error(a, b, span, "if-else branches")
+                // Orientation: the first (non-diverging) branch establishes
+                // the expected type; the other branch is the found type.
+                self.unify_or_error(b, a, span, "if-else branches")
             } else {
                 // No else: result is Optional[then_ty] or Void
                 Type::Primitive(PrimitiveType::Void)
@@ -5225,15 +5319,17 @@ impl TypeChecker {
 
     fn infer_binop(&mut self, op: BinOp, lt: &Type, rt: &Type, span: Span) -> Type {
         match op {
-            // Arithmetic: operands and result are numeric
+            // Arithmetic: operands and result are numeric.
+            // Orientation: the left operand establishes the expected type;
+            // the right operand is the found type.
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => {
-                self.unify_or_error(lt, rt, span, "arithmetic operands");
+                self.unify_or_error(rt, lt, span, "arithmetic operands");
                 self.subst.apply(lt)
             }
 
             // Comparison: operands must unify; result is Bool.
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                self.unify_or_error(lt, rt, span, "comparison operands");
+                self.unify_or_error(rt, lt, span, "comparison operands");
                 // §18.5 trait-language integration: the ordering operators
                 // (`<`, `>`, `<=`, `>=`) require `impl Comparable` for a
                 // *user* (Named) operand. Primitives are gated by the canonical
@@ -5267,7 +5363,7 @@ impl TypeChecker {
 
             // Bitwise: operands must unify (typically Int); result same
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                self.unify_or_error(lt, rt, span, "bitwise operands");
+                self.unify_or_error(rt, lt, span, "bitwise operands");
                 self.subst.apply(lt)
             }
 
@@ -5886,14 +5982,17 @@ fn name_to_primitive(name: &str) -> Option<PrimitiveType> {
     }
 }
 
-/// Suggest a conversion method for common numeric/string primitive mismatches.
+/// Suggest a conversion for common numeric/string primitive mismatches.
 ///
-/// The caller may pass the two types in either order; this helper is
-/// symmetric and produces a single note describing the conversions available
-/// between them. Returns `None` for type pairs without a trivial conversion.
-fn conversion_hint(lhs: &Type, rhs: &Type) -> Option<String> {
-    let l = as_primitive(lhs)?;
-    let r = as_primitive(rhs)?;
+/// **Direction-aware**: the suggestion always names the conversion that
+/// produces the **expected** type from the **found** value. When no such
+/// conversion exists in Bock's surface, this returns `None` — a hint
+/// suggesting the wrong-direction conversion is worse than no hint
+/// (it would steer an agent's repair away from the type the context
+/// requires).
+fn conversion_hint(found: &Type, expected: &Type) -> Option<String> {
+    let f = as_primitive(found)?;
+    let e = as_primitive(expected)?;
     use PrimitiveType as P;
     let is_int = |p: &P| {
         matches!(
@@ -5912,13 +6011,32 @@ fn conversion_hint(lhs: &Type, rhs: &Type) -> Option<String> {
         )
     };
     let is_float = |p: &P| matches!(p, P::Float | P::Float32 | P::Float64 | P::BigFloat);
-    if (is_int(&l) && is_float(&r)) || (is_float(&l) && is_int(&r)) {
-        return Some(
-            "mixed Int/Float — call `.to_float()` on the Int, or `.to_int()` on the Float (truncates), to make the types match".into(),
-        );
+
+    // Found an integer where `Float` is expected: `.to_float()` produces
+    // exactly `Float` (only suggested for the unsized expected type).
+    if is_int(&f) && e == P::Float {
+        return Some(format!(
+            "call `.to_float()` on the `{f}` value to produce the expected `Float`"
+        ));
     }
-    if matches!(l, P::String) || matches!(r, P::String) {
-        return Some("use `.to_string()` to convert the non-`String` operand".into());
+    // Found a float where `Int` is expected: `.to_int()` produces `Int`.
+    if is_float(&f) && e == P::Int {
+        return Some(format!(
+            "call `.to_int()` on the `{f}` value (truncates toward zero) to produce the expected `Int`"
+        ));
+    }
+    // Found a `String` where a number is expected: a String is *parsed*,
+    // not converted — `Int.try_from` / `Float.try_from` return a `Result`.
+    if f == P::String && matches!(e, P::Int | P::Float) {
+        return Some(format!(
+            "a `String` is not implicitly converted; parse it with `{e}.try_from(...)` (returns a `Result` — handle the failure case)"
+        ));
+    }
+    // Found any other primitive where `String` is expected: `.to_string()`.
+    if e == P::String && f != P::String {
+        return Some(format!(
+            "call `.to_string()` on the `{f}` value to produce the expected `String`"
+        ));
     }
     None
 }
@@ -6006,6 +6124,185 @@ mod tests {
                 args: vec![],
             },
         )
+    }
+
+    // ── Diagnostic quality (Q-diag-e4001-message-quality /
+    //    Q-diag-effect-violation-errors) ───────────────────────────────────
+
+    /// E4001 must read ``expected `T`, found `U``` in surface syntax — never
+    /// the doubled-prefix Debug leak `type mismatch: Primitive(String) vs
+    /// Primitive(Int)`.
+    #[test]
+    fn type_mismatch_message_reads_expected_then_found() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let lit = str_lit(&gen);
+        checker.check_expr(&lit, &Type::Primitive(PrimitiveType::Int));
+        let diag = checker.diags.iter().next().expect("a diagnostic");
+        assert_eq!(diag.code.to_string(), "E4001");
+        assert!(
+            diag.message.contains("expected `Int`, found `String`"),
+            "message: {}",
+            diag.message
+        );
+        assert!(
+            !diag.message.contains("Primitive("),
+            "message leaks Debug representation: {}",
+            diag.message
+        );
+    }
+
+    /// The E4001 conversion hint must suggest the conversion that produces
+    /// the **expected** type. A `String` found where `Int` is expected is
+    /// parsed (`Int.try_from`), NOT `.to_string()`-ed (which would convert
+    /// the wrong operand and make the code wronger).
+    #[test]
+    fn type_mismatch_hint_for_expected_int_found_string_is_parse() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let lit = str_lit(&gen);
+        checker.check_expr(&lit, &Type::Primitive(PrimitiveType::Int));
+        let diag = checker.diags.iter().next().expect("a diagnostic");
+        assert!(
+            diag.notes.iter().any(|n| n.contains("Int.try_from")),
+            "notes: {:?}",
+            diag.notes
+        );
+        assert!(
+            !diag.notes.iter().any(|n| n.contains(".to_string()")),
+            "misleading wrong-direction hint: {:?}",
+            diag.notes
+        );
+    }
+
+    #[test]
+    fn conversion_hint_is_direction_aware() {
+        let int = Type::Primitive(PrimitiveType::Int);
+        let float = Type::Primitive(PrimitiveType::Float);
+        let string = Type::Primitive(PrimitiveType::String);
+        let bool_t = Type::Primitive(PrimitiveType::Bool);
+
+        // found Int, expected Float → convert the Int.
+        let hint = conversion_hint(&int, &float).expect("hint");
+        assert!(hint.contains(".to_float()"), "{hint}");
+        // found Float, expected Int → convert the Float.
+        let hint = conversion_hint(&float, &int).expect("hint");
+        assert!(hint.contains(".to_int()"), "{hint}");
+        // found Int, expected String → stringify the Int.
+        let hint = conversion_hint(&int, &string).expect("hint");
+        assert!(hint.contains(".to_string()"), "{hint}");
+        // found String, expected Int/Float → parse, not `.to_string()`.
+        let hint = conversion_hint(&string, &int).expect("hint");
+        assert!(hint.contains("Int.try_from"), "{hint}");
+        let hint = conversion_hint(&string, &float).expect("hint");
+        assert!(hint.contains("Float.try_from"), "{hint}");
+        // No determinable conversion → no hint (a wrong suggestion is
+        // worse than none).
+        assert_eq!(conversion_hint(&bool_t, &int), None);
+        assert_eq!(conversion_hint(&string, &bool_t), None);
+        // Sized float targets have no `.to_float()` shortcut → no hint.
+        assert_eq!(
+            conversion_hint(&int, &Type::Primitive(PrimitiveType::Float32)),
+            None
+        );
+    }
+
+    /// The lowerer's method-call desugar duplicates the receiver node, so an
+    /// undefined name can be inferred twice at the identical span. One root
+    /// cause → one diagnostic (rubric #6).
+    #[test]
+    fn undefined_variable_reported_once_per_name_and_span() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        // Two distinct nodes (distinct ids), same name and span — the shape
+        // the desugar produces.
+        let first = make_node(
+            &gen,
+            NodeKind::Identifier {
+                name: ident("ghost"),
+            },
+        );
+        let second = make_node(
+            &gen,
+            NodeKind::Identifier {
+                name: ident("ghost"),
+            },
+        );
+        checker.infer_expr(&first);
+        checker.infer_expr(&second);
+        assert_eq!(
+            checker.diags.error_count(),
+            1,
+            "expected exactly one E4002 for one root cause"
+        );
+    }
+
+    /// `Effect.handler(...)` (the v1.x-reserved lambda-handler surface) must
+    /// report the actual rule as a single E6006 — not a doubled, rule-less
+    /// `E4002 undefined variable` at the effect name.
+    #[test]
+    fn reserved_lambda_handler_reports_e6006_once() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        checker.insert_effect_op_types(
+            "Log".into(),
+            vec![(
+                "log".into(),
+                Type::Function(FnType {
+                    params: vec![Type::Primitive(PrimitiveType::String)],
+                    ret: Box::new(Type::Primitive(PrimitiveType::Void)),
+                    effects: vec![],
+                }),
+            )],
+        );
+        let object = make_node(&gen, NodeKind::Identifier { name: ident("Log") });
+        let field_access = make_node(
+            &gen,
+            NodeKind::FieldAccess {
+                object: Box::new(object),
+                field: ident("handler"),
+            },
+        );
+        let ty = checker.infer_expr(&field_access);
+        assert_eq!(ty, Type::Error);
+        assert_eq!(checker.diags.error_count(), 1, "exactly one diagnostic");
+        let diag = checker.diags.iter().next().expect("a diagnostic");
+        assert_eq!(diag.code.to_string(), "E6006");
+        assert!(
+            diag.message.contains("`Log.handler(...)`")
+                && diag.message.contains("reserved until v1.x"),
+            "message: {}",
+            diag.message
+        );
+        assert!(
+            diag.notes.iter().any(|n| n.contains("impl Log for")),
+            "note must state the supported v1 handler form: {:?}",
+            diag.notes
+        );
+    }
+
+    /// A `.handler` access on an ordinary undefined name (not an effect)
+    /// still reports the generic undefined variable, not E6006.
+    #[test]
+    fn handler_field_on_non_effect_still_undefined_variable() {
+        let gen = NodeIdGen::new();
+        let mut checker = TypeChecker::new();
+        let object = make_node(
+            &gen,
+            NodeKind::Identifier {
+                name: ident("NotAnEffect"),
+            },
+        );
+        let field_access = make_node(
+            &gen,
+            NodeKind::FieldAccess {
+                object: Box::new(object),
+                field: ident("handler"),
+            },
+        );
+        checker.infer_expr(&field_access);
+        let diag = checker.diags.iter().next().expect("a diagnostic");
+        assert_eq!(diag.code.to_string(), "E4002");
     }
 
     // ── Literal inference ──────────────────────────────────────────────────

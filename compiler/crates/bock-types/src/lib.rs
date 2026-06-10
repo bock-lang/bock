@@ -74,6 +74,16 @@ pub enum PrimitiveType {
     Never,
 }
 
+impl std::fmt::Display for PrimitiveType {
+    /// Renders the primitive's surface-Bock name (`Int`, `String`, …).
+    ///
+    /// The enum variant names are exactly the surface type names, so the
+    /// `Debug` spelling is reused. Keep this invariant when adding variants.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
 // ─── Named (user-defined) types ───────────────────────────────────────────────
 
 /// A user-defined named type (record, enum, class).
@@ -177,6 +187,69 @@ pub enum Type {
     Error,
 }
 
+impl std::fmt::Display for Type {
+    /// Renders the type in **surface Bock syntax** for user-facing
+    /// diagnostics: `Int`, `List[Int]`, `(Int, String)`, `Fn(Int) -> Bool`,
+    /// `String?`, `Result[Int, Error]`.
+    ///
+    /// Diagnostics must use this rendering — never `Debug`, which leaks
+    /// internal representations like `Primitive(Int)`. Unsolved inference
+    /// variables and flexible (sketch-mode) types render as `_`; the poison
+    /// type renders as `<error>` (it should not normally reach a message,
+    /// since `Type::Error` unifies with anything).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Primitive(p) => write!(f, "{p}"),
+            Type::Named(n) => write!(f, "{}", n.name),
+            Type::Generic(g) => {
+                write!(f, "{}[", g.constructor)?;
+                for (i, arg) in g.args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{arg}")?;
+                }
+                write!(f, "]")
+            }
+            Type::Tuple(elems) => {
+                write!(f, "(")?;
+                for (i, e) in elems.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{e}")?;
+                }
+                write!(f, ")")
+            }
+            Type::Function(func) => {
+                write!(f, "Fn(")?;
+                for (i, p) in func.params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{p}")?;
+                }
+                write!(f, ") -> {}", func.ret)?;
+                if !func.effects.is_empty() {
+                    write!(f, " with ")?;
+                    for (i, e) in func.effects.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, " + ")?;
+                        }
+                        write!(f, "{}", e.name)?;
+                    }
+                }
+                Ok(())
+            }
+            Type::Optional(inner) => write!(f, "{inner}?"),
+            Type::Result(ok, err) => write!(f, "Result[{ok}, {err}]"),
+            Type::TypeVar(_) | Type::Flexible(_) => write!(f, "_"),
+            Type::Refined(base, pred) => write!(f, "{base} where {}", pred.source),
+            Type::Error => write!(f, "<error>"),
+        }
+    }
+}
+
 // ─── TypeError ────────────────────────────────────────────────────────────────
 
 /// An error produced by type unification.
@@ -204,24 +277,36 @@ pub enum TypeError {
 }
 
 impl std::fmt::Display for TypeError {
+    /// User-facing rendering. Types render in surface Bock syntax via
+    /// [`Type`]'s `Display` — never `Debug`.
+    ///
+    /// The `expected`/`found` fields of the arity variants (and the
+    /// `left`/`right` of `Mismatch`) follow [`unify`]'s argument order:
+    /// `left`/`expected` describe the first argument, `right`/`found` the
+    /// second. Callers that have a real expected-vs-found orientation must
+    /// pass the expected type as `unify`'s first argument for this text to
+    /// read correctly.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TypeError::Mismatch { left, right } => {
-                write!(f, "type mismatch: {left:?} vs {right:?}")
+                write!(f, "expected `{left}`, found `{right}`")
             }
-            TypeError::OccursCheck { var, ty } => {
-                write!(f, "occurs check failed: ?{var} in {ty:?}")
+            TypeError::OccursCheck { var: _, ty } => {
+                write!(
+                    f,
+                    "the inferred type would be infinite (`_` occurs in `{ty}`)"
+                )
             }
             TypeError::TupleArity { expected, found } => {
                 write!(
                     f,
-                    "tuple arity mismatch: expected {expected}, found {found}"
+                    "expected a tuple with {expected} elements, found {found}"
                 )
             }
             TypeError::FnArity { expected, found } => {
                 write!(
                     f,
-                    "function arity mismatch: expected {expected}, found {found}"
+                    "expected a function taking {expected} parameters, found one taking {found}"
                 )
             }
         }
@@ -500,6 +585,81 @@ mod tests {
 
     fn var(id: TypeVarId) -> Type {
         Type::TypeVar(id)
+    }
+
+    // ── Display (surface-syntax rendering for diagnostics) ────────────────────
+
+    #[test]
+    fn type_display_renders_surface_syntax() {
+        assert_eq!(int().to_string(), "Int");
+        assert_eq!(string_ty().to_string(), "String");
+        assert_eq!(
+            Type::Named(NamedType {
+                name: "Point".into()
+            })
+            .to_string(),
+            "Point"
+        );
+        assert_eq!(
+            Type::Generic(GenericType {
+                constructor: "List".into(),
+                args: vec![int()],
+            })
+            .to_string(),
+            "List[Int]"
+        );
+        assert_eq!(
+            Type::Generic(GenericType {
+                constructor: "Map".into(),
+                args: vec![string_ty(), int()],
+            })
+            .to_string(),
+            "Map[String, Int]"
+        );
+        assert_eq!(
+            Type::Tuple(vec![int(), bool_ty()]).to_string(),
+            "(Int, Bool)"
+        );
+        assert_eq!(
+            Type::Function(FnType {
+                params: vec![int()],
+                ret: Box::new(bool_ty()),
+                effects: vec![],
+            })
+            .to_string(),
+            "Fn(Int) -> Bool"
+        );
+        assert_eq!(
+            Type::Function(FnType {
+                params: vec![],
+                ret: Box::new(int()),
+                effects: vec![EffectRef::new("Log")],
+            })
+            .to_string(),
+            "Fn() -> Int with Log"
+        );
+        assert_eq!(Type::Optional(Box::new(string_ty())).to_string(), "String?");
+        assert_eq!(
+            Type::Result(Box::new(int()), Box::new(string_ty())).to_string(),
+            "Result[Int, String]"
+        );
+        // Inference variables and sketch-mode types render as `_`; types
+        // must never leak Debug forms like `Primitive(Int)` to users.
+        assert_eq!(var(7).to_string(), "_");
+        assert_eq!(
+            Type::Flexible(StructuralConstraints::default()).to_string(),
+            "_"
+        );
+    }
+
+    #[test]
+    fn type_error_display_uses_surface_syntax() {
+        let err = TypeError::Mismatch {
+            left: int(),
+            right: string_ty(),
+        };
+        assert_eq!(err.to_string(), "expected `Int`, found `String`");
+        assert!(!err.to_string().contains("Primitive("));
     }
 
     // ── Substitution ──────────────────────────────────────────────────────────
