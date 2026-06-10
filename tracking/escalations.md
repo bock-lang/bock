@@ -424,7 +424,12 @@ carries a custom impl — strict, surfaces the ambiguity.
 **Options:** **(A) Optional-safe** — `pop()→Optional[T]` (None on empty), `remove(i)→Optional[T]` (None on OOB), `insert(i,v)→Void` (abort on OOB), `reverse()→Void`, all `mut self`; symmetric with the existing `get`/`index_of` Optional returns, no surprise panics on `remove`. **(B) Rust-style panic** — as (A) but `remove(i)→T` aborting on OOB (an OOB index is a programmer error; matches `Vec::remove`). **(C) reverse-only now, defer the rest** — land `reverse()→Void` and defer `pop`/`insert`/`remove` to v1.x.
 **Recommendation:** **(A) Optional-safe** — most consistent with Bock's Optional-everywhere ethos and the existing List read methods; no new panic surface. Non-blocking — the four methods stay placeholder-typed meanwhile (no regression; no example/stdlib calls them as mutators yet).
 **Awaiting:** Design ruling on DQ30 (A / B / C / other).
-**Status:** pending — surfaced to owner 2026-06-09 14:47 UTC; owner deferred ("will circle back with the design decision").
+**Status:** **RESOLVED 2026-06-10** — Design ruled **option (B) refined, with the `remove` → `remove_at` rename**
+(ruling 02:14 UTC; full text in design-questions DQ30-DECIDED — it explicitly diverged from the (A) recommendation,
+with the now-normative principle "queries that can miss return Optional; violated index contracts abort").
+Implemented same day: **#349** (contracts ×5 + interp, `set` OOB pinned, 21 fixtures, §18.3 principle paragraph +
+changelog `20260610-dq30-list-mutator-contracts`). Q-list-mut-pop-insert-remove CLOSED. **With DQ29 + DQ30 both
+resolved, the queue's Design gate is clear.**
 
 ## [2026-06-10 06:03 UTC] Design audit (#334) — operator-decision bundle (R1, R6, OQ1–OQ4)
 

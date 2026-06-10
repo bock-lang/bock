@@ -42,11 +42,10 @@ decided→link)`
 > language decision). **DQ1** (`bock check` default strictness) stays the non-core CLI track (orchestrator + operator). Remaining
 > work is implementation + the v1.x deferrals recorded in the entries below, not open decisions.
 >
-> **★ 2026-06-10 — DQ29 DECIDED + IMPLEMENTED** (Design ruling 02:08 UTC → #347 same day; entry below). **DQ30** (List
-> mutator return contracts, §18.3-silent) remains the open ruling — Design's note says it is next. **★ NEW 2026-06-10 —
-> DQ31** (container element-equality semantics under an explicit `impl Equatable` — rule-3 corner surfaced by #347's
-> cross-target pinning; entry below, escalated). DQ10/DQ11 remain ratification-pending. The compiler v1 backlog is
-> Design-gated on DQ30 only.
+> **★ 2026-06-10 — DQ29 AND DQ30 BOTH DECIDED + IMPLEMENTED SAME DAY** (rulings 02:08/02:14 UTC → #347/#349; entries
+> below). **THE QUEUE'S DESIGN GATE IS CLEAR** — the compiler v1 backlog has no pending ruling blocking it. Open with
+> Design: **DQ31** (container element-equality under an explicit `impl Equatable` — rule-3 corner from #347's pinning;
+> low/corner, nothing gated on it) + DV19–DV24 dispositions. DQ10/DQ11 remain ratification-pending (non-blocking).
 
 ### DQ31 — container `==` element semantics when elements carry an explicit `impl Equatable`
 
@@ -93,7 +92,26 @@ Follow-on: DQ31 (container element-eq corner), DV24 (interp NaN total-order).
   `infer_binop` mechanism as #296) the moment Design rules. Unblocks queue item Q-equatable-gating-user-types.
 - **Status:** DECIDED — see the ruling block above (R1 conditional structural rule; implemented #347).
 
-### DQ30 — return-contract for the in-place `List` mutators `pop`/`insert`/`remove`/`reverse`
+### DQ30 — return-contract for the in-place `List` mutators — DECIDED (Design, 2026-06-10)
+
+**RULING (Design chat, 2026-06-10 02:14 UTC): option (B) refined, with one rename.** Contracts: `pop(mut self) ->
+Optional[T]` (None on empty — emptiness is a normal state) · **`remove_at`**`(mut self, index: Int) -> T` (abort on OOB;
+message carries op/index/len) · `insert(mut self, index: Int, value: T) -> Void` (valid range `0..=len`; abort on OOB;
+explicitly NOT Python's clamp) · `reverse(mut self) -> Void`. All `mut self`, E5004-enforced, extending DQ18. **The
+durable principle, now normative in §18.3: queries that can miss return `Optional`; violated index contracts abort**
+(cross-ref the DQ23 divide-by-zero precedent + §10.5 Panic; the read/write asymmetry is principled — `get(i)` stays
+Optional because reads may probe; mutations may not). **The rename:** bare `remove` is a false friend (Python's is
+by-value; Set/Map `remove` differ) — `remove_at` is the Kotlin/Swift resolution; `List.remove(value)` stays free for a
+future by-value addition; the Q1-floor changelog is NOT edited (rename recorded forward, DQ24 pattern). `set(i, v)` OOB
+→ abort under the same principle, pinned in the same session. Ruling explicitly diverged from the orchestrator's (A)
+recommendation — rationale: (A) is internally asymmetric (remove→None vs insert→abort); None from a failed mutation has
+no sane recovery (worst agent-debugging outcome); (B) keeps Rust output native/idiomatic; DQ23 already established
+abort-on-contract-violation as Bock semantics. **IMPLEMENTED same day: #349** (checker placeholders replaced + E5004 ×4
++ `set`; five-backend lowerings per the ruling's table + interp parity [R11]; 21 fixtures incl. the negative/abort
+cases and the Python-clamp catcher; §18.3 principle paragraph + changelog `20260610-dq30-list-mutator-contracts.md`).
+Closed Q-list-mut-pop-insert-remove. **With DQ29 + DQ30 ruled, the queue's Design gate is clear.**
+
+### DQ30 (original question, for the record)
 - **Question:** DQ18 ruled `push`/`append` are `mut self` → `Void` in-place mutators (§18.3, changelog
   `20260606-list-mutation-map-contains`). The four remaining in-place mutators were left value-returning
   (checker.rs:4607-4620 still type all four as the placeholder receiver `List[T]`), and §18.3 is **silent** on their
@@ -111,7 +129,7 @@ Follow-on: DQ31 (container element-eq corner), DV24 (interp NaN total-order).
   extension of the DQ18 per-target mut-self lowering table ×5; impl mechanism is the same checker stamp + per-backend
   arm. Unblocks queue item Q-list-mut-pop-insert-remove. Surfaced to owner 2026-06-09; owner deferred ("will circle back
   with the design decision").
-- **Status:** escalated → Design (escalations.md)
+- **Status:** DECIDED — see the ruling block above (option B refined + `remove_at` rename; implemented #349).
 
 ### DQ10 — normative primitive-conformance matrix
 - **Question:** which (primitive × core-trait) conformances are **normative** for

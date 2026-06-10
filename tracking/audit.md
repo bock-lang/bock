@@ -2544,3 +2544,49 @@ Probe layer: 4 new items (HIGH: bracket-form bounds unenforced for ALL traits) +
 State at close: main ba338d4 + this tracking PR, 0 open feature PRs, tree clean, views regenerated (--check clean),
   worktrees/branches/caches pruned. CI green at HEAD per PR-watch; main-push run confirmatory.
 Awaiting operator: R1/R6/OQ1–OQ4. Awaiting Design: DQ30 (next per the ruling), DQ31, DV19–DV24.
+
+[2026-06-10 22:58 UTC] ✦ DQ30 RULING RECEIVED → IMPLEMENTED (#349) — List mutator contracts; THE DESIGN GATE IS CLEAR
+  Input: operator delivered the Design chat's DQ30 ruling (timestamped 02:14 UTC, minutes after DQ29's): option (B)
+    refined + the `remove`→`remove_at` rename. Ruling explicitly DIVERGED from my (A) recommendation, with stated
+    rationale ((A) internally asymmetric; None-from-failed-mutation has no sane recovery; (B) keeps rust output native;
+    DQ23 already made abort-on-contract-violation Bock semantics) and a durable normative principle for §18.3: queries
+    that can miss return Optional; violated index contracts abort. Board at start: main e4570cd, 0 open PRs, CI green.
+  Options: same shape as the DQ29 block — one scoped session owning checker + 5-backend lowerings + interp + fixtures +
+    §18.3 + changelog + docs (the ruling's own scoping). No alternatives worth weighing; the ruling IS the work order.
+  Decision: dispatched one engineer; landed as #349 (33 files, CI 15/15, merged 664b153). Substance: checker
+    placeholders (checker.rs:4607-4620) replaced with the ruled signatures, E5004 mut-receiver enforcement extended to
+    all seven in-place mutators; `set(i,v)` — found to be E4013-REJECTED entirely, never implemented — built and pinned
+    under the same principle; five-backend lowerings per the ruling's table (rust fully native incl. native panics per
+    the DQ23 reconciliation; js/ts/py/go synthesize the normalized `List.<op>: index <i> out of bounds (len <n>)` abort;
+    python's native insert-clamp pre-checked away — the fixture catches it); interp implements identical contracts,
+    parity byte-identical on drain/interleave/abort programs (R11). `List.remove` now E4013 + "did you mean
+    `remove_at`?". 21 fixtures (11 exec ×5 incl. 5 aborts · 6 diagnostics · interp mirror) all failing-first. §18.3
+    gains the principle paragraph + signatures + naming note; changelog 20260610-dq30-list-mutator-contracts records the
+    rename FORWARD (Q1-floor changelog untouched per the historical-record rule).
+  ★ BONUS R11 CATCH (the wave's pattern holds — every implementation session is also a probe): the engineer's parity
+    work found interp `push` was a SILENT NO-OP under `bock run` (value-returning legacy registry, no write-back) — a
+    latent DQ18 parity gap sitting since #269. Fixed + regression-tested in the same PR.
+  Verification: engineer gate fmt/clippy/test/doc clean + conformance REQUIRE=all ×2 = 960/0/0 both + mdbook clean +
+    examples 20/20; PR CI 15/15 green. Single-PR block → per-PR verification + CI suffices.
+  Reasoning: ruling implementation within authority; the rename is Design's call made in the ruling itself; no decisions
+    taken here. New FOUNDs filed, not fixed: Q-rust-callarg-borrow-mismatch (ownership pass borrows vs rust by-value —
+    pre-existing, joins the clone-insertion family) + Q-core-legacy-list-builtins (dead registrations; natural bock-core
+    cleanup trio with dead-equals + compare-ordering).
+  Follow-up: hub reconciled (DQ30 DECIDED + escalation resolved; Q-list-mut-pop-insert-remove DONE; 2 new items; header).
+    ★ BOARD STATE: with DQ29 + DQ30 both ruled and implemented same-day, THE COMPILER V1 BACKLOG HAS NO PENDING DESIGN
+    GATE for the first time since 2026-06-08. Dispatchable next: the correctness HIGHs (Q-go-tailmatch-unreachable-panic,
+    Q-interp-list-concat, Q-bracket-bounds-unenforced), the bock-core cleanup trio, Q-context-pack-reconcile +
+    Q-examples-matrix-undodge, and the MED/LOW diagnostics tail. AWAITING OPERATOR: R1/R6/OQ1–OQ4 (the audit bundle —
+    OQ3 is the time-sensitive one). Design: DQ31 (low), DV19–DV24 dispositions.
+
+═══ DAILY DIGEST ADDENDUM 3 — 2026-06-10 (DQ30 block, fourth session close) ═══
+Merged since addendum 2: #349 (DQ30 implementation) + this tracking PR. Both of Design's same-day rulings (DQ29 02:08,
+  DQ30 02:14) are now ruled→implemented→spec-reconciled→hub-reconciled within the day. List mutators: pop/remove_at/
+  insert/reverse + set, mut-self/E5004, queries-Optional/index-abort principle normative in §18.3, rust-native + 
+  normalized synthesized aborts, interp parity proven — plus the latent interp-push silent no-op found and fixed (R11).
+  Conformance 960/0/0 ×2 · examples 20/20.
+★ THE DESIGN GATE IS CLEAR — no pending ruling blocks the compiler v1 backlog (DQ31 is a low corner; DV dispositions
+  pending are non-blocking). The board is fully dispatchable on engineering again.
+State at close: main 664b153 + this tracking PR, 0 open feature PRs, tree clean, views regenerated (--check clean),
+  worktrees/branches/caches pruned, CI green at HEAD per PR-watch.
+Awaiting operator: R1/R6/OQ1–OQ4. Awaiting Design: DQ31, DV19–DV24.
