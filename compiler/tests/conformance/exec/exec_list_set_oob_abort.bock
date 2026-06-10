@@ -1,0 +1,28 @@
+// TEST: exec_list_set_oob_abort
+// EXPECT: output "before"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3 / §10.5): `set` on an out-of-bounds index is a **runtime abort**
+// (a Panic ambient effect), equivalent on every target — the write-path index
+// contract of the same principle that aborts `remove_at`/`insert` OOB. The
+// per-target trap here is JS/TS: native `arr[3] = x` on a length-3 array
+// silently *extends* it (creating holes for larger indices), so the lowering's
+// explicit bounds check is load-bearing. Python raises IndexError natively but
+// accepts negative indices, so its pre-check is also load-bearing; Rust and Go
+// panic natively on a bad index. The program prints `before`, then
+// `xs.set(3, 9)` on a length-3 list must abort: trimmed stdout is exactly
+// `before`. The index flows through `opaque` so it cannot be folded.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn opaque(n: Int) -> Int {
+  return n
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = [1, 2, 3]
+  println("before")
+  xs.set(opaque(3), 9)
+  println("after ${xs.len()}")
+}

@@ -1760,9 +1760,24 @@ The 15 `core.*` modules are tiered: 11 ship in **v1**, 4 are **Reserved for v1.x
 
 `core.option` (v1) — `Optional[T]` utilities.
 `core.result` (v1) — `Result[T, E]` utilities.
-`core.collections` (v1) — `List`, `Map`, `Set`, `SortedSet`. Reserved for v1.x: `Deque`, `SortedMap`, `Stack`, `Queue`, `BitSet`, `Array[T, N]`. `List`, `Map`, and `Set` are **built-in types** whose methods lower to each target's native collection op. Two normative rules govern their method surface:
+`core.collections` (v1) — `List`, `Map`, `Set`, `SortedSet`. Reserved for v1.x: `Deque`, `SortedMap`, `Stack`, `Queue`, `BitSet`, `Array[T, N]`. `List`, `Map`, and `Set` are **built-in types** whose methods lower to each target's native collection op. Three normative rules govern their method surface:
 
-- **Mutation vs. functional building (`List`).** `push`/`append` are **in-place mutators**: they require a **`mut` receiver**, mutate the list, and return **`Void`**. Calling `push`/`append` on a non-`mut` receiver is a compile error (the receiver must be a `let mut` binding, a `mut` parameter, or a field reachable through a `mut` receiver); the recommended functional alternative is named in the diagnostic. Functional list-building stays on `+` / `concat`, which are **value-returning** (a new list), take no `mut`, and never mutate their operands. (`append` is the spelling alias for `push`; both lower identically.) This is the `mut` model of §5 applied to a built-in method — no new mechanism.
+- **Mutation vs. functional building (`List`).** The **in-place mutators** require a **`mut` receiver** and mutate the list in place. The full mutator set (DQ18 + DQ30) with signatures:
+
+  | method | signature | failure behavior |
+  | ------ | --------- | ---------------- |
+  | `push` / `append` | `push(mut self, value: T) -> Void` | — |
+  | `pop` | `pop(mut self) -> Optional[T]` | `None` on empty — emptiness is a normal state, never an abort |
+  | `remove_at` | `remove_at(mut self, index: Int) -> T` | aborts on out-of-bounds (Panic ambient effect, §10.5; the abort message carries the operation, index, and length) |
+  | `insert` | `insert(mut self, index: Int, value: T) -> Void` | valid range `0..=len` (`len` is the append position: `insert(len, x)` appends); aborts past it — explicitly **not** Python's index clamp; negative indices abort |
+  | `reverse` | `reverse(mut self) -> Void` | — |
+  | `set` | `set(mut self, index: Int, value: T) -> Void` | aborts on out-of-bounds (no silent array extension, no negative indexing) |
+
+  Calling any of these on a non-`mut` receiver is a compile error (the receiver must be a `let mut` binding, a `mut` parameter, or a field reachable through a `mut` receiver); the recommended functional alternative is named in the diagnostic. A `mut self` method **returning a value** (`pop`, `remove_at`) is well-formed — the receiver contract is independent of the return type. Functional list-building stays on `+` / `concat`, which are **value-returning** (a new list), take no `mut`, and never mutate their operands. (`append` is the spelling alias for `push`; both lower identically.) This is the `mut` model of §5 applied to built-in methods — no new mechanism.
+
+  *Naming (`remove_at`).* The by-index removal method is `remove_at` — by-index **explicit** (the Kotlin `removeAt` / Swift `remove(at:)` resolution). Bare `List.remove` is **not** a method (rejected with a "did you mean `remove_at`?" suggestion): `remove(value)` is reserved for a future by-value removal, and the family stays coherent — `Set.remove(e)` (element) and `Map.delete(k)` (key) keep their unambiguous receiver semantics.
+
+- **Queries that can miss return `Optional`; violated index contracts abort.** On the **read path**, an absence the caller is expected to handle is an `Optional`: `get(i) -> Optional[T]`, `first`/`last`, `index_of`, `pop` (emptiness is a normal state). On the **write path**, an out-of-bounds index passed to `remove_at`/`insert`/`set` is a violated contract and is a **runtime abort** (a Panic ambient effect, §10.5), equivalent on every target — the same principle as integer division by zero (§3.6, DQ23). The read/write asymmetry is deliberate: `get(i)` stays total via `Optional`, while a write to a position that does not exist has no meaningful partial result.
 - **Membership (`Map` vs. `Set`).** `Map` membership is `contains_key(k)` (test for a key) and `contains_value(v)` (test for a value); bare `contains` is **not** a `Map` method (a map has both keys and values, so an unqualified `contains` is ambiguous) and the compiler rejects `map.contains(...)` with a "did you mean `contains_key`?" suggestion — it is **not** aliased. `contains(e)` **is** a `Set` method (a set has only elements, so it is unambiguous).
 
 `core.string` (v1) — String manipulation, `StringBuilder`. `String.len()` returns the count of Unicode scalar values (characters), not bytes; use `byte_len()` for byte count. Reserved for v1.x: `Regex`.

@@ -1,0 +1,36 @@
+// TEST: interp_list_mutators_interleaved
+// EXPECT: output "2;1;3;5;3;9"
+//
+// DQ30 / R11: the Tier-1 interpreter (`bock run`) must agree with the five
+// compiled targets on the in-place List mutator contracts. This mirrors
+// `exec/exec_list_mutators_interleaved.bock` exactly — same program, same
+// pinned output — and is additionally asserted against the live interpreter by
+// `run_list_mutators_interleaved_matches_targets` in
+// bock-cli/tests/run_command.rs (the conformance pair pattern of
+// interp/question_propagation.bock).
+module main
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = ""
+  for v in xs {
+    out = "${out};${v}"
+  }
+  return out
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = []
+  xs.push(2)
+  xs.append(4)
+  xs.insert(0, 1)
+  xs.insert(2, 3)
+  xs.set(3, 5)
+  let r: Int = xs.remove_at(1)
+  xs.reverse()
+  let p: Int = match xs.pop() {
+    Some(v) => v
+    None => -1
+  }
+  xs.push(9)
+  println("${r};${p};${xs.len()}${join(xs)}")
+}

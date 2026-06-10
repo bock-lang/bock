@@ -1,0 +1,25 @@
+// TEST: exec_list_remove_at_negative_abort
+// EXPECT: output "before"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3 / §10.5): a **negative** index is out of bounds for `remove_at`
+// — there is no Python-style from-the-end indexing in the contract. This is a
+// real per-target trap: Python's native `lst.pop(-1)` would happily remove the
+// last element, so the Python lowering's `0 <= i` pre-check is load-bearing
+// here. The program prints `before`, then `xs.remove_at(-1)` must abort before
+// the `after` print: trimmed stdout is exactly `before`. The index flows
+// through `opaque` so it cannot be folded.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn opaque(n: Int) -> Int {
+  return n
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = [1, 2, 3]
+  println("before")
+  let v: Int = xs.remove_at(opaque(-1))
+  println("after ${v}")
+}

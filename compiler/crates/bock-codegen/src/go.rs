@@ -380,9 +380,12 @@ fn go_module_uses_deep_eq(items: &[AIRNode]) -> bool {
         .any(|n| format!("{n:?}").contains("\"user_eq\": String(\"deep\")"))
 }
 
-/// True if the module references `Optional`, `Some`, or `None` anywhere (so the
-/// Optional runtime prelude must be emitted). A cheap structural scan over the
-/// debug rendering, mirroring `go_module_uses_concurrency`.
+/// True if the module references `Optional`, `Some`, or `None` anywhere — or
+/// calls `pop`, whose DQ30 lowering builds the tagged `__bockOption` runtime
+/// (`__bockSome(v)` / `__bockNone`) — so the Optional runtime prelude must be
+/// emitted. A cheap structural scan over the debug rendering, mirroring
+/// `go_module_uses_concurrency`. Over-matching (a user method named `pop`)
+/// only emits the unused runtime struct, which compiles fine.
 fn go_module_uses_optional(items: &[AIRNode]) -> bool {
     items.iter().any(|n| {
         let s = format!("{n:?}");
@@ -390,6 +393,7 @@ fn go_module_uses_optional(items: &[AIRNode]) -> bool {
             || s.contains("TypeOptional")
             || s.contains("\"Some\"")
             || s.contains("\"None\"")
+            || s.contains("\"pop\"")
     })
 }
 
@@ -4390,6 +4394,17 @@ impl GoEmitCtx {
                         }
                     }
                 }
+                // DQ30: `pop` on a `List[T]` returns `Optional[T]` — resolve
+                // the payload the same way `get`/`first`/`last` do, so
+                // `match xs.pop() { Some(v) => … }` type-asserts `v` to the
+                // element type rather than `interface{}`.
+                if let Some((recv, "pop", _)) =
+                    crate::generator::desugared_list_inplace_mutator(scrutinee, callee, args)
+                {
+                    if let Some(elem) = self.list_receiver_elem_go_type(recv) {
+                        return Some(elem);
+                    }
+                }
                 // `Map.get(k)` returns `Optional[V]`; resolve the payload to the
                 // map's value Go type so `match m.get(k) { Some(x) => … }`
                 // type-asserts `x` to `V` rather than `interface{}`.
@@ -5348,6 +5363,115 @@ impl GoEmitCtx {
         self.write_indent();
         let _ = write!(self.buf, "{recv_str} = append({recv_str}, {x})");
         self.buf.push('\n');
+        Ok(true)
+    }
+
+    /// Emit a DQ30 in-place `List` mutator
+    /// (`pop`/`remove_at`/`insert`/`reverse`/`set`) to its Go form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_inplace_mutator`]. Go
+    /// slices are *values* (a length change must reassign the receiver place,
+    /// the DQ18 `recv = append(recv, x)` pattern), but `pop`/`remove_at` also
+    /// *return* a value, so they cannot be assignment statements. The two are
+    /// reconciled by spelling the reassign through a **pointer**: each
+    /// length-changing lowering is an immediately-invoked func literal taking
+    /// `__r *[]T` and assigning `*__r = …` — the same receiver reassignment,
+    /// composed into expression position. The ownership pass guarantees the
+    /// receiver is a `mut` lvalue (an identifier / field / index place), so
+    /// `&recv` is addressable. `reverse` and `set` never change the length, so
+    /// they mutate the shared backing array directly (no pointer):
+    ///
+    /// - `pop` → len-check + last-element grab + `*__r = (*__r)[:len-1]`
+    ///   shrink, wrapped into the tagged `__bockOption` runtime
+    ///   (`__bockSome(v)` / `__bockNone`);
+    /// - `remove_at(i)` → bounds-check + grab +
+    ///   `*__r = append((*__r)[:i], (*__r)[i+1:]...)` reassign;
+    /// - `insert(i, x)` → bounds-check (`0..=len`) + append-grow +
+    ///   `copy` right-shift + write;
+    /// - `reverse` → in-place two-index swap loop;
+    /// - `set(i, x)` → bounds-check + `__r[i] = x`.
+    ///
+    /// The bounds checks `panic(fmt.Sprintf(...))` with the normalized abort
+    /// message `List.<op>: index <i> out of bounds (len <n>)`, Go's idiomatic
+    /// abort channel (the DQ23 convention — Go's native divide-by-zero panic
+    /// was likewise kept).
+    fn try_emit_list_inplace_mutator(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_inplace_mutator(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let elem = self
+            .list_receiver_elem_go_type(recv)
+            .unwrap_or_else(|| "interface{}".to_string());
+        let slice = format!("[]{elem}");
+        let code = match method {
+            "pop" => format!(
+                "func(__r *{slice}) __bockOption {{ \
+                 if len(*__r) == 0 {{ return __bockNone }}; \
+                 __v := (*__r)[len(*__r)-1]; \
+                 *__r = (*__r)[:len(*__r)-1]; \
+                 return __bockSome(__v) }}(&{recv_str})"
+            ),
+            "remove_at" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                self.needs_fmt_import = true;
+                let i = self.expr_to_string(&idx.value)?;
+                format!(
+                    "func(__r *{slice}, __i int64) {elem} {{ \
+                     if __i < 0 || __i >= int64(len(*__r)) {{ \
+                     panic(fmt.Sprintf(\"List.remove_at: index %d out of bounds (len %d)\", __i, len(*__r))) }}; \
+                     __v := (*__r)[__i]; \
+                     *__r = append((*__r)[:__i], (*__r)[__i+1:]...); \
+                     return __v }}(&{recv_str}, {i})"
+                )
+            }
+            "insert" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.needs_fmt_import = true;
+                let i = self.expr_to_string(&idx.value)?;
+                let x = self.expr_to_string(&x.value)?;
+                format!(
+                    "func(__r *{slice}, __i int64, __x {elem}) {{ \
+                     if __i < 0 || __i > int64(len(*__r)) {{ \
+                     panic(fmt.Sprintf(\"List.insert: index %d out of bounds (len %d)\", __i, len(*__r))) }}; \
+                     *__r = append(*__r, __x); \
+                     copy((*__r)[__i+1:], (*__r)[__i:]); \
+                     (*__r)[__i] = __x }}(&{recv_str}, {i}, {x})"
+                )
+            }
+            "reverse" => format!(
+                "func(__r {slice}) {{ \
+                 for __i, __j := 0, len(__r)-1; __i < __j; __i, __j = __i+1, __j-1 {{ \
+                 __r[__i], __r[__j] = __r[__j], __r[__i] }} }}({recv_str})"
+            ),
+            "set" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.needs_fmt_import = true;
+                let i = self.expr_to_string(&idx.value)?;
+                let x = self.expr_to_string(&x.value)?;
+                format!(
+                    "func(__r {slice}, __i int64, __x {elem}) {{ \
+                     if __i < 0 || __i >= int64(len(__r)) {{ \
+                     panic(fmt.Sprintf(\"List.set: index %d out of bounds (len %d)\", __i, len(__r))) }}; \
+                     __r[__i] = __x }}({recv_str}, {i}, {x})"
+                )
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
         Ok(true)
     }
 
@@ -8874,6 +8998,9 @@ impl GoEmitCtx {
                 if self.try_emit_list_method(node, callee, args)? {
                     return Ok(());
                 }
+                if self.try_emit_list_inplace_mutator(node, callee, args)? {
+                    return Ok(());
+                }
                 if self.try_emit_list_functional_method(node, callee, args)? {
                     return Ok(());
                 }
@@ -11909,6 +12036,20 @@ impl GoEmitCtx {
                 if let NodeKind::Call { callee, args, .. } = &t.kind {
                     if self.try_emit_list_mutating_stmt(t, callee, args)? {
                         return Ok(());
+                    }
+                    // DQ30: the `Void` in-place mutators (`insert`/`reverse`/
+                    // `set`) lower to valueless func-literal calls — valid Go
+                    // *statements*, but not values, so a tail must emit them as
+                    // a plain statement, never behind a `return`.
+                    if let Some((_, m, _)) =
+                        crate::generator::desugared_list_inplace_mutator(t, callee, args)
+                    {
+                        if matches!(m, "insert" | "reverse" | "set") {
+                            self.write_indent();
+                            self.emit_expr(t)?;
+                            self.buf.push('\n');
+                            return Ok(());
+                        }
                     }
                 }
                 // A `match` with statement arms has no value; emit it in

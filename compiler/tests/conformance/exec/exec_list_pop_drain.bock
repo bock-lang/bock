@@ -1,0 +1,43 @@
+// TEST: exec_list_pop_drain
+// EXPECT: output "3;2;1;done;0;none"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3): `pop(mut self) -> Optional[T]` removes and returns the **last**
+// element, or `None` when the list is empty — emptiness is a normal state, not
+// a contract violation, so pop never aborts. The canonical drain loop —
+// `loop { match xs.pop() { Some(v) => …, None => break } }` — must terminate
+// and observe the elements in reverse insertion order on every target:
+//
+//   js / ts:  length-check → tagged Optional around arr.pop()
+//   python:   emptiness-check → _BockSome(lst.pop()) / _bock_none
+//   rust:     (xs).pop() — Rust's native Option-returning Vec::pop
+//   go:       len-check + slice-shrink through a pointer receiver
+//
+// After the drain the list is observably empty (`len() == 0`) and a further
+// `pop` yields `None` — pinned by the trailing match.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn main() -> Void {
+  let mut xs: List[Int] = [1, 2, 3]
+  let mut out: String = ""
+  loop {
+    match xs.pop() {
+      Some(v) => {
+        out = "${out}${v};"
+      }
+      None => break
+    }
+  }
+  out = "${out}done;${xs.len()}"
+  match xs.pop() {
+    Some(v) => {
+      out = "${out};${v}"
+    }
+    None => {
+      out = "${out};none"
+    }
+  }
+  println("${out}")
+}

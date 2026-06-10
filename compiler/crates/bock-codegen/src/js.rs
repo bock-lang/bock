@@ -1659,6 +1659,102 @@ impl EmitCtx {
         Ok(true)
     }
 
+    /// Emit a DQ30 in-place `List` mutator
+    /// (`pop`/`remove_at`/`insert`/`reverse`/`set`) to its JS form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_inplace_mutator`]. JS
+    /// arrays are reference values, so an IIFE parameter (`__r`) aliases the
+    /// receiver and native mutations through it are visible to the caller —
+    /// the same single-evaluation trick the read-only Optional-returning
+    /// methods use:
+    ///
+    /// - `pop` → length-check + native `arr.pop()`, wrapped into the tagged
+    ///   Optional rep (`{ _tag: "Some", _0: v }` / `{ _tag: "None" }`);
+    /// - `remove_at(i)` → bounds-check + `arr.splice(i, 1)[0]`;
+    /// - `insert(i, x)` → bounds-check (`0..=len`) + `arr.splice(i, 0, x)`;
+    /// - `reverse` → native in-place `arr.reverse()`;
+    /// - `set(i, x)` → bounds-check + `arr[i] = x` — the check is load-bearing:
+    ///   native JS index-assign past the end silently *extends* the array.
+    ///
+    /// The bounds checks throw with the normalized abort message
+    /// `List.<op>: index <i> out of bounds (len <n>)`, following the DQ23
+    /// integer-division zero-check convention (`throw new Error(...)`).
+    fn try_emit_list_inplace_mutator(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_inplace_mutator(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        match method {
+            "pop" => {
+                self.buf.push_str(
+                    "((__r) => __r.length > 0 ? { _tag: \"Some\", _0: __r.pop() } : \
+                     { _tag: \"None\" })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push(')');
+            }
+            "remove_at" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "((__r, __i) => { if (__i < 0 || __i >= __r.length) { throw new Error(\
+                     \"List.remove_at: index \" + __i + \" out of bounds (len \" + __r.length + \")\"); } \
+                     return __r.splice(__i, 1)[0]; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push(')');
+            }
+            "insert" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "((__r, __i, __x) => { if (__i < 0 || __i > __r.length) { throw new Error(\
+                     \"List.insert: index \" + __i + \" out of bounds (len \" + __r.length + \")\"); } \
+                     __r.splice(__i, 0, __x); })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            "reverse" => {
+                self.buf.push('(');
+                self.emit_expr(recv)?;
+                self.buf.push_str(").reverse()");
+            }
+            "set" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                self.buf.push_str(
+                    "((__r, __i, __x) => { if (__i < 0 || __i >= __r.length) { throw new Error(\
+                     \"List.set: index \" + __i + \" out of bounds (len \" + __r.length + \")\"); } \
+                     __r[__i] = __x; })(",
+                );
+                self.emit_expr(recv)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&idx.value)?;
+                self.buf.push_str(", ");
+                self.emit_expr(&x.value)?;
+                self.buf.push(')');
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     /// Emit a functional (closure-taking) `List` built-in method call to its JS
     /// form.
     ///
@@ -3501,6 +3597,9 @@ impl EmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_mutating_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_inplace_mutator(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {

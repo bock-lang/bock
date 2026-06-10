@@ -1,0 +1,16 @@
+// TEST: list_pop_non_mut_receiver
+// EXPECT: error E5004 at 14:5
+//
+// DQ30: `pop` is an in-place mutator (`pop(mut self) -> Optional[T]`) — it
+// removes the last element from the receiver, so it requires a `mut` receiver
+// exactly like DQ18's `push`/`append`. Calling it on a plain (non-`mut`) `let`
+// binding is a checker error (`E5004`, the ownership pass) that points at the
+// receiver and suggests `let mut`. The Optional return does not soften the
+// receiver contract: the mutation happens regardless of the value's use.
+module main
+
+fn main() -> Void {
+  let xs: List[Int] = [1, 2, 3]
+  xs.pop()
+  println("${xs.len()}")
+}

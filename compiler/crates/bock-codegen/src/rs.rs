@@ -1793,6 +1793,77 @@ impl RsEmitCtx {
         Ok(true)
     }
 
+    /// Emit a DQ30 in-place `List` mutator
+    /// (`pop`/`remove_at`/`insert`/`reverse`/`set`) to its Rust form.
+    ///
+    /// Recognised via [`crate::generator::desugared_list_inplace_mutator`].
+    /// Bock `List[T]` lowers to `Vec<T>`, whose mutators are exactly the
+    /// contract — idiomatic, zero wrappers:
+    ///
+    /// - `pop` → `(recv).pop()` — `Vec::pop` natively returns `Option<T>`
+    ///   (`None` on empty), the same native Optional rep the `match` lowering
+    ///   expects;
+    /// - `remove_at(i)` → `(recv).remove(i as usize)` — `Vec::remove` panics
+    ///   natively on an out-of-bounds index;
+    /// - `insert(i, x)` → `(recv).insert(i as usize, x)` — `Vec::insert`
+    ///   accepts `0..=len` and panics past it, the exact DQ30 range;
+    /// - `reverse` → `(recv).reverse()`;
+    /// - `set(i, x)` → `(recv)[i as usize] = x` — native index-assign, panics
+    ///   on out-of-bounds.
+    ///
+    /// Abort-message reconciliation (DQ23 convention): the native panics carry
+    /// the operation, index, and length (`removal index (is 5) should be < len
+    /// (is 3)`, `index out of bounds: the len is 3 but the index is 5`), so no
+    /// message wrapper is added — matching how Rust's native divide-by-zero
+    /// panic was kept for §3.6. A negative Bock index wraps through `as usize`
+    /// into a huge value, which the same native bounds checks reject (abort
+    /// preserved; the printed index is the wrapped value). The ownership pass
+    /// guarantees the receiver is a `mut` lvalue, so the `&mut self` borrows
+    /// resolve against the `let mut` / `mut` parameter binding.
+    fn try_emit_list_inplace_mutator(
+        &mut self,
+        node: &AIRNode,
+        callee: &AIRNode,
+        args: &[bock_air::AirArg],
+    ) -> Result<bool, CodegenError> {
+        let Some((recv, method, rest)) =
+            crate::generator::desugared_list_inplace_mutator(node, callee, args)
+        else {
+            return Ok(false);
+        };
+        let recv_str = self.expr_to_string(recv)?;
+        let code = match method {
+            "pop" => format!("({recv_str}).pop()"),
+            "remove_at" => {
+                let Some(idx) = rest.first() else {
+                    return Ok(false);
+                };
+                let i = self.expr_to_string(&idx.value)?;
+                format!("({recv_str}).remove(({i}) as usize)")
+            }
+            "insert" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                let i = self.expr_to_string(&idx.value)?;
+                let x = self.expr_to_string(&x.value)?;
+                format!("({recv_str}).insert(({i}) as usize, ({x}))")
+            }
+            "reverse" => format!("({recv_str}).reverse()"),
+            "set" => {
+                let (Some(idx), Some(x)) = (rest.first(), rest.get(1)) else {
+                    return Ok(false);
+                };
+                let i = self.expr_to_string(&idx.value)?;
+                let x = self.expr_to_string(&x.value)?;
+                format!("({recv_str})[({i}) as usize] = ({x})")
+            }
+            _ => return Ok(false),
+        };
+        self.buf.push_str(&code);
+        Ok(true)
+    }
+
     /// Emit a functional (closure-taking) `List` built-in method call to its
     /// Rust form.
     ///
@@ -4535,6 +4606,9 @@ impl RsEmitCtx {
                     return Ok(());
                 }
                 if self.try_emit_list_mutating_method(node, callee, args)? {
+                    return Ok(());
+                }
+                if self.try_emit_list_inplace_mutator(node, callee, args)? {
                     return Ok(());
                 }
                 if self.try_emit_list_method(node, callee, args)? {

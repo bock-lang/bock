@@ -1,0 +1,30 @@
+// TEST: exec_list_remove_at_oob_abort
+// EXPECT: output "before"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ30 (§18.3 / §10.5): `remove_at` on an out-of-bounds index is a **runtime
+// abort** (a Panic ambient effect), equivalent on every target — a violated
+// index contract on the write path aborts, mirroring DQ23's divide-by-zero
+// precedent (read-path queries that can miss — `get`/`first`/`pop` — return
+// `Optional` instead). The program prints `before`, then evaluates
+// `xs.remove_at(3)` on a length-3 list, which must abort *before* the `after`
+// print: trimmed stdout is exactly `before`. The index flows through `opaque`
+// so it cannot be folded to a compile-time error. The synthesized checks
+// (js/ts/python/go) abort with the normalized message
+// `List.remove_at: index 3 out of bounds (len 3)`; Rust keeps `Vec::remove`'s
+// native panic (which also carries the index and length), per the DQ23
+// native-abort convention.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn opaque(n: Int) -> Int {
+  return n
+}
+
+fn main() -> Void {
+  let mut xs: List[Int] = [1, 2, 3]
+  println("before")
+  let v: Int = xs.remove_at(opaque(3))
+  println("after ${v}")
+}

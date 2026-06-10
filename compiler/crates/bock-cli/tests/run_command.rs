@@ -570,6 +570,160 @@ fn run_question_propagation_returns_err_to_caller() {
     );
 }
 
+/// DQ30 / R11 interpreter parity: the in-place List mutator contracts under
+/// `bock run` must match the five compiled targets exactly. This is the
+/// interleaved-mutation program of the conformance pair
+/// `conformance/interp/list_mutators_interleaved.bock` (interpreter) and
+/// `conformance/exec/exec_list_mutators_interleaved.bock` (compiled ×5):
+/// push/append (DQ18) mixed with insert/set/remove_at/reverse/pop (DQ30)
+/// against one `let mut` accumulator, with the same pinned output.
+/// Before DQ30 the interpreter dispatched these through value-returning
+/// builtin-registry entries with no receiver write-back, so `acc.push(x)` was
+/// a silent no-op under `bock run` while mutating on every compiled target.
+#[test]
+fn run_list_mutators_interleaved_matches_targets() {
+    let f = write_temp_file(
+        "module main\n\
+         \n\
+         fn join(xs: List[Int]) -> String {\n\
+         \x20\x20let mut out: String = \"\"\n\
+         \x20\x20for v in xs {\n\
+         \x20\x20\x20\x20out = \"${out};${v}\"\n\
+         \x20\x20}\n\
+         \x20\x20return out\n\
+         }\n\
+         \n\
+         fn main() -> Void {\n\
+         \x20\x20let mut xs: List[Int] = []\n\
+         \x20\x20xs.push(2)\n\
+         \x20\x20xs.append(4)\n\
+         \x20\x20xs.insert(0, 1)\n\
+         \x20\x20xs.insert(2, 3)\n\
+         \x20\x20xs.set(3, 5)\n\
+         \x20\x20let r: Int = xs.remove_at(1)\n\
+         \x20\x20xs.reverse()\n\
+         \x20\x20let p: Int = match xs.pop() {\n\
+         \x20\x20\x20\x20Some(v) => v\n\
+         \x20\x20\x20\x20None => -1\n\
+         \x20\x20}\n\
+         \x20\x20xs.push(9)\n\
+         \x20\x20println(\"${r};${p};${xs.len()}${join(xs)}\")\n\
+         }\n",
+    );
+    let output = bock_bin().arg("run").arg(f.path()).output().unwrap();
+    assert!(
+        output.status.success(),
+        "expected exit 0, got {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout, "2;1;3;5;3;9\n",
+        "interpreter output diverged from the compiled-target reference"
+    );
+}
+
+/// DQ30 / R11: the `pop` drain loop under `bock run` — elements observed in
+/// reverse insertion order, `None` terminates the loop, and the drained list
+/// is observably empty. Mirrors `conformance/exec/exec_list_pop_drain.bock`.
+#[test]
+fn run_list_pop_drain_matches_targets() {
+    let f = write_temp_file(
+        "module main\n\
+         \n\
+         fn main() -> Void {\n\
+         \x20\x20let mut xs: List[Int] = [1, 2, 3]\n\
+         \x20\x20let mut out: String = \"\"\n\
+         \x20\x20loop {\n\
+         \x20\x20\x20\x20match xs.pop() {\n\
+         \x20\x20\x20\x20\x20\x20Some(v) => {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20out = \"${out}${v};\"\n\
+         \x20\x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20\x20\x20None => break\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20}\n\
+         \x20\x20println(\"${out}done;${xs.len()}\")\n\
+         }\n",
+    );
+    let output = run_with_timeout(
+        {
+            let mut c = bock_bin();
+            c.arg("run").arg(f.path());
+            c
+        },
+        Duration::from_secs(20),
+    )
+    .expect("`bock run` hung: pop drain loop did not terminate");
+    assert!(
+        output.status.success(),
+        "expected exit 0, got {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "3;2;1;done;0\n");
+}
+
+/// DQ30 / R11: a violated index contract aborts under `bock run` with the
+/// normalized message (`List.<op>: index <i> out of bounds (len <n>)`) and a
+/// non-zero exit — for each of `remove_at` (OOB + negative), `insert`
+/// (past-append + negative; Python's native clamp must not leak into the
+/// oracle either), and `set` (OOB). Mirrors the `exec_list_*_abort` fixtures.
+#[test]
+fn run_list_mutator_oob_aborts() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "xs.remove_at(3)",
+            "List.remove_at: index 3 out of bounds (len 3)",
+        ),
+        (
+            "xs.remove_at(-1)",
+            "List.remove_at: index -1 out of bounds (len 3)",
+        ),
+        (
+            "xs.insert(4, 9)",
+            "List.insert: index 4 out of bounds (len 3)",
+        ),
+        (
+            "xs.insert(-1, 9)",
+            "List.insert: index -1 out of bounds (len 3)",
+        ),
+        ("xs.set(3, 9)", "List.set: index 3 out of bounds (len 3)"),
+    ];
+    for (call, want) in cases {
+        let src = format!(
+            "module main\n\
+             \n\
+             fn main() -> Void {{\n\
+             \x20\x20let mut xs: List[Int] = [1, 2, 3]\n\
+             \x20\x20println(\"before\")\n\
+             \x20\x20{call}\n\
+             \x20\x20println(\"after\")\n\
+             }}\n"
+        );
+        let f = write_temp_file(&src);
+        let output = bock_bin().arg("run").arg(f.path()).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "`{call}` must abort (non-zero exit)\nstdout: {stdout}\nstderr: {stderr}",
+        );
+        assert_eq!(
+            stdout.trim_end(),
+            "before",
+            "`{call}` must abort before the `after` print"
+        );
+        assert!(
+            stderr.contains(want),
+            "`{call}` abort message must be the normalized form {want:?}; stderr: {stderr}",
+        );
+    }
+}
+
 /// The Equatable primitive bridge under `bock run`
 /// (Q-interp-assert-primitives root cause): `a.eq(b)` on concrete primitive
 /// receivers must dispatch to native equality, as the compiled targets lower
