@@ -12,7 +12,21 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-10 — main ba338d4, 0 open PRs, clean. ★ DQ29 RULED + IMPLEMENTED SAME DAY (#347): structural Equatable conformance + `==`/`!=` gating.**
+_**Last reconciled 2026-06-10 — main 664b153, 0 open PRs, clean. ★★ DQ30 RULED + IMPLEMENTED (#349) — THE DESIGN GATE IS CLEAR.**
+Design's second same-day ruling (02:14 UTC; option B refined + the `remove`→`remove_at` rename — full text in
+design-questions DQ30-DECIDED) landed via the one scoped session it authorized: `pop -> Optional[T]` (None on empty) ·
+`remove_at -> T` (abort OOB) · `insert -> Void` (`0..=len`, abort OOB, Python clamp pre-checked away) · `reverse -> Void`,
+all mut-self/E5004; PLUS `set(i,v)` — which had never been implemented at all — pinned under the same now-normative §18.3
+principle ("queries that can miss return Optional; violated index contracts abort"). Rust lowers fully native; the other
+backends synthesize the normalized abort; interp parity byte-identical (R11), and the session's parity work caught +
+fixed a LATENT DQ18 GAP: interp `push` was a silent no-op under `bock run`. 21 fixtures (negatives are the point);
+`List.remove` → "did you mean `remove_at`?"; conformance 960/0/0 ×2 · examples 20/20 · CI 15/15. **With DQ29 + DQ30 both
+ruled and implemented, the compiler v1 backlog has NO pending Design gate** — dispatchable now: the fix-wave +
+DQ29/DQ30 follow-up HIGHs (Q-go-tailmatch-unreachable-panic · Q-interp-list-concat · Q-bracket-bounds-unenforced),
+the bock-core cleanup trio, the harvest MED/LOW tail, and the editor follow-ups. New from #349:
+Q-rust-callarg-borrow-mismatch + Q-core-legacy-list-builtins ("DQ30-implementation follow-ups").
+AWAITING OPERATOR: R1/R6/OQ1–OQ4 bundle. Design: DQ31 (low/corner), DV19–DV24 dispositions. ↓ —
+PRIOR: **Last reconciled 2026-06-10 — main ba338d4, 0 open PRs, clean. ★ DQ29 RULED + IMPLEMENTED SAME DAY (#347): structural Equatable conformance + `==`/`!=` gating.**
 Design delivered the DQ29 ruling (02:08 UTC; R1 with a conditional structural rule — full text in design-questions
 DQ29-DECIDED) and the one scoped session it authorizes landed it: recursive `structural_equatable_witness` (records/enums
 iff all parts Equatable; compound built-ins + generic instantiations compose; explicit impl wins; classes excluded;
@@ -650,6 +664,20 @@ targets, an examples test-suite un-broken, every diagnostic re-rendered) — sur
   `==` evaluation, total order inside containers), don't remove the wrapper. Pin with an interp-side NaN fixture when
   fixed (the ×5 target fixture already exists from #347). FOUND 2026-06-10 (#347).
 
+### DQ30-implementation follow-ups (filed 2026-06-10, FOUND via #349)
+
+- **[Q-rust-callarg-borrow-mismatch] ownership pass models call args as borrows; rust codegen passes collections by
+  value** — bug · ready · `compiler/crates/bock-types/` (ownership) ⇄ `bock-codegen` (rust) · — · links #349,
+  Q-rust-clone-insertion-gaps · note: pre-existing, surfaced by #349's fixture work — `"${join(xs)}${xs.len()}"`
+  ordering fails ONLY on rust (E0382): the checker's ownership pass treats the `join(xs)` arg as a borrow, rust codegen
+  moves it. Same root family as the clone-insertion gaps (decide together whether the fix is borrow-passing
+  (`&`/`.clone()` at call sites) or ownership-pass alignment). FOUND 2026-06-10 (#349).
+- **[Q-core-legacy-list-builtins] bock-core still registers legacy value-returning List `push`/`pop`/`insert`/`remove`/
+  `reverse` builtins** — chore · ready · LOW · `compiler/crates/bock-core/src/collections/list.rs` · — · links #349,
+  Q-core-dead-equals-registration, Q-interp-compare-ordering · note: unreachable from checked source after #349's
+  mut-self registry, but dead registrations invite drift. Natural single bock-core cleanup session with the other two
+  bock-core items. FOUND 2026-06-10 (#349).
+
 ### Editor v1.1 feature-wave follow-ups (filed 2026-06-09)
 
 - **[Q-lsp-member-rename] rename/find-references for methods & fields** — feature · blocked ·
@@ -868,15 +896,18 @@ targets, an examples test-suite un-broken, every diagnostic re-rendered) — sur
   structural bridge for bounded generics. §18.5 normative paragraph + changelog `20260610-dq29-structural-equatable.md`;
   spec asymmetry recorded (no structural Comparable/Hashable). Examples 20/20 unaffected; conformance 905/0/0 ×2.
   Follow-on: DQ31 (container element-eq corner) + DV24 (interp NaN total-order). ORIG: ESCALATED 2026-06-08 (DQ29).
-- **[Q-list-mut-pop-insert-remove] `pop`/`insert`/`remove`/`reverse` mutating-method semantics** — impl/design · **blocked · escalated → Design (DQ30)** ·
-  `compiler/crates/bock-types`, `compiler/crates/bock-codegen` · — · blocked-by DQ30 · links DQ18, DQ30, #269 · note:
-  **ESCALATED 2026-06-09 (DQ30).** DQ18 ruled `push`/`append` (`mut self` Void); these four were left value-returning
-  (checker.rs:4607-4620 still type `pop`/`insert`/`remove`/`reverse` as the placeholder receiver `List[T]`). Applying the
-  `mut self` model needs the RETURN CONTRACT decided first, and §18.3 is **silent** on it — the contested axes (`remove` by-index
-  return type [`Optional[T]` vs `T`], out-of-bounds behavior, `pop`-on-empty) are a Design call, not impl-completeness (CLAUDE.md:
-  "undecided behavior → Design"). Surfaced to the owner 2026-06-09; owner deferred ("will circle back with the design decision").
-  Un-block + implement once DQ30 rules; the codegen is then a direct extension of the DQ18 mut-self lowering table ×5. ORIG: FOUND
-  2026-06-06 (#269).
+- **[Q-list-mut-pop-insert-remove] `pop`/`remove_at`/`insert`/`reverse` mutating-method semantics** — impl/design ·
+  **DONE (#349)** · `compiler/crates/bock-types` + `bock-codegen` + `bock-interp` · — · links DQ18, DQ30, #269, #349 ·
+  note: **DONE 2026-06-10 (#349) per the DQ30 ruling (option B refined + the `remove`→`remove_at` rename — see
+  design-questions DQ30-DECIDED).** Contracts: `pop -> Optional[T]` (None on empty) · `remove_at -> T` (abort OOB) ·
+  `insert -> Void` (range `0..=len`, abort OOB — Python's native clamp pre-checked away) · `reverse -> Void`; all
+  `mut self`/E5004; plus `set(i,v)` implemented (was E4013-rejected entirely!) and OOB-pinned under the same
+  now-normative §18.3 principle ("queries that can miss return Optional; violated index contracts abort"). Five-backend
+  lowerings per the ruling's table (rust fully native; synthesized aborts share the normalized message) + interp parity
+  byte-identical (R11). 21 fixtures incl. the abort negatives; `List.remove` → E4013 with a "did you mean `remove_at`?"
+  suggestion. BONUS R11 catch: interp `push` was a SILENT NO-OP under `bock run` (DQ18 parity gap) — fixed + regression-
+  tested in the same PR. §18.3 + changelog `20260610-dq30-list-mutator-contracts`. Conformance 960/0/0 ×2.
+  ORIG: FOUND 2026-06-06 (#269).
 - **[Q-py-collections-builtin-shadow] type-zoo python locals named `list`/`map`/`set` shadow builtins** — bug · **DONE (#262 — py codegen renames builtin-shadowing `let`s to `list__bN`)** ·
   `examples/spec-exercisers/type-zoo/` + `compiler/crates/bock-codegen/src/py.rs` · — · links #259 · note: FOUND 2026-06-05,
   surfaced (not caused) by #259 — the py statement-`match` fix de-masked type-zoo py, which then hits `keys = list(map.keys())`
