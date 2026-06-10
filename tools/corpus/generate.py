@@ -72,13 +72,25 @@ TARGET_ORDER = ["js", "ts", "python", "rust", "go"]
 
 # Top-level conformance categories whose `error E<code> at <l>:<c>`
 # expectations the Rust harness actually enforces via `bock check` (see
-# compiler/tests/execution.rs:
-# `conformance_effect_diagnostic_fixtures_check_as_declared` and
-# `conformance_method_body_diagnostic_fixtures_check_as_declared`). Drift
+# compiler/tests/execution.rs: `conformance_diagnostic_fixtures_check_as_declared`,
+# which walks the ENTIRE conformance tree — every category is wired). Drift
 # between a declared diagnostic and the live compiler in these dirs fails the
 # pipeline; drift elsewhere — where no CI test enforces the declaration — is a
-# manifest warning with the record kept as `verified: false`.
-HARNESS_WIRED_DIAGNOSTIC_CATEGORIES = {"effects", "types-diagnostics"}
+# manifest warning with the record kept as `verified: false`. Because the
+# harness walks the whole tree, any NEW top-level category is harness-enforced
+# from the moment it gains a diagnostic fixture: add it here in the same PR
+# (lockstep with DIAGNOSTIC_FIXTURE_CATEGORIES in execution.rs).
+HARNESS_WIRED_DIAGNOSTIC_CATEGORIES = {
+    "context",
+    "effects",
+    "exec",
+    "interp",
+    "parse",
+    "stdlib",
+    "time",
+    "types",
+    "types-diagnostics",
+}
 
 
 # ---------------------------------------------------------------------------

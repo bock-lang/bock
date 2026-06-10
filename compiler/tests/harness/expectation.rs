@@ -67,16 +67,18 @@ impl fmt::Display for ParseError {
 
 /// Parse a single `EXPECT` value string (everything after `// EXPECT: `).
 ///
-/// Returns `Ok(None)` for unrecognised (future) expectation types so the
-/// harness can be extended without breaking existing tests.
-pub fn parse_expectation(
-    value: &str,
-    line_number: usize,
-) -> Result<Option<Expectation>, ParseError> {
+/// Unrecognised expectation values are a **hard error** (typo guard). They
+/// used to be silently ignored "for forward compatibility", which let a
+/// fixture declare `// EXPECT: no errors` (typo for `no_errors`) and run
+/// expectation-free for weeks without anyone noticing
+/// (Q-conformance-directive-wiring). A new expectation type must be added to
+/// this parser (and to the assertion paths in `execution.rs`) before any
+/// fixture may use it.
+pub fn parse_expectation(value: &str, line_number: usize) -> Result<Expectation, ParseError> {
     let value = value.trim();
 
     if value == "no_errors" {
-        return Ok(Some(Expectation::NoErrors));
+        return Ok(Expectation::NoErrors);
     }
 
     if let Some(rest) = value.strip_prefix("error ") {
@@ -86,10 +88,10 @@ pub fn parse_expectation(
             let code = parts[0].to_string();
             let loc_str = parts[2];
             if let Some(loc) = parse_location(loc_str) {
-                return Ok(Some(Expectation::ErrorAt {
+                return Ok(Expectation::ErrorAt {
                     code,
                     location: loc,
-                }));
+                });
             }
         }
         return Err(ParseError {
@@ -106,7 +108,7 @@ pub fn parse_expectation(
         let text = rest.trim();
         if text.starts_with('"') && text.ends_with('"') && text.len() >= 2 {
             let inner = &text[1..text.len() - 1];
-            return Ok(Some(Expectation::Output(inner.to_string())));
+            return Ok(Expectation::Output(inner.to_string()));
         }
         return Err(ParseError {
             line_number,
@@ -134,11 +136,17 @@ pub fn parse_expectation(
                 ),
             });
         }
-        return Ok(Some(Expectation::Targets(set)));
+        return Ok(Expectation::Targets(set));
     }
 
-    // Unknown expectation type — forward-compatible: ignore silently.
-    Ok(None)
+    // Unknown expectation value — hard error (typo guard; see the fn docs).
+    Err(ParseError {
+        line_number,
+        message: format!(
+            "unknown expectation {value:?}; known forms: `no_errors`, \
+             `error E<code> at <line>:<col>`, `output \"<text>\"`, `targets <id>, ...`"
+        ),
+    })
 }
 
 fn parse_location(s: &str) -> Option<Location> {
@@ -154,15 +162,13 @@ mod tests {
 
     #[test]
     fn test_no_errors() {
-        let exp = parse_expectation("no_errors", 1).unwrap().unwrap();
+        let exp = parse_expectation("no_errors", 1).unwrap();
         assert_eq!(exp, Expectation::NoErrors);
     }
 
     #[test]
     fn test_error_at() {
-        let exp = parse_expectation("error E0205 at 3:10", 1)
-            .unwrap()
-            .unwrap();
+        let exp = parse_expectation("error E0205 at 3:10", 1).unwrap();
         assert_eq!(
             exp,
             Expectation::ErrorAt {
@@ -174,16 +180,27 @@ mod tests {
 
     #[test]
     fn test_output() {
-        let exp = parse_expectation("output \"hello world\"", 1)
-            .unwrap()
-            .unwrap();
+        let exp = parse_expectation("output \"hello world\"", 1).unwrap();
         assert_eq!(exp, Expectation::Output("hello world".to_string()));
     }
 
     #[test]
-    fn test_unknown_is_none() {
-        let result = parse_expectation("run_in_future_phase", 1).unwrap();
-        assert!(result.is_none());
+    fn test_unknown_is_error() {
+        // Typo guard: an unrecognised expectation value must be a hard error,
+        // not silently ignored — `// EXPECT: run_in_future_phase` (or a typo
+        // like `no errors`) must never run expectation-free.
+        let result = parse_expectation("run_in_future_phase", 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("unknown expectation"));
+    }
+
+    #[test]
+    fn test_no_errors_typo_is_error() {
+        // The exact typo class that motivated the guard: `no errors` (space
+        // instead of underscore) ran unasserted in types/fn_type_param.bock.
+        let result = parse_expectation("no errors", 2);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().line_number, 2);
     }
 
     #[test]
@@ -201,9 +218,7 @@ mod tests {
 
     #[test]
     fn test_targets() {
-        let exp = parse_expectation("targets go, rust , js", 1)
-            .unwrap()
-            .unwrap();
+        let exp = parse_expectation("targets go, rust , js", 1).unwrap();
         let mut want = BTreeSet::new();
         want.insert("go".to_string());
         want.insert("rust".to_string());
@@ -219,10 +234,10 @@ mod tests {
     }
 
     #[test]
-    fn test_targets_bare_word_is_unknown() {
-        // `targets` with no trailing space/args is an unknown directive, not an
-        // error (forward-compatible: ignored).
-        let result = parse_expectation("targets", 3).unwrap();
-        assert!(result.is_none());
+    fn test_targets_bare_word_is_error() {
+        // `targets` with no trailing space/args is malformed; under the typo
+        // guard it is a hard error (it used to be silently ignored).
+        let result = parse_expectation("targets", 3);
+        assert!(result.is_err());
     }
 }
