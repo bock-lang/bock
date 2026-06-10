@@ -1,0 +1,341 @@
+//! examples-matrix — parsing, aggregation, and rendering logic.
+//!
+//! Pure functions only: this module turns the raw lines of
+//! `tools/examples-exec-baseline.txt` into a typed dataset and renders the
+//! examples × targets support matrix as fixed-width text and Markdown.
+//! Keeping the logic free of I/O makes every function directly testable.
+
+module matrix
+
+use core.string.{pad_right}
+
+// ─── Data model ────────────────────────────────────────────────────
+
+/// One (example, target, status) observation from the baseline file.
+///
+/// `status` is one of the baseline's two statuses: `"pass"` (builds and runs
+/// clean) or `"build"` (builds clean; run failed or no runtime present).
+@context("One observation from the examples-exec baseline: which example, on which target, at which support status (pass|build). Plain data; no behavior.")
+public record Entry {
+  example: String
+  target: String
+  status: String
+}
+
+/// The classification of one raw baseline line.
+@context("Per-line parse outcome: comment/blank (Skipped), data (Parsed), or anything else (Malformed, carrying the raw line for diagnostics).")
+public enum ParsedLine {
+  /// A comment (`# ...`) or blank line — not data, not an error.
+  Skipped
+  /// A well-formed data line, carrying its parsed [`Entry`].
+  Parsed(Entry)
+  /// A non-comment line that did not parse; carries the raw line.
+  Malformed(String)
+}
+
+/// The aggregate result of parsing every line of the baseline file.
+@context("Whole-file parse result: data entries, malformed lines kept for reporting, and a count of skipped comment/blank lines. Nothing is silently dropped.")
+public record ParseResult {
+  entries: List[Entry]
+  malformed: List[String]
+  skipped: Int
+}
+
+/// Per-target rollup used in the report's summary section.
+///
+/// The count fields are named `pass_count`/`build_count` (not `pass`/`build`):
+/// the Python backend currently emits record fields verbatim, and a field
+/// named `pass` collides with the Python keyword (see FOUND items in the
+/// README/PR for the compiler-side fix).
+@context("Per-target rollup: how many examples pass vs build-only on one target.")
+public record TargetSummary {
+  target: String
+  pass_count: Int
+  build_count: Int
+}
+
+// ─── Parsing ───────────────────────────────────────────────────────
+
+/// Classifies one raw baseline line.
+///
+/// Data lines are tab-separated `<example-path> <target> <status>` triples;
+/// `#`-prefixed and blank lines are skipped. Anything else — wrong field
+/// count, empty fields, or an unknown status — is reported as malformed
+/// rather than silently dropped.
+@context("Classify one baseline line. @intent: tab-separated <example> <target> <status> triples; # and blank lines skip; everything else is Malformed, never dropped. @constraint: pure, no I/O.")
+public fn parse_line(line: String) -> ParsedLine {
+  let trimmed = line.trim()
+  if (trimmed == "") {
+    return Skipped
+  }
+  if (trimmed.starts_with("#")) {
+    return Skipped
+  }
+  // Accumulate the non-empty, trimmed fields with an explicit loop rather
+  // than a split/map/filter chain: the Go backend currently erases lambda
+  // element types in map/filter to interface{}, which rejects the emitted
+  // code (see FOUND items in the README/PR). The loop also keeps `fields`
+  // concretely typed as List[String].
+  let mut fields: List[String] = []
+  for piece in trimmed.split("\t") {
+    let p = piece.trim()
+    if (p != "") {
+      fields.push(p)
+    }
+  }
+  if (fields.len() != 3) {
+    return Malformed(line)
+  }
+  let example = fields.get(0).unwrap_or("")
+  let target = fields.get(1).unwrap_or("")
+  let status = fields.get(2).unwrap_or("")
+  if (status != "pass" && status != "build") {
+    return Malformed(line)
+  }
+  Parsed(Entry { example: example, target: target, status: status })
+}
+
+/// Parses every line, separating data entries from malformed lines and
+/// counting skipped comment/blank lines.
+///
+/// The parameter is `raw_lines`, not `lines`: the Go backend currently
+/// resolves an identifier named `lines` in for-loop position to the runtime
+/// string helper `Lines` (see FOUND items in the README/PR).
+@context("Fold parse_line over the whole file, partitioning outcomes into a ParseResult. @constraint: pure; preserves input order of entries and malformed lines.")
+public fn parse_lines(raw_lines: List[String]) -> ParseResult {
+  let mut entries: List[Entry] = []
+  let mut malformed: List[String] = []
+  let mut skipped = 0
+  for line in raw_lines {
+    match parse_line(line) {
+      Skipped => {
+        skipped = skipped + 1
+      }
+      Parsed(e) => {
+        entries.push(e)
+      }
+      Malformed(raw) => {
+        malformed.push(raw)
+      }
+    }
+  }
+  ParseResult { entries: entries, malformed: malformed, skipped: skipped }
+}
+
+// ─── Aggregation ───────────────────────────────────────────────────
+
+/// Unique example paths, in first-appearance order.
+@context("Distinct example paths in first-appearance order — row order of the matrix.")
+public fn example_order(entries: List[Entry]) -> List[String] {
+  let mut seen: List[String] = []
+  for e in entries {
+    if (!seen.contains(e.example)) {
+      seen.push(e.example)
+    }
+  }
+  seen
+}
+
+/// Unique target names, in first-appearance order.
+@context("Distinct target names in first-appearance order — column order of the matrix.")
+public fn target_order(entries: List[Entry]) -> List[String] {
+  let mut seen: List[String] = []
+  for e in entries {
+    if (!seen.contains(e.target)) {
+      seen.push(e.target)
+    }
+  }
+  seen
+}
+
+/// The recorded status for one (example, target) cell, if any.
+@context("Look up the recorded status for one (example, target) cell; on duplicate records the last one wins. None means the baseline has no entry for the pair.")
+public fn status_for(entries: List[Entry], example: String, target: String) -> Optional[String] {
+  let mut found: Optional[String] = None
+  for e in entries {
+    if (e.example == example && e.target == target) {
+      found = Some(e.status)
+    }
+  }
+  found
+}
+
+/// The display token for one matrix cell: the status, or `-` when the
+/// baseline has no entry for that (example, target) pair.
+@context("Render one matrix cell: the recorded status, or '-' for an unrecorded pair.")
+public fn cell_token(entries: List[Entry], example: String, target: String) -> String {
+  status_for(entries, example, target).unwrap_or("-")
+}
+
+/// How many entries carry the given status.
+@context("Count entries with a given status.")
+public fn count_status(entries: List[Entry], status: String) -> Int {
+  entries.filter((e) => e.status == status).len()
+}
+
+/// Pass/build rollup for one target.
+///
+/// Counts in a single pass instead of filter-then-count twice: the Rust
+/// backend currently misses the `.clone()` a local needs when it is passed
+/// by value to two calls (see FOUND items in the README/PR), and one pass
+/// is cheaper anyway.
+@context("Aggregate one target's entries into a pass/build-only rollup in a single pass.")
+public fn summarize_target(entries: List[Entry], target: String) -> TargetSummary {
+  let mut pass_count = 0
+  let mut build_count = 0
+  for e in entries {
+    if (e.target == target) {
+      if (e.status == "pass") {
+        pass_count = pass_count + 1
+      }
+      if (e.status == "build") {
+        build_count = build_count + 1
+      }
+    }
+  }
+  TargetSummary {
+    target: target
+    pass_count: pass_count
+    build_count: build_count
+  }
+}
+
+/// Integer percentage (truncated) of `part` in `whole`; 0 when `whole` is 0.
+@context("Truncated integer percentage; defined as 0 when the denominator is 0.")
+public fn percent(part: Int, whole: Int) -> Int {
+  if (whole == 0) {
+    0
+  } else {
+    (part * 100) / whole
+  }
+}
+
+/// `percent(part, whole)` rendered with a trailing percent sign, e.g. `95%`.
+///
+/// The sign is concatenated from a plain (non-interpolated) literal: the Go
+/// backend currently fails to escape a literal `%` inside an *interpolated*
+/// string when lowering it to `fmt.Sprintf`, which corrupts the output
+/// (`%!p(MISSING)`) — see FOUND items in the README/PR.
+fn percent_str(part: Int, whole: Int) -> String {
+  let sign = "%"
+  "${percent(part, whole)}${sign}"
+}
+
+/// How many (example, target) grid cells have no recorded entry.
+///
+/// Counts distinct recorded pairs in one pass and subtracts from the grid
+/// size, rather than probing every cell in a nested loop: the Rust backend
+/// currently mishandles ownership of loop variables reused across inner-loop
+/// iterations (see FOUND items in the README/PR), and one pass is cheaper.
+/// Duplicate records cannot skew the result because pairs are de-duplicated.
+@context("Count grid cells (example x target) with no recorded baseline entry: grid size minus distinct recorded pairs, computed in a single pass.")
+public fn count_missing(entries: List[Entry]) -> Int {
+  let mut seen_pairs: List[String] = []
+  for e in entries {
+    let key = "${e.example}\t${e.target}"
+    if (!seen_pairs.contains(key)) {
+      seen_pairs.push(key)
+    }
+  }
+  example_order(entries).len() * target_order(entries).len() - seen_pairs.len()
+}
+
+// ─── Rendering ─────────────────────────────────────────────────────
+
+/// The widest string in `xs`, but at least `floor`.
+fn width_of(xs: List[String], floor: Int) -> Int {
+  let mut w = floor
+  for x in xs {
+    if (x.len() > w) {
+      w = x.len()
+    }
+  }
+  w
+}
+
+/// Renders the matrix as a fixed-width text table.
+@context("Render the examples x targets matrix as an aligned fixed-width text table. @constraint: deterministic output, column widths derived from content.")
+public fn render_text_table(entries: List[Entry]) -> String {
+  let examples = example_order(entries)
+  let targets = target_order(entries)
+  let name_w = width_of(examples, "example".len())
+  // Every cell token is "pass", "build", or "-"; "build" is the widest.
+  let cell_w = width_of(targets, "build".len())
+
+  let mut out = pad_right("example", name_w, " ")
+  for t in targets {
+    out = "${out}  ${pad_right(t, cell_w, " ")}"
+  }
+  for ex in examples {
+    let mut row = pad_right(ex, name_w, " ")
+    for t in targets {
+      row = "${row}  ${pad_right(cell_token(entries, ex, t), cell_w, " ")}"
+    }
+    out = "${out}\n${row}"
+  }
+  out
+}
+
+/// Renders the matrix as a Markdown table.
+@context("Render the same matrix as a GitHub-flavored Markdown table for pasting into issues/PRs.")
+public fn render_markdown_table(entries: List[Entry]) -> String {
+  let examples = example_order(entries)
+  let targets = target_order(entries)
+
+  let mut header = "| example |"
+  let mut rule = "| --- |"
+  for t in targets {
+    header = "${header} ${t} |"
+    rule = "${rule} --- |"
+  }
+  let mut out = "${header}\n${rule}"
+  for ex in examples {
+    let mut row = "| ${ex} |"
+    for t in targets {
+      row = "${row} ${cell_token(entries, ex, t)} |"
+    }
+    out = "${out}\n${row}"
+  }
+  out
+}
+
+/// Renders the summary block: per-target rollups plus overall totals.
+@context("Render per-target pass/build rollups and overall totals, including a computed count of unrecorded grid cells.")
+public fn render_summary(entries: List[Entry]) -> String {
+  let targets = target_order(entries)
+  let examples = example_order(entries)
+  let total = entries.len()
+  let pass = count_status(entries, "pass")
+  let build = count_status(entries, "build")
+  let missing = count_missing(entries)
+
+  let mut out = "Per-target:"
+  for t in targets {
+    let s = summarize_target(entries, t)
+    let t_total = s.pass_count + s.build_count
+    out = "${out}\n  ${pad_right(t, 8, " ")} ${s.pass_count} pass, ${s.build_count} build-only of ${t_total} (${percent_str(s.pass_count, t_total)} pass)"
+  }
+  out = "${out}\nTotals: ${examples.len()} examples x ${targets.len()} targets, ${total} recorded pairs"
+  out = "${out}\n        ${pass} pass (${percent_str(pass, total)}), ${build} build-only (${percent_str(build, total)}), ${missing} missing"
+  out
+}
+
+/// Renders the full report: provenance header, text matrix, Markdown matrix,
+/// summary, and any malformed-line diagnostics.
+@context("Assemble the full report: provenance header, text matrix, Markdown matrix, summary, and malformed-line diagnostics when present. @constraint: deterministic; same input lines always yield byte-identical output.")
+public fn render_report(source: String, result: ParseResult) -> String {
+  let entries = result.entries
+  let mut out = "examples-matrix — examples x targets support matrix"
+  out = "${out}\nsource: ${source}"
+  out = "${out}\nparsed: ${entries.len()} entries (${result.skipped} comment/blank lines skipped, ${result.malformed.len()} malformed)"
+  out = "${out}\n\n${render_text_table(entries)}"
+  out = "${out}\n\nMarkdown:\n\n${render_markdown_table(entries)}"
+  out = "${out}\n\n${render_summary(entries)}"
+  if (result.malformed.len() > 0) {
+    out = "${out}\n\nMalformed lines:"
+    for raw in result.malformed {
+      out = "${out}\n  ${raw}"
+    }
+  }
+  out
+}
