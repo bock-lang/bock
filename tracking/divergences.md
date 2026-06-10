@@ -17,6 +17,31 @@ status(open | resolved→link)`
 
 ## Open
 
+### DV21 — §6.7 fieldless enum-variant expression accepted statically, rejected at interp runtime
+- **§:** §6.7 · **spec-says:** enum-variant construction/usage rules are
+  checked statically · **impl-does:** a fieldless `Status.Active`
+  *expression* passes `bock check` but is a runtime error in the
+  interpreter — the static checker under-rejects (or the interp
+  under-accepts; the spec reading favors static rejection).
+- **Classification:** impl-bug
+- **Disposition:** route to Design to confirm the §6.7 reading, then
+  fix-impl → queue (file the Q-item on the ruling; checker-side
+  rejection is the expected outcome).
+- **Status:** open (FOUND by the #339 context-pack authoring probe,
+  2026-06-10)
+
+### DV20 — §21.11 qualified enum-variant patterns rejected by the parser
+- **§:** §21.11 · **spec-says:** the grammar admits qualified
+  enum-variant patterns (`Status.Active =>`) in match arms ·
+  **impl-does:** the parser rejects the qualified form; only bare
+  variant names match.
+- **Classification:** spec-ahead-of-impl
+- **Disposition:** route to Design — implement the qualified pattern
+  form or amend §21.11; interacts with DV21's §6.7 expression-position
+  question (same qualified-variant surface).
+- **Status:** open (FOUND by the #339 context-pack authoring probe,
+  2026-06-10)
+
 ### DV19 — §20.3 claims a v1 LSP completion provider; none is implemented
 - **§:** §20.3 · **spec-says:** the v1 LSP ships completion ·
   **impl-does:** `bock lsp` registers hover, definition, push+pull

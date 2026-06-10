@@ -12,7 +12,21 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-10 — main dd5e770, 0 open PRs, clean, CI green. ★ DESIGN-AUDIT TRIAGE (#334 → hub).**
+_**Last reconciled 2026-06-10 — main 9ee050a, 0 open PRs, clean. ★ DESIGN-AUDIT FOLLOW-UP WAVE COMPLETE (#336–#339) + DEFECT HARVEST.**
+All four ready R3/R8 items dispatched as one 4-lane file-disjoint fan-out and landed same-block: **#336**
+Q-diagnostics-agent-audit (standing criterion at `.claude/conventions/diagnostics-review.md`; 70 codes/85 sites mapped;
+exit codes verified correct everywhere) · **#337** Q-synthetic-corpus (`tools/corpus/generate.py` — 261 verified records,
+1054/1054 target pairs, deterministic; output gitignored per OQ2) · **#338** Q-dogfood-tool (`tools/examples-matrix/` in
+pure Bock, executed on ALL 5 targets, stdout byte-identical ×5) · **#339** Q-context-pack (`context-pack/BOCK-CONTEXT-PACK.md`
+v0.1.0, 15/15 examples check-verified + drift-guard script). Two lanes resumed substantial work recovered from the aborted
+prior session (corpus ~80%, examples-matrix ~70% pre-built). **The wave doubled as the deepest off-fixture compiler probe
+yet → "Dogfood/context-pack defect harvest" section below: 20 new queue items** (HIGHs: the SILENT go `%`-interpolation
+cross-target divergence Q-go-percent-interpolation · Q-python-ifelse-truncation · Q-interp-question-propagation [R11] ·
+3 diagnostics HIGHs · the systemic Q-conformance-directive-wiring — only `effects/` + `types-diagnostics/` ErrorAt
+directives are CI-live), **2 new divergences DV20/DV21 (→ Design)**, and a §20.4 validation-ledger caveat (snapshot).
+A 4–6 lane correctness fix wave on the HIGHs is the obvious next dispatch — no gates. AWAITING OPERATOR (unchanged):
+the 6-item escalation bundle (R1/R6/OQ1–OQ4) + DQ29/DQ30; DV19 + now DV20/DV21 with Design. ↓ —
+PRIOR: **Last reconciled 2026-06-10 — main dd5e770, 0 open PRs, clean, CI green. ★ DESIGN-AUDIT TRIAGE (#334 → hub).**
 The Design chat's strategic audit (`designs/2026-06-09-design-audit.md`, landed #334) is folded into the hub: **R2+R4 spec
 touches landed** (§17.2 tier-default labels fixed per the audit's §4.5 ruling; §20.3 v1.x note reoriented MCP-first; changelog
 `20260610-design-audit-spec-touches.md`); **R3+R8 filed as queue items below** (Q-context-pack, Q-synthetic-corpus,
@@ -353,22 +367,37 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ### Design-audit follow-ups (filed 2026-06-10, from `designs/2026-06-09-design-audit.md`)
 
-- **[Q-context-pack] versioned model-familiarity context pack** — feature · ready ·
-  new top-level artifact (CLAUDE.md-shaped primer: spec + idiom guide + error-code table + worked examples) + `tools/scripts/` ·
-  — · links audit R3(1), R-A · note: the dominant-risk (model familiarity) mitigation; the single-file spec + vocab-sync
-  pipeline are the existing primitives. Versioned, shipped in-repo.
-- **[Q-synthetic-corpus] synthetic-corpus pipeline from conformance fixtures** — feature · ready ·
-  `tools/` (new pipeline; reads `compiler/tests/conformance/`) · — · links audit R3(2), R-A · note: mass-produce *verified*
-  (Bock source ↔ 5 target outputs ↔ expected behavior) triples from the compiler + conformance suite; 824 passing pairs are
-  the seed. **Publication of the corpus is OQ2 (operator) — the pipeline itself is unblocked.**
-- **[Q-diagnostics-agent-audit] diagnostics-as-agent-affordance audit + standing review criterion** — chore/audit · ready ·
-  read-only audit over error emission sites + a review-criterion note in `.claude/` conventions · — · links audit R3(3) ·
-  note: audit error messages for machine-actionability (the `bock check` exit-code bug was this lesson once); outcome = a
-  FOUND list of weak diagnostics + the standing criterion. Docs are training data; diagnostics are agent UX.
-- **[Q-dogfood-tool] one real tool written in Bock** — feature · ready ·
-  new `tools/` or `examples/` project (candidates: conformance-report generator, examples-matrix renderer) · — · links audit
-  R8 · note: yields corpus, credibility, and the first genuine user. Candidate choice is the dispatching session's call;
-  output should run via project mode on ≥1 shipping target.
+- **[Q-context-pack] versioned model-familiarity context pack** — feature · **DONE (#339)** ·
+  `context-pack/` + `tools/scripts/verify-context-pack.sh` · — · links audit R3(1), R-A, #339 · note: **DONE 2026-06-10
+  (#339)** — `context-pack/BOCK-CONTEXT-PACK.md` v0.1.0 (1,086 lines ≈ 11k tokens, pinned to spec 23-section state @
+  bef33b7): mental model, toolchain quickstart, idiom primer, v1-boundary, error-code table (sourced from
+  `bock-errors/src/catalog.rs` cross-checked against real emission sites), 5 RUN-verified worked examples, 20 pitfalls,
+  10 dated Known Divergences. Drift guard: `verify-context-pack.sh` runs `bock check` on every ```bock block (15/15 pass;
+  negative path verified). Authoring doubled as a compiler probe: 10 FOUND + 2 DV filed (harvest section below; DV20/DV21).
+  In-repo only — external publication stays OQ2 (operator).
+- **[Q-synthetic-corpus] synthetic-corpus pipeline from conformance fixtures** — feature · **DONE (#337)** ·
+  `tools/corpus/` · — · links audit R3(2), R-A, #337 · note: **DONE 2026-06-10 (#337)** — `tools/corpus/generate.py`
+  emits one verified record per fixture (schema 1.0.0: source + per-target `--source-only` trees + declared expectations +
+  live `bock check` evidence for diagnostic fixtures). Clean run: 261 records (exec 206 / static 41 / diagnostic 14),
+  1054/1054 target pairs ok, byte-deterministic, ~6s. Directive grammar mirrored line-by-line from
+  `compiler/tests/harness/`; `HARNESS_WIRED_DIAGNOSTIC_CATEGORIES` tracks which dirs CI actually asserts (→
+  Q-conformance-directive-wiring). **Output stays uncommitted/gitignored — publication is OQ2 (operator).** 2 stale-fixture
+  FOUNDs → Q-conformance-fixture-repairs.
+- **[Q-diagnostics-agent-audit] diagnostics-as-agent-affordance audit + standing review criterion** — chore/audit · **DONE (#336)** ·
+  `.claude/conventions/diagnostics-review.md` · — · links audit R3(3), #336 · note: **DONE 2026-06-10 (#336)** — surface
+  mapped (70 codes / 85 construction sites; catalog 44 entries, 28 emitted codes unregistered; 53 bare-`eprintln!` CLI
+  bypass sites); ~43 empirical `bock check` runs (exit codes correct in every scenario — the historical exit-code lesson
+  is fixed and centralized via `CheckOutcome`). Standing criterion landed at `.claude/conventions/diagnostics-review.md`
+  (8-point checklist; reviewer prompt: "could an agent produce the correct one-edit repair from this text alone?").
+  12 FOUND + systemic gaps triaged → harvest section below (Q-diag-*, Q-error-catalog-completeness,
+  Q-conformance-directive-wiring).
+- **[Q-dogfood-tool] one real tool written in Bock** — feature · **DONE (#338)** ·
+  `tools/examples-matrix/` · — · links audit R8, #338 · note: **DONE 2026-06-10 (#338)** — examples-matrix renderer
+  (the examples × targets support matrix from `tools/examples-exec-baseline.txt`), pure Bock (parsing/aggregation/
+  rendering in `matrix.bock`; baseline snapshotted into a generated module via `sync-baseline.sh` — v1 has no file-read
+  surface). Exceeded the ≥1-target bar: built AND executed on ALL 5, stdout byte-identical ×5, report hand-cross-checked
+  against the baseline. Dogfooding earned its keep: 6 real codegen FOUNDs (incl. a SILENT cross-target output divergence,
+  go `%`-interpolation) → harvest section below.
 - **[Q-mcp-server] `bock-mcp` server — compiler surface as MCP tools** — feature · deferred (v1.x lead tooling item) ·
   new crate `compiler/crates/bock-mcp/` (or a bock-cli subcommand — a scoping pass decides) · — · links audit R4, §20.3 note,
   changelog `20260610-design-audit-spec-touches.md` · note: `check`/`build`/`test`/`inspect`/conformance as agent tools;
@@ -376,6 +405,113 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 - **[Q-ai-loop-design-pass] agentic repair-loop / AI-layer composability design pass** — design · deferred (FIRST v1.x design
   pass) · `spec/` §17 + a design doc · — · links audit R5, §17.7/§17.8 · note: loop budgets, convergence detection,
   fallback policy — composing Generate/Repair/verify into a first-class pipeline stage. Routes to Design when v1.x opens.
+
+### Dogfood/context-pack defect harvest (filed 2026-06-10, FOUND via #336–#339)
+
+The design-audit follow-up wave doubled as the deepest off-fixture probe of the compiler yet (a real Bock tool ×5 + 15
+verified primer examples + 43 diagnostic runs). Everything below is off-conformance-coverage — which is itself the finding
+(see Q-conformance-directive-wiring and the snapshot ledger caveat).
+
+**Codegen correctness (silent-wrong-output items first):**
+
+- **[Q-go-percent-interpolation] go: literal `%` in interpolated strings unescaped in `fmt.Sprintf` lowering** — bug · ready ·
+  **HIGH** · `compiler/crates/bock-codegen/` (go) + a conformance fixture · — · links #338 · note: builds clean, corrupts
+  output (`95%!p(MISSING)ass` vs `95% pass` on the other 4) — a SILENT cross-target divergence, exactly what §20.4 exists to
+  prevent; needs a fixture so the mechanism catches the class. Repro: `println("${n}% pass")`. FOUND 2026-06-10 (#338).
+- **[Q-python-ifelse-truncation] python: function truncated after statement-position `if/else` whose arms end in `println`** —
+  bug · ready · **HIGH** · `compiler/crates/bock-codegen/` (python) · — · links #339, #259 (the prior py-truncation lesson) ·
+  note: `return print(...)` lowering ends the function early — silent wrong code, same family as the #259 statement-`match`
+  bug. FOUND 2026-06-10 (#339).
+- **[Q-python-keyword-record-fields] python: record fields colliding with Python keywords emitted verbatim** — bug · ready ·
+  `compiler/crates/bock-codegen/` (python) · — · links #338 · note: `record Tally { pass: Int }` → `SyntaxError`; keyword
+  escape missing in field position (check go/js/ts/rust reserved-word handling for the same class). FOUND 2026-06-10 (#338).
+- **[Q-rust-clone-insertion-gaps] rust: by-value clone insertion misses two reuse shapes (E0382)** — bug · ready ·
+  `compiler/crates/bock-codegen/` (rust) · — · links #338 · note: (a) local passed by value twice inside a record-literal
+  trailing expression (same double-use compiles when let-bound in `main` — position-sensitive); (b) nested `for` over a local
+  List with the outer loop var passed by value in the inner loop (liveness-based insertion misses loop-carried reuse).
+  FOUND 2026-06-10 (#338).
+- **[Q-go-split-combinator-typing] go: `.map`/`.filter` lambda element types erase to `interface{}` over `split()` results** —
+  bug · ready · `compiler/crates/bock-codegen/src/go.rs` · — · links #338, Q-go-chained-combinator-typing (#256 fixed the
+  combinator-call-receiver case) · note: builtin-method receiver (`"a,b".split(",")` → List[String]) doesn't propagate element
+  type into the chained lambda — does not compile. Sibling of the #256 fix, different receiver shape. FOUND 2026-06-10 (#338).
+- **[Q-go-runtime-helper-shadowing] go: user identifier `lines` in for-in position resolves to runtime helper `Lines`** — bug ·
+  ready · `compiler/crates/bock-codegen/` (go) · — · links #338 · note: with `core.string` imported, `for line in lines`
+  (param `lines: List[String]`) emits the helper, not the local — does not compile; name-resolution/shadowing in the go
+  emitter. FOUND 2026-06-10 (#338).
+- **[Q-js-user-equality-reference] js: user-type `==` with an Equatable impl lowers to reference equality** — bug · ready ·
+  `compiler/crates/bock-codegen/` (js/ts) · — · links #339, Q-equatable-gating-user-types, DQ29 · note: distinct from the
+  DQ29 *gating* question — this is the lowering: interp compares correctly, js compares references. FOUND 2026-06-10 (#339).
+- **[Q-bounded-comparable-codegen] `T: Comparable` generic comparisons broken (js wrong result; python emits undefined
+  trait-base classes)** — bug · ready · `compiler/crates/bock-codegen/` (js, python) · — · links #339, #299
+  (Q-user-comparison-codegen — which explicitly left `T: Comparable` untouched) · note: js wrong on both the operator and
+  `.compare()` forms; python references trait-base classes `_bock_runtime.py` never defines → `NameError`. The known-untouched
+  half of the #299 fix, now demonstrated broken. FOUND 2026-06-10 (#339).
+- **[Q-displayable-interpolation-dispatch] `${user_type}` interpolation doesn't dispatch through Displayable** — bug · ready ·
+  `compiler/crates/bock-codegen/` + `bock-interp` · — · links #339 · note: interp prints the structural form, js prints
+  `[object Object]`; conformance only covers explicit `.to_string()` — add the interpolation-position fixture with the fix.
+  FOUND 2026-06-10 (#339).
+- **[Q-js-handling-let-redeclaration] js: `let` declaration dropped when the same name re-binds in sibling `handling`
+  blocks** — bug · ready · `compiler/crates/bock-codegen/` (js/ts) · — · links #339 · note: second sibling block references
+  an undeclared name at runtime. FOUND 2026-06-10 (#339).
+
+**Interpreter parity (rank with correctness per routing.md R11 — the Tier-1 oracle is diverging):**
+
+- **[Q-interp-question-propagation] interp: `?` aborts instead of propagating `Err` at the call boundary** — bug · ready ·
+  **HIGH (R11)** · `compiler/crates/bock-interp/` · — · links #339, routing R11 · note: js early-returns correctly; the
+  reference interpreter aborts — the oracle diverges from targets on a core §9 operator. FOUND 2026-06-10 (#339).
+- **[Q-interp-assert-primitives] interp: `assert_eq`/`assert_ne` fail at runtime on primitives** — bug · ready ·
+  `compiler/crates/bock-interp/` · — · links #339 · note: `method 'eq' not found on Int`; `expect().to_equal()` works —
+  inconsistent test-surface support in the interpreter path. FOUND 2026-06-10 (#339).
+- **[Q-test-interp-crossfile-use] `bock test` interpreter path can't resolve cross-file `use main.{…}`** — bug · ready ·
+  `compiler/crates/bock-interp/` / test runner · — · links #339 · note: affects the in-repo `examples/*/test/` layout —
+  test files importing the module under test fail at resolution in interp mode. FOUND 2026-06-10 (#339).
+
+**Diagnostics quality (apply `.claude/conventions/diagnostics-review.md` to each fix):**
+
+- **[Q-diag-e4001-message-quality] E4001 message leaks Rust `Debug` type names, doubles the prefix, never says
+  expected-vs-found; conversion hint can be directionally wrong** — bug · ready · **HIGH** · `compiler/crates/bock-types/` +
+  `bock-errors` · — · links #336 · note: `type mismatch in expression: type mismatch: Primitive(String) vs Primitive(Int)`
+  (lib.rs:210 via checker.rs:1045); checker.rs:5920 suggests `.to_string()` when Int is expected. The highest-traffic
+  diagnostic in agent repair loops. FOUND 2026-06-10 (#336).
+- **[Q-diag-effect-violation-errors] effect-op violations mis-categorized and double-emitted** — bug · ready · **HIGH** ·
+  `compiler/crates/bock-air/src/resolve.rs` + `bock-types/src/checker.rs` · — · links #336 · note: undeclared effect op →
+  E1001 ``undefined name `log`; did you mean `Log`?`` (wrong category, misleading casing suggestion, slot-collides with the
+  lexer's E1001); v1.x-reserved lambda-handler → E4002 ``undefined variable`` emitted TWICE at the same span, never naming
+  the reserved rule (checker.rs:2265 — some path type-checks the expression twice). FOUND 2026-06-10 (#336).
+- **[Q-diag-ansi-no-color] unconditional ANSI escapes — `NO_COLOR` ignored, no TTY detection** — bug · ready · **HIGH** ·
+  `compiler/crates/bock-errors/src/lib.rs:293` · — · links #336 · note: escapes land in piped output — directly hostile to
+  agent consumption (and to CI logs). FOUND 2026-06-10 (#336).
+- **[Q-diag-brief-span-format] `--brief` emits byte offsets (`(at file:129..134)`), not `line:col`** — bug · ready ·
+  `compiler/crates/bock-cli/src/check.rs:634` · — · links #336, §20.1.1 · note: inconsistent with rich mode and with the
+  conformance directive format; CLI-shape (§20.1 non-normative) so fixable without Design. FOUND 2026-06-10 (#336).
+- **[Q-diag-structure-misc] structural diagnostics cleanup (MED/LOW batch)** — bug · ready ·
+  `compiler/crates/bock-cli/` + `bock-parser` + `bock-air` · — · links #336, #338 · note: (a) circular-dep error is a bare
+  string — no code/span/cycle participants (check.rs:330); (b) `if` without parens hits the E2000 catch-all cascade and the
+  purpose-built E2030 lambda-parens diagnostic is unreachable (parser lib.rs:168); (c) E1007 private-symbol error omits the
+  determinable "declare it `public`" fix (resolve.rs:491); (d) W8013 context-annotation warning fires per public item,
+  uncataloged — pure noise (#338 had to add 19 `@context` lines to silence it; validate_context.rs:292). FOUND 2026-06-10.
+- **[Q-error-catalog-completeness] error catalog incomplete + unenforced** — bug · ready ·
+  `compiler/crates/bock-errors/src/catalog.rs` + a registry test · — · links #336, #339 · note: 28 emitted codes
+  unregistered (E0204, E2031/2061/2071/2072/2091/2092, E5004, the entire 8xxx family, W0001); 2 entries unparseable
+  (`"E1005 (module)"` collision workarounds); E4012 catalog entry conflicts with its §6.7 coherence use; 1xxx slot
+  collisions need a renumbering decision; NO test asserts emission↔catalog correspondence — add one with the fix.
+  FOUND 2026-06-10 (#336, #339 independently).
+- **[Q-w1001-effect-import-false-positive] spurious W1001 unused-import for effect names used in `with`/`handling`/
+  `impl … for`** — bug · ready · `compiler/crates/bock-air/` · — · links #339, Q-w1001-glob-internal-symbols · note:
+  effect-name usages in those three positions don't mark the import used. FOUND 2026-06-10 (#339).
+
+**Test-infra (the systemic finding):**
+
+- **[Q-conformance-directive-wiring] only `effects/` + `types-diagnostics/` ErrorAt directives are asserted via `bock
+  check`; every other category's diagnostic directives are inert** — chore · ready · **HIGH (meta)** ·
+  `compiler/tests/execution.rs` / harness · — · links #336, #337 · note: proven by Q-conformance-fixture-repairs (a stale
+  fixture nobody noticed). Wire the remaining categories (or per-category opt-in) and keep
+  `tools/corpus/generate.py::HARNESS_WIRED_DIAGNOSTIC_CATEGORIES` in lockstep. FOUND 2026-06-10 (#336 + #337 independently).
+- **[Q-conformance-fixture-repairs] two defective fixtures** — chore · ready · LOW ·
+  `compiler/tests/conformance/types/` · — · links #336, #337, Q-conformance-directive-wiring · note:
+  `type_mismatch.bock` declares `// EXPECT: error E0205 at 3:10`, compiler reports E4001 at 3:22 (stale, never asserted);
+  `fn_type_param.bock` has `// EXPECT: no errors` (typo for `no_errors`, silently ignored → expectation-free fixture).
+  FOUND 2026-06-10 (#336/#337).
 
 ### Editor v1.1 feature-wave follow-ups (filed 2026-06-09)
 

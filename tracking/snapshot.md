@@ -11,7 +11,7 @@ changes.
 
 ---
 
-## Build status (as of main 0567568, 2026-06-09)
+## Build status (as of main 9ee050a, 2026-06-10 — measured at 0567568; #335–#339 touched zero compiler/docs surface, so the figures carry)
 
 | What | State |
 |------|-------|
@@ -150,7 +150,7 @@ Standing ledger distinguishing designed bets from proven capabilities
 
 | Pillar | Status |
 |--------|--------|
-| Cross-target conformance equivalence (§20.4) | **validated** — 824 fixture×target pairs / 0 failed ×5; divergences (Int division, Bool spelling) caught + eliminated by the mechanism |
+| Cross-target conformance equivalence (§20.4) | **validated** — 824 fixture×target pairs / 0 failed ×5; divergences (Int division, Bool spelling) caught + eliminated by the mechanism. **⚠ Bounded by fixture coverage (2026-06-10):** the first off-fixture dogfood probe (#338/#339) found a SILENT cross-target output divergence (go `%`-interpolation, Q-go-percent-interpolation) and an interp-vs-targets `?`-propagation divergence (Q-interp-question-propagation) — the claim holds *on the covered surface*; the harvest queue items + Q-conformance-directive-wiring widen the surface |
 | Deterministic codegen substrate (Tier 2, §17.2) | **validated** — the entire v1 compiler/stdlib/examples surface runs on it; no API key in CI |
 | Decision manifests / pins / deterministic fallback (§17.4, §19) | **validated at build time** — manifest plumbing live; runtime promote-from-runtime path unexercised |
 | Effects + capabilities as checked semantics (§10, §14) | **validated** — checked + executing ×5 (incl. the §10 invocation forms, #155) |
