@@ -1802,21 +1802,25 @@ struct PyEmitCtx {
     /// `break v` value still flows through the separate `loop_value_targets`
     /// stack, not this flag.
     in_loop_body_tail: bool,
-    /// `true` while emitting the arm bodies of a **statement-position** `match`
-    /// (one that sits mid-block as a side-effecting statement, not as the
-    /// block/function tail nor a value-binding RHS — set by [`Self::emit_stmt`]'s
-    /// `Match` arm). Like [`Self::in_loop_body_tail`], such a match evaluates to
-    /// Unit: each arm's tail expression is *discarded*, so
+    /// `true` while emitting the arm/branch bodies of a **statement-position**
+    /// control-flow construct — a `match` or an `if`/`else` that sits mid-block
+    /// as a side-effecting statement, not as the block/function tail nor a
+    /// value-binding RHS (set by [`Self::emit_stmt`]'s `Match` and `If` arms).
+    /// Like [`Self::in_loop_body_tail`], such a construct evaluates to Unit:
+    /// each arm's/branch's tail expression is *discarded*, so
     /// [`Self::emit_block_body_inner`] must emit it as a bare expression statement
     /// (`<value>`) rather than a function-body `return <value>`. Emitting `return`
-    /// here aborts the enclosing function after the matched arm runs — the
-    /// chat-protocol truncation, where `match decoded { Ok(m) => println(..) … }`
-    /// returned out of `main` after the first arm instead of falling through to
-    /// the rest of the body. Saved/restored around the arm bodies and cleared
-    /// while emitting any *nested* value context (a nested `fn`/method body, a
-    /// value-binding hoist), so the discard applies only to the statement-match's
-    /// own arm tails and never leaks into a value position.
-    in_stmt_match_arm: bool,
+    /// here aborts the enclosing function after the matched arm/taken branch runs
+    /// — the chat-protocol truncation, where `match decoded { Ok(m) =>
+    /// println(..) … }` returned out of `main` after the first arm instead of
+    /// falling through to the rest of the body (#259), and its `if`/`else`
+    /// sibling (Q-python-ifelse-truncation), where `if c { println(..) } else {
+    /// println(..) }` returned out after either branch. Saved/restored around
+    /// the arm/branch bodies and cleared while emitting any *nested* value
+    /// context (a nested `fn`/method body, a value-binding hoist), so the
+    /// discard applies only to the statement construct's own tails and never
+    /// leaks into a value position.
+    in_stmt_construct_arm: bool,
 }
 
 impl PyEmitCtx {
@@ -1867,7 +1871,7 @@ impl PyEmitCtx {
             shadow_counter: 0,
             pending_scope_seed: Vec::new(),
             in_loop_body_tail: false,
-            in_stmt_match_arm: false,
+            in_stmt_construct_arm: false,
         }
     }
 
@@ -3780,7 +3784,10 @@ impl PyEmitCtx {
                 } else {
                     for f in fields {
                         let type_hint = self.ast_type_to_py(&f.ty);
-                        self.writeln(&format!("{}: {type_hint}", to_snake_case(&f.name.name)));
+                        // `py_field_ident`: a field named after a Python
+                        // keyword (`pass`) must be escaped (`pass_`) or the
+                        // dataclass declaration is a SyntaxError.
+                        self.writeln(&format!("{}: {type_hint}", py_field_ident(&f.name.name)));
                     }
                     for method in Self::dedup_impl_methods(&impls) {
                         self.buf.push('\n');
@@ -3901,7 +3908,10 @@ impl PyEmitCtx {
                     let params: Vec<String> = fields
                         .iter()
                         .map(|f| {
-                            let fname = to_snake_case(&f.name.name);
+                            // `py_field_ident`: keyword-named fields (`pass`)
+                            // must be escaped (`pass_`) in the `__init__`
+                            // parameter list and attribute assignments alike.
+                            let fname = py_field_ident(&f.name.name);
                             let type_hint = self.ast_type_to_py(&f.ty);
                             format!("{fname}: {type_hint}")
                         })
@@ -3909,7 +3919,7 @@ impl PyEmitCtx {
                     self.writeln(&format!("def __init__(self, {}):", params.join(", ")));
                     self.indent += 1;
                     for f in fields {
-                        let fname = to_snake_case(&f.name.name);
+                        let fname = py_field_ident(&f.name.name);
                         self.writeln(&format!("self.{fname} = {fname}"));
                     }
                     self.indent -= 1;
@@ -4278,13 +4288,13 @@ impl PyEmitCtx {
         // re-binding a param is a plain rebind, a nested-block one is renamed).
         self.pending_scope_seed = Self::param_value_names(params);
         // A function-body tail is the function's return value, even for a `fn`
-        // *nested inside a loop body or a statement-match arm*: clear the discard
+        // *nested inside a loop body or a statement-`match`/`if` arm*: clear the discard
         // flags so this body returns its tail rather than dropping it.
         let prev_discard = std::mem::replace(&mut self.in_loop_body_tail, false);
-        let prev_match = std::mem::replace(&mut self.in_stmt_match_arm, false);
+        let prev_match = std::mem::replace(&mut self.in_stmt_construct_arm, false);
         let body_res = self.emit_fn_body(body);
         self.in_loop_body_tail = prev_discard;
-        self.in_stmt_match_arm = prev_match;
+        self.in_stmt_construct_arm = prev_match;
         body_res?;
         self.current_handler_vars = old_handler_vars;
         self.indent -= 1;
@@ -4360,13 +4370,13 @@ impl PyEmitCtx {
             seed.extend(Self::param_value_names(rest));
             self.pending_scope_seed = seed;
             // A method body's tail is its return value — clear any enclosing
-            // discard flags (loop-body or statement-match arm) so it returns
+            // discard flags (loop-body or statement-`match`/`if` arm) so it returns
             // rather than dropping its tail.
             let prev_discard = std::mem::replace(&mut self.in_loop_body_tail, false);
-            let prev_match = std::mem::replace(&mut self.in_stmt_match_arm, false);
+            let prev_match = std::mem::replace(&mut self.in_stmt_construct_arm, false);
             let body_res = self.emit_fn_body(body);
             self.in_loop_body_tail = prev_discard;
-            self.in_stmt_match_arm = prev_match;
+            self.in_stmt_construct_arm = prev_match;
             body_res?;
             self.current_handler_vars = old_handler_vars;
             self.indent -= 1;
@@ -4584,7 +4594,9 @@ impl PyEmitCtx {
                     self.indent += 1;
                     for f in fields {
                         let type_hint = self.ast_type_to_py(&f.ty);
-                        self.writeln(&format!("{}: {type_hint}", to_snake_case(&f.name.name)));
+                        // `py_field_ident`: keyword-named payload fields
+                        // (`lambda`) must be escaped (`lambda_`).
+                        self.writeln(&format!("{}: {type_hint}", py_field_ident(&f.name.name)));
                     }
                     self.writeln(&format!("_tag: str = \"{vname}\""));
                     self.indent -= 1;
@@ -4680,44 +4692,23 @@ impl PyEmitCtx {
                 }
                 Ok(())
             }
-            NodeKind::If {
-                let_pattern,
-                condition,
-                then_block,
-                else_block,
-            } => {
-                if let Some(pat) = let_pattern {
-                    let ind = self.indent_str();
-                    let binding = self.pattern_to_py_binding(pat);
-                    let _ = write!(self.buf, "{ind}{binding} = ");
-                    self.emit_expr(condition)?;
-                    self.buf.push('\n');
-                    self.writeln(&format!("if {binding} is not None:"));
-                    self.indent += 1;
-                    self.emit_block_body(then_block)?;
-                    self.indent -= 1;
-                } else {
-                    let ind = self.indent_str();
-                    let _ = write!(self.buf, "{ind}if ");
-                    self.emit_expr(condition)?;
-                    self.buf.push_str(":\n");
-                    self.indent += 1;
-                    self.emit_block_body(then_block)?;
-                    self.indent -= 1;
-                }
-                if let Some(else_b) = else_block {
-                    if matches!(else_b.kind, NodeKind::If { .. }) {
-                        let ind = self.indent_str();
-                        let _ = write!(self.buf, "{ind}el");
-                        self.emit_stmt(else_b)?;
-                        return Ok(());
-                    }
-                    self.writeln("else:");
-                    self.indent += 1;
-                    self.emit_block_body(else_b)?;
-                    self.indent -= 1;
-                }
-                Ok(())
+            NodeKind::If { .. } => {
+                // Statement position: a mid-block `if`/`else` is a Unit
+                // statement, so each branch's tail expression is discarded
+                // (emitted as a bare expression statement) rather than
+                // `return`ed — the same contract as the statement-`match` arm
+                // below (Q-python-ifelse-truncation; sibling of the #259
+                // chat-protocol truncation). Without the flag, a branch whose
+                // body is a bare expression (`if c { println(..) }`) emitted
+                // `return print(..)`, aborting the enclosing function after
+                // the taken branch so every following statement was skipped.
+                // Saved/restored, and cleared inside any nested value context
+                // (a nested fn/method body, a value-binding hoist), so it
+                // scopes only to this statement's own branch tails.
+                let prev = std::mem::replace(&mut self.in_stmt_construct_arm, true);
+                let r = self.emit_stmt_if(node, false);
+                self.in_stmt_construct_arm = prev;
+                r
             }
             NodeKind::For {
                 pattern,
@@ -4812,39 +4803,21 @@ impl PyEmitCtx {
                 condition,
                 else_block,
             } => {
-                if let Some(pat) = let_pattern {
-                    // `guard (let PAT = EXPR) else { ELSE }` — a refutable
-                    // binding guard. Lower to a two-arm `match` so PAT's bindings
-                    // (e.g. `val` in `Ok(val)`) are extracted on success and stay
-                    // in scope after the guard (Python `match` bindings persist as
-                    // ordinary assignments); the `_` arm runs the diverging ELSE.
-                    let ind = self.indent_str();
-                    let _ = write!(self.buf, "{ind}match ");
-                    self.emit_expr(condition)?;
-                    self.buf.push_str(":\n");
-                    self.indent += 1;
-                    let ind = self.indent_str();
-                    let _ = write!(self.buf, "{ind}case ");
-                    self.emit_pattern(pat)?;
-                    self.buf.push_str(":\n");
-                    self.indent += 1;
-                    self.writeln("pass");
-                    self.indent -= 1;
-                    self.writeln("case _:");
-                    self.indent += 1;
-                    self.emit_block_body(else_block)?;
-                    self.indent -= 1;
-                    self.indent -= 1;
-                    return Ok(());
-                }
-                let ind = self.indent_str();
-                let _ = write!(self.buf, "{ind}if not (");
-                self.emit_expr(condition)?;
-                self.buf.push_str("):\n");
-                self.indent += 1;
-                self.emit_block_body(else_block)?;
-                self.indent -= 1;
-                Ok(())
+                // The guard `else` block is statement position. Per §8.4 it
+                // must diverge (`return`/`break`/`continue`/`Never`) — a
+                // diverging tail is a statement and unaffected by the discard
+                // flag — but the checker does not currently enforce the
+                // divergence (surfaced as OPEN with this fix), and for an
+                // accepted non-diverging else every other backend (js/ts/go/
+                // rust and the interpreter) falls through to the statements
+                // after the guard. Without the flag the bare-expression tail
+                // lowered to `return print(..)`, silently truncating the
+                // function on Python alone — the same early-`return` family as
+                // the statement `match`/`if` fixes above.
+                let prev = std::mem::replace(&mut self.in_stmt_construct_arm, true);
+                let r = self.emit_stmt_guard(let_pattern.as_deref(), condition, else_block);
+                self.in_stmt_construct_arm = prev;
+                r
             }
             NodeKind::Match { scrutinee, arms } => {
                 // Statement position: a mid-block `match` is a Unit statement, so
@@ -4856,9 +4829,9 @@ impl PyEmitCtx {
                 // is saved/restored and cleared inside any nested value context
                 // (a nested fn/method body, a value-binding hoist), so it scopes
                 // only to this match's own arm tails.
-                let prev = std::mem::replace(&mut self.in_stmt_match_arm, true);
+                let prev = std::mem::replace(&mut self.in_stmt_construct_arm, true);
                 let r = self.emit_match(scrutinee, arms);
-                self.in_stmt_match_arm = prev;
+                self.in_stmt_construct_arm = prev;
                 r
             }
             NodeKind::Block { stmts, tail } => {
@@ -4935,6 +4908,129 @@ impl PyEmitCtx {
                 Ok(())
             }
         }
+    }
+
+    /// Emit a **statement-position** `if` (with its optional `else`/`else if`
+    /// chain). `inline` is true for an `else if` continuation: the caller has
+    /// already written this line's indentation plus the `el` prefix, so the
+    /// emission starts at `if <cond>:` with no leading indent. (The previous
+    /// code re-entered the generic statement emitter after writing `el`, which
+    /// wrote its own indentation — `el    if (…):`, a Python SyntaxError, for
+    /// every mid-block `else if` chain. The tail-position twin
+    /// [`Self::emit_tail_control_flow_inline`] already chained correctly.)
+    ///
+    /// The caller ([`Self::emit_stmt`]'s `If` arm) sets
+    /// [`Self::in_stmt_construct_arm`] around the whole chain, so each branch
+    /// body's bare-expression tail lowers to a bare statement, never a
+    /// function-body `return` (Q-python-ifelse-truncation).
+    fn emit_stmt_if(&mut self, node: &AIRNode, inline: bool) -> Result<(), CodegenError> {
+        let NodeKind::If {
+            let_pattern,
+            condition,
+            then_block,
+            else_block,
+        } = &node.kind
+        else {
+            // Defensive: only `If` nodes are routed here.
+            return self.emit_stmt(node);
+        };
+        if let Some(pat) = let_pattern {
+            // `if let` — bind first, then test. Never reached with `inline`
+            // (an `else if let` continuation is emitted under a plain `else:`
+            // below, because its binding statement needs its own line).
+            let ind = self.indent_str();
+            let binding = self.pattern_to_py_binding(pat);
+            let _ = write!(self.buf, "{ind}{binding} = ");
+            self.emit_expr(condition)?;
+            self.buf.push('\n');
+            self.writeln(&format!("if {binding} is not None:"));
+        } else {
+            if inline {
+                self.buf.push_str("if ");
+            } else {
+                let ind = self.indent_str();
+                let _ = write!(self.buf, "{ind}if ");
+            }
+            self.emit_expr(condition)?;
+            self.buf.push_str(":\n");
+        }
+        self.indent += 1;
+        self.emit_block_body(then_block)?;
+        self.indent -= 1;
+        if let Some(else_b) = else_block {
+            if let NodeKind::If {
+                let_pattern: nested_let,
+                ..
+            } = &else_b.kind
+            {
+                if nested_let.is_none() {
+                    // `else if` → `elif`: write the `el` prefix, then continue
+                    // on the same line.
+                    let ind = self.indent_str();
+                    let _ = write!(self.buf, "{ind}el");
+                    return self.emit_stmt_if(else_b, true);
+                }
+                // `else if let` needs its binding statement first — emit the
+                // whole continuation indented under a plain `else:`.
+                self.writeln("else:");
+                self.indent += 1;
+                let r = self.emit_stmt_if(else_b, false);
+                self.indent -= 1;
+                return r;
+            }
+            self.writeln("else:");
+            self.indent += 1;
+            self.emit_block_body(else_b)?;
+            self.indent -= 1;
+        }
+        Ok(())
+    }
+
+    /// Emit a **statement-position** `guard (cond) else { … }` /
+    /// `guard (let PAT = EXPR) else { … }`. The caller ([`Self::emit_stmt`]'s
+    /// `Guard` arm) sets [`Self::in_stmt_construct_arm`] around the call so a
+    /// bare-expression tail in the `else` block lowers to a bare statement —
+    /// see the rationale there; a spec-conforming diverging `else` (§8.4) is a
+    /// statement tail and is emitted unchanged.
+    fn emit_stmt_guard(
+        &mut self,
+        let_pattern: Option<&AIRNode>,
+        condition: &AIRNode,
+        else_block: &AIRNode,
+    ) -> Result<(), CodegenError> {
+        if let Some(pat) = let_pattern {
+            // `guard (let PAT = EXPR) else { ELSE }` — a refutable
+            // binding guard. Lower to a two-arm `match` so PAT's bindings
+            // (e.g. `val` in `Ok(val)`) are extracted on success and stay
+            // in scope after the guard (Python `match` bindings persist as
+            // ordinary assignments); the `_` arm runs the diverging ELSE.
+            let ind = self.indent_str();
+            let _ = write!(self.buf, "{ind}match ");
+            self.emit_expr(condition)?;
+            self.buf.push_str(":\n");
+            self.indent += 1;
+            let ind = self.indent_str();
+            let _ = write!(self.buf, "{ind}case ");
+            self.emit_pattern(pat)?;
+            self.buf.push_str(":\n");
+            self.indent += 1;
+            self.writeln("pass");
+            self.indent -= 1;
+            self.writeln("case _:");
+            self.indent += 1;
+            self.emit_block_body(else_block)?;
+            self.indent -= 1;
+            self.indent -= 1;
+            return Ok(());
+        }
+        let ind = self.indent_str();
+        let _ = write!(self.buf, "{ind}if not (");
+        self.emit_expr(condition)?;
+        self.buf.push_str("):\n");
+        self.indent += 1;
+        self.emit_block_body(else_block)?;
+        self.indent -= 1;
+        Ok(())
     }
 
     // ── Expressions ─────────────────────────────────────────────────────────
@@ -5268,7 +5364,10 @@ impl PyEmitCtx {
             }
             NodeKind::FieldAccess { object, field } => {
                 self.emit_expr(object)?;
-                let _ = write!(self.buf, ".{}", to_snake_case(&field.name));
+                // `py_field_ident`: a keyword-named field (`pass`) reads as the
+                // escaped attribute (`t.pass_`) — `t.pass` is a SyntaxError —
+                // matching the escaped dataclass/`__init__` declaration.
+                let _ = write!(self.buf, ".{}", py_field_ident(&field.name));
                 Ok(())
             }
             NodeKind::Index { object, index } => {
@@ -5350,6 +5449,13 @@ impl PyEmitCtx {
                         .collect::<Vec<_>>()
                         .join(".")
                 };
+                // `py_field_ident` throughout: keyword-named fields (`pass`)
+                // construct through their escaped spelling — kwargs
+                // (`Tally(pass_=7)`) and spread dict keys (`"pass_": 9`) must
+                // match the escaped dataclass field, and `pass=7` is a
+                // SyntaxError besides. A shorthand field's *value* is the
+                // same-named value binding, whose spelling `py_value_ident`
+                // escapes identically.
                 if let Some(sp) = spread {
                     // Spread: create dict, update, then construct
                     self.buf.push_str(&format!("{type_name}(**{{**vars("));
@@ -5359,11 +5465,11 @@ impl PyEmitCtx {
                         if i > 0 {
                             self.buf.push_str(", ");
                         }
-                        let _ = write!(self.buf, "\"{}\": ", to_snake_case(&f.name.name));
+                        let _ = write!(self.buf, "\"{}\": ", py_field_ident(&f.name.name));
                         if let Some(val) = &f.value {
                             self.emit_expr(val)?;
                         } else {
-                            self.buf.push_str(&to_snake_case(&f.name.name));
+                            self.buf.push_str(&py_value_ident(&f.name.name));
                         }
                     }
                     self.buf.push_str("})");
@@ -5374,11 +5480,11 @@ impl PyEmitCtx {
                         if i > 0 {
                             self.buf.push_str(", ");
                         }
-                        let _ = write!(self.buf, "{}=", to_snake_case(&f.name.name));
+                        let _ = write!(self.buf, "{}=", py_field_ident(&f.name.name));
                         if let Some(val) = &f.value {
                             self.emit_expr(val)?;
                         } else {
-                            self.buf.push_str(&to_snake_case(&f.name.name));
+                            self.buf.push_str(&py_value_ident(&f.name.name));
                         }
                     }
                     self.buf.push(')');
@@ -5797,7 +5903,11 @@ impl PyEmitCtx {
                 };
                 let mut field_pats: Vec<String> = Vec::with_capacity(fields.len());
                 for f in fields {
-                    let field_name = to_snake_case(&f.name.name);
+                    // `py_field_ident`: a keyword-named field (`pass`)
+                    // destructures through its escaped spelling
+                    // (`case Tally(pass_=p)`), matching the escaped dataclass
+                    // field declaration.
+                    let field_name = py_field_ident(&f.name.name);
                     if let Some(pat) = &f.pattern {
                         // Recurse so a nested record/constructor/tuple sub-pattern
                         // keeps its inner bindings.
@@ -5809,7 +5919,10 @@ impl PyEmitCtx {
                         // name, not by `__match_args__` position (a dataclass's
                         // positional order is field-decl order *plus* the trailing
                         // `_tag`, so a bare positional sub-pattern would mis-bind
-                        // multi-field variants).
+                        // multi-field variants). For a keyword-named field both
+                        // sides escape identically (`pass_=pass_`): the bound
+                        // value identifier's references go through
+                        // `py_value_ident`, which produces the same spelling.
                         field_pats.push(format!("{field_name}={field_name}"));
                     }
                 }
@@ -6665,14 +6778,17 @@ impl PyEmitCtx {
     /// *statement* position — a Bock loop evaluates to Unit, so the value is
     /// discarded — and a `return` would abort the enclosing function after the
     /// first iteration (the fizzbuzz one-line / inventory single-product
-    /// truncation). There it is emitted as a bare expression statement. The arm
-    /// body of a statement-position `match` ([`Self::in_stmt_match_arm`], set by
-    /// [`Self::emit_stmt`]'s `Match` arm) is discarded for the same reason — a
-    /// mid-block `match` is a Unit statement, and a `return` there aborts the
-    /// enclosing function after the matched arm (the chat-protocol truncation).
+    /// truncation). There it is emitted as a bare expression statement. The
+    /// arm/branch body of a statement-position `match` or `if`/`else`
+    /// ([`Self::in_stmt_construct_arm`], set by [`Self::emit_stmt`]'s `Match`
+    /// and `If` arms) is discarded for the same reason — a mid-block
+    /// `match`/`if` is a Unit statement, and a `return` there aborts the
+    /// enclosing function after the matched arm / taken branch (the
+    /// chat-protocol truncation and its if/else sibling,
+    /// Q-python-ifelse-truncation).
     fn emit_tail_value_or_discard(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
         let ind = self.indent_str();
-        if self.in_loop_body_tail || self.in_stmt_match_arm {
+        if self.in_loop_body_tail || self.in_stmt_construct_arm {
             self.buf.push_str(&ind);
         } else {
             let _ = write!(self.buf, "{ind}return ");
@@ -6772,17 +6888,17 @@ impl PyEmitCtx {
     ) -> Result<(), CodegenError> {
         // A value-binding RHS is a *value* context: its tail is assigned to
         // `target`, never discarded. Clear any active discard flag (a loop-body
-        // tail set by an enclosing `emit_loop_body`, or a statement-match arm set
-        // by `emit_stmt`) so it doesn't leak into this value position; a nested
-        // loop/statement-match inside the RHS re-sets the relevant flag. Restored
-        // after.
+        // tail set by an enclosing `emit_loop_body`, or a statement-`match`/`if`
+        // arm set by `emit_stmt`) so it doesn't leak into this value position; a
+        // nested loop/statement-construct inside the RHS re-sets the relevant
+        // flag. Restored after.
         let prev_discard = std::mem::replace(&mut self.in_loop_body_tail, false);
-        let prev_match = std::mem::replace(&mut self.in_stmt_match_arm, false);
+        let prev_match = std::mem::replace(&mut self.in_stmt_construct_arm, false);
         self.enter_shadow_scope();
         let r = self.emit_block_body_assigning_inner(target, node);
         self.leave_shadow_scope();
         self.in_loop_body_tail = prev_discard;
-        self.in_stmt_match_arm = prev_match;
+        self.in_stmt_construct_arm = prev_match;
         r
     }
 
@@ -7132,10 +7248,11 @@ impl PyEmitCtx {
                 )
             }
             NodeKind::RecordPat { fields, .. } => {
-                // Python doesn't have destructuring; use first field name or underscore
+                // Python doesn't have destructuring; use first field name or
+                // underscore (keyword-escaped like every value binding).
                 fields
                     .first()
-                    .map(|f| to_snake_case(&f.name.name))
+                    .map(|f| py_value_ident(&f.name.name))
                     .unwrap_or_else(|| "_".into())
             }
             _ => "_".into(),
@@ -7309,6 +7426,23 @@ fn py_value_ident(name: &str) -> String {
         &to_snake_case(name),
         crate::generator::KeywordTarget::Python,
     )
+}
+
+/// The Python spelling of a record / class / enum-struct-variant **field**
+/// name: `snake_case`, then escaped against the Python keyword set — the same
+/// policy as value identifiers ([`py_value_ident`]), extended to field
+/// position (Q-python-keyword-record-fields). A Bock field named `pass` emits
+/// as `pass_`; left verbatim it is a `SyntaxError` in the dataclass
+/// declaration (`pass: int`), the constructor keyword args (`Tally(pass=7)`),
+/// the attribute access (`t.pass`), and the match pattern
+/// (`case Tally(pass=p)`). Applied identically at every field position —
+/// dataclass / `__init__` declaration, constructor kwargs (plain and spread
+/// dict keys), field access, and record-pattern destructuring — so the escaped
+/// spelling always agrees. A record-pattern *shorthand* (`{ pass }`) binds a
+/// value identifier of the same Bock name, which [`py_value_ident`] escapes to
+/// the identical spelling at every reference site.
+fn py_field_ident(name: &str) -> String {
+    py_value_ident(name)
 }
 
 /// True when `name` (an already snake_cased Python value identifier) collides
@@ -8156,6 +8290,310 @@ mod tests {
         assert!(out.contains("class Point:"), "got: {out}");
         assert!(out.contains("x: float"), "got: {out}");
         assert!(out.contains("y: float"), "got: {out}");
+    }
+
+    /// Builds `print("<s>")` as a bare call node.
+    fn print_call(id: u32, s: &str) -> AIRNode {
+        node(
+            id,
+            NodeKind::Call {
+                callee: Box::new(id_node(id + 1, "print")),
+                args: vec![AirArg {
+                    label: None,
+                    value: str_lit(id + 2, s),
+                }],
+                type_args: vec![],
+            },
+        )
+    }
+
+    /// A mid-block (statement-position) `if`/`else if`/`else` whose branches
+    /// are bare `print` expressions must lower each branch tail to a *bare
+    /// statement*, never a function-body `return`, and chain `else if` as
+    /// `elif` (Q-python-ifelse-truncation). Before the fix: each branch
+    /// emitted `return print(..)` — aborting the function after the taken
+    /// branch so the trailing statement never ran — and the chain emitted
+    /// `el    if (..):`, a SyntaxError, because the `el` prefix was followed
+    /// by a fully-indented statement `if`. Sibling of the statement-`match`
+    /// fix (#259).
+    #[test]
+    fn stmt_position_if_else_discards_branch_tails_and_chains_elif() {
+        // if c1 { print("a") } else if c2 { print("b") } else { print("c") }
+        // print("after")
+        let chain = node(
+            10,
+            NodeKind::If {
+                let_pattern: None,
+                condition: Box::new(id_node(11, "c1")),
+                then_block: Box::new(block(12, vec![], Some(print_call(13, "a")))),
+                else_block: Some(Box::new(node(
+                    20,
+                    NodeKind::If {
+                        let_pattern: None,
+                        condition: Box::new(id_node(21, "c2")),
+                        then_block: Box::new(block(22, vec![], Some(print_call(23, "b")))),
+                        else_block: Some(Box::new(block(30, vec![], Some(print_call(31, "c"))))),
+                    },
+                ))),
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("report"),
+                generic_params: vec![],
+                params: vec![param_node(2, "c1"), param_node(3, "c2")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(4, vec![chain, print_call(40, "after")], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("return print("),
+            "statement-if branch tails must be discarded, not returned: {out}"
+        );
+        assert!(
+            out.contains("elif c2:"),
+            "`else if` must chain as a single `elif`: {out}"
+        );
+        assert!(
+            !out.contains("el    "),
+            "the `el` prefix must not be followed by an indented statement: {out}"
+        );
+        assert!(
+            out.contains("print(\"after\""),
+            "the statement after the chain must still be emitted: {out}"
+        );
+    }
+
+    /// A `guard` whose `else` block does **not** diverge (spec §8.4 requires
+    /// divergence, but the checker currently accepts this — surfaced as OPEN)
+    /// must still not `return` out of the enclosing function: every other
+    /// backend and the interpreter fall through to the statements after the
+    /// guard. A spec-conforming diverging `else` is a statement tail and is
+    /// unaffected by this. Same early-`return` family as the statement
+    /// `match`/`if` truncations.
+    #[test]
+    fn stmt_guard_nondiverging_else_discards_tail() {
+        let guard = node(
+            10,
+            NodeKind::Guard {
+                let_pattern: None,
+                condition: Box::new(id_node(11, "ok")),
+                else_block: Box::new(block(12, vec![], Some(print_call(13, "warn")))),
+            },
+        );
+        let f = node(
+            1,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("report"),
+                generic_params: vec![],
+                params: vec![param_node(2, "ok")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(4, vec![guard, print_call(40, "after")], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            !out.contains("return print("),
+            "a non-diverging guard else must fall through, not return: {out}"
+        );
+        assert!(
+            out.contains("print(\"after\""),
+            "the statement after the guard must still be emitted: {out}"
+        );
+    }
+
+    /// Record / enum-struct-variant fields named after Python keywords must be
+    /// escaped (`pass` → `pass_`, `lambda` → `lambda_`) at every field
+    /// position with one agreed spelling: the dataclass declaration, the
+    /// constructor keyword args, attribute access, and record-pattern
+    /// destructuring (Q-python-keyword-record-fields; extends #162's value-
+    /// identifier escaping to field position). Unescaped, the dataclass
+    /// declaration `pass: int` is a SyntaxError before `main` even runs.
+    #[test]
+    fn keyword_record_fields_escaped_at_every_site() {
+        let int_ty = || bock_ast::TypeExpr::Named {
+            id: 0,
+            span: span(),
+            path: type_path(&["Int"]),
+            args: vec![],
+        };
+        let rec = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Tally"),
+                generic_params: vec![],
+                fields: vec![bock_ast::RecordDeclField {
+                    id: 0,
+                    span: span(),
+                    name: ident("pass"),
+                    ty: int_ty(),
+                    default: None,
+                }],
+            },
+        );
+        let enum_decl = node(
+            2,
+            NodeKind::EnumDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Gate"),
+                generic_params: vec![],
+                variants: vec![node(
+                    3,
+                    NodeKind::EnumVariant {
+                        name: ident("Open"),
+                        payload: EnumVariantPayload::Struct(vec![bock_ast::RecordDeclField {
+                            id: 0,
+                            span: span(),
+                            name: ident("lambda"),
+                            ty: int_ty(),
+                            default: None,
+                        }]),
+                    },
+                )],
+            },
+        );
+        // let t = Tally { pass: 7 }
+        let let_t = node(
+            10,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(11, "t")),
+                ty: None,
+                value: Box::new(node(
+                    12,
+                    NodeKind::RecordConstruct {
+                        path: type_path(&["Tally"]),
+                        fields: vec![AirRecordField {
+                            name: ident("pass"),
+                            value: Some(Box::new(int_lit(13, "7"))),
+                        }],
+                        spread: None,
+                    },
+                )),
+            },
+        );
+        // print(t.pass)
+        let access = node(
+            20,
+            NodeKind::Call {
+                callee: Box::new(id_node(21, "print")),
+                args: vec![AirArg {
+                    label: None,
+                    value: node(
+                        22,
+                        NodeKind::FieldAccess {
+                            object: Box::new(id_node(23, "t")),
+                            field: ident("pass"),
+                        },
+                    ),
+                }],
+                type_args: vec![],
+            },
+        );
+        // match t { Tally { pass: p } => print("x") }
+        let m = node(
+            30,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(31, "t")),
+                arms: vec![node(
+                    32,
+                    NodeKind::MatchArm {
+                        pattern: Box::new(node(
+                            33,
+                            NodeKind::RecordPat {
+                                path: type_path(&["Tally"]),
+                                fields: vec![AirRecordPatternField {
+                                    name: ident("pass"),
+                                    pattern: Some(Box::new(bind_pat(34, "p"))),
+                                }],
+                                rest: false,
+                            },
+                        )),
+                        guard: None,
+                        body: Box::new(block(35, vec![], Some(print_call(36, "x")))),
+                    },
+                )],
+            },
+        );
+        // let g = Open { lambda: 3 }
+        let let_g = node(
+            40,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(41, "g")),
+                ty: None,
+                value: Box::new(node(
+                    42,
+                    NodeKind::RecordConstruct {
+                        path: type_path(&["Open"]),
+                        fields: vec![AirRecordField {
+                            name: ident("lambda"),
+                            value: Some(Box::new(int_lit(43, "3"))),
+                        }],
+                        spread: None,
+                    },
+                )),
+            },
+        );
+        let f = node(
+            5,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(6, vec![let_t, access, m, let_g], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![rec, enum_decl, f]));
+        assert!(
+            out.contains("pass_: int"),
+            "dataclass field must be keyword-escaped: {out}"
+        );
+        assert!(
+            out.contains("Tally(pass_=7)"),
+            "constructor kwargs must be keyword-escaped: {out}"
+        );
+        assert!(
+            out.contains("t.pass_"),
+            "field access must be keyword-escaped: {out}"
+        );
+        assert!(
+            out.contains("Tally(pass_=p)"),
+            "record-pattern destructuring must be keyword-escaped: {out}"
+        );
+        assert!(
+            out.contains("lambda_: int"),
+            "enum struct-variant field must be keyword-escaped: {out}"
+        );
+        assert!(
+            out.contains("Gate_Open(lambda_=3)"),
+            "variant constructor kwargs must be keyword-escaped: {out}"
+        );
+        assert!(
+            !out.contains("pass:") && !out.contains("pass=") && !out.contains("lambda:"),
+            "no field position may emit the unescaped keyword: {out}"
+        );
     }
 
     #[test]

@@ -1,0 +1,63 @@
+// TEST: exec_stmt_ifelse_no_early_return
+// EXPECT: output "pos;mid;small;end;done"
+// EXPECT: targets js, python, rust, go
+//
+// A statement-position `if`/`else` — one sitting mid-block as a side-effecting
+// statement, not the function/value tail nor a value-binding RHS — whose
+// branches are *bare expression* bodies (`print(...)`) must NOT abort the
+// enclosing function (Q-python-ifelse-truncation, 2026-06-10 dogfood probe).
+// The Python backend's `emit_stmt` `If` arm routed each branch through the
+// shared `emit_block_body`, which lowers a bare-expression tail as a
+// function-body `return`: `if n > 0: return print("pos;")`. The `return`
+// aborts the function the moment a branch runs, so every statement after the
+// `if` was skipped — and the run still exited 0, hiding it from an
+// exit-code-only view. Sibling of the statement-`match` truncation fixed for
+// py_stmt_match_no_early_return (#259) and the loop-tail truncation pinned by
+// py_loop_tail_println_all_iterations.
+//
+// The mid-block `else if` chain additionally pins a second defect in the same
+// arm: the chain was emitted as the `el` prefix followed by a full
+// statement-`if` (which writes its own indentation), producing `el    if ...`
+// — a hard SyntaxError.
+//
+// Shapes covered, each followed by a statement that must still run:
+//   1. plain `if`/`else` with bare-`print` branches      → "pos;" then "mid;"
+//   2. `if`/`else if`/`else` chain                       → "small;" then "end;"
+//   3. `if` with no `else`                               → "end;" then "done"
+//
+// The fall-through semantics this pins are target-agnostic, so every backend
+// that can run a bare-`print` fixture does. ts is excluded for a PRE-EXISTING
+// toolchain gap unrelated to this bug: bare `print` lowers to
+// `process.stdout.write`, which fails the harness's `tsc --noEmit` validation
+// (TS2591: Cannot find name 'process') because the scaffolded tsconfig has no
+// `@types/node` — the reason no existing all-target exec fixture uses `print`
+// (`println` → `console.log` is fine). Same-shape js coverage stands in for
+// the shared js/ts lowering.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn report(n: Int) -> Void {
+  if (n > 0) {
+    print("pos;")
+  } else {
+    print("neg;")
+  }
+  print("mid;")
+  if (n > 10) {
+    print("big;")
+  } else if (n > 0) {
+    print("small;")
+  } else {
+    print("zero;")
+  }
+  if (n > 0) {
+    print("end;")
+  }
+  print("done")
+}
+
+fn main() -> Void {
+  report(3)
+}
