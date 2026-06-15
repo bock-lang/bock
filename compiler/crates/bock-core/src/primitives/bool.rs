@@ -4,9 +4,6 @@ use bock_interp::{BockString, BuiltinRegistry, RuntimeError, TypeTag, Value};
 
 /// Register all Bool methods and trait implementations.
 pub fn register(registry: &mut BuiltinRegistry) {
-    // ── Comparable trait ─────────────────────────────────────────────────
-    registry.register(TypeTag::Bool, "compare", bool_compare);
-
     // ── Hashable trait ───────────────────────────────────────────────────
     registry.register(TypeTag::Bool, "hash_code", bool_hash_code);
 
@@ -31,14 +28,6 @@ fn expect_bool(args: &[Value], pos: usize, method: &str) -> Result<bool, Runtime
             got: args.len(),
         }),
     }
-}
-
-// ─── Comparable ───────────────────────────────────────────────────────────────
-
-fn bool_compare(args: &[Value]) -> Result<Value, RuntimeError> {
-    let a = expect_bool(args, 0, "compare")?;
-    let b = expect_bool(args, 1, "compare")?;
-    Ok(Value::ordering(a.cmp(&b)))
 }
 
 // ─── Hashable ─────────────────────────────────────────────────────────────────
@@ -84,20 +73,6 @@ mod tests {
         let mut r = BuiltinRegistry::new();
         register(&mut r);
         r
-    }
-
-    #[test]
-    fn compare_false_less_than_true() {
-        let r = reg();
-        let result = r.call(
-            TypeTag::Bool,
-            "compare",
-            &[Value::Bool(false), Value::Bool(true)],
-        );
-        assert_eq!(
-            result.unwrap().unwrap(),
-            Value::ordering(std::cmp::Ordering::Less)
-        );
     }
 
     #[test]
