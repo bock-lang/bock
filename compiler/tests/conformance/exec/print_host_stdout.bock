@@ -1,0 +1,8 @@
+// TEST: exec_print_host_stdout
+// EXPECT: output "ab"
+// EXPECT: targets js, ts, python, rust, go
+module main
+fn main() -> Void {
+  print("a")
+  println("b")
+}
