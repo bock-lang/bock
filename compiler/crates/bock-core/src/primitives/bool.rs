@@ -7,9 +7,6 @@ pub fn register(registry: &mut BuiltinRegistry) {
     // ── Comparable trait ─────────────────────────────────────────────────
     registry.register(TypeTag::Bool, "compare", bool_compare);
 
-    // ── Equatable trait ──────────────────────────────────────────────────
-    registry.register(TypeTag::Bool, "equals", bool_equals);
-
     // ── Hashable trait ───────────────────────────────────────────────────
     registry.register(TypeTag::Bool, "hash_code", bool_hash_code);
 
@@ -41,15 +38,7 @@ fn expect_bool(args: &[Value], pos: usize, method: &str) -> Result<bool, Runtime
 fn bool_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_bool(args, 0, "compare")?;
     let b = expect_bool(args, 1, "compare")?;
-    Ok(Value::Int(a.cmp(&b) as i64))
-}
-
-// ─── Equatable ────────────────────────────────────────────────────────────────
-
-fn bool_equals(args: &[Value]) -> Result<Value, RuntimeError> {
-    let a = expect_bool(args, 0, "equals")?;
-    let b = expect_bool(args, 1, "equals")?;
-    Ok(Value::Bool(a == b))
+    Ok(Value::ordering(a.cmp(&b)))
 }
 
 // ─── Hashable ─────────────────────────────────────────────────────────────────
@@ -105,29 +94,10 @@ mod tests {
             "compare",
             &[Value::Bool(false), Value::Bool(true)],
         );
-        assert_eq!(result.unwrap().unwrap(), Value::Int(-1));
-    }
-
-    #[test]
-    fn equals_true() {
-        let r = reg();
-        let result = r.call(
-            TypeTag::Bool,
-            "equals",
-            &[Value::Bool(true), Value::Bool(true)],
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Less)
         );
-        assert_eq!(result.unwrap().unwrap(), Value::Bool(true));
-    }
-
-    #[test]
-    fn equals_false() {
-        let r = reg();
-        let result = r.call(
-            TypeTag::Bool,
-            "equals",
-            &[Value::Bool(true), Value::Bool(false)],
-        );
-        assert_eq!(result.unwrap().unwrap(), Value::Bool(false));
     }
 
     #[test]

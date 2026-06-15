@@ -7,9 +7,6 @@ pub fn register(registry: &mut BuiltinRegistry) {
     // ── Comparable trait ─────────────────────────────────────────────────
     registry.register(TypeTag::Char, "compare", char_compare);
 
-    // ── Equatable trait ──────────────────────────────────────────────────
-    registry.register(TypeTag::Char, "equals", char_equals);
-
     // ── Hashable trait ───────────────────────────────────────────────────
     registry.register(TypeTag::Char, "hash_code", char_hash_code);
 
@@ -45,15 +42,7 @@ fn expect_char(args: &[Value], pos: usize, method: &str) -> Result<char, Runtime
 fn char_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_char(args, 0, "compare")?;
     let b = expect_char(args, 1, "compare")?;
-    Ok(Value::Int(a.cmp(&b) as i64))
-}
-
-// ─── Equatable ────────────────────────────────────────────────────────────────
-
-fn char_equals(args: &[Value]) -> Result<Value, RuntimeError> {
-    let a = expect_char(args, 0, "equals")?;
-    let b = expect_char(args, 1, "equals")?;
-    Ok(Value::Bool(a == b))
+    Ok(Value::ordering(a.cmp(&b)))
 }
 
 // ─── Hashable ─────────────────────────────────────────────────────────────────
@@ -146,18 +135,10 @@ mod tests {
             "compare",
             &[Value::Char('a'), Value::Char('z')],
         );
-        assert_eq!(result.unwrap().unwrap(), Value::Int(-1));
-    }
-
-    #[test]
-    fn equals_true() {
-        let r = reg();
-        let result = r.call(
-            TypeTag::Char,
-            "equals",
-            &[Value::Char('x'), Value::Char('x')],
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Less)
         );
-        assert_eq!(result.unwrap().unwrap(), Value::Bool(true));
     }
 
     #[test]

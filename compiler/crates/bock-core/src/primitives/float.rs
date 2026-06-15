@@ -16,9 +16,6 @@ pub fn register(registry: &mut BuiltinRegistry) {
     // ── Comparable trait ─────────────────────────────────────────────────
     registry.register(TypeTag::Float, "compare", float_compare);
 
-    // ── Equatable trait ──────────────────────────────────────────────────
-    registry.register(TypeTag::Float, "equals", float_equals);
-
     // ── Hashable trait ───────────────────────────────────────────────────
     registry.register(TypeTag::Float, "hash_code", float_hash_code);
 
@@ -99,18 +96,13 @@ fn float_negate(args: &[Value]) -> Result<Value, RuntimeError> {
 
 // ─── Comparable ───────────────────────────────────────────────────────────────
 
+/// Returns the prelude `Ordering` enum (`Less`/`Equal`/`Greater`). Uses
+/// `f64::total_cmp` (consistent with the `OrdF64` wrapper's total order), so
+/// `compare` defines a total order even where IEEE `==` would not.
 fn float_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_float(args, 0, "compare")?;
     let b = expect_float(args, 1, "compare")?;
-    Ok(Value::Int(a.total_cmp(&b) as i64))
-}
-
-// ─── Equatable ────────────────────────────────────────────────────────────────
-
-fn float_equals(args: &[Value]) -> Result<Value, RuntimeError> {
-    let a = expect_float(args, 0, "equals")?;
-    let b = expect_float(args, 1, "equals")?;
-    Ok(Value::Bool(OrdF64(a) == OrdF64(b)))
+    Ok(Value::ordering(a.total_cmp(&b)))
 }
 
 // ─── Hashable ─────────────────────────────────────────────────────────────────
@@ -258,14 +250,10 @@ mod tests {
     fn compare_less() {
         let r = reg();
         let result = r.call(TypeTag::Float, "compare", &[f(1.0), f(2.0)]);
-        assert_eq!(result.unwrap().unwrap(), Value::Int(-1));
-    }
-
-    #[test]
-    fn equals_true() {
-        let r = reg();
-        let result = r.call(TypeTag::Float, "equals", &[f(1.5), f(1.5)]);
-        assert_eq!(result.unwrap().unwrap(), Value::Bool(true));
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Less)
+        );
     }
 
     #[test]

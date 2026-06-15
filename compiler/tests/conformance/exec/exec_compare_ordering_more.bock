@@ -1,0 +1,45 @@
+// TEST: exec_compare_ordering_more
+// EXPECT: output "f:less;f:equal;f:greater;c:greater;c:equal"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-interp-compare-ordering (R11 oracle parity): a primitive's
+// `Comparable.compare` resolves in the checker to `Ordering`, and every compiled
+// target lowers `a.compare(b)` to a self-contained `Ordering` value the
+// `Less`/`Equal`/`Greater` arms recognise. The reference interpreter previously
+// returned a bare `Int` (-1/0/1) from its primitive `compare` bridge, so a
+// `match a.compare(b) { Less => … }` failed interp-only while the targets
+// matched fine — a silent oracle divergence. The bock-core primitive bridge now
+// returns the `Ordering` enum (`Less`/`Equal`/`Greater`) under the interpreter.
+//
+// `exec/primitive_compare.bock` already pins `Int` and `String`; this fixture
+// extends coverage to `Float` and `Char` (the other surface-`Comparable`
+// primitives), exercising every `Ordering` variant on `Float`. The interp-side
+// companion is `conformance/interp/compare_ordering.bock`.
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn describeFloat(a: Float, b: Float) -> String {
+  match a.compare(b) {
+    Less => return "f:less"
+    Equal => return "f:equal"
+    Greater => return "f:greater"
+  }
+}
+
+fn describeChar(a: Char, b: Char) -> String {
+  match a.compare(b) {
+    Less => return "c:less"
+    Equal => return "c:equal"
+    Greater => return "c:greater"
+  }
+}
+
+fn main() -> Void {
+  let f1: String = describeFloat(1.0, 2.0)
+  let f2: String = describeFloat(2.5, 2.5)
+  let f3: String = describeFloat(9.0, 2.0)
+  let c1: String = describeChar('z', 'a')
+  let c2: String = describeChar('m', 'm')
+  println("${f1};${f2};${f3};${c1};${c2}")
+}

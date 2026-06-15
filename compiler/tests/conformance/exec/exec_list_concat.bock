@@ -1,0 +1,61 @@
+// TEST: exec_list_concat
+// EXPECT: output "3;1,2,3;1|2,3;a,b;x,y,z"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-interp-list-concat (R11 oracle parity): the `+` operator on two `List`
+// operands is value-returning concatenation — `[1] + [2, 3]` evaluates to a
+// fresh `[1, 2, 3]`, mutating neither operand. The checker accepts `List + List`
+// and every compiled target evaluates it (js/ts: spread `[...a, ...b]`; python:
+// `a + b`; rust: chained `into_iter().chain(...)`; go: `append(append(nil, a...),
+// b...)`), but the reference interpreter previously raised a runtime type error
+// in `eval_binary_op`, so it REJECTED a program every target accepts — a silent
+// degradation of the cross-target equivalence guarantee the interpreter exists
+// to certify. The interp-side companion is `conformance/interp/list_concat.bock`.
+//
+// The original operands are re-joined after the concat (the `1|2,3` group) to
+// pin the non-mutating, value-returning semantics: a destructive `+` would have
+// left `left`/`right` altered.
+//
+// Output is built from element values joined with `,` (and groups joined with
+// `;`) so it is target-independent. `main` is intentionally NOT `public`.
+module main
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = ""
+  let mut first: Bool = true
+  for x in xs {
+    if (first) {
+      out = "${x}"
+      first = false
+    } else {
+      out = "${out},${x}"
+    }
+  }
+  out
+}
+
+fn joins(xs: List[String]) -> String {
+  let mut out: String = ""
+  let mut first: Bool = true
+  for x in xs {
+    if (first) {
+      out = x
+      first = false
+    } else {
+      out = "${out},${x}"
+    }
+  }
+  out
+}
+
+fn main() -> Void {
+  let left: List[Int] = [1]
+  let right: List[Int] = [2, 3]
+  let joined: List[Int] = left + right
+  // Operands are unchanged (value-returning, never mutating): re-joining them
+  // yields the original contents.
+  let operands: String = "${join(left)}|${join(right)}"
+  let words: List[String] = ["a"] + ["b"]
+  let three: List[String] = ["x", "y"] + ["z"]
+  println("${joined.len()};${join(joined)};${operands};${joins(words)};${joins(three)}")
+}

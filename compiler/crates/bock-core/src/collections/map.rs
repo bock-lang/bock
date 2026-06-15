@@ -247,7 +247,7 @@ fn map_hash_code(args: &[Value]) -> Result<Value, RuntimeError> {
 fn map_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_map(args, 0, "compare")?;
     let b = expect_map(args, 1, "compare")?;
-    Ok(Value::Int(a.cmp(b) as i64))
+    Ok(Value::ordering(a.cmp(b)))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -479,6 +479,9 @@ mod tests {
             "compare",
             &[make_map(&[(1, 10)]), make_map(&[(2, 20)])],
         );
-        assert_eq!(result.unwrap().unwrap(), Value::Int(-1));
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Less)
+        );
     }
 }

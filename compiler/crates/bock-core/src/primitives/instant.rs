@@ -13,9 +13,8 @@ pub fn register(registry: &mut BuiltinRegistry) {
     registry.register(TypeTag::Instant, "add", instant_add);
     registry.register(TypeTag::Instant, "sub", instant_sub);
 
-    // ── Comparable / Equatable ───────────────────────────────────────────
+    // ── Comparable ───────────────────────────────────────────────────────
     registry.register(TypeTag::Instant, "compare", instant_compare);
-    registry.register(TypeTag::Instant, "equals", instant_equals);
 
     // ── Displayable ──────────────────────────────────────────────────────
     registry.register(TypeTag::Instant, "display", instant_display);
@@ -122,18 +121,12 @@ fn instant_sub(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
-// ─── Comparable / Equatable ──────────────────────────────────────────────
+// ─── Comparable ──────────────────────────────────────────────────────────
 
 fn instant_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_instant(args, 0, "compare")?;
     let b = expect_instant(args, 1, "compare")?;
-    Ok(Value::Int(a.cmp(&b) as i64))
-}
-
-fn instant_equals(args: &[Value]) -> Result<Value, RuntimeError> {
-    let a = expect_instant(args, 0, "equals")?;
-    let b = expect_instant(args, 1, "equals")?;
-    Ok(Value::Bool(a == b))
+    Ok(Value::ordering(a.cmp(&b)))
 }
 
 // ─── Displayable ─────────────────────────────────────────────────────────

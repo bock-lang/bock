@@ -858,6 +858,16 @@ impl Interpreter {
             (BinOp::Add, Value::String(a), Value::String(b)) => {
                 Ok(Value::String(BockString::new(format!("{a}{b}"))))
             }
+            // `List + List` is value-returning concatenation (Q-interp-list-concat):
+            // the checker accepts it and all five codegen targets evaluate it, so
+            // the interpreter — the cross-target equivalence oracle (routing R11) —
+            // must too. Produces a fresh list; neither operand is mutated.
+            (BinOp::Add, Value::List(a), Value::List(b)) => {
+                let mut out = Vec::with_capacity(a.len() + b.len());
+                out.extend(a);
+                out.extend(b);
+                Ok(Value::List(out))
+            }
 
             (BinOp::Sub, Value::Int(a), Value::Int(b)) => a
                 .checked_sub(b)
