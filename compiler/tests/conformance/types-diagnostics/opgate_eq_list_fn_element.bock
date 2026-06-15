@@ -1,5 +1,5 @@
 // TEST: opgate_eq_list_fn_element
-// EXPECT: error E4015 at 23:23
+// EXPECT: error E4015 at 23:20
 //
 // DQ31 (§18.5 "Container equality defers to element conformance") + DQ29
 // poison rule (unchanged): a container of a NON-Equatable element rejects `==`.
