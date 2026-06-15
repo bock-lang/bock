@@ -2637,7 +2637,7 @@ Awaiting operator: R1/R6/OQ1–OQ4. Awaiting Design: DQ31, DV19–DV24.
     matrix lane (tools/) in parallel.
   Decision: dispatched 2 Bash-auth appliers. WB-codegen committed all 7 items incrementally (a6de928 go-handling · d034fcb
     ts-eq · ac62cb8 rust-eq · 0526925 py-match-bind · ccfa542 prelude-impl · ae5c9c6 bounded-comparable · e90c595
-    displayable-interp), each build+run-verified ×5 before commit; it un-excluded the two #372  guards
+    displayable-interp), each build+run-verified ×5 before commit; it un-excluded the two #372 `// EXPECT: targets` guards
     (compare_output_smoke/rust, primitive_eq_bridge/ts) as it fixed the underlying E0034/TS2367. WB-matrix reverted all 5
     dodges (byte-identical ×5, sha unchanged from baseline). Both agents stalled on their final gate by backgrounding cargo
     (same recurring pattern) — WB-codegen recovered by committing the already-applied work (incremental commits left a clean
@@ -2650,5 +2650,5 @@ Awaiting operator: R1/R6/OQ1–OQ4. Awaiting Design: DQ31, DV19–DV24.
   Follow-up: Wave B items + the 4 FOUNDs CLOSED. v1.0-hardening correctness floor is now essentially clean. REMAINING = a
     small Wave-C tail (Q-ts-generic-enum-codegen, Q-py-go-wrapper-structural-eq, Q-bocktest-discovery-readdir-unwrap
     robustness, Q-core-bool-compare-dead LOW, 2 doc-prose chores) + 3 Design OPENs to formalize as DQ entries.
-    NEXT: drain the 8 dependabot PRs (#359–366 — stale pre-#367 base, need  onto e9f4299 → merge
+    NEXT: drain the 8 dependabot PRs (#359–366 — stale pre-#367 base, need `@dependabot rebase` onto e9f4299 → merge
     round-robin across the extensions/vscode + website shared lockfiles; regex #364 independent).
