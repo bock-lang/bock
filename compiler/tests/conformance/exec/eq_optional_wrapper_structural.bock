@@ -1,0 +1,32 @@
+// TEST: eq_optional_wrapper_structural
+// EXPECT: output "same:true;diff:false;none_eq:true;some_vs_none:false;ne:true"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-py-go-wrapper-structural-eq: structural `==` on the `Optional[T]` wrapper.
+// Two `Some(x)` compare equal iff their payloads are equal; `Some` never equals
+// `None`; two `None` are equal. Before this fix the Python runtime wrapper
+// classes (`_BockSome`/`_BockNone`) had no `__eq__`, so `Some(1) == Some(1)`
+// fell back to object identity and printed `false` — diverging from js/ts/rust.
+// The wrapper's `__eq__` routes payload comparison through Python's `==` (which
+// itself dispatches a custom-`eq` payload), so the wrapper inherits its
+// payload's equality.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let a: Optional[Int] = Some(1)
+  let b: Optional[Int] = Some(1)
+  let c: Optional[Int] = Some(2)
+  let n1: Optional[Int] = None
+  let n2: Optional[Int] = None
+
+  let same: Bool = a == b
+  let diff: Bool = a == c
+  let none_eq: Bool = n1 == n2
+  let some_vs_none: Bool = a == n1
+  let ne: Bool = a != c
+
+  println("same:${same};diff:${diff};none_eq:${none_eq};some_vs_none:${some_vs_none};ne:${ne}")
+}

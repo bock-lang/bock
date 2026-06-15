@@ -143,11 +143,23 @@ class _BockSome:
         self._0 = _0
     def __repr__(self):
         return f'Some({self._0!r})'
+    def __eq__(self, other):
+        if not isinstance(other, _BockSome):
+            return NotImplemented
+        return self._0 == other._0
+    def __hash__(self):
+        return hash(('Some', self._0))
 
 class _BockNone:
     __slots__ = ()
     def __repr__(self):
         return 'None'
+    def __eq__(self, other):
+        if not isinstance(other, _BockNone):
+            return NotImplemented
+        return True
+    def __hash__(self):
+        return hash('None')
 
 _bock_none = _BockNone()
 ";
@@ -168,6 +180,12 @@ class _BockOk:
         self._0 = _0
     def __repr__(self):
         return f'Ok({self._0!r})'
+    def __eq__(self, other):
+        if not isinstance(other, _BockOk):
+            return NotImplemented
+        return self._0 == other._0
+    def __hash__(self):
+        return hash(('Ok', self._0))
 
 class _BockErr:
     __match_args__ = ('_0',)
@@ -176,6 +194,12 @@ class _BockErr:
         self._0 = _0
     def __repr__(self):
         return f'Err({self._0!r})'
+    def __eq__(self, other):
+        if not isinstance(other, _BockErr):
+            return NotImplemented
+        return self._0 == other._0
+    def __hash__(self):
+        return hash(('Err', self._0))
 
 def _bock_parse_int(s, mk_err):
     try:

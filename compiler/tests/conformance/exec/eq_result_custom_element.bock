@@ -1,0 +1,48 @@
+// TEST: eq_result_custom_element
+// EXPECT: output "ok_ci:true;err_ci:true;ok_ne:false;variant_ne:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-py-go-wrapper-structural-eq: a `Result[T, E]` wrapping records with a custom
+// `impl Equatable` must defer BOTH the Ok-payload and the Err-payload comparison
+// to that `eq`. `Tag` compares its `name` CASE-INSENSITIVELY, so
+// `Ok(Tag{"HI"}) == Ok(Tag{"hi"})` and `Err(Tag{"OOPS"}) == Err(Tag{"oops"})`
+// are both TRUE despite structural payload differences — while an `Ok` and an
+// `Err` with case-insensitively-equal payloads still differ on the variant tag.
+//
+// Same two-backend bug as eq_optional_custom_element: Python's `_BockOk`/
+// `_BockErr` had no `__eq__` (identity fallback); Go's wrapper compared via
+// `reflect.DeepEqual` over unexported fields, ignoring the payload's `Eq`.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Equatable}
+
+record Tag {
+  name: String,
+}
+
+impl Equatable for Tag {
+  public fn eq(self, other: Tag) -> Bool {
+    self.name.to_lower() == other.name.to_lower()
+  }
+}
+
+fn main() -> Void {
+  let okA: Result[Tag, Tag] = Ok(Tag { name: "HI" })
+  let okB: Result[Tag, Tag] = Ok(Tag { name: "hi" })
+  let okC: Result[Tag, Tag] = Ok(Tag { name: "bye" })
+  let errA: Result[Tag, Tag] = Err(Tag { name: "OOPS" })
+  let errB: Result[Tag, Tag] = Err(Tag { name: "oops" })
+
+  let ok_ci: Bool = okA == okB
+  let err_ci: Bool = errA == errB
+  let ok_ne: Bool = okA == okC
+  // Variant tag distinguishes even when the wrapped names are case-equal.
+  let sameName1: Result[Tag, Tag] = Ok(Tag { name: "x" })
+  let sameName2: Result[Tag, Tag] = Err(Tag { name: "X" })
+  let variant_ne: Bool = sameName1 == sameName2
+
+  println("ok_ci:${ok_ci};err_ci:${err_ci};ok_ne:${ok_ne};variant_ne:${variant_ne}")
+}

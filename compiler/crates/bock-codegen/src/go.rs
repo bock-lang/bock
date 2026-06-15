@@ -378,6 +378,29 @@ func __bockDeepEq(a any, b any) bool {
 // `reflect.DeepEqual` for any value lacking a custom `Eq`, so all-structural
 // sub-trees behave identically to the `\"deep\"` lane.
 func __bockEqCustom(a any, b any) bool {
+	// Optional/Result runtime wrappers carry their payload in an unexported
+	// `v interface{}` field, so the generic `reflect.Struct` arm below cannot
+	// reach it (`CanInterface()` is false) and bails to `reflect.DeepEqual`,
+	// which would IGNORE a custom `impl Equatable` on the payload (DQ31). Match
+	// the variant tag, then recurse on the payload through `__bockEqCustom` so a
+	// custom-`Eq` element inside the wrapper defers to its `Eq`.
+	if oa, ok := a.(__bockOption); ok {
+		ob, ok := b.(__bockOption)
+		if !ok || oa.tag != ob.tag {
+			return false
+		}
+		if oa.tag == \"None\" {
+			return true
+		}
+		return __bockEqCustom(oa.v, ob.v)
+	}
+	if ra, ok := a.(__bockResult); ok {
+		rb, ok := b.(__bockResult)
+		if !ok || ra.tag != rb.tag {
+			return false
+		}
+		return __bockEqCustom(ra.v, rb.v)
+	}
 	va := reflect.ValueOf(a)
 	vb := reflect.ValueOf(b)
 	// A value with a custom `Eq(Self) bool` method defines its own equality.
@@ -1083,11 +1106,17 @@ impl GoGenerator {
             content.push_str(CONCURRENCY_RUNTIME_GO);
             content.push('\n');
         }
-        if uses_optional {
+        // The deep-eq runtime's `__bockEqCustom` type-asserts the Optional/Result
+        // wrapper structs to defer their payload to the element's `Eq`
+        // (Q-py-go-wrapper-structural-eq), so those type definitions must be in
+        // scope wherever `__bockEqCustom` is. Emit them when `uses_deep_eq` even
+        // if the program never names `Optional`/`Result` directly; the
+        // (then-unused) constructors are harmless package-level decls in Go.
+        if uses_optional || uses_deep_eq {
             content.push_str(OPTIONAL_RUNTIME_GO);
             content.push('\n');
         }
-        if uses_result {
+        if uses_result || uses_deep_eq {
             content.push_str(RESULT_RUNTIME_GO);
             content.push('\n');
         }
@@ -6861,12 +6890,20 @@ impl GoEmitCtx {
                 }
                 let uses_optional = go_module_uses_optional(items);
                 let uses_result = go_module_uses_result(items);
-                if !self.optional_runtime_emitted && uses_optional {
+                // The deep-eq runtime's `__bockEqCustom` type-asserts the
+                // Optional/Result wrapper structs to defer their payload to the
+                // element's `Eq` (Q-py-go-wrapper-structural-eq), so the wrapper
+                // type definitions must be in scope wherever `__bockEqCustom` is.
+                // Emit them when the module uses a deep-eq lane even if it never
+                // names `Optional`/`Result`; the (then-unused) constructors are
+                // harmless package-level decls in Go.
+                let uses_deep_eq = go_module_uses_deep_eq(items);
+                if !self.optional_runtime_emitted && (uses_optional || uses_deep_eq) {
                     self.buf.push_str(OPTIONAL_RUNTIME_GO);
                     self.buf.push('\n');
                     self.optional_runtime_emitted = true;
                 }
-                if !self.result_runtime_emitted && uses_result {
+                if !self.result_runtime_emitted && (uses_result || uses_deep_eq) {
                     self.buf.push_str(RESULT_RUNTIME_GO);
                     self.buf.push('\n');
                     self.result_runtime_emitted = true;
@@ -6914,7 +6951,7 @@ impl GoEmitCtx {
                     self.buf.push('\n');
                     self.int_pow_runtime_emitted = true;
                 }
-                if !self.deep_eq_runtime_emitted && go_module_uses_deep_eq(items) {
+                if !self.deep_eq_runtime_emitted && uses_deep_eq {
                     self.buf.push_str(DEEP_EQ_RUNTIME_GO);
                     self.buf.push('\n');
                     self.deep_eq_runtime_emitted = true;
