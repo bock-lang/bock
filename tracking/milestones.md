@@ -25,9 +25,9 @@ the Bock identity.
   defined hardening pass first** (OQ3) before the cut — **scope = everything ready except pure docs** (D2-polish
   defers to v1.2), correctness-first (the equivalence cluster leads). → **MS-v1.0-hardening** (below). Identity
   sign-off (R1) + marketing wedge (OQ1) **delegated to the marketing chat**
-  (`tracking/handoffs/2026-06-15-marketing-positioning.md`); R6 ratified; OQ2 publish; OQ4 (§10.8 demo) deferred to
+  (`tracking/handoffs/20260615-0412-marketing-positioning-handoff.md`); R6 ratified; OQ2 publish; OQ4 (§10.8 demo) deferred to
   v1.x. The v1.0 cut + release actions (all escalate) follow the hardening pass + the marketing copy lock.
-- **★ POSITIONING RESOLVED (2026-06-15, marketing chat → operator sign-off; handoff `2026-06-15-marketing-positioning.md`):**
+- **★ POSITIONING RESOLVED (2026-06-15, marketing chat → operator sign-off; handoff `20260615-0412-marketing-positioning-handoff.md`):**
   OQ1 + R1 returned and landed. A **nested split, not one ICP**: **Identity = the guarantee** (provable cross-target
   equivalence + auditable/reproducible AI pipeline) carries the homepage hero + the **§1.1 spec amendment** (LANDED,
   changelog `20260615-s1.1-equivalence-amendment`); **launch wedge = SDK / library vendors** (project mode's native

@@ -2676,12 +2676,12 @@ FOUND/OPEN filed: 8 (Wave 3) + the Wave-B per-backend bugs (mostly closed by #37
   tail (Q-ts-generic-enum-codegen, Q-py-go-wrapper-structural-eq, the readdir-unwrap robustness fix, 2 doc chores) + 3 Design
   OPENs to formalize as DQ entries.
 State at close: main cd4c383, 0 open PRs (all 8 feature + 8 dependabot merged), worktrees/branches pruned. Every PR CI-verified 15/15 on its branch incl. Windows; final-HEAD CI confirmatory.
-Awaiting operator: OQ1/R1 (marketing positioning handoff at tracking/handoffs/2026-06-15-marketing-positioning.md) — the only
+Awaiting operator: OQ1/R1 (marketing positioning handoff at tracking/handoffs/20260615-0412-marketing-positioning-handoff.md) — the only
   pending non-engineering item.
 
 [2026-06-15 20:55 UTC] ✦ POSITIONING (OQ1/R1) RESOLVED + §1.1 amendment landed
   Input: the marketing chat returned the operator-signed resolution for OQ1 (wedge) + R1 (identity) + OQ2 framing + a
-    website-scope call, resolving handoff 2026-06-15-marketing-positioning.md.
+    website-scope call, resolving handoff 20260615-0412-marketing-positioning-handoff.md.
   Options: this is a RECONCILE, not a decision (the operator signed). Scope: land the §1.1 spec amendment (Design supplied
     the truth basis; explicitly delegated to the orchestrator) + the hub reconcile; ROUTE (not publish) the external copy.
   Decision: landed the §1.1 amendment ("...conformance-tested for semantic equivalence: ...verified to behave identically
@@ -2698,3 +2698,22 @@ Awaiting operator: OQ1/R1 (marketing positioning handoff at tracking/handoffs/20
   Follow-up: the operator-decision bundle (R1/R6/OQ1-OQ4) is now FULLY dispositioned — no pending operator/Design items.
     Next concrete work: Q-sdk-vendor-demo (impl, gates the marketing wedge page) + the Wave-C engineering tail. The
     wedge-page + get-started copy are marketing work that escalates at publication.
+
+[2026-06-15 21:25 UTC] Naming sweep + DQ32/DQ33 formalization + Wave-C / SDK-demo dispatch
+  Input: operator directed (1) the tracking/handoffs/ naming-convention sweep, (2) move forward on the SDK-vendor demo +
+    the Wave-C tail with maximum fan-out.
+  Decision: dispatched 6 file-disjoint Bash-auth applier lanes — L-ts (Q-ts-generic-enum-codegen) · L-pygo
+    (Q-py-go-wrapper-structural-eq) · L-cli (Q-bocktest-discovery-readdir-unwrap) · L-cleanup (Q-core-bool-compare-dead +
+    2 doc chores) · L-ci (vocab/assets drift CI guard) · L-demo (Q-sdk-vendor-demo). Orchestrator tracking (this PR):
+    (a) swept the single handoff file to the documented YYYYMMDD-HHMM-<descriptor>-handoff.md convention
+    (20260615-0412-marketing-positioning-handoff.md) + updated its 3 refs + documented the convention in tracking/CLAUDE.md;
+    (b) formalized the two genuine core-spec OPENs as DQ32 (Hashable-on-collection-keys enforcement) + DQ33
+    (transitively-forwarded unbounded generics soundness) in design-questions.md + an escalation entry → Design; (c) ruled
+    the error-code-numbering OPEN stays a queue chore (diagnostics §20.1 non-core, NOT a DQ — Q-error-code-renumbering).
+  Verification: tracking-doc only — no compiler/mdbook surface, gate N/A; STATUS/ROADMAP regenerated (tracking-views check).
+    The 6 lanes verify via per-PR CI + a combined gate on completion.
+  Reasoning: the naming sweep aligns the repo to the documented (system-level) handoff convention — since that convention
+    lives in the project instructions (not an editable repo doc), renaming the one file + its refs is the consistency fix
+    (chosen over leaving the divergence). DQ formalization is FILE-only — the orchestrator does not decide core spec (→ Design).
+  Follow-up: recover/verify/merge the 6 lanes (combined gate, same model as Waves A/B). DQ32/DQ33 await a Design ruling
+    (non-blocking). Q-sdk-vendor-demo, once merged, unblocks the marketing wedge-page copy (Q-wedge-usecases-page, ESCALATE).
