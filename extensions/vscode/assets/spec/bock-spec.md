@@ -42,6 +42,8 @@ Bock is a feature-declarative, target-agnostic programming language designed for
 
 Bock code describes what a program does and what guarantees it requires — not how those are achieved on any given platform. An AI-driven transpilation pipeline generates idiomatic code for each target language and platform.
 
+Uniquely, Bock's multi-target output is conformance-tested for semantic equivalence: the same program is verified to behave identically on every target it ships to.
+
 ### 1.2 — Design Goals
 
 **AI-first, human-friendly.** AI agents are the primary developers. The language treats AI context as a first-class design system — semantic annotations, structured metadata, and decision manifests are core features. Humans remain central as architects, reviewers, and operators.
