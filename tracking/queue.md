@@ -12,7 +12,9 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-06-10 — main 664b153, 0 open PRs, clean. ★★ DQ30 RULED + IMPLEMENTED (#349) — THE DESIGN GATE IS CLEAR.**
+_**Last reconciled 2026-06-15 — main 8619f0a, 0 open feature PRs (8 routine dependabot pending), clean, final-HEAD CI green. ★★★ MS-v1.0-HARDENING WAVES 1–3 ALL COMPLETE.**
+Wave 1+2 (#352–#357 — the equivalence cluster + diagnostics-credibility) landed earlier today; **Wave 3 + chores (#368–#373) now complete** — 7 hardening items across 6 file-disjoint lanes, run as **scout → apply → orchestrator-publish** under the background-agent Write/Edit constraint (agents investigate read-only; edits applied via Bash; orchestrator pushes + merges): **#370** rust clone-insertion (4 reuse shapes; rs.rs-only, ownership pass unchanged) · **#371** js/ts sibling-`handling` let-scope · **#373** ts bare-`print` scaffold shim (`node-globals.d.ts` + `@types/node`) · **#369** context-pack v0.1.1 · **#368** sync-vocab single-file-spec repoint (also un-broke the VS Code spec panel) · **#372** whole-tree output-execution wiring (248 output fixtures / 1053 pairs, loud `// EXPECT: targets` exclusions, + a Windows CRLF hotfix the combined gate caught). Combined-tree re-verified (octopus of all 6 → conformance ×2 0 failed; per-PR CI 15/15 incl. Windows; final main 8619f0a CI green). The combined gate's lone local `cargo test` RED was a pre-existing ENV fragility (`Q-bocktest-discovery-readdir-unwrap` — `/tmp/snap-private-tmp` readdir-unwrap), NOT a regression. **REMAINING v1.0-hardening = Wave B** (codegen trait-dispatch: bounded-comparable · prelude-impl · displayable-interpolation; + 4 per-backend FOUNDs: rust-eq E0034 · ts-primitive-eq TS2367 · go-handling-scope · py-letexpr-match; + `Q-examples-matrix-undodge`) + the doc/infra FOUND tail. AWAITING OPERATOR: OQ1/R1 (marketing handoff). ↓ —
+PRIOR: **Last reconciled 2026-06-10 — main 664b153, 0 open PRs, clean. ★★ DQ30 RULED + IMPLEMENTED (#349) — THE DESIGN GATE IS CLEAR.**
 Design's second same-day ruling (02:14 UTC; option B refined + the `remove`→`remove_at` rename — full text in
 design-questions DQ30-DECIDED) landed via the one scoped session it authorized: `pop -> Optional[T]` (None on empty) ·
 `remove_at -> T` (abort OOB) · `insert -> Void` (`0..=len`, abort OOB, Python clamp pre-checked away) · `reverse -> Void`,
@@ -420,10 +422,19 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 > - `Q-error-catalog-completeness` · `Q-diag-structure-misc` · `Q-diag-brief-span-format` · `Q-errors-render-byte-col-drift` · `Q-w1001-effect-import-false-positive` → **#356**
 > - `Q-dq31-container-element-eq` → **#357**
 >
-> **REMAINING (Wave 3 + chores — NOT yet dispatched; the wind-down stopped here cleanly):**
-> - **Wave 3 (per-backend codegen families, share codegen files → run after DQ31, now landed):** `Q-rust-clone-insertion-gaps` + `Q-rust-callarg-borrow-mismatch` (rust ownership) · `Q-displayable-interpolation-dispatch` · `Q-bounded-comparable-codegen` · `Q-js-handling-let-redeclaration` · `Q-prelude-impl-missing-import`
-> - **Chores:** `Q-context-pack-reconcile` · `Q-examples-matrix-undodge` · `Q-exec-output-directive-wiring` · `Q-ts-print-scaffold-types` · `Q-sync-vocab-script-stale`
-> - Plus the FOUND/OPEN below (filed this pass). `D2-polish` defers to v1.2 (pure docs).
+> **★★★ WAVE 3 + CHORES COMPLETE (2026-06-15, #368–#373) — 7 hardening items across 6 file-disjoint lanes.**
+> CLOSED this pass (inline `· ready ·` tags superseded — repo wins):
+> - `Q-rust-clone-insertion-gaps` + `Q-rust-callarg-borrow-mismatch` → **#370** (4 reuse shapes; rs.rs only, ownership pass unchanged)
+> - `Q-js-handling-let-redeclaration` → **#371** (fresh let-scope per `handling` block) · `Q-ts-print-scaffold-types` → **#373** (vendored `node-globals.d.ts` shim + `@types/node`)
+> - `Q-context-pack-reconcile` → **#369** (v0.1.1) · `Q-sync-vocab-script-stale` → **#368** (repointed to single-file spec; also un-broke the VS Code spec panel)
+> - `Q-exec-output-directive-wiring` → **#372** (whole-tree exec: 248 output fixtures / 1053 pairs, loud `// EXPECT: targets` exclusions; +CRLF-normalize hotfix for Windows multi-line output)
+> Combined-tree re-verified: octopus of all 6 → conformance ×2 0 failed (Unix); per-PR CI 15/15 incl. Windows; final main HEAD `8619f0a` CI green. The lone local `cargo test` RED was a pre-existing ENV issue (`Q-bocktest-discovery-readdir-unwrap` — `/tmp/snap-private-tmp` `read_dir().unwrap()`), NOT a regression (CI's clean `/tmp` passes).
+>
+> **REMAINING (Wave B — codegen trait-dispatch + the per-backend FOUNDs; entangled, share codegen files → one session or careful backend partition):**
+> - **Trait-dispatch (cross-backend):** `Q-bounded-comparable-codegen` (js,py) · `Q-prelude-impl-missing-import` (rust,py — plausibly the root of bounded-comparable's py half) · `Q-displayable-interpolation-dispatch` (all + interp)
+> - **Per-backend FOUNDs (filed this pass):** `Q-rust-equatable-eq-collision` (rs, E0034) · `Q-ts-primitive-eq-literal-overlap` (ts, TS2367) · `Q-go-handling-let-redeclaration` (go — same defect as #371's js/ts fix) · `Q-py-letexpr-match-namerror` (py)
+> - **Chore (disjoint):** `Q-examples-matrix-undodge` (tools/examples-matrix/ — revert go/py + now-fixed rust dodges)
+> - **Doc/infra FOUNDs:** `Q-stdlib-smoke-header-prose-stale` (now-false fixture headers) · `Q-vscode-claudemd-spec-sections-stale` · `Q-bocktest-discovery-readdir-unwrap` (bug) · OPEN: no CI guard for vocab.json/assets-spec ↔ compiler drift. `D2-polish` defers to v1.2 (pure docs).
 
 ### v1.0-hardening FOUND/OPEN (filed 2026-06-15, surfaced by #352–#357)
 
@@ -437,6 +448,20 @@ Design questions (→ Design hub; captured here so they're not lost — formaliz
 - **OPEN: code-numbering collisions** — `E1001`/`E1005`/`E1006` each carry two meanings (lexer vs resolver); `W8020` has two (effect-unused vs PII-tainted-signature); `E2030` is emitted both for parens-required and for a missing fn name in `parse_fn_decl`. Renumbering is a design decision (not done unilaterally). FOUND 2026-06-15 (#356).
 - **OPEN: Hashable-on-collection-keys enforcement** — a custom-`eq` type used as a `Map` KEY / `Set` MEMBER needs `Hashable` to be constructible on Rust/Go/Python (`HashMap`/`HashSet` require `Hash+Eq`), but `bock check` doesn't enforce `Hashable` on collection keys, so such programs pass the checker but emit uncompilable Rust. Pre-existing, independent of `==`. FOUND 2026-06-15 (#357).
 - **OPEN: transitively-forwarded *unbounded* generic params** — a `fn g[U](x)` with no bound that forwards `x` into a `Comparable`-requiring callee is still accepted (arg is an unsolved `TypeVar`). Pre-existing; the `where`-clause path behaves identically (so #355 is at parity, not a regression). Catching it is a broader soundness improvement applying to both bound forms. FOUND 2026-06-15 (#355).
+
+### Wave-3 FOUND/OPEN (filed 2026-06-15, surfaced by #368–#373)
+
+Codegen bugs (→ Wave B):
+- **[Q-rust-equatable-eq-collision] rust E0034: a user `impl Equatable`'s `eq` collides with Rust's `PartialEq::eq` at `a.eq(&b)`** — bug · ready · `compiler/crates/bock-codegen/src/rs.rs` · — · links #372 · note: reproduced by `compare_output_smoke` on rust (which #372 excludes loudly via `// EXPECT: targets`). Needs a fully-qualified call (`Equatable::eq(&a, &b)`). FOUND 2026-06-15 (#372).
+- **[Q-ts-primitive-eq-literal-overlap] ts TS2367: primitive `.eq` of distinct literal operands lowers to `3 === 4`, which TS's literal-overlap check rejects** — bug · ready · `compiler/crates/bock-codegen/src/ts.rs` · — · links #372 · note: reproduced by `primitive_eq_bridge` on ts (excluded loudly by #372). Widen operands or avoid emitting a literal `===` literal for primitive eq. FOUND 2026-06-15 (#372).
+- **[Q-go-handling-let-redeclaration] go: a `let` re-bound under the same name in sibling `handling` blocks → `undefined: part`** — bug · ready · `compiler/crates/bock-codegen/src/go.rs` · — · links #371 · note: same root defect as #371's js/ts fix (`part :=` then bare `part =`); needs the same fresh-scope-per-handling-block treatment. #371's fixture excludes go for this reason. FOUND 2026-06-15 (#371).
+- **[Q-py-letexpr-match-namerror] python: a record-pattern `match` in let-EXPRESSION position lowers to a lambda IIFE that never binds the pattern variables → `NameError`** — bug · ready · `compiler/crates/bock-codegen/src/py.rs` · — · links #370, Q-py-valuepos-match-payload-namebind · note: `s = match u { User { name, age } => "${name}…" }` emits `(lambda __v: f"{name}…")(u)`. Statement-position match is fine. FOUND 2026-06-15 (#370).
+
+Test/doc/infra (→ chore tail):
+- **[Q-bocktest-discovery-readdir-unwrap] `bock test` project/sibling discovery does `read_dir(...).unwrap()` that PANICS when an ancestor/scanned dir is unreadable** — bug · ready · `compiler/crates/bock-cli/src/test.rs` (~824/901) · — · links #370–#373 (combined-gate) · note: surfaced when /tmp held a root-owned unreadable `/tmp/snap-private-tmp`; the discovery walk reaches /tmp regardless of TMPDIR. Skip unreadable dirs gracefully; the sibling scan reaching /tmp at all looks over-broad. Env-only (CI's clean /tmp passes), but a real latent fragility. FOUND 2026-06-15 (combined gate).
+- **[Q-stdlib-smoke-header-prose-stale] stdlib `*_output_smoke` fixtures' header comments still say the harness "does not yet execute fixtures"** — chore/doc · ready · `compiler/tests/conformance/stdlib/{compare,convert}/…` · — · links #372 · note: now false — #372's execution lane runs them. Comment-only refresh. FOUND 2026-06-15 (#372).
+- **[Q-vscode-claudemd-spec-sections-stale] `extensions/vscode/CLAUDE.md` Vocab Sync Reminder still documents the old `spec/sections/` copy behavior** — chore/doc · ready · `extensions/vscode/CLAUDE.md` · — · links #368 · note: should read `spec/bock-spec.md` post-#368. FOUND 2026-06-15 (#368).
+- **OPEN: no CI guard for vocab.json / assets-spec ↔ compiler/spec drift** — the drift #368 fixed went unnoticed because nothing re-runs `sync-vocab.sh` and diffs. A CI check (run sync-vocab, assert no diff) would catch it. Process/infra. FOUND 2026-06-15 (#368).
 
 ### Design-audit follow-ups (filed 2026-06-10, from `designs/2026-06-09-design-audit.md`)
 

@@ -2590,3 +2590,40 @@ Merged since addendum 2: #349 (DQ30 implementation) + this tracking PR. Both of 
 State at close: main 664b153 + this tracking PR, 0 open feature PRs, tree clean, views regenerated (--check clean),
   worktrees/branches/caches pruned, CI green at HEAD per PR-watch.
 Awaiting operator: R1/R6/OQ1–OQ4. Awaiting Design: DQ31, DV19–DV24.
+
+[2026-06-15 15:36 UTC] ✦ MS-v1.0-HARDENING WAVE 3 + CHORES COMPLETE (#368–#373) — 7 items, 6 lanes; scout→apply→publish under the background-agent write constraint
+  Input: picking up the v1.0-hardening drain where the wind-down stopped (queue Ready "REMAINING Wave 3 + chores"). Board
+    at start: main 397161f, 0 open feature PRs, clean; DQ gate clear; OQ3 authorized the drain.
+  Options: dispatch the remaining Wave-3 codegen items + 5 chores as file-disjoint lanes (like #341–#349). Discovered the
+    Wave-3 codegen items are NOT cleanly disjoint (cross-backend: each backend is one large file rs/js/ts/py/go.rs), so
+    split into Wave A = the truly-disjoint subset (rust-ownership clone family · js/ts handling · 4 chores) and deferred
+    the entangled trait-dispatch items to Wave B.
+  Decision: dispatched 6 lanes. HARNESS CONSTRAINT HIT: background sub-agents (Agent tool) are denied Write/Edit on repo
+    files (confirms [[background-subagents-cannot-write]]), and SendMessage is unavailable to redirect them. Adapted the
+    model: agents run as read-only SCOUTS (investigate + propose exact fix), then either (a) the orchestrator applies the
+    fix itself (light lanes), or (b) a fresh APPLIER agent applies via Bash (explicitly authorized as the sanctioned
+    editing path) and gates/commits. Heavy appliers reliably stalled by backgrounding cargo (recurring
+    [[engineer-subagent-dispatch-discipline]] failure) — recovered each by killing the orphan, committing the
+    already-applied (compiled) work, and deferring correctness to ONE combined gate.
+  Lanes → PRs: #370 Q-rust-clone-insertion-gaps + Q-rust-callarg-borrow-mismatch (rs.rs-only, ownership pass unchanged) ·
+    #371 Q-js-handling-let-redeclaration (fresh let-scope per handling block) · #373 Q-ts-print-scaffold-types (vendored
+    node-globals.d.ts shim + @types/node) · #369 Q-context-pack-reconcile (v0.1.1) · #368 Q-sync-vocab-script-stale
+    (single-file-spec repoint; un-broke the spec panel) · #372 Q-exec-output-directive-wiring (whole-tree output exec,
+    248 fixtures/1053 pairs).
+  Verification (orchestrator-run): octopus of all 6 lane branches into integration/wave3 (clean — file-disjoint) → full
+    gate. fmt/clippy/doc clean; conformance ×2 BOTH 0 failed; cargo test RED on 9 bock-cli test::tests — DIAGNOSED as a
+    pre-existing ENV fragility (read_dir('/tmp/snap-private-tmp').unwrap() in bock test discovery; reached regardless of
+    TMPDIR; root-owned unreadable snap dir created mid-session), NOT a Wave-A regression. Proven: #370/#371/#373 PR CI
+    15/15 green (clean /tmp). #372's CI caught a REAL combined-tree bug — A4's new multi-line output fixture failed on
+    BOTH Windows lanes (CRLF: expected \n vs actual \r\n) — fixed by normalizing line endings in the execution-lane
+    stdout comparison (6bb27e3); re-run 15/15 incl. both Windows. Merged all 6 (squash); final main 8619f0a CI green.
+  Reasoning: all 7 items were ready/un-gated, within authority (impl bugs vs settled spec). The CRLF fix and the
+    env-issue diagnosis were the two judgment calls; both verified before merge. No spec/design decisions taken.
+  Follow-up: 8 FOUND/OPEN filed (queue Wave-3 FOUND/OPEN section) — 4 per-backend codegen bugs feed Wave B
+    (Q-rust-equatable-eq-collision E0034 · Q-ts-primitive-eq-literal-overlap TS2367 · Q-go-handling-let-redeclaration ·
+    Q-py-letexpr-match-namerror); 1 latent test-fragility (Q-bocktest-discovery-readdir-unwrap); 2 doc/prose
+    (Q-stdlib-smoke-header-prose-stale, Q-vscode-claudemd-spec-sections-stale); 1 OPEN (vocab/assets drift CI guard).
+    Wave B (entangled trait-dispatch codegen + the 4 FOUNDs + Q-examples-matrix-undodge) is the remaining v1.0-hardening
+    engineering. 8 dependabot PRs (#359–366) still pending — routine, deferred to a batch. NOTE: audit.md had no
+    2026-06-15 entries before this — the Wave 1+2 / walk-through sessions updated the Ready block + escalations but not
+    the rolling note or audit; both caught up this pass.
