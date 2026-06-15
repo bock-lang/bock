@@ -226,11 +226,6 @@ fn required_targets() -> BTreeSet<String> {
     required
 }
 
-/// Resolve the conformance directory that holds execution fixtures.
-fn conformance_exec_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/exec")
-}
-
 /// Resolve the **root** of the conformance fixture tree — every category.
 ///
 /// The check-driven tests below walk this whole tree, so a diagnostic or
@@ -290,9 +285,42 @@ const MIN_DIAGNOSTIC_FIXTURES: usize = 14;
 /// on 2026-06-10). Falling below it means discovery silently lost fixtures.
 const MIN_NO_ERRORS_FIXTURES: usize = 40;
 
+/// Categories that must each contribute at least one **output** fixture (an
+/// `// EXPECT: output "..."`) to the cross-target execution lane.
+///
+/// Like [`DIAGNOSTIC_FIXTURE_CATEGORIES`] this is a **tripwire, not a filter**:
+/// the execution test walks the entire conformance tree (every category — even
+/// ones not listed here — is wired automatically), and this list pins the
+/// categories known to carry output fixtures today. A discovery regression (a
+/// directory rename, a walk bug, fixtures silently dropping out of the run)
+/// then fails loudly instead of shrinking coverage. Before 2026-06-15 the
+/// execution lane discovered fixtures from `conformance/exec/` ONLY, so the
+/// output fixtures under `interp/`, `stdlib/`, and `time/` were parsed but
+/// never executed (Q-exec-output-directive-wiring) — exactly the silent
+/// exclusion this tripwire now guards against. When a fixture set legitimately
+/// moves, update this list in the same PR.
+const OUTPUT_FIXTURE_CATEGORIES: &[&str] = &["exec", "interp", "stdlib", "time"];
+
+/// Floor on the number of `// EXPECT: output` fixtures the execution lane must
+/// discover and schedule (the count on 2026-06-15 was 248; the floor sits below
+/// it with headroom for routine churn). Falling below it means discovery
+/// silently lost output fixtures — the precise failure mode
+/// Q-exec-output-directive-wiring fixed (5+ fixtures outside `exec/` were never
+/// executed). Mirrors [`MIN_DIAGNOSTIC_FIXTURES`] / [`MIN_NO_ERRORS_FIXTURES`].
+const MIN_OUTPUT_FIXTURES: usize = 200;
+
 /// Build `case`'s source for `target` into `project_dir`, returning the
-/// directory containing the emitted `main.<ext>` (i.e. `project_dir/build/<target>`).
-fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
+/// directory containing the emitted `main.<ext>` (i.e.
+/// `project_dir/build/<target>`).
+///
+/// A **fixture-attributable** failure — the target toolchain rejecting the
+/// emitted code, a missing entrypoint, or a multi-file fixture that emitted no
+/// sibling modules — is returned as `Err(message)` so the caller records it as
+/// one `Outcome::Failed` and the run continues to the next (fixture, target),
+/// surfacing EVERY failing pair in a single run instead of aborting at the
+/// first. Only genuine harness faults (cannot spawn `bock build`, cannot write
+/// the temp project) still panic, since they invalidate the whole run.
+fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> Result<PathBuf, String> {
     let main_path = project_dir.join("main.bock");
     std::fs::write(&main_path, &case.source).expect("write fixture source");
 
@@ -325,22 +353,26 @@ fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
     }
     let output = cmd.output().expect("failed to spawn bock build");
 
-    assert!(
-        output.status.success(),
-        "`bock build -t {target}` failed for fixture `{}`:\nstdout:\n{}\nstderr:\n{}",
-        case.name,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    if !output.status.success() {
+        return Err(format!(
+            "`bock build -t {target}` failed for fixture `{}` \
+             (declare the exclusion with `// EXPECT: targets ...` if this is a \
+             known per-target codegen gap):\nstdout:\n{}\nstderr:\n{}",
+            case.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
 
     let build_dir = project_dir.join("build").join(target);
     let entry = build_dir.join(entry_relpath(target));
-    assert!(
-        entry.is_file(),
-        "expected emitted entrypoint {} for fixture `{}`, but it was not written",
-        entry.display(),
-        case.name,
-    );
+    if !entry.is_file() {
+        return Err(format!(
+            "expected emitted entrypoint {} for fixture `{}`, but it was not written",
+            entry.display(),
+            case.name,
+        ));
+    }
 
     // Every target emits a per-module tree: a multi-file fixture — one that
     // ships an auxiliary `.bock` module via a `// FILE:` marker — must emit a
@@ -373,15 +405,16 @@ fn build_fixture(case: &TestCase, target: &str, project_dir: &Path) -> PathBuf {
                 }
             }
         }
-        assert!(
-            sibling_count > 0,
-            "fixture `{}` is multi-file but target `{target}` (per-module tree) \
-             emitted only `main.{ext}` — expected sibling module files",
-            case.name,
-        );
+        if sibling_count == 0 {
+            return Err(format!(
+                "fixture `{}` is multi-file but target `{target}` (per-module tree) \
+                 emitted only `main.{ext}` — expected sibling module files",
+                case.name,
+            ));
+        }
     }
 
-    build_dir
+    Ok(build_dir)
 }
 
 /// Outcome of attempting one (fixture, target) pair.
@@ -414,7 +447,10 @@ fn run_one(
     }
 
     let tmp = tempfile::tempdir().expect("create temp project dir");
-    let build_dir = build_fixture(case, target, tmp.path());
+    let build_dir = match build_fixture(case, target, tmp.path()) {
+        Ok(dir) => dir,
+        Err(msg) => return Outcome::Failed(msg),
+    };
 
     match registry.run(target, &build_dir) {
         Ok(output) => {
@@ -438,17 +474,37 @@ fn run_one(
     }
 }
 
+/// Every conformance fixture — in EVERY category — that declares
+/// `// EXPECT: output "..."` is compiled in project mode, run on each present
+/// target, and stdout-diffed against the directive.
+///
+/// Until 2026-06-15 this lane discovered fixtures from `conformance/exec/`
+/// **only**, while the three check-driven tests below
+/// already walked the whole tree. The output fixtures under `interp/`,
+/// `stdlib/`, and `time/` were therefore parsed but never executed — a silent
+/// exclusion that let a fixture's `// EXPECT: output` drift from its program's
+/// actual stdout without any cross-target test noticing
+/// (Q-exec-output-directive-wiring). This walk mirrors the diagnostic lane's
+/// whole-tree approach (#341): every present-and-future output fixture
+/// auto-wires, with no per-directory allow-list to forget to update.
+///
+/// A fixture may declare `// EXPECT: targets <ids>` to restrict which backends
+/// it runs on (absent ⇒ every target). That directive is the **loud, declared**
+/// way to exclude a target a fixture genuinely cannot build on today — e.g.
+/// `stdlib/compare/compare_output_smoke.bock` excludes `rust`, where the user
+/// `Equatable::eq` impl collides with Rust's `PartialEq::eq` at `a.eq(&b)`
+/// (E0034, a separate codegen defect) — rather than a silent skip.
 #[test]
 fn conformance_fixtures_execute_on_every_present_target() {
     let registry = ToolchainRegistry::with_builtins();
     let required = required_targets();
-    let dir = conformance_exec_dir();
+    let root = conformance_root_dir();
 
-    let discovered = discover_tests(&dir);
+    let discovered = discover_tests(&root);
     assert!(
         !discovered.is_empty(),
         "no fixtures discovered under {}; expected at least one execution fixture",
-        dir.display()
+        root.display()
     );
 
     let mut cases: Vec<TestCase> = Vec::new();
@@ -479,8 +535,17 @@ fn conformance_fixtures_execute_on_every_present_target() {
     assert!(
         !output_cases.is_empty(),
         "no `// EXPECT: output \"...\"` fixtures under {}",
-        dir.display()
+        root.display()
     );
+
+    // Tally discovered output fixtures per category for the coverage tripwire.
+    let mut by_category: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for (case, _, _) in &output_cases {
+        *by_category
+            .entry(fixture_category(&root, &case.path))
+            .or_default() += 1;
+    }
 
     let mut passed: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
@@ -505,6 +570,10 @@ fn conformance_fixtures_execute_on_every_present_target() {
     // Always print a coverage summary so an all-skipped green run is not
     // mistaken for real coverage.
     eprintln!("\n=== conformance execution summary ===");
+    eprintln!("  output fixtures discovered: {}", output_cases.len());
+    for (category, count) in &by_category {
+        eprintln!("    {category}: {count} fixture(s)");
+    }
     eprintln!("  passed:  {} ({})", passed.len(), passed.join(", "));
     eprintln!(
         "  skipped: {} (toolchain absent: {})",
@@ -527,6 +596,22 @@ fn conformance_fixtures_execute_on_every_present_target() {
         failures.is_empty(),
         "conformance execution failures:\n\n{}",
         failures.join("\n\n")
+    );
+
+    // Tripwires against silent coverage shrink (see the constants' docs). These
+    // run AFTER the failure assertion so a real mismatch is reported first.
+    for category in OUTPUT_FIXTURE_CATEGORIES {
+        assert!(
+            by_category.contains_key(*category),
+            "category `{category}` contributed no `// EXPECT: output` fixtures to \
+             the execution lane — coverage shrank (or fixtures moved; update \
+             OUTPUT_FIXTURE_CATEGORIES)",
+        );
+    }
+    assert!(
+        output_cases.len() >= MIN_OUTPUT_FIXTURES,
+        "expected >= {MIN_OUTPUT_FIXTURES} output fixtures, discovered {}",
+        output_cases.len(),
     );
 }
 

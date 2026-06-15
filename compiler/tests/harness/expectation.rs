@@ -23,7 +23,10 @@ pub enum Expectation {
     NoErrors,
     /// `// EXPECT: error E<code> at <line>:<col>` — a specific error at a location.
     ErrorAt { code: String, location: Location },
-    /// `// EXPECT: output "<text>"` — the interpreter should print this text.
+    /// `// EXPECT: output "<text>"` — the program should print this text.
+    /// The quoted value supports `\n`/`\t`/`\"`/`\\` escapes, so a program
+    /// that prints multiple lines (one `println` per line) declares its expected
+    /// stdout with `\n`. See `decode_output_escapes` for the decoder.
     Output(String),
     /// `// EXPECT: targets <a>, <b>, ...` — restrict execution to the listed
     /// transpilation targets (by id: `js`, `ts`, `python`, `rust`, `go`).
@@ -108,7 +111,7 @@ pub fn parse_expectation(value: &str, line_number: usize) -> Result<Expectation,
         let text = rest.trim();
         if text.starts_with('"') && text.ends_with('"') && text.len() >= 2 {
             let inner = &text[1..text.len() - 1];
-            return Ok(Expectation::Output(inner.to_string()));
+            return decode_output_escapes(inner, line_number).map(Expectation::Output);
         }
         return Err(ParseError {
             line_number,
@@ -149,6 +152,45 @@ pub fn parse_expectation(value: &str, line_number: usize) -> Result<Expectation,
     })
 }
 
+/// Decode the backslash escapes permitted inside an `// EXPECT: output "..."`
+/// directive's quoted text.
+///
+/// A directive line is a single physical line, so a fixture whose program emits
+/// **multiple lines** of stdout (one `println` per line) expresses its expected
+/// output with `\n`. The recognised escapes are `\n` (newline), `\t` (tab),
+/// `\"` (a literal double-quote inside the value) and `\\` (a literal
+/// backslash). Any other escape — e.g. a stray `\x` — is a hard error (the
+/// typo-guard discipline: a malformed escape must never be silently passed
+/// through and then mismatch at run time). A value with no backslash decodes to
+/// itself unchanged, so every pre-escape directive keeps its exact meaning.
+fn decode_output_escapes(inner: &str, line_number: usize) -> Result<String, ParseError> {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            other => {
+                return Err(ParseError {
+                    line_number,
+                    message: format!(
+                        "invalid escape `\\{}` in output expectation; \
+                         supported escapes are `\\n`, `\\t`, `\\\"`, `\\\\`",
+                        other.map(|c| c.to_string()).unwrap_or_default()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn parse_location(s: &str) -> Option<Location> {
     let (line_str, col_str) = s.split_once(':')?;
     let line = line_str.trim().parse().ok()?;
@@ -182,6 +224,37 @@ mod tests {
     fn test_output() {
         let exp = parse_expectation("output \"hello world\"", 1).unwrap();
         assert_eq!(exp, Expectation::Output("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_output_newline_escape() {
+        // A multi-line program (one `println` per line) expresses its expected
+        // stdout with `\n`; the decoder turns it into a real newline.
+        let exp = parse_expectation("output \"a\\nb\\nc\"", 1).unwrap();
+        assert_eq!(exp, Expectation::Output("a\nb\nc".to_string()));
+    }
+
+    #[test]
+    fn test_output_escapes_tab_quote_backslash() {
+        let exp = parse_expectation("output \"x\\ty\\\"z\\\\w\"", 1).unwrap();
+        assert_eq!(exp, Expectation::Output("x\ty\"z\\w".to_string()));
+    }
+
+    #[test]
+    fn test_output_no_backslash_is_verbatim() {
+        // A value with no backslash decodes to itself: pre-escape directives
+        // keep their exact meaning.
+        let exp = parse_expectation("output \"3;1,2,3;1|2,3\"", 1).unwrap();
+        assert_eq!(exp, Expectation::Output("3;1,2,3;1|2,3".to_string()));
+    }
+
+    #[test]
+    fn test_output_invalid_escape_is_error() {
+        // A stray `\x` is a hard error (typo guard for escapes) — never silently
+        // passed through to mismatch at run time.
+        let result = parse_expectation("output \"bad\\xescape\"", 9);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().line_number, 9);
     }
 
     #[test]

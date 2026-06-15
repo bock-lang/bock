@@ -1,5 +1,6 @@
 // TEST: stdlib_compare_output_smoke
 // EXPECT: output "equal"
+// EXPECT: targets js, ts, python, go
 //
 // A `main` that builds two equal `Key`s via `core.compare.key(...)` and prints
 // whether they are `eq`. NOTE: the harness currently *parses* `// EXPECT:

@@ -1,5 +1,5 @@
 // TEST: interp_compare_ordering
-// EXPECT: output "less;equal;greater;str-greater"
+// EXPECT: output "less\nequal\ngreater\nstr-greater"
 //
 // Q-interp-compare-ordering (R11 oracle parity), interpreter side. A primitive's
 // `Comparable.compare` returns the prelude `Ordering` enum, so
