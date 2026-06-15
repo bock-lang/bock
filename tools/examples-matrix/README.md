@@ -67,11 +67,24 @@ All five targets print byte-identical reports.
 
 ## Dogfooding notes
 
-Writing this tool surfaced several real codegen defects (rust ownership
-clone-insertion gaps, a Python `pass` keyword collision on record fields,
-Go lambda type erasure in `map`/`filter`, a Go identifier collision with
-the runtime `Lines` helper, and unescaped `%` in Go's lowered `Sprintf`).
-They are recorded as FOUND items with minimal repros in the PR that added
-this tool. Where a reasonable idiom existed, the code here uses it (each
-such spot carries a comment naming the defect it dodges); the defects
-themselves remain compiler work, not worked around silently.
+Writing this tool surfaced several real codegen defects:
+
+- rust ownership clone-insertion gaps (a local passed by value to two calls,
+  and loop variables reused across nested-loop iterations) — fixed by #370
+  (`Q-rust-clone-insertion-gaps`);
+- a Python `pass` keyword collision on record fields — fixed by #344;
+- Go lambda type erasure in `map`/`filter` — fixed by #343;
+- a Go identifier collision with the runtime `Lines` helper — fixed by #343;
+- unescaped `%` in Go's lowered `Sprintf` (a literal `%` inside an
+  interpolated string corrupting output as `%!p(MISSING)`) — fixed by #343.
+
+Each was originally recorded as a FOUND item with a minimal repro, and the
+tool carried a workaround idiom at each spot (a comment naming the defect it
+dodged). Now that all of those compiler fixes have landed, the dodges have
+been reverted to the natural idioms — direct `${percent(...)}%`
+interpolation, the `pass`/`build` record fields and `lines` parameter, the
+`split(...).map(...).filter(...)` field-extraction chain, and the
+nested-loop missing-cell probe. The tool therefore now exercises the
+previously-broken idioms directly: it is living regression proof that the
+fixes hold, and any reintroduction of those defects would break its
+byte-identical-across-five-targets contract.
