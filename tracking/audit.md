@@ -2627,3 +2627,28 @@ Awaiting operator: R1/R6/OQ1–OQ4. Awaiting Design: DQ31, DV19–DV24.
     engineering. 8 dependabot PRs (#359–366) still pending — routine, deferred to a batch. NOTE: audit.md had no
     2026-06-15 entries before this — the Wave 1+2 / walk-through sessions updated the Ready block + escalations but not
     the rolling note or audit; both caught up this pass.
+
+[2026-06-15 19:12 UTC] ✦ MS-v1.0-HARDENING WAVE B COMPLETE (#375–#376) — cross-backend codegen trait-dispatch + 4 per-backend FOUNDs; correctness floor clean
+  Input: operator chose "Wave B codegen, then dependabot" (AskUserQuestion, after Wave 3 landed at 66efd2e). Wave B = the
+    entangled remainder: 3 trait-dispatch items (bounded-Comparable, prelude-impl, displayable-interpolation) spanning all
+    backends + the 4 per-backend FOUNDs this pass surfaced + Q-examples-matrix-undodge.
+  Options: the codegen items share the per-backend files (py.rs wanted by 3 of them, rs.rs by 2), so they are NOT file-disjoint
+    — can't fan out like Wave 3. Chose: ONE comprehensive codegen session (incremental commits, easy→hard) + ONE disjoint
+    matrix lane (tools/) in parallel.
+  Decision: dispatched 2 Bash-auth appliers. WB-codegen committed all 7 items incrementally (a6de928 go-handling · d034fcb
+    ts-eq · ac62cb8 rust-eq · 0526925 py-match-bind · ccfa542 prelude-impl · ae5c9c6 bounded-comparable · e90c595
+    displayable-interp), each build+run-verified ×5 before commit; it un-excluded the two #372 `// EXPECT: targets` guards
+    (compare_output_smoke/rust, primitive_eq_bridge/ts) as it fixed the underlying E0034/TS2367. WB-matrix reverted all 5
+    dodges (byte-identical ×5, sha unchanged from baseline). Both agents stalled on their final gate by backgrounding cargo
+    (same recurring pattern) — WB-codegen recovered by committing the already-applied work (incremental commits left a clean
+    7/7 tree); its own local conformance run reported 1103 passed / 0 failed before the stall.
+  Verification: per-PR CI 15/15 incl. BOTH Windows lanes on #376 (the authoritative clean-env gate — its conformance proves
+    the 7 fixes correct cross-target, incl. the un-excluded rust/ts cases); #375 15/15. Merged both (squash); final main
+    e9f4299 CI green.
+  Reasoning: all items ready/un-gated, within authority (impl bugs vs settled spec). #376's py match-binding fix also closed
+    the pre-existing Q-py-valuepos-match-payload-namebind (value-position form, same root). No spec/design decisions taken.
+  Follow-up: Wave B items + the 4 FOUNDs CLOSED. v1.0-hardening correctness floor is now essentially clean. REMAINING = a
+    small Wave-C tail (Q-ts-generic-enum-codegen, Q-py-go-wrapper-structural-eq, Q-bocktest-discovery-readdir-unwrap
+    robustness, Q-core-bool-compare-dead LOW, 2 doc-prose chores) + 3 Design OPENs to formalize as DQ entries.
+    NEXT: drain the 8 dependabot PRs (#359–366 — stale pre-#367 base, need `@dependabot rebase` onto e9f4299 → merge
+    round-robin across the extensions/vscode + website shared lockfiles; regex #364 independent).
