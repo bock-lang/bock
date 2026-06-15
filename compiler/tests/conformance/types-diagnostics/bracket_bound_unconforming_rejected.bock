@@ -1,0 +1,36 @@
+// TEST: bracket_bound_unconforming_rejected
+// EXPECT: error E4005 at 34:21
+//
+// Q-bracket-bounds-unenforced (§4): a bracket-form generic bound
+// `[T: Comparable]` is enforced at call sites by the SAME path that a
+// `where (T: Comparable)` clause uses — the two forms are equivalent, so a
+// non-conforming type argument must be rejected for both. Before this fix
+// bracket bounds were collected (for method resolution) but never threaded
+// into `check_trait_bounds_at_call`, so `smallest(p1, p2)` with a `Point`
+// that declares no `impl Comparable` was silently accepted.
+//
+// `Point` has no `impl Comparable`, so the `smallest(p1, p2)` call is rejected
+// with the trait-bound error code (E4005), pointing at the call expression
+// (the `let` initializer at 34:21). The positive sibling fixture
+// `bracket_bound_conforming_ok.bock` confirms a conforming argument still
+// type-checks.
+module main
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+fn smallest[T: Comparable](a: T, b: T) -> T {
+  if (a < b) {
+    return a
+  }
+  return b
+}
+
+fn main() -> Void {
+  let p1: Point = Point { x: 1, y: 2 }
+  let p2: Point = Point { x: 3, y: 4 }
+  let r: Point = smallest(p1, p2)
+  println("done")
+}
