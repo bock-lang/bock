@@ -12052,11 +12052,28 @@ impl GoEmitCtx {
                         }
                     }
                 }
-                // A `match` with statement arms has no value; emit it in
-                // statement position (a Go `switch`) rather than as an
-                // expression IIFE, regardless of whether a return was wanted.
+                // A `match` whose value is not consumed must emit in statement
+                // position (a Go `switch` / if-chain), never as an expression
+                // IIFE. Two cases reach here:
+                //
+                //   1. A `match` with statement arms (`break`/`return`/an
+                //      assignment) carries no value at all.
+                //   2. A `match` in a *non-returning* tail position
+                //      (`emit_return == false`: a `Void`/`main` body tail, an
+                //      `if`/loop/arm statement block) — its result is discarded,
+                //      so even value-shaped arms (a `print(...)`/void-call arm,
+                //      classified as an expression, not a statement) yield
+                //      nothing the caller reads.
+                //
+                // Routing both to `emit_match` avoids the
+                // `func() interface{} { …arm…; panic("unreachable") }()` IIFE
+                // form, whose trailing exhaustiveness guard runs *after* the
+                // matched arm — producing correct output and THEN a spurious
+                // `unreachable` panic (Q-go-tailmatch-unreachable-panic). The
+                // statement-position lowering has no such guard for a total
+                // record/plain match, so the arm is the terminal statement.
                 if let NodeKind::Match { scrutinee, arms } = &t.kind {
-                    if crate::generator::match_has_statement_arm(arms) {
+                    if !emit_return || crate::generator::match_has_statement_arm(arms) {
                         self.emit_match(scrutinee, arms)?;
                         return Ok(());
                     }
@@ -12122,9 +12139,12 @@ impl GoEmitCtx {
             // emit through the statement path, never as an expression.
             self.emit_node(node)?;
         } else {
-            // Single expression as body.
+            // Single expression as body. A `match` whose value is not consumed
+            // (statement arms, or any match in a non-returning `emit_return ==
+            // false` body) emits in statement position, never as an IIFE — see
+            // the block-tail arm above (Q-go-tailmatch-unreachable-panic).
             if let NodeKind::Match { scrutinee, arms } = &node.kind {
-                if crate::generator::match_has_statement_arm(arms) {
+                if !emit_return || crate::generator::match_has_statement_arm(arms) {
                     self.emit_match(scrutinee, arms)?;
                     return Ok(());
                 }
