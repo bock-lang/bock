@@ -1,0 +1,58 @@
+// TEST: exec_ts_generic_enum_codegen
+// EXPECT: output "full=7;empty=0"
+// EXPECT: targets js, ts, python, rust
+//
+// A GENERIC user-defined enum (`enum Box[T] { Full(T), Empty }`), constructed at
+// a CONCRETE instantiation (`Box[Int]`) and matched. Regression fixture for
+// Q-ts-generic-enum-codegen.
+//
+// `go` is intentionally EXCLUDED from the target set: this is the first generic
+// *user enum* exec fixture in the suite, and it surfaced a PRE-EXISTING Go
+// codegen defect independent of the TS fix here (FOUND: Q-go-generic-enum-codegen).
+// The Go backend emits an invalid enum-marker-method receiver
+// `func (BoxFull[T any]) isBox()` — a Go receiver's type-parameter list must not
+// carry the `any` constraint (`func (BoxFull[T]) isBox()` is the valid form), so
+// `go build` fails with "unexpected name any, expected ]". That lives in the Go
+// backend (`go.rs`), out of scope for this TS-only change; it is filed as a FOUND
+// for a follow-up that owns `go.rs`. The other four targets (js, ts, python, rust)
+// all build and execute this fixture, printing `full=7;empty=0`.
+//
+// TS defect (TS2314 "Generic type requires N type argument(s)"): the enum union
+// type ALIAS was emitted with concretized/mismatched generic arity relative to
+// the per-variant interfaces — e.g. the alias rendered like `Box<number>` while
+// the variant interfaces were `Box_Full<T>` / `Box_Empty<T>`, so the alias body
+// referenced variant interfaces with the wrong number of type arguments and
+// `tsc --noEmit` rejected the file before any narrowing concern. The fix makes
+// the union alias and the variant interfaces carry CONSISTENT generic-parameter
+// arity (`type Box<T> = Box_Full<T> | Box_Empty<T>`, each variant interface
+// carrying the same `<T>`), and emits uses with the right type args.
+//
+// `Full` carries the type param `T` (a positional/tuple payload); `Empty` is a
+// unit variant in the same enum so the union mixes a payload-bearing generic
+// variant with a payload-free one — the arity-consistency point of the fixture.
+//
+// The reducer pulls the payload out via a `match` whose `Full(x)` arm binds and
+// uses the payload (so Go's unused-local check is satisfied) and whose `Empty`
+// arm returns a default.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Box[T] {
+  Full(T)
+  Empty
+}
+
+fn unwrap_or_zero(b: Box[Int]) -> Int {
+  match b {
+    Full(x) => return x
+    Empty => return 0
+  }
+}
+
+fn main() -> Void {
+  let f: Box[Int] = Full(7)
+  let e: Box[Int] = Empty
+  println("full=${unwrap_or_zero(f)};empty=${unwrap_or_zero(e)}")
+}
