@@ -1,5 +1,6 @@
 // TEST: interpreter_primitive_eq_bridge
 // EXPECT: output "int=true;float=true;bool=true;string=true;char=true;neq=false"
+// EXPECT: targets js, python, rust, go
 //
 // The Equatable primitive bridge under the reference interpreter: `a.eq(b)`
 // on a concrete primitive receiver must dispatch to native equality, exactly

@@ -28,6 +28,11 @@
 //! fixture runs on every target. It lets a fixture exercise a backend-specific
 //! defect without failing on targets where the relevant feature is not yet
 //! supported.
+//!
+//! The quoted text of `// EXPECT: output "..."` supports the backslash escapes
+//! `\n`, `\t`, `\"` and `\\`. A directive is one physical line, so a program
+//! that prints **multiple** lines of stdout (one `println` per line) expresses
+//! its expected output with `\n`. A value with no backslash is taken verbatim.
 
 pub mod expectation;
 
