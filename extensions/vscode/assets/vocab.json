@@ -931,7 +931,6 @@
           "compare",
           "display",
           "eq",
-          "equals",
           "hash_code",
           "negate",
           "to_int",
@@ -953,7 +952,6 @@
           "compare",
           "display",
           "eq",
-          "equals",
           "hash_code",
           "is_alpha",
           "is_digit",
@@ -975,7 +973,6 @@
           "compare",
           "display",
           "div",
-          "equals",
           "hash_code",
           "is_negative",
           "is_zero",
@@ -1002,7 +999,6 @@
           "display",
           "div",
           "eq",
-          "equals",
           "floor",
           "hash_code",
           "is_infinite",
@@ -1034,7 +1030,6 @@
           "display",
           "duration_since",
           "elapsed",
-          "equals",
           "sub",
           "to_string"
         ]
@@ -1049,7 +1044,6 @@
           "display",
           "div",
           "eq",
-          "equals",
           "hash_code",
           "max",
           "min",
@@ -1102,18 +1096,13 @@
           "get",
           "hash_code",
           "index_of",
-          "insert",
           "is_empty",
           "iter",
           "join",
           "last",
           "len",
           "map",
-          "pop",
-          "push",
           "reduce",
-          "remove",
-          "reverse",
           "skip",
           "slice",
           "sort",
@@ -1229,7 +1218,6 @@
           "display",
           "ends_with",
           "eq",
-          "equals",
           "format",
           "hash_code",
           "index_of",
@@ -1345,20 +1333,22 @@
       {
         "code": "E1005",
         "severity": "error",
-        "summary": "Invalid digit for numeric literal.",
-        "description": "A digit was found that is outside the range of the declared numeric base.",
+        "summary": "Invalid digit for numeric literal, or imported module not found.",
+        "description": "Two passes share this slot (a `1xxx` collision pending a renumbering decision). Lexer: a digit was found that is outside the range of the declared numeric base. Name resolution: a `use` path named a module the registry could not locate.",
         "spec_refs": [
-          "§1.3"
+          "§1.3",
+          "§10"
         ],
         "related_codes": []
       },
       {
         "code": "E1006",
         "severity": "error",
-        "summary": "Unterminated block comment.",
-        "description": "A `/* ... */` block comment was opened but never closed before end of input.",
+        "summary": "Unterminated block comment, or imported symbol not found in module.",
+        "description": "Two passes share this slot (a `1xxx` collision pending a renumbering decision). Lexer: a `/* ... */` block comment was opened but never closed before end of input. Name resolution: a `use` path names a module that exists but does not export the requested symbol.",
         "spec_refs": [
-          "§1.2"
+          "§1.2",
+          "§10"
         ],
         "related_codes": []
       },
@@ -1366,27 +1356,7 @@
         "code": "W1001",
         "severity": "warning",
         "summary": "Unused import.",
-        "description": "An import was declared but never referenced.",
-        "spec_refs": [
-          "§10"
-        ],
-        "related_codes": []
-      },
-      {
-        "code": "E1005 (module)",
-        "severity": "error",
-        "summary": "Module not found.",
-        "description": "An imported module could not be located by the module registry.",
-        "spec_refs": [
-          "§10"
-        ],
-        "related_codes": []
-      },
-      {
-        "code": "E1006 (module)",
-        "severity": "error",
-        "summary": "Symbol not found in module.",
-        "description": "A `use` path names a module that exists but does not export the requested symbol.",
+        "description": "An import was declared but never referenced. Uses of an imported effect name in `with`, `handling`, and `impl … for` positions count as references (Q-w1001-effect-import-false-positive).",
         "spec_refs": [
           "§10"
         ],
@@ -1397,6 +1367,16 @@
         "severity": "error",
         "summary": "Symbol is not visible.",
         "description": "The referenced symbol exists but is private; declare it `public` to export it.",
+        "spec_refs": [
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1008",
+        "severity": "error",
+        "summary": "Circular module dependency.",
+        "description": "The `use` import graph contains a cycle, so the modules cannot be compiled in any dependency order. The message names every module in the cycle in order and points at one offending `use` edge. Fix by removing one of the `use` edges in the cycle, or by extracting the shared items into a third module that both can import.",
         "spec_refs": [
           "§10"
         ],
@@ -1475,8 +1455,18 @@
       {
         "code": "E2030",
         "severity": "error",
-        "summary": "Invalid lambda parameter list.",
-        "description": "Lambda parameters must be parenthesized; single-identifier forms are not accepted.",
+        "summary": "Parentheses required (lambda parameters / `if` condition).",
+        "description": "A construct that requires parentheses was written without them. Lambda parameters must be parenthesized; single-identifier forms (`x => …`) are not accepted. An `if` condition must be parenthesized (`if (cond) { … }`); the diagnostic names the offending token and a note gives the wrapped form. (The parser also reuses this code for a missing function name after `fn` — a known overload pending a renumbering decision.)",
+        "spec_refs": [
+          "§5"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2031",
+        "severity": "error",
+        "summary": "Invalid lambda / function parameter.",
+        "description": "A parameter position expected a name and found something else — e.g. a missing name after `mut`, or a non-identifier where a parameter name was required.",
         "spec_refs": [
           "§5"
         ],
@@ -1513,6 +1503,16 @@
         "related_codes": []
       },
       {
+        "code": "E2061",
+        "severity": "error",
+        "summary": "Expected constant name.",
+        "description": "A `const` declaration was missing its name: a constant name was expected and a different token was found.",
+        "spec_refs": [
+          "§4"
+        ],
+        "related_codes": []
+      },
+      {
         "code": "E2070",
         "severity": "error",
         "summary": "Invalid match arm.",
@@ -1523,12 +1523,52 @@
         "related_codes": []
       },
       {
+        "code": "E2071",
+        "severity": "error",
+        "summary": "Expected associated type name.",
+        "description": "An associated-type position inside a `trait`/`impl` expected a type name (`type Name`) and found a different token.",
+        "spec_refs": [
+          "§4.4"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2072",
+        "severity": "error",
+        "summary": "Expected method name.",
+        "description": "A method declaration inside a `trait`/`impl`/`class` expected a method name after `fn` and found a different token.",
+        "spec_refs": [
+          "§4.4"
+        ],
+        "related_codes": []
+      },
+      {
         "code": "E2090",
         "severity": "error",
         "summary": "Invalid effect declaration.",
         "description": "An `effect` declaration or `with` clause is malformed.",
         "spec_refs": [
           "§8"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2091",
+        "severity": "error",
+        "summary": "Expected effect operation name.",
+        "description": "An effect operation declaration inside an `effect` block expected an operation name after `fn` and found a different token.",
+        "spec_refs": [
+          "§8"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2092",
+        "severity": "error",
+        "summary": "Tuple positional indexing is not available in v1.",
+        "description": "`t.0` / `t.1` positional tuple indexing is not a v1 form. Destructure with `let (a, b) = t` to bind tuple elements instead.",
+        "spec_refs": [
+          "§5"
         ],
         "related_codes": []
       },
@@ -1673,6 +1713,16 @@
         "related_codes": []
       },
       {
+        "code": "E5004",
+        "severity": "error",
+        "summary": "In-place `List` mutator requires a `mut` receiver.",
+        "description": "An in-place `List` mutator (`push`/`append`, DQ18; `pop`/`remove_at`/`insert`/`reverse` and indexed `set`, DQ30) was called on a receiver that is not a mutable lvalue. These methods mutate the list in place, so the receiver must be a `mut` binding. Fix: declare the list with `let mut`, take a `mut` parameter, or use a value-returning combinator (`+` / `concat`).",
+        "spec_refs": [
+          "§3"
+        ],
+        "related_codes": []
+      },
+      {
         "code": "E6001",
         "severity": "error",
         "summary": "Undeclared effect.",
@@ -1771,6 +1821,198 @@
         "description": "A public function calls into code requiring capabilities it has not declared.",
         "spec_refs": [
           "§9"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8001",
+        "severity": "error",
+        "summary": "Unknown capability in `@capability`.",
+        "description": "A `@capability` annotation named a capability the compiler does not recognize.",
+        "spec_refs": [
+          "§9"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8002",
+        "severity": "error",
+        "summary": "Expected capability name in `@capability`.",
+        "description": "A `@capability` argument was not a capability name (e.g. `Capability.Network` or `Network`).",
+        "spec_refs": [
+          "§9"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8003",
+        "severity": "error",
+        "summary": "Expected duration or byte size in `@performance`.",
+        "description": "A `@performance` budget argument was not a duration (e.g. `100.ms`) or a byte size (e.g. `50.mb`).",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8004",
+        "severity": "error",
+        "summary": "`@invariant` requires an expression argument.",
+        "description": "An `@invariant` annotation was written without the boolean expression it constrains.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8005",
+        "severity": "error",
+        "summary": "Invalid `@security` argument.",
+        "description": "A `@security` annotation expected a string `level` or a boolean `pii` flag, or was given neither.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8006",
+        "severity": "error",
+        "summary": "Expected string argument in `@domain`.",
+        "description": "A `@domain` annotation argument was not a string literal.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8010",
+        "severity": "error",
+        "summary": "`@invariant` expression must be boolean-typed.",
+        "description": "An `@invariant` expression must be a comparison, logical, or call expression that yields a boolean.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8011",
+        "severity": "error",
+        "summary": "Child security level less restrictive than parent.",
+        "description": "An item's `@security` level is less restrictive than the level it inherits from an enclosing context, which would weaken the parent's guarantee.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W8011",
+        "severity": "warning",
+        "summary": "Child declares `pii=false` but parent declares `pii=true`.",
+        "description": "PII status is inherited: a child cannot drop a parent's `pii=true` to `pii=false`. The narrower flag is ignored and a warning is issued.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8013",
+        "severity": "error",
+        "summary": "Public item is missing context annotations (production mode).",
+        "description": "In production (strict) mode every public item (`fn`/`class`/`trait`/`record`/`enum`) must carry a `@context` annotation. The standard-mode form of this rule is the warning `W8013`.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W8013",
+        "severity": "warning",
+        "summary": "Public item is missing context annotations (standard mode).",
+        "description": "In standard mode a public item (`fn`/`class`/`trait`/`record`/`enum`) without a `@context` annotation is flagged as a recommendation, once per item. Promotes to the error `E8013` in production (strict) mode; suppressed entirely in lax mode and for embedded-stdlib modules.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W8015",
+        "severity": "warning",
+        "summary": "Unknown security level in `@security`.",
+        "description": "A `@security(level: …)` string was not one of the known security levels; the annotation is kept but flagged.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8016",
+        "severity": "error",
+        "summary": "`@performance` budget must be positive.",
+        "description": "A `@performance` budget (`max_latency` or `max_memory`) was zero or negative; budgets must be positive values.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8020",
+        "severity": "error",
+        "summary": "Effect operation has no handler in scope.",
+        "description": "A called effect operation has no handler installed in any enclosing scope and the effect is not declared, so it can never be discharged.",
+        "spec_refs": [
+          "§8",
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W8020",
+        "severity": "warning",
+        "summary": "Effect declared-but-unused, or PII-tainted signature without security context.",
+        "description": "Two checks currently share this code (a `8xxx` overlap pending a renumbering decision). Capability verification: an effect declared in a function's `with` clause is never used in its body. Context composition: a function has PII-tainted types in its signature but its module lacks a `@security` context acknowledging PII.",
+        "spec_refs": [
+          "§8",
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8021",
+        "severity": "error",
+        "summary": "Callee requires an undeclared capability.",
+        "description": "A called function requires a capability that is not declared in the current scope, so the requirement cannot be satisfied.",
+        "spec_refs": [
+          "§9"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W8021",
+        "severity": "warning",
+        "summary": "Importing a PII-returning function into a module without a PII security context.",
+        "description": "A `use` imports a function that returns PII-tainted types into a module whose `@security` context does not acknowledge PII.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W8022",
+        "severity": "warning",
+        "summary": "PII-tainted type passed to a logging/output function.",
+        "description": "A PII-tainted type flows into a logging or output sink, which is a potential data leak. One warning is emitted per call site.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E8023",
+        "severity": "error",
+        "summary": "Public declaration is missing `@context` (production mode).",
+        "description": "In production mode a public function, class, trait, or type must carry a `@context` annotation; capability verification rejects the bare declaration.",
+        "spec_refs": [
+          "§17"
         ],
         "related_codes": []
       }
