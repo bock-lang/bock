@@ -1,5 +1,5 @@
 // TEST: opgate_eq_class_unimpl
-// EXPECT: error E4015 at 20:23
+// EXPECT: error E4015 at 20:20
 //
 // DQ29 (§18.5 structural Equatable): CLASSES are excluded from structural
 // conformance (the data/identity line) — a class gets `==` only via an

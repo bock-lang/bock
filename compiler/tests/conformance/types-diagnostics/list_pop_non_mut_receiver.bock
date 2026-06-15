@@ -1,5 +1,5 @@
 // TEST: list_pop_non_mut_receiver
-// EXPECT: error E5004 at 14:5
+// EXPECT: error E5004 at 14:3
 //
 // DQ30: `pop` is an in-place mutator (`pop(mut self) -> Optional[T]`) — it
 // removes the last element from the receiver, so it requires a `mut` receiver

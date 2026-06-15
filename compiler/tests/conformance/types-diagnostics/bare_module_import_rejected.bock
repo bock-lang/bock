@@ -1,5 +1,5 @@
 // TEST: bare_module_import_rejected
-// EXPECT: error E4014 at 13:6
+// EXPECT: error E4014 at 13:1
 //
 // Q-import-reject (§12.2 / DQ8): a `use` of a module path with NEITHER a
 // brace-list NOR a wildcard — a bare `use core.error` — is not a v1 import

@@ -1,5 +1,5 @@
 // TEST: opgate_eq_generic_pair_poisoned
-// EXPECT: error E4015 at 23:23
+// EXPECT: error E4015 at 23:20
 //
 // DQ29 (§18.5 structural Equatable): a GENERIC user type instantiates
 // conditionally — `Pair[A, B]` is Equatable iff both `A` and `B` are, decided

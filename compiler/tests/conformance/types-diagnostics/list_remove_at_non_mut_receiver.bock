@@ -1,5 +1,5 @@
 // TEST: list_remove_at_non_mut_receiver
-// EXPECT: error E5004 at 14:5
+// EXPECT: error E5004 at 14:3
 //
 // DQ30: `remove_at` is an in-place mutator
 // (`remove_at(mut self, index: Int) -> T`) — it removes the element at the

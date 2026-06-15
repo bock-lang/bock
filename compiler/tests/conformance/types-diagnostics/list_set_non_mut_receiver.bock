@@ -1,5 +1,5 @@
 // TEST: list_set_non_mut_receiver
-// EXPECT: error E5004 at 14:5
+// EXPECT: error E5004 at 14:3
 //
 // DQ30: indexed `set` is an in-place mutator
 // (`set(mut self, index: Int, value: T) -> Void`) — it overwrites an element

@@ -1,17 +1,12 @@
 // TEST: parse_tuple_index_diagnostic
-// EXPECT: error E2092 at 18:5
+// EXPECT: error E2092 at 13:4
 //
-// Tuple positional indexing `t.0` / `t.1` is deferred to v1.x
-// (spec §7.6; changelog 20260513-0540-specs-changes.md). The lexer tokenizes
-// `t.0` as `Ident`, `Dot`, `IntLiteral`, which previously fell through to the
-// generic "expected expression, found `.`" parser error (E2020). The parser
-// now recognises this shape and emits a specific, actionable diagnostic
-// (E2092) that points users at destructuring instead.
-//
-// NOTE: the conformance harness parses directives but does not yet execute
-// fixtures against the checker; the E2092 message and recovery behavior are
-// asserted directly by the `bock-parser` unit tests `expr_tuple_index_*`.
-// This fixture documents the expectation and guards the directive shape.
+// Tuple positional indexing `t.0` / `t.1` is deferred to v1.x (spec 7.6). The
+// parser recognises the `Ident Dot IntLiteral` shape and emits a specific,
+// actionable diagnostic (E2092) pointing at destructuring; the span starts at
+// the `.` (column 4: two spaces + `t`, then `.`). Driven through `bock check`;
+// also asserted by the `bock-parser` unit tests `expr_tuple_index_*`.
+// (No multibyte chars in this fixture, so the column is drift-free.)
 
 fn main() -> Int {
   let t = (1, 2)

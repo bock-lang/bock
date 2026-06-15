@@ -1,5 +1,5 @@
 // TEST: opgate_eq_bound_record_fn_field
-// EXPECT: error E4015 at 28:23
+// EXPECT: error E4015 at 28:20
 //
 // DQ29 (§18.5 structural Equatable) — bound-satisfaction half: a
 // `where (T: Equatable)` bound is satisfied by structural conformance, so it

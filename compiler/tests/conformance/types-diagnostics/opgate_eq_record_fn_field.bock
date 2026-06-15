@@ -1,5 +1,5 @@
 // TEST: opgate_eq_record_fn_field
-// EXPECT: error E4015 at 24:23
+// EXPECT: error E4015 at 24:20
 //
 // DQ29 (§18.5 structural Equatable): a non-Equatable leaf POISONS the
 // structural conformance — `Fn` types have no equality, so a record holding a

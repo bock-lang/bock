@@ -1,5 +1,5 @@
 // TEST: opgate_comparison_user_type_unimpl
-// EXPECT: error E4005 at 23:21
+// EXPECT: error E4005 at 23:18
 //
 // Q-list-operator-gating-user-types (§18.5): the ordering operators
 // (`<`, `>`, `<=`, `>=`) require `impl Comparable` for a USER (record/class)

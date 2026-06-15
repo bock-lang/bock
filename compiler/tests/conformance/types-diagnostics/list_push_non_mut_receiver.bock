@@ -1,5 +1,5 @@
 // TEST: list_push_non_mut_receiver
-// EXPECT: error E5004 at 14:5
+// EXPECT: error E5004 at 14:3
 //
 // DQ18: `List.push`/`append` are in-place mutators — they require a `mut`
 // receiver and return `Void`. Pushing onto a plain (non-`mut`) `let` binding is
