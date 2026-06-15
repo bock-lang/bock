@@ -166,6 +166,15 @@ bock test                         # run all tests
 bock test --filter parse          # only tests whose name matches "parse"
 ```
 
+When a test file lives inside a project (its directory tree contains a
+`bock.project` marker), `bock test` also parses the project's sibling
+modules so cross-file `use` resolves. Discovery walks the project
+subtree: a sub-directory it cannot read (for example a root-owned,
+permission-denied scratch directory that happens to sit under the
+project root) is **skipped with a warning**, not treated as a fatal
+error — an unreadable, unrelated directory never aborts an otherwise
+valid test run.
+
 | Flag                | Meaning                          |
 | ------------------- | -------------------------------- |
 | `--filter <FILTER>` | Run only tests matching pattern. |

@@ -636,18 +636,62 @@ fn register_type_builtins(checker: &mut TypeChecker) {
 /// Discover `.bock` files recursively from the given directory.
 fn discover_bock_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    discover_bock_files_recursive(dir, &mut files)?;
+    // The entry directory is the root: an unreadable root is a genuine error.
+    // Unreadable sub-directories encountered during recursion are skipped (see
+    // the helper) so a permission error on an unrelated scanned dir cannot
+    // abort the whole project walk.
+    discover_bock_files_recursive(dir, &mut files, true)?;
     files.sort();
     Ok(files)
 }
 
 /// Recursive helper for file discovery.
-fn discover_bock_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| anyhow::anyhow!("could not read directory '{}': {e}", dir.display()))?;
+///
+/// Mirrors `bock test`'s discovery: an unreadable *sibling* directory under the
+/// resolved project root is skipped with a warning rather than aborting the
+/// walk (a stray `bock.project` in an ancestor can pin the root unexpectedly
+/// wide, dragging a root-owned/`0o000` scratch dir into scope). `is_root` is
+/// `true` only for the directory the caller explicitly handed us; for that one
+/// an unreadable directory remains a hard error.
+fn discover_bock_files_recursive(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    is_root: bool,
+) -> anyhow::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if !is_root => {
+            eprintln!(
+                "warning: skipping unreadable directory '{}': {e}",
+                dir.display()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "could not read directory '{}': {e}",
+                dir.display()
+            ));
+        }
+    };
 
     for entry in entries {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) if !is_root => {
+                eprintln!(
+                    "warning: skipping unreadable entry under '{}': {e}",
+                    dir.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "could not read entry under '{}': {e}",
+                    dir.display()
+                ));
+            }
+        };
         let path = entry.path();
         if path.is_dir() {
             let name = entry.file_name();
@@ -657,7 +701,7 @@ fn discover_bock_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow
                 && name_str != "target"
                 && name_str != "node_modules"
             {
-                discover_bock_files_recursive(&path, files)?;
+                discover_bock_files_recursive(&path, files, false)?;
             }
         } else if path.is_file() {
             if let Some(ext) = path.extension() {
