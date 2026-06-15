@@ -1163,6 +1163,89 @@ impl TsEmitCtx {
         Some(info)
     }
 
+    /// If `value` is a *construction of a single user-enum variant* — a struct
+    /// variant (`Open { … }`, a [`NodeKind::RecordConstruct`]), a unit variant
+    /// (`Open`, a bare [`NodeKind::Identifier`]), or a tuple variant (`Open(…)`,
+    /// a [`NodeKind::Call`] on a bare variant name) — return the *declaring
+    /// enum's* name (the union type), else `None`.
+    ///
+    /// Used by [`Self::emit_stmt`] to widen the initialiser of a type-annotated
+    /// `let`/`const` binding back to its declared union: `const g: Gate =
+    /// Gate_Open(7)` otherwise narrows `g` to the construction variant
+    /// (`Gate_Open`), and a later `match g` on the sibling variant fails `tsc
+    /// --noEmit` with TS2678 (the narrowed literal `_tag` is "not comparable" to
+    /// the sibling's). The declared annotation must win; widening the
+    /// initialiser (`Gate_Open(7) as Gate`) defeats the const-init narrowing so
+    /// the declared union type is what `g` carries at every use site.
+    fn variant_construct_enum(&self, value: &AIRNode) -> Option<String> {
+        match &value.kind {
+            // Struct variant: `Open { level: 7 }`.
+            NodeKind::RecordConstruct { path, spread, .. } if spread.is_none() => self
+                .user_variant_for_path(path)
+                .map(|i| i.enum_name.clone()),
+            // Unit variant: a bare `Open`.
+            NodeKind::Identifier { name } => self
+                .user_variant_for_name(&name.name)
+                .map(|i| i.enum_name.clone()),
+            // Tuple variant: `Open(7)` — a call whose callee is a bare variant
+            // name (the only call shape that constructs a variant; a method or
+            // assoc call has a `FieldAccess` callee, not an `Identifier`).
+            NodeKind::Call { callee, .. } => match &callee.kind {
+                NodeKind::Identifier { name } => self
+                    .user_variant_for_name(&name.name)
+                    .map(|i| i.enum_name.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether a type-annotated binding's initialiser needs a widening cast to
+    /// its declared type, i.e. `value` constructs a single variant of the enum
+    /// the binding is declared as. The declared TS type string (`ty_ts`) must
+    /// name exactly that enum's union — a binding annotated with an unrelated
+    /// type, or one whose value is not a single-variant construction, is left
+    /// untouched.
+    fn binding_needs_union_widening(&self, value: &AIRNode, ty_ts: Option<&str>) -> bool {
+        match (ty_ts, self.variant_construct_enum(value)) {
+            (Some(declared), Some(enum_name)) => declared == enum_name,
+            _ => false,
+        }
+    }
+
+    /// Emit a `let`/`const` binding's initialiser `value` under the binding's
+    /// declared TS type `ty_ts`, restoring the prior expected type afterwards so
+    /// it never leaks to a sibling/nested expression.
+    ///
+    /// `ty_ts` is recorded as [`Self::current_expected_type`] for the value emit
+    /// (so a value-position `match`/`if` IIFE annotates its arrow return and
+    /// hoists a bare scrutinee — see [`Self::current_expected_type`]). When the
+    /// value is a single-variant construction of the declared enum union, the
+    /// emitted initialiser is widened with an `as <Union>` cast so the binding
+    /// carries the declared union type rather than the narrower construction
+    /// variant (see [`Self::variant_construct_enum`]).
+    fn emit_let_value(
+        &mut self,
+        value: &AIRNode,
+        ty_ts: Option<String>,
+    ) -> Result<(), CodegenError> {
+        // The widening cast (`Gate_Open(7) as Gate`) only applies when the
+        // declared type names the enum the value constructs a variant of; an
+        // unrelated annotation, or a non-construction value, emits unchanged.
+        let widen_to = self
+            .binding_needs_union_widening(value, ty_ts.as_deref())
+            .then(|| ty_ts.clone())
+            .flatten();
+        let prev_expected = self.current_expected_type.take();
+        self.current_expected_type = ty_ts;
+        self.emit_expr(value)?;
+        if let Some(union) = widen_to {
+            let _ = write!(self.buf, " as {union}");
+        }
+        self.current_expected_type = prev_expected;
+        Ok(())
+    }
+
     /// Bring `cur_line` / `cur_col` up to date with everything appended to
     /// `buf` since the last sync.
     fn sync_pos(&mut self) {
@@ -4067,10 +4150,7 @@ impl TsEmitCtx {
                         if self.simple_let_redeclared(&ts_name) {
                             let ind = self.indent_str();
                             let _ = write!(self.buf, "{ind}{ts_name} = ");
-                            let prev_expected = self.current_expected_type.take();
-                            self.current_expected_type = ty_ts;
-                            self.emit_expr(value)?;
-                            self.current_expected_type = prev_expected;
+                            self.emit_let_value(value, ty_ts)?;
                             self.buf.push_str(";\n");
                             return Ok(());
                         }
@@ -4080,10 +4160,7 @@ impl TsEmitCtx {
                             self.mark_simple_let_declared(&ts_name);
                             let ind = self.indent_str();
                             let _ = write!(self.buf, "{ind}{kw} {ts_name}{ty_str} = ");
-                            let prev_expected = self.current_expected_type.take();
-                            self.current_expected_type = ty_ts;
-                            self.emit_expr(value)?;
-                            self.current_expected_type = prev_expected;
+                            self.emit_let_value(value, ty_ts)?;
                             self.buf.push_str(";\n");
                             return Ok(());
                         }
@@ -4104,15 +4181,14 @@ impl TsEmitCtx {
                 }
                 let ind = self.indent_str();
                 let _ = write!(self.buf, "{ind}{kw} {binding}{ty_str} = ");
-                // Record the binding's declared type as the expected type for the
-                // value, so a value-position `match`/`if` IIFE annotates its arrow
-                // return and hoists a bare-identifier scrutinee (avoids the TS2367
-                // narrowing — see `current_expected_type`). Restored after so it
-                // never leaks to a nested/sibling expression.
-                let prev_expected = self.current_expected_type.take();
-                self.current_expected_type = ty_ts;
-                self.emit_expr(value)?;
-                self.current_expected_type = prev_expected;
+                // `emit_let_value` records the binding's declared type as the
+                // expected type for the value (so a value-position `match`/`if`
+                // IIFE annotates its arrow return and hoists a bare-identifier
+                // scrutinee — see `current_expected_type`) and, for a
+                // single-variant enum construction, widens the initialiser to the
+                // declared union so the binding does not narrow to the
+                // construction variant (TS2678 on a later sibling-variant match).
+                self.emit_let_value(value, ty_ts)?;
                 self.buf.push_str(";\n");
                 Ok(())
             }
@@ -7280,6 +7356,166 @@ mod tests {
         assert!(
             out.contains("function Option_Some<T>(value: T): Option_Some"),
             "got: {out}"
+        );
+    }
+
+    /// Q-ts-variant-constructed-let-typing: a type-annotated binding initialised
+    /// by a single variant construction must widen the initialiser to the
+    /// declared enum *union* (`Gate_Open(7) as Gate`), not narrow `g` to the
+    /// construction variant — otherwise a later `match g` on a sibling variant
+    /// fails `tsc --noEmit` (TS2678). Covers all three payload shapes: struct
+    /// (`RecordConstruct`), tuple (`Call` on a variant name), and unit
+    /// (bare `Identifier`).
+    #[test]
+    fn typed_let_binding_widens_variant_construct_to_declared_union() {
+        let gate = node(
+            1,
+            NodeKind::EnumDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Gate"),
+                generic_params: vec![],
+                variants: vec![
+                    node(
+                        2,
+                        NodeKind::EnumVariant {
+                            name: ident("Open"),
+                            payload: EnumVariantPayload::Struct(vec![make_record_field(
+                                "level", "Int",
+                            )]),
+                        },
+                    ),
+                    node(
+                        3,
+                        NodeKind::EnumVariant {
+                            name: ident("Closed"),
+                            payload: EnumVariantPayload::Tuple(vec![type_node(4, "Int")]),
+                        },
+                    ),
+                    node(
+                        5,
+                        NodeKind::EnumVariant {
+                            name: ident("Locked"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                ],
+            },
+        );
+        // let g: Gate = Open { level: 7 }   (struct variant)
+        let open = node(
+            10,
+            NodeKind::RecordConstruct {
+                path: type_path(&["Open"]),
+                fields: vec![bock_air::AirRecordField {
+                    name: ident("level"),
+                    value: Some(Box::new(int_lit(11, "7"))),
+                }],
+                spread: None,
+            },
+        );
+        let let_g = node(
+            12,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(13, "g")),
+                ty: Some(Box::new(type_node(14, "Gate"))),
+                value: Box::new(open),
+            },
+        );
+        // let c: Gate = Closed(3)   (tuple variant)
+        let closed = node(
+            20,
+            NodeKind::Call {
+                callee: Box::new(id_node(21, "Closed")),
+                args: vec![AirArg {
+                    label: None,
+                    value: int_lit(22, "3"),
+                }],
+                type_args: vec![],
+            },
+        );
+        let let_c = node(
+            23,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(24, "c")),
+                ty: Some(Box::new(type_node(25, "Gate"))),
+                value: Box::new(closed),
+            },
+        );
+        // let k: Gate = Locked   (unit variant)
+        let let_k = node(
+            30,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(31, "k")),
+                ty: Some(Box::new(type_node(32, "Gate"))),
+                value: Box::new(id_node(33, "Locked")),
+            },
+        );
+        let f = ts_fn_decl(
+            40,
+            "main",
+            vec![],
+            None,
+            block(41, vec![let_g, let_c, let_k], None),
+        );
+        let out = gen(&module(vec![], vec![gate, f]));
+        assert!(
+            out.contains("const g: Gate = Gate_Open(7) as Gate;"),
+            "struct-variant binding must widen to the declared union, got:\n{out}"
+        );
+        assert!(
+            out.contains("const c: Gate = Gate_Closed(3) as Gate;"),
+            "tuple-variant binding must widen to the declared union, got:\n{out}"
+        );
+        assert!(
+            out.contains("const k: Gate = Gate_Locked as Gate;"),
+            "unit-variant binding must widen to the declared union, got:\n{out}"
+        );
+    }
+
+    /// The widening cast is *scoped to the matching declared type*: a binding
+    /// annotated with a type that is not the constructed variant's enum union
+    /// (here a record `Point`, not an enum) emits unchanged — no spurious cast.
+    #[test]
+    fn typed_let_binding_no_widening_for_non_enum_construct() {
+        let point = node(
+            1,
+            NodeKind::RecordDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Point"),
+                generic_params: vec![],
+                fields: vec![make_record_field("x", "Int")],
+            },
+        );
+        let ctor = node(
+            10,
+            NodeKind::RecordConstruct {
+                path: type_path(&["Point"]),
+                fields: vec![bock_air::AirRecordField {
+                    name: ident("x"),
+                    value: Some(Box::new(int_lit(11, "5"))),
+                }],
+                spread: None,
+            },
+        );
+        let let_p = node(
+            12,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(13, "p")),
+                ty: Some(Box::new(type_node(14, "Point"))),
+                value: Box::new(ctor),
+            },
+        );
+        let f = ts_fn_decl(20, "main", vec![], None, block(21, vec![let_p], None));
+        let out = gen(&module(vec![], vec![point, f]));
+        assert!(
+            !out.contains(" as Point"),
+            "a record (non-enum) binding must not get a widening cast, got:\n{out}"
         );
     }
 
