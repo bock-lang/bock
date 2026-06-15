@@ -27,6 +27,21 @@ the Bock identity.
   sign-off (R1) + marketing wedge (OQ1) **delegated to the marketing chat**
   (`tracking/handoffs/2026-06-15-marketing-positioning.md`); R6 ratified; OQ2 publish; OQ4 (§10.8 demo) deferred to
   v1.x. The v1.0 cut + release actions (all escalate) follow the hardening pass + the marketing copy lock.
+- **★ POSITIONING RESOLVED (2026-06-15, marketing chat → operator sign-off; handoff `2026-06-15-marketing-positioning.md`):**
+  OQ1 + R1 returned and landed. A **nested split, not one ICP**: **Identity = the guarantee** (provable cross-target
+  equivalence + auditable/reproducible AI pipeline) carries the homepage hero + the **§1.1 spec amendment** (LANDED,
+  changelog `20260615-s1.1-equivalence-amendment`); **launch wedge = SDK / library vendors** (project mode's native
+  npm/pip/cargo/go-mod packages + transpiled tests ARE their product promise — fully in current scope, no FFI); **macro
+  narrative = the trust-scarcity shift**, held in air-cover register only (NOT a product-capability lead — zero shipping
+  users / no compliance track record would overclaim and collide with the §1.1 enterprise-procurement non-audience). The
+  signed public identity sentence uses **"verifies," not "proves"** (R9-ledger-accurate; shares the verb with §1.1).
+  **Website scope:** homepage stays guarantee-led; the SDK-vendor wedge gets its **own use-cases page** — a NEW pending
+  route (slug TBD by marketing: `/use-cases` | `/for-sdk-authors`; 404s cleanly until copy lands, per deferred-route
+  discipline). The `/get-started` copy lock (was gated on R1) is now **UNBLOCKED** → marketing locks it, implementation
+  renders. OQ2 corpus reframed as equivalence-moat evidence supporting the wedge. **Boundary:** identity sentence +
+  website copy stay marketing-owned + human-approved; the orchestrator landed only the §1.1 amendment + this reconcile.
+  NEXT (marketing, non-blocking): draft the wedge page — it needs a **verified SDK-vendor demo** (one Bock source →
+  emitted native packages ×5 + a real conformance report), an implementation delegation before the copy locks (→ `queue.md`).
 - **Property claims:** "one language, many targets" (JS/TS/Py/Rust/Go
   codegen parity on examples); "effects on every function"; "targeted
   output, not a runtime".

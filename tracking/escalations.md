@@ -510,3 +510,17 @@ changelog `20260615-stdlib-ratifications-dq31.md`; design-questions DQ10–DQ15/
 adopted, MS-v1.0-hardening, release-prep, OQ2/OQ4); queue (Q-dq31-container-element-eq filed, hardening grouping);
 marketing handoff committed; STATUS/ROADMAP regenerated.
 **Status:** resolved (Bucket A); Bucket B resolved except OQ1/R1 (delegated, awaiting the marketing session).
+
+## [2026-06-15 05:02 UTC] OQ1 (wedge) + R1 (identity) — RESOLVED via marketing chat
+
+**Type:** strategic (positioning) + core-spec reconcile (§1.1)
+**Severity:** low (no blocker; the v1.0-hardening engineering was independent)
+**Trigger:** the marketing-chat session returned the signed resolution for OQ1 + R1 (+ OQ2 framing + a website-scope call), resolving the handoff `tracking/handoffs/2026-06-15-marketing-positioning.md`.
+**Decision (operator-signed):**
+- **OQ1** = a nested split, not one ICP: **identity = the guarantee** (hero); **launch wedge = SDK / library vendors** (proof surface, fully in current scope); **macro narrative = the trust-scarcity shift** (air-cover register, NOT a product-capability lead — would overclaim given zero shipping users / no compliance track record, and collide with the §1.1 enterprise non-audience).
+- **R1** = signed identity sentence (verbatim in the handoff); two voice edits applied before sign-off (em dash → colon; "proves" → "verifies").
+- **§1.1 spec amendment** (Design-supplied, operator-signed): "Uniquely, Bock's multi-target output is conformance-tested for semantic equivalence: the same program is verified to behave identically on every target it ships to." — orchestrator-reconciled THIS PR; changelog `20260615-s1.1-equivalence-amendment`.
+- **Website:** homepage stays guarantee-led; a NEW SDK-vendor use-cases page (pending route, slug TBD by marketing); the `/get-started` copy lock is UNBLOCKED. OQ2 corpus reframed as equivalence-moat evidence for the wedge.
+**Orchestrator landed (this reconcile):** §1.1 amendment + changelog; `milestones.md` positioning-resolved entry + wedge-route registration; `queue.md` positioning follow-ups (verified SDK-vendor demo · wedge-page copy · get-started copy lock); handoff marked RESOLVED. **The identity sentence + all website copy remain marketing-owned + human-approved — NOT published here.**
+**Flag to operator (low):** `tracking/handoffs/` uses the in-use `YYYY-MM-DD-descriptor.md` filename convention, which diverges from the project instructions' `YYYYMMDD-HHMM-<descriptor>-handoff.md` changelog format. The repo convention wins for now; surface for a one-time sweep if you want consistency.
+**Status:** resolved.
