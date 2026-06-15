@@ -502,6 +502,20 @@ pub struct TypeChecker {
     /// and where-clause constraints. Used by the FieldAccess handler to
     /// resolve methods on bounded type parameters.
     type_var_bounds: HashMap<TypeVarId, Vec<String>>,
+    /// Generic-param trait bounds of the function body currently being checked,
+    /// keyed by param NAME (e.g. `"T" → ["Comparable"]`). Populated at the top
+    /// of [`TypeChecker::check_fn_decl`] from both the inline `[T: Trait]` form
+    /// and the `where (T: Trait)` form, and restored on exit (so a nested
+    /// method body sees its own params, not the outer scope's). Consulted by
+    /// [`TypeChecker::check_trait_bounds_at_call`] via
+    /// [`TypeChecker::abstract_param_satisfies_bound`]: when a call inside a
+    /// generic function passes that function's own type parameter (which
+    /// resolves to an abstract `Named(param)` rather than a concrete type) to a
+    /// callee with the same bound, the bound is satisfied *because the enclosing
+    /// scope already requires it* — without this, a self-referential generic
+    /// like `from_list[T: Comparable]` calling `add[T: Comparable](…, x: T)`
+    /// would be falsely rejected since `T` has no concrete impl.
+    current_fn_param_bounds: HashMap<String, Vec<String>>,
     /// Names of locally-declared `class` types. Populated during `collect_sig`
     /// for `ClassDecl` nodes. The DQ29 structural-Equatable predicate consults
     /// this to EXCLUDE classes from the structural default (a class sits on
@@ -571,6 +585,7 @@ impl TypeChecker {
             type_aliases: HashMap::new(),
             trait_method_types: HashMap::new(),
             type_var_bounds: HashMap::new(),
+            current_fn_param_bounds: HashMap::new(),
             class_names: HashSet::new(),
             enum_variant_payloads: HashMap::new(),
             synth_id: std::cell::Cell::new(SYNTH_ID_BASE),
@@ -1371,6 +1386,33 @@ impl TypeChecker {
                 });
                 self.env.define(name.name.clone(), fn_ty);
 
+                // Fold bracket-form generic bounds (`[T: Trait]`) into the
+                // stored where-clause so they are enforced at call sites by the
+                // same `check_trait_bounds_at_call` path that `where (T: Trait)`
+                // bounds use (§4 treats the two forms as equivalent). Each
+                // `GenericParam` whose `bounds` are non-empty becomes a
+                // synthesized `TypeConstraint` keyed on the param name; the
+                // explicit `where` clauses follow, so a param with bounds in
+                // both forms contributes both (the bound-check and ABI encoder
+                // both de-duplicate per param). Without this fold, bracket
+                // bounds reach `type_var_bounds` (for method resolution) but
+                // never the call-site satisfaction check, so a non-conforming
+                // type argument was silently accepted (Q-bracket-bounds-unenforced).
+                let bracket_bounds = generic_params.iter().filter_map(|gp| {
+                    if gp.bounds.is_empty() {
+                        None
+                    } else {
+                        Some(TypeConstraint {
+                            id: gp.id,
+                            span: gp.span,
+                            param: gp.name.clone(),
+                            bounds: gp.bounds.clone(),
+                        })
+                    }
+                });
+                let merged_where_clause: Vec<TypeConstraint> =
+                    bracket_bounds.chain(where_clause.iter().cloned()).collect();
+
                 self.fn_sigs.insert(
                     name.name.clone(),
                     FnSig {
@@ -1378,7 +1420,7 @@ impl TypeChecker {
                         generic_var_ids: gp_var_ids,
                         param_types,
                         return_type: ret_ty,
-                        where_clause: where_clause.clone(),
+                        where_clause: merged_where_clause,
                     },
                 );
             }
@@ -2265,6 +2307,31 @@ impl TypeChecker {
             }
         }
 
+        // Record this function's generic-param bounds BY NAME for the duration
+        // of its body, so `check_trait_bounds_at_call` can recognise a call that
+        // forwards one of these params (an abstract `Named(param)`) to a callee
+        // requiring the same bound. Both bound forms contribute. Save/restore so
+        // nested method bodies don't leak each other's params.
+        let saved_fn_param_bounds = std::mem::take(&mut self.current_fn_param_bounds);
+        for gp in &generic_params {
+            let bound_names: Vec<String> = gp.bounds.iter().map(type_path_to_name).collect();
+            if !bound_names.is_empty() {
+                self.current_fn_param_bounds
+                    .entry(gp.name.name.clone())
+                    .or_default()
+                    .extend(bound_names);
+            }
+        }
+        for clause in &where_clause {
+            let bound_names: Vec<String> = clause.bounds.iter().map(type_path_to_name).collect();
+            if !bound_names.is_empty() {
+                self.current_fn_param_bounds
+                    .entry(clause.param.name.clone())
+                    .or_default()
+                    .extend(bound_names);
+            }
+        }
+
         // Bind params
         let param_types: Vec<Type> = params
             .iter()
@@ -2307,6 +2374,7 @@ impl TypeChecker {
 
         self.return_ty_stack.pop();
         self.env.pop_scope();
+        self.current_fn_param_bounds = saved_fn_param_bounds;
 
         let effects: Vec<EffectRef> = effect_clause
             .iter()
@@ -2452,7 +2520,8 @@ impl TypeChecker {
                 // documented v1 limitation (see the session PR notes).
                 let concrete_key = crate::traits::type_key(&concrete_ty);
                 let satisfied = resolve_impl(&trait_ref, &concrete_ty, impl_table).is_some()
-                    || impl_table.has_any_param_trait_impl(&trait_name, &concrete_key);
+                    || impl_table.has_any_param_trait_impl(&trait_name, &concrete_key)
+                    || self.abstract_param_satisfies_bound(&concrete_ty, &trait_name);
                 if !satisfied {
                     // DQ29 (§18.5): an `Equatable` bound is ALSO satisfied by
                     // structural conformance — a record/enum whose fields /
@@ -2488,16 +2557,52 @@ impl TypeChecker {
                             }
                         }
                     }
-                    self.diags.error(
-                        E_WHERE_CLAUSE,
-                        format!(
-                            "type `{concrete_ty:?}` does not satisfy bound `{trait_name}` \
-                             required by function `{fn_name}`",
-                        ),
-                        span,
-                    );
+                    self.diags
+                        .error(
+                            E_WHERE_CLAUSE,
+                            format!(
+                                "type `{concrete_ty}` does not satisfy bound `{trait_name}` \
+                                 required by function `{fn_name}`",
+                            ),
+                            span,
+                        )
+                        .note(format!(
+                            "implement the trait for the type, e.g. `impl {trait_name} for \
+                             {concrete_ty}`, or call `{fn_name}` with a conforming type"
+                        ));
                 }
             }
+        }
+    }
+
+    /// Whether `concrete_ty` satisfies `trait_name` *vacuously* because it is
+    /// still an abstract type parameter that already carries the bound in the
+    /// enclosing scope — not a concrete type the impl table could resolve.
+    ///
+    /// Two abstract forms arise at a generic call site:
+    ///
+    /// * `Type::Named(param)` — a type parameter of the function whose body we
+    ///   are checking, forwarded into a callee with the same bound (e.g.
+    ///   `from_list[T: Comparable]` calling `add[T: Comparable](…, x: T)`). The
+    ///   bound holds because [`Self::current_fn_param_bounds`] records that the
+    ///   enclosing function already requires `param: trait_name`.
+    /// * `Type::TypeVar(_)` — an inference variable that unification has not yet
+    ///   solved to a concrete type. It cannot be soundly *rejected* (the real
+    ///   type may well conform), so it is treated as satisfied; the concrete
+    ///   instantiation is bound-checked at the outer call site where the
+    ///   variable resolves.
+    ///
+    /// This keeps the bracket-form `[T: Trait]` and `where (T: Trait)` bounds
+    /// enforceable for *concrete* arguments while not falsely rejecting a
+    /// generic function that legitimately forwards its own bounded parameter.
+    fn abstract_param_satisfies_bound(&self, concrete_ty: &Type, trait_name: &str) -> bool {
+        match concrete_ty {
+            Type::Named(nt) => self
+                .current_fn_param_bounds
+                .get(&nt.name)
+                .is_some_and(|bounds| bounds.iter().any(|b| b == trait_name)),
+            Type::TypeVar(_) => true,
+            _ => false,
         }
     }
 

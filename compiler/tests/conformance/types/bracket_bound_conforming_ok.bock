@@ -1,0 +1,36 @@
+// TEST: bracket_bound_conforming_ok
+// EXPECT: no_errors
+//
+// Q-bracket-bounds-unenforced (§4): the positive half of bracket-form bound
+// enforcement. `smallest[T: Comparable]` is now bound-checked at call sites
+// exactly like a `where (T: Comparable)` clause, so the enforcement must NOT
+// reject a CONFORMING argument:
+//
+//   * `smallest(3, 7)` — `Int` conforms to `Comparable`, accepted.
+//   * `relay(a, b)` inside `relay[T: Comparable]` forwards the function's own
+//     bounded type parameter `T` into `smallest[T: Comparable]`. `T` is an
+//     abstract parameter, not a concrete type, but the enclosing scope already
+//     requires `T: Comparable`, so the bound is satisfied. Without this the
+//     self-referential generics in `core.collections` (`from_list` → `add`)
+//     would be falsely rejected.
+//
+// The negative sibling `types-diagnostics/bracket_bound_unconforming_rejected.bock`
+// pins that a non-conforming concrete argument IS rejected.
+module main
+
+fn smallest[T: Comparable](a: T, b: T) -> T {
+  if (a < b) {
+    return a
+  }
+  return b
+}
+
+fn relay[T: Comparable](a: T, b: T) -> T {
+  return smallest(a, b)
+}
+
+fn main() -> Void {
+  let direct: Int = smallest(3, 7)
+  let forwarded: Int = relay(10, 4)
+  println("${direct} ${forwarded}")
+}
