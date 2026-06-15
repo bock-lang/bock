@@ -1,0 +1,46 @@
+// TEST: eq_list_custom_element
+// EXPECT: output "eq:true;ne:false;op_ne:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ31 (§18.5 "Container equality defers to element conformance"): a `List`
+// of an element type carrying an explicit `impl Equatable` must compare its
+// elements through that custom `eq`, NOT structurally. `Bucket` is equal under
+// `v % 10`, so two lists holding STRUCTURALLY-distinct buckets (`v: 12` vs
+// `v: 2`) are `==` because their elements are custom-equal — and the inverse:
+// `v: 12` vs `v: 13` are NOT custom-equal, so the lists are `!=`.
+//
+// This is the corner #347 left un-pinned: js/ts already honored the element's
+// `eq` inside a `List`, but Rust (`Vec<T> ==`) needed `PartialEq` the type
+// does not derive (E0369), and Go's `reflect.DeepEqual` compared structurally
+// — diverging per target. The fix: the element type gets a `PartialEq`
+// delegating to its `eq` (Rust) / its native `==` dispatches `eq` (Python's
+// `__eq__`) / a custom-element deep-equality helper (`__bockEqCustom`, Go);
+// js/ts route through `__bockEq`, which already dispatches element `eq`.
+// The type has ONE equality, the same inside the container as outside, and the
+// observable result is byte-identical across all five targets.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Equatable}
+
+record Bucket {
+  v: Int,
+}
+
+impl Equatable for Bucket {
+  public fn eq(self, other: Bucket) -> Bool {
+    self.v % 10 == other.v % 10
+  }
+}
+
+fn main() -> Void {
+  let a: List[Bucket] = [Bucket { v: 12 }, Bucket { v: 23 }]
+  let b: List[Bucket] = [Bucket { v: 2 }, Bucket { v: 3 }]
+  let c: List[Bucket] = [Bucket { v: 12 }, Bucket { v: 24 }]
+  let eq: Bool = a == b
+  let ne: Bool = a == c
+  let op_ne: Bool = a != b
+  println("eq:${eq};ne:${ne};op_ne:${op_ne}")
+}

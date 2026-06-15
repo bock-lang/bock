@@ -3925,13 +3925,31 @@ impl PyEmitCtx {
                 } else {
                     format!("({})", bases.join(", "))
                 };
+                // DQ31 (§18.5): a record with an explicit `impl Equatable` (its
+                // custom `eq` IS its equality) gets `@dataclass(eq=False)` plus
+                // a `__eq__` that DELEGATES to that `eq`. Otherwise the
+                // dataclass-generated structural `__eq__` would shadow the
+                // custom `eq`, and a `list`/`dict`/`set`/`tuple` of the type
+                // would compare structurally — silently ignoring the user's
+                // equality and diverging from the other targets. With the
+                // delegating `__eq__`, native container `==` (and `dict`-value
+                // / `list` element comparison) route through the custom `eq`,
+                // giving the type its ONE equality inside containers as outside.
+                let custom_eq = matches!(
+                    node.metadata.get(bock_types::checker::CUSTOM_EQ_META_KEY),
+                    Some(bock_air::Value::Bool(true))
+                );
                 // `@dataclass` is only appropriate when the class actually
                 // carries data. Empty handler structs are cleaner as plain
                 // classes — `@dataclass` on an ABC subclass without fields
                 // adds no value and drags in the dataclass metaclass.
                 if !fields.is_empty() {
                     self.needs_dataclass_import = true;
-                    self.writeln("@dataclass");
+                    if custom_eq {
+                        self.writeln("@dataclass(eq=False)");
+                    } else {
+                        self.writeln("@dataclass");
+                    }
                 }
                 self.writeln(&format!("class {}{base_list}:", name.name));
                 self.indent += 1;
@@ -3952,6 +3970,17 @@ impl PyEmitCtx {
                     for method in Self::dedup_impl_methods(&impls) {
                         self.buf.push('\n');
                         self.emit_class_method(method)?;
+                    }
+                    if custom_eq {
+                        self.buf.push('\n');
+                        self.writeln("def __eq__(self, other: object) -> bool:");
+                        self.indent += 1;
+                        self.writeln(&format!("if not isinstance(other, {}):", name.name));
+                        self.indent += 1;
+                        self.writeln("return NotImplemented");
+                        self.indent -= 1;
+                        self.writeln("return self.eq(other)");
+                        self.indent -= 1;
                     }
                 }
                 self.indent -= 1;

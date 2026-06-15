@@ -1,0 +1,41 @@
+// TEST: eq_nested_custom_element
+// EXPECT: output "deep:true;ne:false;mixed:true"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ31 (§18.5 "Container equality defers to element conformance"): the
+// custom-element loop path composes through NESTED containers — a
+// `List[List[Bucket]]` and a `Map[String, List[Bucket]]` each defer their
+// `Bucket` comparison to the custom `eq` (`v % 10`) at every depth.
+// Structurally-distinct buckets that are custom-equal compare equal through
+// the nesting, byte-identically across targets; the inverse holds (`ne`).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Equatable}
+
+record Bucket {
+  v: Int,
+}
+
+impl Equatable for Bucket {
+  public fn eq(self, other: Bucket) -> Bool {
+    self.v % 10 == other.v % 10
+  }
+}
+
+fn main() -> Void {
+  let a: List[List[Bucket]] = [[Bucket { v: 12 }], [Bucket { v: 23 }, Bucket { v: 34 }]]
+  let b: List[List[Bucket]] = [[Bucket { v: 2 }], [Bucket { v: 3 }, Bucket { v: 4 }]]
+  let c: List[List[Bucket]] = [[Bucket { v: 12 }], [Bucket { v: 23 }, Bucket { v: 35 }]]
+  let deep: Bool = a == b
+  let ne: Bool = a == c
+
+  // Map whose values are themselves a custom-element List.
+  let m1: Map[String, List[Bucket]] = { "k": [Bucket { v: 19 }] }
+  let m2: Map[String, List[Bucket]] = { "k": [Bucket { v: 9 }] }
+  let mixed: Bool = m1 == m2
+
+  println("deep:${deep};ne:${ne};mixed:${mixed}")
+}

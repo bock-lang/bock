@@ -3038,6 +3038,60 @@ impl RsEmitCtx {
         format!("<{}>", items.join(", "))
     }
 
+    /// DQ31 (§18.5): when a record/enum carries an explicit `impl Equatable`
+    /// (the checker's [`bock_types::checker::CUSTOM_EQ_META_KEY`] stamp), emit a
+    /// `PartialEq` that DELEGATES to that custom `eq`. This gives the type its
+    /// ONE equality natively inside Rust containers — `Vec<T> == Vec<T>`,
+    /// `HashMap`/`HashSet` membership, tuple `==` — all route through the user's
+    /// `eq`, matching the standalone `==` (which the `"impl"` lane already
+    /// dispatches through `eq`). Without it, `Vec<T> == Vec<T>` is `E0369` (the
+    /// type derives no `PartialEq`); a *structural* `#[derive(PartialEq)]` would
+    /// pin the WRONG equality. `Eq` is intentionally NOT implemented: a custom
+    /// `eq` need not be reflexive/total, and Rust containers used here
+    /// (`Vec`/`HashMap` value comparison via `==`) need only `PartialEq`.
+    ///
+    /// Emitted as a fully-qualified call to the trait method
+    /// (`Equatable::eq`) to avoid the `PartialEq::eq` / `Equatable::eq` name
+    /// clash on the receiver.
+    fn emit_delegating_partial_eq(
+        &mut self,
+        node: &AIRNode,
+        name: &str,
+        generic_params: &[bock_ast::GenericParam],
+    ) {
+        // Read the checker's `CUSTOM_EQ_META_KEY` stamp directly (bock-codegen
+        // sits above bock-types, so the constant is importable; the getter
+        // lives nowhere in `generator.rs` for this lane).
+        if !matches!(
+            node.metadata.get(bock_types::checker::CUSTOM_EQ_META_KEY),
+            Some(bock_air::Value::Bool(true))
+        ) {
+            return;
+        }
+        // Generic params appear in both the `impl<..>` header and the type
+        // path; bounds on the params are preserved (the delegate calls
+        // `Equatable::eq`, which the params must satisfy at the use site).
+        let generics = self.generic_params_to_rs(generic_params);
+        let type_args = if generic_params.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = generic_params.iter().map(|p| p.name.name.clone()).collect();
+            format!("<{}>", names.join(", "))
+        };
+        self.buf.push('\n');
+        self.writeln(&format!(
+            "impl{generics} PartialEq for {name}{type_args} {{"
+        ));
+        self.indent += 1;
+        self.writeln("fn eq(&self, other: &Self) -> bool {");
+        self.indent += 1;
+        self.writeln("Equatable::eq(self, other)");
+        self.indent -= 1;
+        self.writeln("}");
+        self.indent -= 1;
+        self.writeln("}");
+    }
+
     /// Emit where clause: `where T: Foo, U: Bar`.
     fn where_clause_to_rs(&self, clauses: &[bock_ast::TypeConstraint]) -> String {
         if clauses.is_empty() {
@@ -3181,6 +3235,7 @@ impl RsEmitCtx {
                 }
                 self.indent -= 1;
                 self.writeln("}");
+                self.emit_delegating_partial_eq(node, &name.name, generic_params);
                 Ok(())
             }
             NodeKind::EnumDecl {
@@ -3210,6 +3265,7 @@ impl RsEmitCtx {
                 }
                 self.indent -= 1;
                 self.writeln("}");
+                self.emit_delegating_partial_eq(node, &name.name, generic_params);
                 Ok(())
             }
             NodeKind::ClassDecl {
@@ -3235,6 +3291,10 @@ impl RsEmitCtx {
                 }
                 self.indent -= 1;
                 self.writeln("}");
+                // DQ31: a class with an explicit `impl Equatable` gets a
+                // `PartialEq` delegating to its `eq`, so a `Vec`/`HashMap`/
+                // `HashSet` of the class compares through the custom equality.
+                self.emit_delegating_partial_eq(node, &name.name, generic_params);
                 self.buf.push('\n');
                 // impl block for methods
                 if !methods.is_empty() {
@@ -4473,22 +4533,30 @@ impl RsEmitCtx {
                     }
                 }
                 // DQ29: `==`/`!=` on a type with an explicit `impl Equatable`
-                // dispatch through its `eq` (native `==` would need a
-                // `PartialEq` the type intentionally does not derive — the
-                // user's `eq` IS the type's equality). The operand is borrowed
-                // exactly as `compare` above (`eq(&self, other: &Self)`). The
-                // "structural"/"deep" lanes stay native: the stamped derive
-                // gives records/enums field-wise `==`, and `Vec`/`HashMap`/
-                // `HashSet`/tuples are already structural in Rust.
+                // dispatch through its `eq` (the user's `eq` IS the type's
+                // equality). DQ31 (§18.5): such a type ALSO gets a `PartialEq`
+                // that delegates to that same `eq` (see
+                // `emit_delegating_partial_eq`), so `self.eq(other)` is now
+                // ambiguous between `Equatable::eq` and `PartialEq::eq` — use
+                // the fully-qualified trait call `Equatable::eq(self, other)`.
+                // The "structural"/"deep" lanes stay native: the stamped
+                // structural derive gives records/enums field-wise `==`, and
+                // `Vec`/`HashMap`/`HashSet`/tuples are already structural in
+                // Rust. The "deep_custom" lane (a container whose element tree
+                // carries a custom impl) ALSO stays native: the delegating
+                // `PartialEq` makes `Vec<T> == Vec<T>` / `HashMap` / `HashSet`
+                // route element comparison, key-matching and membership through
+                // the element's `eq`.
                 if matches!(op, BinOp::Eq | BinOp::Ne)
                     && crate::generator::user_eq_kind(node) == Some("impl")
                 {
                     if *op == BinOp::Ne {
                         self.buf.push('!');
                     }
+                    self.buf.push_str("Equatable::eq(&");
                     self.emit_expr(left)?;
-                    self.buf.push_str(".eq(");
-                    self.emit_call_arg(right, true)?;
+                    self.buf.push_str(", &");
+                    self.emit_expr(right)?;
                     self.buf.push(')');
                     return Ok(());
                 }

@@ -1,0 +1,31 @@
+// TEST: eq_nested_structural_native
+// EXPECT: output "eq:true;ne:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ31 (§18.5 "Container equality defers to element conformance"): a container
+// whose element tree is ALL structural-default (no explicit `impl Equatable`
+// anywhere) keeps the NATIVE, idiomatic equality path — Rust `Vec`/`HashMap`
+// `==` via the structural `#[derive(PartialEq)]`, Go `reflect.DeepEqual`,
+// native field-wise/content equality on Python and JS/TS. Here `Point` is a
+// plain record (structural Equatable, DQ29), so `List[Point]` and the nested
+// `Map[String, List[Point]]` compare field-wise/content-wise. The observable
+// result is identical to the loop path; this fixture pins that the native path
+// is taken and is correct (equal + unequal).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+fn main() -> Void {
+  let a: List[Point] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+  let b: List[Point] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+  let c: List[Point] = [Point { x: 1, y: 2 }, Point { x: 3, y: 9 }]
+  let eq: Bool = a == b
+  let ne: Bool = a == c
+  println("eq:${eq};ne:${ne}")
+}

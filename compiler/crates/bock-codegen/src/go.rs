@@ -368,16 +368,102 @@ const DEEP_EQ_RUNTIME_GO: &str = "// ── Bock structural equality runtime ─
 func __bockDeepEq(a any, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
+
+// DQ31 (§18.5 container equality defers to element conformance): the
+// custom-element deep-equality lane. A container whose element tree carries an
+// explicit `impl Equatable` (the `\"deep_custom\"` lane) must compare elements
+// — and match Map keys / Set members — through the element's `Eq` method, NOT
+// `reflect.DeepEqual` (which is field-wise and would silently ignore the
+// custom equality, diverging from the other targets). Falls back to
+// `reflect.DeepEqual` for any value lacking a custom `Eq`, so all-structural
+// sub-trees behave identically to the `\"deep\"` lane.
+func __bockEqCustom(a any, b any) bool {
+	va := reflect.ValueOf(a)
+	vb := reflect.ValueOf(b)
+	// A value with a custom `Eq(Self) bool` method defines its own equality.
+	if eq := va.MethodByName(\"Eq\"); eq.IsValid() && va.Type() == vb.Type() {
+		mt := eq.Type()
+		if mt.NumIn() == 1 && mt.NumOut() == 1 && mt.Out(0).Kind() == reflect.Bool {
+			out := eq.Call([]reflect.Value{vb})
+			return out[0].Bool()
+		}
+	}
+	if !va.IsValid() || !vb.IsValid() || va.Kind() != vb.Kind() {
+		return reflect.DeepEqual(a, b)
+	}
+	switch va.Kind() {
+	case reflect.Slice, reflect.Array:
+		if va.Len() != vb.Len() {
+			return false
+		}
+		for i := 0; i < va.Len(); i++ {
+			if !__bockEqCustom(va.Index(i).Interface(), vb.Index(i).Interface()) {
+				return false
+			}
+		}
+		return true
+	case reflect.Map:
+		if va.Len() != vb.Len() {
+			return false
+		}
+		// Order-independent: every (k, v) in a must match some (bk, bv) in b
+		// under custom element equality (the key's `Eq` governs key-matching,
+		// the value's `Eq` the value comparison). A Set lowers to a Go
+		// map[T]struct{}, so membership is the same scan with a trivial value.
+		bKeys := vb.MapKeys()
+		for _, ka := range va.MapKeys() {
+			found := false
+			for _, kb := range bKeys {
+				if __bockEqCustom(ka.Interface(), kb.Interface()) {
+					if __bockEqCustom(va.MapIndex(ka).Interface(), vb.MapIndex(kb).Interface()) {
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	case reflect.Ptr, reflect.Interface:
+		if va.IsNil() || vb.IsNil() {
+			return va.IsNil() == vb.IsNil()
+		}
+		return __bockEqCustom(va.Elem().Interface(), vb.Elem().Interface())
+	case reflect.Struct:
+		// Records and tuples (struct{ Field0 …; Field1 … }): recurse field-wise
+		// so a custom-`Eq` element nested in a struct still defers to its `Eq`.
+		// Codegen emits exported (PascalCased / `Field0`-style) fields, all
+		// reachable through reflection. If any field is unexported (a runtime
+		// wrapper this helper does not special-case above), fall back to
+		// `reflect.DeepEqual` for the whole value rather than ignore it.
+		for i := 0; i < va.NumField(); i++ {
+			if !va.Field(i).CanInterface() {
+				return reflect.DeepEqual(a, b)
+			}
+			if !__bockEqCustom(va.Field(i).Interface(), vb.Field(i).Interface()) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(a, b)
+	}
+}
 ";
 
-/// True if the module contains a `"deep"`-lane equality (so
+/// True if the module contains a `"deep"`- or `"deep_custom"`-lane equality (so
 /// [`DEEP_EQ_RUNTIME_GO`] must be emitted and `\"reflect\"` imported). Mirrors
 /// [`go_module_uses_range`]'s structural debug scan over the checker's
-/// `user_eq` metadata stamp.
+/// `user_eq` metadata stamp. The `"deep_custom"` lane (DQ31) routes through the
+/// same runtime block, which defines both `__bockDeepEq` and `__bockEqCustom`.
 fn go_module_uses_deep_eq(items: &[AIRNode]) -> bool {
-    items
-        .iter()
-        .any(|n| format!("{n:?}").contains("\"user_eq\": String(\"deep\")"))
+    items.iter().any(|n| {
+        let dbg = format!("{n:?}");
+        dbg.contains("\"user_eq\": String(\"deep\")")
+            || dbg.contains("\"user_eq\": String(\"deep_custom\")")
+    })
 }
 
 /// True if the module references `Optional`, `Some`, or `None` anywhere — or
@@ -8852,6 +8938,10 @@ impl GoEmitCtx {
                 // lowers through the `__bockDeepEq` runtime helper, whose
                 // `reflect.DeepEqual` is element-wise for slices and
                 // order-independent for maps (Bock `Map`/`Set`). The
+                // `"deep_custom"` lane (DQ31, §18.5) — a container whose element
+                // tree carries an explicit `impl Equatable` — routes through
+                // `__bockEqCustom`, which dispatches element comparison and
+                // Map-key / Set-member matching through the element's `Eq`. The
                 // `"structural"` and `"generic"` lanes stay native: Go struct/
                 // interface equality is already field-wise (tag-then-payload
                 // for the enum interface form), and a `comparable`-constrained
@@ -8871,6 +8961,18 @@ impl GoEmitCtx {
                             let other = self.expr_to_string(right)?;
                             let neg = if *op == BinOp::Ne { "!" } else { "" };
                             let _ = write!(self.buf, "{neg}__bockDeepEq({recv}, {other})");
+                            return Ok(());
+                        }
+                        // DQ31: a container whose element tree carries a custom
+                        // `impl Equatable` routes through `__bockEqCustom`,
+                        // which dispatches element comparison (and Map-key /
+                        // Set-member matching) through the element's `Eq`
+                        // method rather than `reflect.DeepEqual`.
+                        Some("deep_custom") => {
+                            let recv = self.expr_to_string(left)?;
+                            let other = self.expr_to_string(right)?;
+                            let neg = if *op == BinOp::Ne { "!" } else { "" };
+                            let _ = write!(self.buf, "{neg}__bockEqCustom({recv}, {other})");
                             return Ok(());
                         }
                         _ => {}

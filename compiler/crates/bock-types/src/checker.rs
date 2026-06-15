@@ -280,6 +280,20 @@ pub const USER_EQ_META_KEY: &str = "user_eq";
 /// code never needs `PartialEq`. The value is a `Value::Bool(true)`.
 pub const DERIVE_EQ_META_KEY: &str = "derive_structural_eq";
 
+/// Metadata key stamped on a `RecordDecl` / `EnumDecl` node that carries an
+/// explicit `impl Equatable` (DQ31, §18.5). The type's custom `eq` IS its
+/// equality, so it must hold the same inside a container as outside.
+///
+/// Consumed by the **Rust** backend, which emits a `impl PartialEq` that
+/// DELEGATES to the custom `eq` (`Equatable::eq(self, other)`), rather than the
+/// structural `#[derive(PartialEq)]` of [`DERIVE_EQ_META_KEY`]. This makes a
+/// `Vec<T>`/`HashMap`/`HashSet` of the type compare through the custom `eq`
+/// natively — the same equality the standalone `==` already routes through
+/// `eq` (the `"impl"` lane). Without it, `Vec<T> == Vec<T>` is `E0369` (the
+/// type derives no `PartialEq`); with a *structural* derive instead it would
+/// pin the WRONG equality into containers. The value is a `Value::Bool(true)`.
+pub const CUSTOM_EQ_META_KEY: &str = "custom_eq_impl";
+
 /// Base node id for AIR nodes the checker synthesizes (the `for`-over-`Iterable`
 /// desugar). Chosen high enough to sit far above the dense, zero-based ids the
 /// lowerer assigns to real nodes, so synthesized nodes never collide with real
@@ -1951,6 +1965,11 @@ impl TypeChecker {
             }
             NodeKind::ClassDecl { .. } => {
                 self.check_class_decl(node);
+                // DQ31: a class with an explicit `impl Equatable` earns the
+                // `CUSTOM_EQ` stamp so the Rust backend emits a `PartialEq`
+                // delegating to its `eq` — letting a `List`/`Map`/`Set` of the
+                // class compare through the custom equality natively.
+                self.stamp_derive_structural_eq(node);
             }
             // Record/enum declarations carry no body to check, but DQ29 stamps
             // the structurally-Equatable ones for the Rust backend's
@@ -1978,17 +1997,34 @@ impl TypeChecker {
     /// semantics (`#[derive(PartialEq)]` on `Pair<A, B>` bounds each use site
     /// on `A: PartialEq, B: PartialEq` — rule 4's per-instantiation decision).
     fn stamp_derive_structural_eq(&mut self, node: &mut AIRNode) {
+        // A class is excluded from the structural default (DQ29 rule 7), so it
+        // only ever earns the DQ31 `CUSTOM_EQ` stamp (via an explicit impl) —
+        // never the structural derive.
+        let is_class = matches!(&node.kind, NodeKind::ClassDecl { .. });
         let name = match &node.kind {
-            NodeKind::RecordDecl { name, .. } | NodeKind::EnumDecl { name, .. } => {
-                name.name.clone()
-            }
+            NodeKind::RecordDecl { name, .. }
+            | NodeKind::EnumDecl { name, .. }
+            | NodeKind::ClassDecl { name, .. } => name.name.clone(),
             _ => return,
         };
         let named = Type::Named(crate::NamedType { name });
         if let Some(table) = self.impl_table.as_ref() {
             if resolve_impl(&TraitRef::new("Equatable"), &named, table).is_some() {
+                // DQ31: an explicit `impl Equatable` suppresses the structural
+                // derive (its `eq` IS the equality), but the Rust backend must
+                // still emit a `PartialEq` DELEGATING to that `eq` so a
+                // container of the type (`Vec<T>` / `HashMap` / `HashSet`)
+                // compares through the custom equality natively — the type's
+                // one equality, the same inside a container as outside.
+                node.metadata
+                    .insert(CUSTOM_EQ_META_KEY.to_string(), Value::Bool(true));
                 return;
             }
+        }
+        if is_class {
+            // A class without an explicit impl has no equality at all; never
+            // derive a structural `PartialEq` for it.
+            return;
         }
         let mut in_progress = HashSet::new();
         let mut path = Vec::new();
@@ -5921,6 +5957,162 @@ impl TypeChecker {
         None
     }
 
+    // ── DQ31: three-state Equatable provenance (§18.5) ───────────────────────
+
+    /// DQ31 (§18.5 "Container equality defers to element conformance"): the
+    /// three-state extension of [`Self::structural_equatable_witness`].
+    /// Returns the [`EqProvenance`] of `ty` — whether its `Equatable`
+    /// conformance is the compiler-provided structural default, derives from an
+    /// explicit `impl Equatable` somewhere in its tree, or is absent entirely.
+    ///
+    /// A type is [`EqProvenance::StructuralDefault`] only if it carries no
+    /// explicit `impl Equatable` AND every field / element / payload type is
+    /// itself `StructuralDefault`. ANY explicit impl anywhere in the element
+    /// tree yields [`EqProvenance::CustomImpl`] (the container must take the
+    /// per-element loop calling that `eq`); any non-Equatable leaf yields
+    /// [`EqProvenance::NotEquatable`] (the DQ29 poison rule — `==` is rejected).
+    ///
+    /// Same recursion shape and co-inductive termination as the witness probe:
+    /// a type currently being checked (`in_progress`) is assumed
+    /// `StructuralDefault` (the recursive cycle contributes nothing stronger).
+    /// Unknowns are conservatively `StructuralDefault`.
+    pub(crate) fn equatable_provenance(
+        &self,
+        ty: &Type,
+        in_progress: &mut HashSet<String>,
+    ) -> EqProvenance {
+        let resolved = self.subst.apply(ty);
+        match &resolved {
+            // Unknowns: conservatively the native structural default.
+            Type::TypeVar(_) | Type::Flexible(_) | Type::Error => EqProvenance::StructuralDefault,
+            // The poisoning leaf: function types have no equality.
+            Type::Function(_) => EqProvenance::NotEquatable,
+            Type::Primitive(p) => {
+                if matches!(p, PrimitiveType::Void) {
+                    return EqProvenance::StructuralDefault;
+                }
+                match self.impl_table.as_ref() {
+                    Some(table)
+                        if resolve_impl(&TraitRef::new("Equatable"), &resolved, table)
+                            .is_some() =>
+                    {
+                        // Primitives conform via the sealed canonical table,
+                        // not a user impl: the native operator is correct.
+                        EqProvenance::StructuralDefault
+                    }
+                    // No table or not in the sealed set → cannot prove
+                    // conformance: poison (mirrors the witness predicate).
+                    _ => EqProvenance::NotEquatable,
+                }
+            }
+            Type::Named(n) => {
+                // Explicit impl wins → custom equality (rule 1).
+                if let Some(table) = self.impl_table.as_ref() {
+                    if resolve_impl(&TraitRef::new("Equatable"), &resolved, table).is_some() {
+                        return EqProvenance::CustomImpl;
+                    }
+                }
+                if !in_progress.insert(n.name.clone()) {
+                    return EqProvenance::StructuralDefault;
+                }
+                let result = if self.class_names.contains(&n.name) {
+                    // A class without an explicit impl has no equality.
+                    EqProvenance::NotEquatable
+                } else if let Some(variants) = self.enum_variant_payloads.get(&n.name) {
+                    self.enum_payloads_provenance(&variants.clone(), &HashMap::new(), in_progress)
+                } else if let Some(fields) = self.record_field_types.get(&n.name) {
+                    self.record_fields_provenance(&fields.clone(), &HashMap::new(), in_progress)
+                } else {
+                    // Opaque imported structure: conservatively structural.
+                    EqProvenance::StructuralDefault
+                };
+                in_progress.remove(&n.name);
+                result
+            }
+            Type::Generic(g) => match (g.constructor.as_str(), g.args.as_slice()) {
+                ("List" | "Set", [elem]) => self.equatable_provenance(elem, in_progress),
+                ("Map", [key, value]) => self
+                    .equatable_provenance(key, in_progress)
+                    .join(self.equatable_provenance(value, in_progress)),
+                _ => {
+                    if let Some(table) = self.impl_table.as_ref() {
+                        if resolve_impl(&TraitRef::new("Equatable"), &resolved, table).is_some() {
+                            return EqProvenance::CustomImpl;
+                        }
+                    }
+                    let key = crate::traits::type_key(&resolved);
+                    if !in_progress.insert(key.clone()) {
+                        return EqProvenance::StructuralDefault;
+                    }
+                    let subst_map: HashMap<String, Type> = self
+                        .record_generic_params
+                        .get(&g.constructor)
+                        .map(|params| params.iter().cloned().zip(g.args.iter().cloned()).collect())
+                        .unwrap_or_default();
+                    let result = if let Some(variants) =
+                        self.enum_variant_payloads.get(&g.constructor)
+                    {
+                        self.enum_payloads_provenance(&variants.clone(), &subst_map, in_progress)
+                    } else if let Some(fields) = self.record_field_types.get(&g.constructor) {
+                        if self.class_names.contains(&g.constructor) {
+                            EqProvenance::NotEquatable
+                        } else {
+                            self.record_fields_provenance(&fields.clone(), &subst_map, in_progress)
+                        }
+                    } else {
+                        EqProvenance::StructuralDefault
+                    };
+                    in_progress.remove(&key);
+                    result
+                }
+            },
+            Type::Tuple(elems) => elems
+                .iter()
+                .fold(EqProvenance::StructuralDefault, |acc, e| {
+                    acc.join(self.equatable_provenance(e, in_progress))
+                }),
+            Type::Optional(inner) => self.equatable_provenance(inner, in_progress),
+            Type::Result(ok, err) => self
+                .equatable_provenance(ok, in_progress)
+                .join(self.equatable_provenance(err, in_progress)),
+            Type::Refined(base, _) => self.equatable_provenance(base, in_progress),
+        }
+    }
+
+    /// Combine the [`EqProvenance`] of every record field (rule 6 substitution
+    /// applied first). The DQ31 analogue of [`Self::record_fields_witness`].
+    fn record_fields_provenance(
+        &self,
+        fields: &[(String, Type)],
+        subst_map: &HashMap<String, Type>,
+        in_progress: &mut HashSet<String>,
+    ) -> EqProvenance {
+        fields
+            .iter()
+            .fold(EqProvenance::StructuralDefault, |acc, (_, fty)| {
+                let fty = substitute_named_params(fty, subst_map);
+                acc.join(self.equatable_provenance(&fty, in_progress))
+            })
+    }
+
+    /// Combine the [`EqProvenance`] of every enum payload component (rule 6
+    /// substitution applied first). The DQ31 analogue of
+    /// [`Self::enum_payloads_witness`].
+    fn enum_payloads_provenance(
+        &self,
+        variants: &[EnumVariantPayloadTypes],
+        subst_map: &HashMap<String, Type>,
+        in_progress: &mut HashSet<String>,
+    ) -> EqProvenance {
+        variants
+            .iter()
+            .flat_map(|(_, components)| components.iter())
+            .fold(EqProvenance::StructuralDefault, |acc, (_, cty)| {
+                let cty = substitute_named_params(cty, subst_map);
+                acc.join(self.equatable_provenance(&cty, in_progress))
+            })
+    }
+
     /// §18.5 operator gating (DQ29): require an `==`/`!=` operand to be
     /// `Equatable`, mirroring [`Self::require_comparable_operand`]'s shape but
     /// deciding conformance with the structural predicate
@@ -5991,20 +6183,44 @@ impl TypeChecker {
                 }
                 // Structural record/enum (a class without an impl is rejected
                 // by the gate; stamping is moot on an erroring program).
-                if self.type_needs_deep_eq(&resolved, &mut HashSet::new()) {
-                    Some("deep")
-                } else {
-                    Some("structural")
-                }
+                // DQ31: a record/enum whose field/payload tree carries an
+                // explicit `impl Equatable` somewhere takes the custom-element
+                // loop so that element's `eq` governs comparison.
+                self.container_eq_kind(&resolved)
             }
             Type::Generic(_) | Type::Tuple(_) | Type::Optional(_) | Type::Result(_, _) => {
-                if self.type_needs_deep_eq(&resolved, &mut HashSet::new()) {
-                    Some("deep")
-                } else {
-                    Some("structural")
-                }
+                self.container_eq_kind(&resolved)
             }
             Type::Refined(base, _) => self.user_eq_kind(base),
+        }
+    }
+
+    /// DQ31: pick the [`USER_EQ_META_KEY`] lane for a *container* operand (a
+    /// record/enum/tuple shape, `List`/`Map`/`Set`, or `Optional`/`Result`
+    /// wrapper) by consulting its element-tree [`EqProvenance`].
+    ///
+    /// - element tree all-[`StructuralDefault`](EqProvenance::StructuralDefault)
+    ///   → the native path is observably correct and idiomatic: `"deep"` when a
+    ///   collection is involved (Go needs `reflect.DeepEqual`; JS/TS need
+    ///   `__bockEq`) or `"structural"` otherwise (record/enum/tuple — Go/Python
+    ///   native field-wise equality, Rust's structural `PartialEq` derive).
+    /// - element tree contains a [`CustomImpl`](EqProvenance::CustomImpl) → the
+    ///   `"deep_custom"` lane: the container must take a per-element loop that
+    ///   calls the custom element's `eq` (and, for `Map`/`Set`, lets it govern
+    ///   key-matching and membership/dedup) so the type's ONE equality holds
+    ///   inside the container as outside, byte-identically across targets.
+    /// - [`NotEquatable`](EqProvenance::NotEquatable) is unreachable here: the
+    ///   `==` gate already rejected the program, so stamping is moot. It maps to
+    ///   the same native lane the old code produced (defensive, never observed).
+    fn container_eq_kind(&self, resolved: &Type) -> Option<&'static str> {
+        let native = if self.type_needs_deep_eq(resolved, &mut HashSet::new()) {
+            "deep"
+        } else {
+            "structural"
+        };
+        match self.equatable_provenance(resolved, &mut HashSet::new()) {
+            EqProvenance::CustomImpl => Some("deep_custom"),
+            EqProvenance::StructuralDefault | EqProvenance::NotEquatable => Some(native),
         }
     }
 
@@ -6514,6 +6730,66 @@ impl Default for TypeChecker {
 }
 
 // ─── DQ29 structural-Equatable support types ─────────────────────────────────
+
+/// DQ31 (§18.5 "Container equality defers to element conformance"): the
+/// *provenance* of a type's `Equatable` conformance — the three-state answer
+/// the structural predicate yields once recursion is taken into account.
+///
+/// A type has ONE equality, the same inside a container as outside. Whether a
+/// container (`List`/`Map`/`Set`/`Optional`/`Result`/tuple) compares with the
+/// target's NATIVE structural operator or with a PER-ELEMENT loop calling the
+/// element's `eq` is decided by walking the element tree:
+///
+/// - [`EqProvenance::StructuralDefault`] — the type has no explicit
+///   `impl Equatable` ANYWHERE in its tree; every field / element / payload is
+///   itself `StructuralDefault`. The compiler-provided field-wise default is
+///   the type's equality, so a container of such elements keeps the native,
+///   idiomatic path (Rust `==`, Go `reflect.DeepEqual`, native structural
+///   JS/TS/Python). Observably identical to the loop path.
+/// - [`EqProvenance::CustomImpl`] — the type carries an explicit
+///   `impl Equatable` (its `eq` IS the type's equality), OR some element /
+///   field / payload in its tree does. A container whose element tree contains
+///   ANY `CustomImpl` must take the loop path so the element's `eq` governs
+///   element comparison (and, for `Map`/`Set`, key-matching and
+///   membership/dedup) — otherwise the target's native structural equality
+///   would silently ignore the custom `eq`, diverging per target (the corner
+///   #347 left un-pinned).
+/// - [`EqProvenance::NotEquatable`] — some leaf has no equality at all (an `Fn`
+///   field, a class without an impl). `==` is rejected (the DQ29 poison rule,
+///   unchanged).
+///
+/// Unknowns (unsolved type vars, flexible/sketch types, `Error`, opaque
+/// imported structure) are conservatively `StructuralDefault`, mirroring the
+/// witness predicate's conservatism: the gate rejects only what it can prove
+/// non-Equatable, and the native path is the safe default for an unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EqProvenance {
+    /// No explicit `impl Equatable` anywhere in the type's tree — the
+    /// compiler-provided structural default is the type's equality.
+    StructuralDefault,
+    /// An explicit `impl Equatable` on the type itself or on some element /
+    /// field / payload in its tree — the loop path must call element `eq`.
+    CustomImpl,
+    /// Some leaf has no equality at all — `==` is rejected (DQ29 poison rule).
+    NotEquatable,
+}
+
+impl EqProvenance {
+    /// Combine two sub-results in the recursive walk, taking the "strongest"
+    /// answer: `NotEquatable` poisons (rule unchanged), then `CustomImpl`
+    /// propagates (any custom impl in the tree forces the loop path), and
+    /// `StructuralDefault` is the identity. Mirrors a lattice join with
+    /// `NotEquatable > CustomImpl > StructuralDefault`.
+    #[must_use]
+    fn join(self, other: EqProvenance) -> EqProvenance {
+        use EqProvenance::{CustomImpl, NotEquatable, StructuralDefault};
+        match (self, other) {
+            (NotEquatable, _) | (_, NotEquatable) => NotEquatable,
+            (CustomImpl, _) | (_, CustomImpl) => CustomImpl,
+            (StructuralDefault, StructuralDefault) => StructuralDefault,
+        }
+    }
+}
 
 /// The witness a failed structural-Equatable probe returns: which leaf
 /// poisoned the conformance, and where it sits.
