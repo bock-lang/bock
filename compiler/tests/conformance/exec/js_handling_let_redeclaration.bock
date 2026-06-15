@@ -1,6 +1,6 @@
 // TEST: js_handling_let_redeclaration
 // EXPECT: output "[first][second]"
-// EXPECT: targets js, ts, python, rust
+// EXPECT: targets js, ts, python, rust, go
 //
 // Regression for Q-js-handling-let-redeclaration: a `let` re-bound under the
 // SAME name in two *sibling* `handling { … }` blocks was dropped on the js/ts
@@ -18,11 +18,11 @@
 // The effect op `log` is genuinely invoked inside each block (it returns a
 // `[…]`-tagged copy of its argument); the two results accumulate into `acc`,
 // printed once with `println` so the harness's literal single-line
-// `output "…"` comparison matches. js/ts/python/rust only: the Go backend
-// (go.rs) carries the same block-scope defect (`part := …` in the first block,
-// bare `part = …` in the second → `undefined: part`), tracked separately as a
-// FOUND on go.rs; this fixture pins the js/ts fix (plus the already-correct
-// python/rust backends). `main` is intentionally NOT `public` (Go entry-point
+// `output "…"` comparison matches. The Go backend (go.rs) carried the same
+// block-scope defect (`part := …` in the first block, bare `part = …` in the
+// second → `undefined: part`); it is now fixed the same way (a fresh
+// `go_declared_scopes` frame per `handling` block), so this fixture pins all
+// five backends. `main` is intentionally NOT `public` (Go entry-point
 // rationale, see hello_world.bock).
 module main
 
