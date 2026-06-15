@@ -6,10 +6,10 @@
 // violation and is rejected with `E4011`; the newtype pattern is the escape
 // hatch. Scoped strictly to the (core trait, primitive) quadrant.
 //
-// NOTE: the conformance harness parses directives but does not yet execute
-// fixtures (execution is staged for Q-fconf); the `E4011` behavior is asserted
-// by the `bock-cli` `stdlib_primitive_bridge` integration suite against the
-// real checker.
+// NOTE: a check-time fixture — it carries `// EXPECT: error` (E4011) but no
+// `// EXPECT: output`, so the directive lane asserts the diagnostic while the
+// cross-target execution lane (#372) does not run it. The `E4011` behavior is
+// also asserted by the `bock-cli` `stdlib_primitive_bridge` integration suite.
 module userapp
 
 use core.compare.{Comparable, Ordering}
