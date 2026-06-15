@@ -17,7 +17,13 @@ tracking/
   audit.md            Decision log (reasoning per action) + digests.
   escalations.md      Items awaiting the human / Design, with responses.
   designs/, plans/    Approved design specs + implementation plans.
+  handoffs/           Cross-chat handoffs (→ Marketing / Design) + their resolutions.
 ```
+
+**Handoff filenames** follow `YYYYMMDD-HHMM-<descriptor>-handoff.md` (UTC, the
+project-instructions handoff convention) — e.g.
+`20260615-0412-marketing-positioning-handoff.md`. A `> ✅ RESOLVED <date>` banner
++ the signed decisions land at the top of the same file when the handoff returns.
 
 `ROADMAP.md` and `STATUS.md` at the repo root are **generated** from
 this hub by `tools/scripts/gen-tracking-views.sh` (milestones → ROADMAP;

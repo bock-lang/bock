@@ -47,6 +47,34 @@ decided→link)`
 > Design: **DQ31** (container element-equality under an explicit `impl Equatable` — rule-3 corner from #347's pinning;
 > low/corner, nothing gated on it) + DV19–DV24 dispositions. DQ10/DQ11 remain ratification-pending (non-blocking).
 
+> **★ 2026-06-15 — two NEW core-spec DQs filed (non-blocking), from the v1.0-hardening probe layer:** DQ32
+> (Hashable-on-collection-keys enforcement) + DQ33 (transitively-forwarded unbounded generics soundness). DQ31 RULED
+> 2026-06-15 (below). Nothing is gated on the three; engineering proceeds.
+
+### DQ32 — must `bock check` enforce `Hashable` on `Map` keys / `Set` members? (NEW — escalated to Design, 2026-06-15)
+
+**Status:** escalated → Design (filed, non-blocking).
+**Context:** a user type used as a `Map` KEY or `Set` MEMBER needs `Hashable` to be constructible on Rust/Go/Python
+(`HashMap`/`HashSet` require `Hash + Eq`). Today `bock check` does **not** enforce `Hashable` on collection keys, so a
+program using a non-Hashable key (e.g. a custom-`eq` record, or one transitively containing a `Float`) passes the checker
+but emits **uncompilable Rust/Go**. Pre-existing; surfaced by the DQ29/DQ31 equality work (FOUND #357). Independent of `==`.
+**Question:** should §18.5 / the type rules require `K: Hashable` (resp. `T: Hashable`) at `Map[K,_]` / `Set[T]`
+construction + key-insertion sites, with a checker error analogous to the `Comparable` gate? And what is the normative
+Hashable-matrix corner for a `Float` (NaN) reached inside a key?
+**Why Design:** a normative type-rule / conformance-matrix question (language semantics), not impl-completeness.
+
+### DQ33 — reject transitively-forwarded UNBOUNDED generic params forwarded into a bounded callee? (NEW — escalated to Design, 2026-06-15)
+
+**Status:** escalated → Design (filed, non-blocking; a soundness refinement).
+**Context:** a `fn g[U](x)` with **no bound** that forwards `x` into a `Comparable`-requiring (or otherwise-bounded) callee
+is currently **accepted** — the arg is an unsolved `TypeVar`, so the bound isn't checked at `g`'s definition. Both bound
+forms behave identically (`where (U: …)` and `[U: …]`), so #355 is at parity, not a regression; catching this is a broader
+soundness improvement. FOUND 2026-06-15 (#355 bounds work).
+**Question:** should the checker reject (or require an explicit bound on) a generic param that is transitively forwarded
+into a position requiring a bound it doesn't carry? A generics-soundness rule with cross-target implications (the unbounded
+`U` reaches a backend that needs the bound and won't compile).
+**Why Design:** type-system soundness rule (core spec).
+
 ### DQ31 — container `==` element semantics when elements carry an explicit `impl Equatable` — DECIDED (Design, 2026-06-15)
 
 **RULING (Design chat, 2026-06-15 03:43 UTC): option (a) as semantics, with a required codegen specialization.**

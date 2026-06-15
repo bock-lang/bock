@@ -479,7 +479,7 @@ release-window work and revisit at the first v1.x planning pass.
 - **OQ4 (§10.8 runtime-AI demo):** **defer behind the release window**; revisit at first v1.x planning (R9 ledger
   holds; R6's verification track leads v1.x).
 
-**Authorized actions:** the marketing handoff lands at `tracking/handoffs/2026-06-15-marketing-positioning.md`; R6/OQ2/
+**Authorized actions:** the marketing handoff lands at `tracking/handoffs/20260615-0412-marketing-positioning-handoff.md`; R6/OQ2/
 OQ4 + the MS-v1.0-hardening milestone + v1.0-timing reconcile into `milestones.md`/`queue.md`; OQ1/R1 route to the
 marketing chat. See the consolidated 2026-06-15 walk-through entry below.
 
@@ -515,7 +515,7 @@ marketing handoff committed; STATUS/ROADMAP regenerated.
 
 **Type:** strategic (positioning) + core-spec reconcile (§1.1)
 **Severity:** low (no blocker; the v1.0-hardening engineering was independent)
-**Trigger:** the marketing-chat session returned the signed resolution for OQ1 + R1 (+ OQ2 framing + a website-scope call), resolving the handoff `tracking/handoffs/2026-06-15-marketing-positioning.md`.
+**Trigger:** the marketing-chat session returned the signed resolution for OQ1 + R1 (+ OQ2 framing + a website-scope call), resolving the handoff `tracking/handoffs/20260615-0412-marketing-positioning-handoff.md`.
 **Decision (operator-signed):**
 - **OQ1** = a nested split, not one ICP: **identity = the guarantee** (hero); **launch wedge = SDK / library vendors** (proof surface, fully in current scope); **macro narrative = the trust-scarcity shift** (air-cover register, NOT a product-capability lead — would overclaim given zero shipping users / no compliance track record, and collide with the §1.1 enterprise non-audience).
 - **R1** = signed identity sentence (verbatim in the handoff); two voice edits applied before sign-off (em dash → colon; "proves" → "verifies").
@@ -524,3 +524,19 @@ marketing handoff committed; STATUS/ROADMAP regenerated.
 **Orchestrator landed (this reconcile):** §1.1 amendment + changelog; `milestones.md` positioning-resolved entry + wedge-route registration; `queue.md` positioning follow-ups (verified SDK-vendor demo · wedge-page copy · get-started copy lock); handoff marked RESOLVED. **The identity sentence + all website copy remain marketing-owned + human-approved — NOT published here.**
 **Flag to operator (low):** `tracking/handoffs/` uses the in-use `YYYY-MM-DD-descriptor.md` filename convention, which diverges from the project instructions' `YYYYMMDD-HHMM-<descriptor>-handoff.md` changelog format. The repo convention wins for now; surface for a one-time sweep if you want consistency.
 **Status:** resolved.
+
+## [2026-06-15 21:25 UTC] DQ32 + DQ33 — two core-spec questions from the v1.0-hardening probe → Design
+
+**Type:** design (core-spec)
+**Severity:** low (non-blocking — nothing in the queue is gated on either; filed per the core-spec rule)
+**Trigger:** the Wave-3/Wave-B hardening probe surfaced two soundness/type-rule questions that the orchestrator may NOT decide (core spec → Design). Formalized as DQ32/DQ33 (`design-questions.md`).
+**Context:**
+- **DQ32 — Hashable on collection keys.** A custom-`eq` (or Float-containing) user type used as a `Map` key / `Set` member passes `bock check` but emits uncompilable Rust/Go (`HashMap`/`HashSet` need `Hash + Eq`). Should §18.5 / the type rules enforce `K: Hashable` at construction/insertion, analogous to the `Comparable` gate? FOUND #357.
+- **DQ33 — transitively-forwarded unbounded generics.** `fn g[U](x)` (no bound) forwarding `x` into a bounded callee is accepted (unsolved `TypeVar`); both bound forms behave identically so #355 is at parity. Should the checker reject / require the bound? FOUND #355.
+**Recommendation:** none on the merits (Design's call). Both are additive type-rule tightenings; non-blocking.
+**Awaiting:** Design ruling on DQ32 / DQ33.
+**Status:** pending.
+
+> NOTE — the third Wave-3 OPEN, **error-code-numbering collisions** (E1001/E1005/E1006/W8020/E2030 double meanings), is
+> **diagnostics/CLI surface (§20.1 non-normative), NOT core-spec** — it stays a `queue.md` chore (a careful renumbering
+> plan), not a Design DQ.

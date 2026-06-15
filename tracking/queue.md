@@ -440,11 +440,13 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 > - **#375** `Q-examples-matrix-undodge` — all 5 dodges reverted; byte-identical ×5 (sha unchanged from baseline → the dodges were pure workarounds, the underlying bugs truly fixed by #343/#344/#370).
 > Combined: each PR CI 15/15; final main HEAD `e9f4299` CI green.
 >
-> **REMAINING (Wave C tail — the v1.0-hardening floor is essentially correctness-clean; what's left is small):**
+> **WAVE C + SDK DEMO — IN FLIGHT (2026-06-15, 6 file-disjoint lanes dispatched):**
 > - **Codegen bugs:** `Q-ts-generic-enum-codegen` (ts, TS2314) · `Q-py-go-wrapper-structural-eq` (Optional/Result `==` on py/go)
 > - **Robustness:** `Q-bocktest-discovery-readdir-unwrap` (bug — `bock test` discovery `read_dir().unwrap()` panics on an unreadable ancestor dir) · `Q-core-bool-compare-dead` (LOW)
-> - **Doc/infra:** `Q-stdlib-smoke-header-prose-stale` · `Q-vscode-claudemd-spec-sections-stale` · OPEN: vocab/assets↔compiler drift CI guard. `D2-polish` defers to v1.2 (pure docs).
-> - **→ Design (OPENs):** code-numbering collisions · Hashable-on-collection-keys enforcement · transitively-forwarded unbounded generics (formalize as DQ entries).
+> - **Doc/infra:** `Q-stdlib-smoke-header-prose-stale` · `Q-vscode-claudemd-spec-sections-stale` · `Q-vocab-assets-drift-ci-guard` (the former OPEN, now a lane). `D2-polish` defers to v1.2 (pure docs).
+> - **Positioning proof:** `Q-sdk-vendor-demo` (the wedge proof surface — examples/, dispatched).
+> - **→ Design:** Hashable-on-collection-keys → **DQ32** · transitively-forwarded unbounded generics → **DQ33** (both filed/escalated 2026-06-15, non-blocking). Error-code-numbering collisions stays a `queue.md` chore (diagnostics/CLI §20.1, non-core — `Q-error-code-renumbering`, needs a careful renumbering plan), NOT a Design DQ.
+> - **Process:** the `tracking/handoffs/` filename was swept to the documented `YYYYMMDD-HHMM-<descriptor>-handoff.md` convention (now noted in `tracking/CLAUDE.md`).
 
 ### v1.0-hardening FOUND/OPEN (filed 2026-06-15, surfaced by #352–#357)
 
