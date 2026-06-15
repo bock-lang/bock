@@ -1,5 +1,5 @@
 // TEST: list_remove_rejected
-// EXPECT: error E4013 at 14:23
+// EXPECT: error E4013 at 14:19
 //
 // DQ30: the by-index removal method is `remove_at`, NOT `remove` — by-index
 // explicit (the Kotlin `removeAt` / Swift `remove(at:)` resolution).

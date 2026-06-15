@@ -27,7 +27,7 @@ use bock_air::{
     NodeIdGen, StrictnessLevel, SymbolTable,
 };
 use bock_build::dep_graph::{self, DepGraph};
-use bock_errors::{Diagnostic, DiagnosticBag, Severity};
+use bock_errors::{Diagnostic, DiagnosticBag, Severity, Span};
 use bock_lexer::Lexer;
 use bock_parser::Parser;
 use bock_source::SourceMap;
@@ -327,7 +327,13 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
     let topo_order = match dep_graph.topological_order() {
         Some(order) => order,
         None => {
-            eprintln!("error: circular module dependency detected");
+            report_module_cycle(
+                &dep_graph,
+                &id_to_index,
+                &parsed_files,
+                &source_map,
+                options,
+            );
             return Ok(CheckOutcome::Failed);
         }
     };
@@ -617,13 +623,211 @@ fn diagnostics_to_surface(diagnostics: &[Diagnostic], is_stdlib: bool) -> Vec<Di
     }
 }
 
+/// Find one dependency cycle in `graph` and return its participant module ids
+/// in order, with the first id repeated at the end to close the loop
+/// (e.g. `["a", "b", "a"]`). Returns `None` if the graph is acyclic.
+///
+/// Uses only `DepGraph`'s public read API (`modules` / `dependencies`) so the
+/// cycle can be reconstructed in `bock-cli` without the graph having to track
+/// it. Roots and dependencies are visited in sorted order so the reported cycle
+/// is deterministic run-to-run.
+fn find_module_cycle(graph: &DepGraph) -> Option<Vec<String>> {
+    let mut roots: Vec<String> = graph.modules().into_iter().cloned().collect();
+    roots.sort();
+
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Iterative DFS that records the active path so a back-edge reveals the
+    // exact cycle. `stack` holds (node, sorted dependency iterator position).
+    for root in &roots {
+        if visited.contains(root) {
+            continue;
+        }
+        let mut path: Vec<String> = Vec::new();
+        let mut on_path: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Explicit work stack of (node, children, next-child-index).
+        let mut stack: Vec<(String, Vec<String>, usize)> = Vec::new();
+
+        let sorted_deps = |node: &str| -> Vec<String> {
+            let mut deps: Vec<String> = graph
+                .dependencies(node)
+                .map(|d| d.iter().cloned().collect())
+                .unwrap_or_default();
+            deps.sort();
+            deps
+        };
+
+        stack.push((root.clone(), sorted_deps(root), 0));
+        path.push(root.clone());
+        on_path.insert(root.clone());
+
+        while let Some((node, children, idx)) = stack.last_mut() {
+            if *idx < children.len() {
+                let dep = children[*idx].clone();
+                *idx += 1;
+                if on_path.contains(&dep) {
+                    // Back-edge → cycle. Slice the path from `dep` and close it.
+                    let start = path.iter().position(|m| m == &dep).unwrap_or(0);
+                    let mut cycle: Vec<String> = path[start..].to_vec();
+                    cycle.push(dep);
+                    return Some(cycle);
+                }
+                if !visited.contains(&dep) {
+                    let deps = sorted_deps(&dep);
+                    path.push(dep.clone());
+                    on_path.insert(dep.clone());
+                    stack.push((dep, deps, 0));
+                }
+            } else {
+                let node = node.clone();
+                visited.insert(node.clone());
+                on_path.remove(&node);
+                path.pop();
+                stack.pop();
+            }
+        }
+    }
+    None
+}
+
+/// Emit a coded, spanned diagnostic for a circular module dependency.
+///
+/// Replaces a bare `eprintln!("circular module dependency detected")` that
+/// carried no code, no span, and did not name the modules in the cycle —
+/// useless to an agent trying to repair it (Q-diag-structure-misc (a)). The
+/// diagnostic (`E1008`) names every module in the cycle in order, points its
+/// primary span at one offending `use` edge, and notes the fix.
+fn report_module_cycle(
+    graph: &DepGraph,
+    id_to_index: &HashMap<String, usize>,
+    parsed_files: &[ParsedFile],
+    source_map: &SourceMap,
+    options: &CheckOptions,
+) {
+    let code = bock_errors::DiagnosticCode {
+        prefix: 'E',
+        number: 1008,
+    };
+
+    let Some(cycle) = find_module_cycle(graph) else {
+        // Defensive: topo sort said there is a cycle but we could not locate
+        // it. Still emit a coded diagnostic rather than a bare string.
+        let mut bag = DiagnosticBag::new();
+        bag.error(
+            code,
+            "circular module dependency detected",
+            bock_errors::Span::dummy(),
+        );
+        let diags: Vec<Diagnostic> = bag.iter().cloned().collect();
+        eprintln!("{}", render_codeonly(&diags));
+        return;
+    };
+
+    // `cycle` is e.g. ["a", "b", "a"]; the participant list is everything but
+    // the repeated closing node.
+    let participants = &cycle[..cycle.len().saturating_sub(1)];
+    let chain = cycle.join(" -> ");
+
+    // Choose a primary span: an import in some participant module that targets
+    // the next module in the cycle, preferring a module we actually parsed.
+    let mut primary: Option<(Span, String)> = None;
+    for window in cycle.windows(2) {
+        let (from, to) = (&window[0], &window[1]);
+        if let Some(&idx) = id_to_index.get(from) {
+            let pf = &parsed_files[idx];
+            for import in &pf.module.imports {
+                if &dep_graph::module_path_to_id(&import.path) == to {
+                    primary = Some((import.span, pf.filename.clone()));
+                    break;
+                }
+            }
+        }
+        if primary.is_some() {
+            break;
+        }
+    }
+
+    let mut bag = DiagnosticBag::new();
+    let span = primary.as_ref().map_or_else(Span::dummy, |(s, _)| *s);
+    let diag = bag.error(code, format!("circular module dependency: {chain}"), span);
+    // One consolidated note: the rich renderer (ariadne 0.4) keeps only the
+    // last note per report, so fold the participant list and the fix into a
+    // single note rather than losing one.
+    diag.note(format!(
+        "the cycle involves {} module(s): {}. Break it by removing one of the \
+         `use` edges, or extract the shared items into a third module that both \
+         can import",
+        participants.len(),
+        participants.join(", ")
+    ));
+
+    let diags: Vec<Diagnostic> = bag.iter().cloned().collect();
+    match primary {
+        Some((_, ref filename)) => {
+            // Render against the offending file's source so the span resolves
+            // to a real `line:col` (rich) or correct `line:col` (brief).
+            if let Some(&idx) = id_to_index
+                .values()
+                .find(|&&i| &parsed_files[i].filename == filename)
+            {
+                let source = &source_map.get_file(parsed_files[idx].file_id).content;
+                print_diagnostics(&diags, filename, source, !options.brief);
+            } else {
+                eprintln!("{}", render_codeonly(&diags));
+            }
+        }
+        None => {
+            // No parsed participant carried the edge (e.g. a cycle entirely in
+            // synthetic ids); still emit the coded, named diagnostic.
+            eprintln!("{}", render_codeonly(&diags));
+        }
+    }
+}
+
+/// Render diagnostics without source context (no file/source available),
+/// preserving the `severity[code]: message` shape and any notes.
+fn render_codeonly(diagnostics: &[Diagnostic]) -> String {
+    let mut out = String::new();
+    for diag in diagnostics {
+        let severity = match diag.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+            Severity::Hint => "hint",
+        };
+        out.push_str(&format!("{severity}[{}]: {}\n", diag.code, diag.message));
+        for note in &diag.notes {
+            out.push_str(&format!("  note: {note}\n"));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Convert a byte offset into `source` to a 1-indexed `(line, column)`, with
+/// the column counting Unicode scalar values (characters), not bytes.
+///
+/// Mirrors `bock_source::SourceFile::line_col` for content held as a `&str`;
+/// kept local so brief-mode rendering does not require a `SourceFile`. Offsets
+/// past the end clamp to the end of the file.
+fn byte_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let clamped = offset.min(source.len());
+    let prefix = &source[..clamped];
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let line_start = prefix.rfind('\n').map_or(0, |i| i + 1);
+    let col = prefix[line_start..].chars().count() + 1;
+    (line, col)
+}
+
 /// Print diagnostics, optionally with source context.
 fn print_diagnostics(diagnostics: &[Diagnostic], filename: &str, source: &str, context: bool) {
     if context {
         let rendered = bock_errors::render(diagnostics, filename, source);
         eprint!("{rendered}");
     } else {
-        // Simple one-line-per-diagnostic format without source context
+        // Simple one-line-per-diagnostic format without source context.
+        // Locations render as `file:line:col` — the same `line:col` the rich
+        // mode and the conformance `error E<code> at <line>:<col>` directive
+        // use — not raw byte offsets (Q-diag-brief-span-format, §20.1.1).
         for diag in diagnostics {
             let severity = match diag.severity {
                 Severity::Error => "error",
@@ -631,9 +835,10 @@ fn print_diagnostics(diagnostics: &[Diagnostic], filename: &str, source: &str, c
                 Severity::Info => "info",
                 Severity::Hint => "hint",
             };
+            let (line, col) = byte_to_line_col(source, diag.span.start);
             eprintln!(
-                "{severity}[{}]: {} (at {}:{}..{})",
-                diag.code, diag.message, filename, diag.span.start, diag.span.end
+                "{severity}[{}]: {} (at {filename}:{line}:{col})",
+                diag.code, diag.message
             );
         }
     }
@@ -765,6 +970,39 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn byte_to_line_col_counts_chars_not_bytes() {
+        // ASCII: identity-ish, 1-indexed.
+        let s = "abc\ndef";
+        assert_eq!(byte_to_line_col(s, 0), (1, 1));
+        assert_eq!(byte_to_line_col(s, 2), (1, 3));
+        assert_eq!(byte_to_line_col(s, 4), (2, 1)); // first char of line 2
+                                                    // Multibyte: 'é' is 2 bytes — the column must count it as one char.
+        let m = "fée x"; // f(0) é(1-2) e(3) ' '(4) x(5)
+        assert_eq!(byte_to_line_col(m, 5), (1, 5)); // 'x' is column 5, not 6
+                                                    // Past the end clamps.
+        assert_eq!(byte_to_line_col(m, 999), (1, 6));
+    }
+
+    #[test]
+    fn brief_diagnostic_renders_line_col_not_byte_offsets() {
+        // Q-diag-brief-span-format: brief mode must print `file:line:col`,
+        // matching rich mode and the conformance directive — never byte
+        // offsets like `129..134`. Capturing eprintln is awkward, so assert
+        // on the format building blocks directly.
+        let source = "module m\nfn main() -> Void {\n  bad\n}\n";
+        // Byte offset of `bad` (line 3): "module m\n"=9, "fn main() -> Void {\n"=20.
+        let bad_offset = source.find("bad").unwrap();
+        let (line, col) = byte_to_line_col(source, bad_offset);
+        assert_eq!((line, col), (3, 3));
+        let rendered = format!("error[E4002]: undefined variable `bad` (at m.bock:{line}:{col})");
+        assert!(rendered.contains("m.bock:3:3"), "{rendered}");
+        assert!(
+            !rendered.contains(".."),
+            "must not contain a byte range: {rendered}"
+        );
+    }
+
+    #[test]
     fn test_discover_bock_files_recursive() {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("sub");
@@ -846,6 +1084,56 @@ mod tests {
         .unwrap();
 
         let outcome = run(vec![path], &CheckOptions::default()).unwrap();
+        assert_eq!(outcome, CheckOutcome::Failed);
+    }
+
+    // ── Circular module dependency (Q-diag-structure-misc (a)) ─────────────
+
+    #[test]
+    fn find_module_cycle_reports_participants_in_order() {
+        use std::collections::HashSet;
+        let mut g = DepGraph::new();
+        g.add_module_with_deps("a".into(), HashSet::from(["b".to_string()]));
+        g.add_module_with_deps("b".into(), HashSet::from(["c".to_string()]));
+        g.add_module_with_deps("c".into(), HashSet::from(["a".to_string()]));
+        let cycle = find_module_cycle(&g).expect("a 3-module cycle must be found");
+        // Closed loop: first == last, and every participant appears.
+        assert_eq!(cycle.first(), cycle.last());
+        for m in ["a", "b", "c"] {
+            assert!(
+                cycle.contains(&m.to_string()),
+                "cycle missing {m}: {cycle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_module_cycle_none_for_acyclic_graph() {
+        use std::collections::HashSet;
+        let mut g = DepGraph::new();
+        g.add_module_with_deps("app".into(), HashSet::from(["lib".to_string()]));
+        g.add_module("lib".into());
+        assert!(find_module_cycle(&g).is_none());
+    }
+
+    #[test]
+    fn run_circular_module_dependency_returns_failed() {
+        // Two mutually-importing modules form a cycle; `bock check` must fail
+        // (the coded E1008 diagnostic is verified by manual integration).
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.bock");
+        let b = dir.path().join("b.bock");
+        fs::write(
+            &a,
+            "module a\nuse b.{ fromB }\npublic fn fromA() -> Int { 1 }\n",
+        )
+        .unwrap();
+        fs::write(
+            &b,
+            "module b\nuse a.{ fromA }\npublic fn fromB() -> Int { 2 }\n",
+        )
+        .unwrap();
+        let outcome = run(vec![a, b], &CheckOptions::default()).unwrap();
         assert_eq!(outcome, CheckOutcome::Failed);
     }
 

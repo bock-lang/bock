@@ -524,11 +524,17 @@ impl<'a> Resolver<'a> {
                                     NameKind::Unresolved
                                 }
                                 Err(RegistryError::NotVisible { name, .. }) => {
-                                    self.diag.error(
-                                        E_NOT_VISIBLE,
-                                        format!("`{name}` in module `{module_id}` is private"),
-                                        imported.span,
-                                    );
+                                    self.diag
+                                        .error(
+                                            E_NOT_VISIBLE,
+                                            format!(
+                                                "`{name}` in module `{module_id}` is private"
+                                            ),
+                                            imported.span,
+                                        )
+                                        .note(format!(
+                                            "declare `{name}` as `public` in module `{module_id}` to export it"
+                                        ));
                                     NameKind::Unresolved
                                 }
                             }
@@ -872,6 +878,14 @@ impl<'a> Resolver<'a> {
     fn inject_effect_operations(&mut self, effect_clause: &[bock_ast::TypePath]) {
         let mut visited = HashSet::new();
         for effect_path in effect_clause {
+            // Naming an effect in a `with` clause is a *use* of its (possibly
+            // imported) name: without marking it, an effect imported only to be
+            // declared here is reported as an unused import (W1001 false
+            // positive, Q-w1001-effect-import-false-positive). Mark the leading
+            // segment, which is the imported binding.
+            if let Some(first) = effect_path.segments.first() {
+                self.symbols.mark_used(&first.name);
+            }
             let effect_name = effect_path
                 .segments
                 .iter()
@@ -946,6 +960,16 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_impl(&mut self, d: &ImplBlock) {
+        // `impl <Trait/Effect> for <Type>` *uses* the trait/effect name; an
+        // effect or trait imported only to be implemented must not be reported
+        // as an unused import (W1001 false positive,
+        // Q-w1001-effect-import-false-positive). The `trait_path` itself is not
+        // otherwise visited here, so mark its leading (imported) segment.
+        if let Some(trait_path) = &d.trait_path {
+            if let Some(first) = trait_path.segments.first() {
+                self.symbols.mark_used(&first.name);
+            }
+        }
         for m in &d.methods {
             // Check whether the method already declares `self` as a parameter.
             let has_self = m
@@ -1071,6 +1095,14 @@ impl<'a> Resolver<'a> {
         self.symbols.push_scope();
         let mut visited = HashSet::new();
         for pair in &h.handlers {
+            // The handled effect's name is used here (it gates which ops become
+            // visible). Mark its imported binding so an effect imported solely
+            // to be handled is not flagged W1001 unused
+            // (Q-w1001-effect-import-false-positive). `mark_used` searches all
+            // scopes, so it reaches the module-scope import binding.
+            if let Some(first) = pair.effect.segments.first() {
+                self.symbols.mark_used(&first.name);
+            }
             let effect_name = pair
                 .effect
                 .segments
@@ -2189,6 +2221,162 @@ mod tests {
             .filter(|d| d.severity == bock_errors::Severity::Warning)
             .collect();
         assert!(warnings.is_empty(), "no warning expected for used import");
+    }
+
+    // ── W1001 effect-import false positive (Q-w1001-effect-import-false-positive) ──
+
+    /// Build an `import` of `name` from module `core`.
+    fn named_import(id: NodeId, name: &str) -> ImportDecl {
+        ImportDecl {
+            id,
+            span: sp(),
+            visibility: Visibility::Private,
+            path: mpath(&["core"]),
+            items: ImportItems::Named(vec![ImportedName {
+                span: sp(),
+                name: ident(name),
+                alias: None,
+            }]),
+        }
+    }
+
+    fn tpath(name: &str) -> bock_ast::TypePath {
+        bock_ast::TypePath {
+            segments: vec![ident(name)],
+            span: sp(),
+        }
+    }
+
+    fn unused_import_warnings(diag: &DiagnosticBag) -> Vec<String> {
+        diag.iter()
+            .filter(|d| d.severity == bock_errors::Severity::Warning)
+            .filter(|d| d.message.contains("unused import"))
+            .map(|d| d.message.clone())
+            .collect()
+    }
+
+    #[test]
+    fn effect_used_in_with_clause_is_not_unused_import() {
+        // `use core.{ Log }` then `fn doWork() with Log { ... }`. The effect is
+        // referenced only in the `with` clause; it must not be flagged W1001.
+        let import = named_import(10, "Log");
+        let func = Item::Fn(FnDecl {
+            id: 1,
+            span: sp(),
+            annotations: vec![],
+            visibility: Visibility::Private,
+            is_async: false,
+            name: ident("doWork"),
+            generic_params: vec![],
+            params: vec![],
+            return_type: None,
+            effect_clause: vec![tpath("Log")],
+            where_clause: vec![],
+            body: Some(empty_block(100)),
+        });
+        let module = simple_module(vec![import], vec![func]);
+        let mut st = SymbolTable::new();
+        let diag = resolve_names(&module, &mut st);
+        assert!(
+            unused_import_warnings(&diag).is_empty(),
+            "effect used in `with` clause must not warn W1001: {:?}",
+            unused_import_warnings(&diag)
+        );
+    }
+
+    #[test]
+    fn effect_used_in_impl_for_is_not_unused_import() {
+        // `use core.{ Log }` then `impl Log for Silent { ... }`. The effect name
+        // in `trait_path` is a use of the import; no W1001.
+        let import = named_import(10, "Log");
+        let impl_block = Item::Impl(bock_ast::ImplBlock {
+            id: 2,
+            span: sp(),
+            annotations: vec![],
+            generic_params: vec![],
+            trait_path: Some(tpath("Log")),
+            trait_args: vec![],
+            target: bock_ast::TypeExpr::Named {
+                id: 3,
+                span: sp(),
+                path: tpath("Silent"),
+                args: vec![],
+            },
+            where_clause: vec![],
+            type_assignments: vec![],
+            methods: vec![],
+        });
+        let module = simple_module(vec![import], vec![impl_block]);
+        let mut st = SymbolTable::new();
+        let diag = resolve_names(&module, &mut st);
+        assert!(
+            unused_import_warnings(&diag).is_empty(),
+            "effect used in `impl ... for` must not warn W1001: {:?}",
+            unused_import_warnings(&diag)
+        );
+    }
+
+    #[test]
+    fn genuinely_unused_import_still_warns() {
+        // Regression guard: the effect-import fix must not suppress W1001 for an
+        // import that truly is unused.
+        let import = named_import(10, "ReallyUnused");
+        let module = simple_module(vec![import], vec![]);
+        let mut st = SymbolTable::new();
+        let diag = resolve_names(&module, &mut st);
+        let warns = unused_import_warnings(&diag);
+        assert!(
+            warns.iter().any(|w| w.contains("ReallyUnused")),
+            "a genuinely unused import must still warn W1001: {warns:?}"
+        );
+    }
+
+    // ── E1007 private-symbol fix suggestion (Q-diag-structure-misc (c)) ────────
+
+    #[test]
+    fn private_symbol_import_error_suggests_public() {
+        use crate::registry::{ExportDetail, ExportKind, ExportedSymbol, ModuleExports};
+        use crate::stubs::TypeRef;
+
+        // Register module `core` exporting a PRIVATE symbol `secret`.
+        let mut registry = ModuleRegistry::new();
+        let mut exports = ModuleExports::new("core", "core.bock");
+        exports.add_symbol(
+            "secret",
+            ExportedSymbol {
+                kind: ExportKind::Function,
+                visibility: Visibility::Private,
+                ty: TypeRef("Fn() -> Void".to_string()),
+                detail: ExportDetail::None,
+            },
+        );
+        registry.register(exports);
+
+        // A module that imports the private `core.secret`.
+        let import = named_import(10, "secret");
+        let module = simple_module(vec![import], vec![]);
+        let mut st = SymbolTable::new();
+        let diag = resolve_names_with_registry(&module, &mut st, &registry);
+
+        let e1007: Vec<_> = diag
+            .iter()
+            .filter(|d| d.code.to_string() == "E1007")
+            .collect();
+        assert_eq!(e1007.len(), 1, "expected one E1007, got {}", e1007.len());
+        let d = e1007[0];
+        assert!(
+            d.message.contains("secret") && d.message.contains("private"),
+            "message should name the symbol and the rule: {:?}",
+            d.message
+        );
+        // The determinable fix must be present as a note.
+        assert!(
+            d.notes
+                .iter()
+                .any(|n| n.contains("public") && n.contains("secret")),
+            "E1007 must suggest declaring the symbol `public`: {:?}",
+            d.notes
+        );
     }
 
     // ── Shadowing ─────────────────────────────────────────────────────────────

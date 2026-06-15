@@ -1,0 +1,22 @@
+// TEST: parse_if_condition_requires_parens
+// EXPECT: error E2030 at 19:6
+//
+// Q-diag-structure-misc (b): an `if` whose condition is not parenthesized used
+// to fall into the generic E2000 "expected `(`" catch-all (via the parser's
+// `expect`), which named the missing token but neither the violated rule nor
+// the fix — so the purpose-built parens-required diagnostic (E2030) was
+// unreachable for `if`. The parser now detects the missing `(` at the `if`
+// condition directly and emits E2030 with an actionable note ("wrap the
+// condition in parentheses: `if (cond) { ... }`"). Bock requires `if (cond)`
+// with parentheses (spec §5 / §3.2).
+//
+// The diagnostic points at the offending token after `if` (the bare condition
+// `ready`), at 19:6. Recovery keeps parsing the condition, so the single
+// E2030 is the only diagnostic for this root cause (no trailing "expected `)`"
+// noise).
+
+fn main() -> Void {
+  if ready {
+    println("go")
+  }
+}

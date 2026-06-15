@@ -1,5 +1,5 @@
 // TEST: unknown_method_concrete
-// EXPECT: error E4013 at 16:23
+// EXPECT: error E4013 at 16:19
 //
 // Q-checker-unknown-method-concrete: an unknown method on a CONCRETE receiver
 // is a checker error (`E4013`), not a silent resolution to a fresh type

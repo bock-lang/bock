@@ -329,6 +329,29 @@ pub fn render(diagnostics: &[Diagnostic], filename: &str, source: &str) -> Strin
     )
 }
 
+/// Convert a byte offset into `source` to a character (Unicode scalar) offset.
+///
+/// `Span` stores byte offsets, but `ariadne::Source` indexes by character
+/// offset — so spans must be remapped at the render boundary. Feeding byte
+/// offsets straight through shifts the rendered `line:col` and the underline
+/// once any multibyte character precedes the span (e.g. a span after `é`
+/// rendered one column too far right, and could drop its underline entirely).
+///
+/// Offsets at or past the end of `source` clamp to the total character count,
+/// which keeps end-of-file spans renderable rather than panicking.
+fn byte_to_char_offset(source: &str, byte_offset: usize) -> usize {
+    if byte_offset >= source.len() {
+        return source.chars().count();
+    }
+    // Count characters whose byte position is strictly before `byte_offset`.
+    // A byte offset that lands inside a multibyte character (it should not, for
+    // well-formed spans) rounds down to that character's char index.
+    source
+        .char_indices()
+        .take_while(|(i, _)| *i < byte_offset)
+        .count()
+}
+
 /// Render diagnostics with an explicit color decision.
 ///
 /// `color: false` guarantees the output contains no ANSI escape sequences.
@@ -344,9 +367,14 @@ pub fn render_with_color(
 
     for diag in diagnostics {
         let kind = severity_to_kind(diag.severity);
-        let span_range = diag.span.start..diag.span.end;
+        // `ariadne::Source` indexes by character offset, not byte offset, so
+        // every span fed to it must be remapped from the byte offsets `Span`
+        // carries (see `byte_to_char_offset`).
+        let start_char = byte_to_char_offset(source, diag.span.start);
+        let end_char = byte_to_char_offset(source, diag.span.end);
+        let span_range = start_char..end_char;
 
-        let mut builder = Report::build(kind, filename, diag.span.start)
+        let mut builder = Report::build(kind, filename, start_char)
             .with_config(Config::default().with_color(color))
             .with_message(format!("[{}] {}", diag.code, diag.message))
             .with_label(
@@ -356,8 +384,10 @@ pub fn render_with_color(
             );
 
         for label in &diag.labels {
+            let l_start = byte_to_char_offset(source, label.span.start);
+            let l_end = byte_to_char_offset(source, label.span.end);
             builder = builder.with_label(
-                AriadneLabel::new((filename, label.span.start..label.span.end))
+                AriadneLabel::new((filename, l_start..l_end))
                     .with_message(&label.message)
                     .with_color(Color::Blue),
             );
@@ -643,6 +673,71 @@ mod tests {
         let out = render_with_color(&[diag], "test.bock", "let x = ;", false);
         assert!(out.contains("declare the variable first"), "output: {out}");
         assert!(!out.contains('\u{1b}'), "output: {out:?}");
+    }
+
+    // ── byte→char offset remapping for the render boundary ─────────────────────
+
+    #[test]
+    fn byte_to_char_offset_ascii_is_identity() {
+        let s = "abcdef";
+        assert_eq!(byte_to_char_offset(s, 0), 0);
+        assert_eq!(byte_to_char_offset(s, 3), 3);
+        assert_eq!(byte_to_char_offset(s, 6), 6);
+    }
+
+    #[test]
+    fn byte_to_char_offset_multibyte() {
+        // "fée x": bytes f(0) é(1-2) e(3) space(4) x(5); chars f=0 é=1 e=2 ' '=3 x=4.
+        let s = "fée x";
+        assert_eq!(byte_to_char_offset(s, 0), 0); // before 'f'
+        assert_eq!(byte_to_char_offset(s, 1), 1); // before 'é'
+        assert_eq!(byte_to_char_offset(s, 3), 2); // before 'e' (past 2-byte 'é')
+        assert_eq!(byte_to_char_offset(s, 5), 4); // before 'x'
+        assert_eq!(byte_to_char_offset(s, 6), 5); // end of file (clamped)
+                                                  // Past-end clamps to the char count.
+        assert_eq!(byte_to_char_offset(s, 999), 5);
+    }
+
+    #[test]
+    fn render_multibyte_span_underlines_correct_char() {
+        // Regression for Q-errors-render-byte-col-drift: a span after a
+        // multibyte character must render at the correct char column and keep
+        // its underline. "fée x" — the `x` token is byte 5..6, char 4..5, and
+        // must render at column 5 (1-indexed), not column 6.
+        let source = "fée x";
+        let span = Span {
+            file: FileId(1),
+            start: 5,
+            end: 6,
+        };
+        let diag = Diagnostic {
+            severity: Severity::Error,
+            code: DiagnosticCode {
+                prefix: 'E',
+                number: 1,
+            },
+            message: "bad token".into(),
+            span,
+            labels: vec![],
+            notes: vec![],
+        };
+        let out = render_with_color(&[diag], "m.bock", source, false);
+        // Column 5 is correct (f=1, é=2, e=3, ' '=4, x=5); the pre-fix code
+        // reported 1:6 and dropped the underline.
+        assert!(out.contains("m.bock:1:5"), "expected column 5, got:\n{out}");
+        assert!(
+            !out.contains("m.bock:1:6"),
+            "should not drift to col 6:\n{out}"
+        );
+        // An underline must render under the offending char — ariadne uses a
+        // box-drawing underline (`┬`/`─`); pre-fix the span fell off the char
+        // range and no underline was drawn at all.
+        assert!(
+            out.contains('┬') || out.contains('─'),
+            "expected an underline under the span:\n{out}"
+        );
+        // The flagged source line is present and intact.
+        assert!(out.contains("fée x"), "source line should render:\n{out}");
     }
 
     #[test]

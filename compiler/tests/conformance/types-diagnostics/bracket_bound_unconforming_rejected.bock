@@ -1,5 +1,5 @@
 // TEST: bracket_bound_unconforming_rejected
-// EXPECT: error E4005 at 34:21
+// EXPECT: error E4005 at 34:18
 //
 // Q-bracket-bounds-unenforced (§4): a bracket-form generic bound
 // `[T: Comparable]` is enforced at call sites by the SAME path that a

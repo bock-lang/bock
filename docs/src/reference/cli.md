@@ -126,10 +126,16 @@ bock check --brief                 # compact one-line diagnostics
 bock check --strict                # production strictness (gaps are errors)
 ```
 
+`--brief` emits one line per diagnostic with the location as `file:line:col`:
+
+```text
+error[E4002]: undefined variable `bad` (at src/main.bock:3:3)
+```
+
 | Flag               | Meaning                                                                                       |
 | ------------------ | --------------------------------------------------------------------------------------------- |
 | `--only <ASPECT>`  | Restrict to specific aspects. Valid v1 aspects: `types`, `context`. Comma-separated or repeated. |
-| `--brief`          | Compact, one-line diagnostics with no source-context snippets.                                |
+| `--brief`          | Compact, one-line diagnostics with no source-context snippets. Locations render as `file:line:col` (the same `line:col` the rich output and the conformance directives use), not byte offsets. |
 | `--strict`         | Force production strictness; turns completeness *warnings* into *errors*. Mirrors `bock build --strict`. |
 
 `bock check` exits non-zero **if and only if** it produces at least

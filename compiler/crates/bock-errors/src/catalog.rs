@@ -38,6 +38,10 @@ pub struct DiagnosticCodeInfo {
 ///   `bock-air` resolver and E6006 by the checker, but both report
 ///   effect-system rules so they live in this family)
 /// - `7xxx` — capabilities (`bock-types/capabilities`)
+/// - `8xxx` — context-annotation system (`bock-air`): `@context`/`@capability`
+///   interpretation (`context.rs`), context validation (`validate_context.rs`),
+///   and capability verification / composition / PII flow
+///   (`verify_capabilities.rs`, `compose_context.rs`)
 #[must_use]
 pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
     vec![
@@ -70,50 +74,48 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             description: "A character literal is empty, contains more than one character, or has an invalid escape.",
             spec_refs: &["§1.3"],
         },
+        // `E1005`/`E1006` are each shared by the lexer and the name-resolution
+        // pass (a `1xxx` slot collision). Until a renumbering decision splits
+        // them, one parseable catalog entry per code covers both meanings.
         DiagnosticCodeInfo {
             code: "E1005",
             severity: Severity::Error,
-            summary: "Invalid digit for numeric literal.",
-            description: "A digit was found that is outside the range of the declared numeric base.",
-            spec_refs: &["§1.3"],
+            summary: "Invalid digit for numeric literal, or imported module not found.",
+            description: "Two passes share this slot (a `1xxx` collision pending a renumbering decision). Lexer: a digit was found that is outside the range of the declared numeric base. Name resolution: a `use` path named a module the registry could not locate.",
+            spec_refs: &["§1.3", "§10"],
         },
         DiagnosticCodeInfo {
             code: "E1006",
             severity: Severity::Error,
-            summary: "Unterminated block comment.",
-            description: "A `/* ... */` block comment was opened but never closed before end of input.",
-            spec_refs: &["§1.2"],
+            summary: "Unterminated block comment, or imported symbol not found in module.",
+            description: "Two passes share this slot (a `1xxx` collision pending a renumbering decision). Lexer: a `/* ... */` block comment was opened but never closed before end of input. Name resolution: a `use` path names a module that exists but does not export the requested symbol.",
+            spec_refs: &["§1.2", "§10"],
         },
         // ── Name resolution (also 1xxx) ─────────────────────────────────
         DiagnosticCodeInfo {
             code: "W1001",
             severity: Severity::Warning,
             summary: "Unused import.",
-            description: "An import was declared but never referenced.",
+            description: "An import was declared but never referenced. Uses of an imported effect name in `with`, `handling`, and `impl … for` positions count as references (Q-w1001-effect-import-false-positive).",
             spec_refs: &["§10"],
         },
-        // Note: E1001 overlaps with the lexer code above — historically
-        // the resolver reuses the slot for "undefined name" at a different
-        // phase. Tooling should disambiguate by pass context.
-        DiagnosticCodeInfo {
-            code: "E1005 (module)",
-            severity: Severity::Error,
-            summary: "Module not found.",
-            description: "An imported module could not be located by the module registry.",
-            spec_refs: &["§10"],
-        },
-        DiagnosticCodeInfo {
-            code: "E1006 (module)",
-            severity: Severity::Error,
-            summary: "Symbol not found in module.",
-            description: "A `use` path names a module that exists but does not export the requested symbol.",
-            spec_refs: &["§10"],
-        },
+        // Note: E1001 also overlaps — the lexer uses it for "unexpected
+        // character" and the resolver reuses it for "undefined name" at a
+        // different phase. Tooling disambiguates by pass context. This
+        // `1xxx` collision (E1001/E1005/E1006) is tracked for a renumbering
+        // decision; the catalog keeps one parseable entry per code.
         DiagnosticCodeInfo {
             code: "E1007",
             severity: Severity::Error,
             summary: "Symbol is not visible.",
             description: "The referenced symbol exists but is private; declare it `public` to export it.",
+            spec_refs: &["§10"],
+        },
+        DiagnosticCodeInfo {
+            code: "E1008",
+            severity: Severity::Error,
+            summary: "Circular module dependency.",
+            description: "The `use` import graph contains a cycle, so the modules cannot be compiled in any dependency order. The message names every module in the cycle in order and points at one offending `use` edge. Fix by removing one of the `use` edges in the cycle, or by extracting the shared items into a third module that both can import.",
             spec_refs: &["§10"],
         },
         // ── Parser (2xxx) ───────────────────────────────────────────────
@@ -169,8 +171,15 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
         DiagnosticCodeInfo {
             code: "E2030",
             severity: Severity::Error,
-            summary: "Invalid lambda parameter list.",
-            description: "Lambda parameters must be parenthesized; single-identifier forms are not accepted.",
+            summary: "Parentheses required (lambda parameters / `if` condition).",
+            description: "A construct that requires parentheses was written without them. Lambda parameters must be parenthesized; single-identifier forms (`x => …`) are not accepted. An `if` condition must be parenthesized (`if (cond) { … }`); the diagnostic names the offending token and a note gives the wrapped form. (The parser also reuses this code for a missing function name after `fn` — a known overload pending a renumbering decision.)",
+            spec_refs: &["§5"],
+        },
+        DiagnosticCodeInfo {
+            code: "E2031",
+            severity: Severity::Error,
+            summary: "Invalid lambda / function parameter.",
+            description: "A parameter position expected a name and found something else — e.g. a missing name after `mut`, or a non-identifier where a parameter name was required.",
             spec_refs: &["§5"],
         },
         DiagnosticCodeInfo {
@@ -195,6 +204,13 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             spec_refs: &["§4.7"],
         },
         DiagnosticCodeInfo {
+            code: "E2061",
+            severity: Severity::Error,
+            summary: "Expected constant name.",
+            description: "A `const` declaration was missing its name: a constant name was expected and a different token was found.",
+            spec_refs: &["§4"],
+        },
+        DiagnosticCodeInfo {
             code: "E2070",
             severity: Severity::Error,
             summary: "Invalid match arm.",
@@ -202,11 +218,39 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             spec_refs: &["§7"],
         },
         DiagnosticCodeInfo {
+            code: "E2071",
+            severity: Severity::Error,
+            summary: "Expected associated type name.",
+            description: "An associated-type position inside a `trait`/`impl` expected a type name (`type Name`) and found a different token.",
+            spec_refs: &["§4.4"],
+        },
+        DiagnosticCodeInfo {
+            code: "E2072",
+            severity: Severity::Error,
+            summary: "Expected method name.",
+            description: "A method declaration inside a `trait`/`impl`/`class` expected a method name after `fn` and found a different token.",
+            spec_refs: &["§4.4"],
+        },
+        DiagnosticCodeInfo {
             code: "E2090",
             severity: Severity::Error,
             summary: "Invalid effect declaration.",
             description: "An `effect` declaration or `with` clause is malformed.",
             spec_refs: &["§8"],
+        },
+        DiagnosticCodeInfo {
+            code: "E2091",
+            severity: Severity::Error,
+            summary: "Expected effect operation name.",
+            description: "An effect operation declaration inside an `effect` block expected an operation name after `fn` and found a different token.",
+            spec_refs: &["§8"],
+        },
+        DiagnosticCodeInfo {
+            code: "E2092",
+            severity: Severity::Error,
+            summary: "Tuple positional indexing is not available in v1.",
+            description: "`t.0` / `t.1` positional tuple indexing is not a v1 form. Destructure with `let (a, b) = t` to bind tuple elements instead.",
+            spec_refs: &["§5"],
         },
         // ── Type checker (4xxx) ────────────────────────────────────────
         DiagnosticCodeInfo {
@@ -308,6 +352,13 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             description: "The loop body moves a value captured from outside, which would move it more than once.",
             spec_refs: &["§3"],
         },
+        DiagnosticCodeInfo {
+            code: "E5004",
+            severity: Severity::Error,
+            summary: "In-place `List` mutator requires a `mut` receiver.",
+            description: "An in-place `List` mutator (`push`/`append`, DQ18; `pop`/`remove_at`/`insert`/`reverse` and indexed `set`, DQ30) was called on a receiver that is not a mutable lvalue. These methods mutate the list in place, so the receiver must be a `mut` binding. Fix: declare the list with `let mut`, take a `mut` parameter, or use a value-returning combinator (`+` / `concat`).",
+            spec_refs: &["§3"],
+        },
         // ── Effects (6xxx) ─────────────────────────────────────────────
         DiagnosticCodeInfo {
             code: "E6001",
@@ -380,6 +431,144 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             description: "A public function calls into code requiring capabilities it has not declared.",
             spec_refs: &["§9"],
         },
+        // ── Context-annotation system (8xxx) ───────────────────────────
+        // @context / @capability interpretation (bock-air/context.rs).
+        DiagnosticCodeInfo {
+            code: "E8001",
+            severity: Severity::Error,
+            summary: "Unknown capability in `@capability`.",
+            description: "A `@capability` annotation named a capability the compiler does not recognize.",
+            spec_refs: &["§9"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8002",
+            severity: Severity::Error,
+            summary: "Expected capability name in `@capability`.",
+            description: "A `@capability` argument was not a capability name (e.g. `Capability.Network` or `Network`).",
+            spec_refs: &["§9"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8003",
+            severity: Severity::Error,
+            summary: "Expected duration or byte size in `@performance`.",
+            description: "A `@performance` budget argument was not a duration (e.g. `100.ms`) or a byte size (e.g. `50.mb`).",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8004",
+            severity: Severity::Error,
+            summary: "`@invariant` requires an expression argument.",
+            description: "An `@invariant` annotation was written without the boolean expression it constrains.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8005",
+            severity: Severity::Error,
+            summary: "Invalid `@security` argument.",
+            description: "A `@security` annotation expected a string `level` or a boolean `pii` flag, or was given neither.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8006",
+            severity: Severity::Error,
+            summary: "Expected string argument in `@domain`.",
+            description: "A `@domain` annotation argument was not a string literal.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8010",
+            severity: Severity::Error,
+            summary: "`@invariant` expression must be boolean-typed.",
+            description: "An `@invariant` expression must be a comparison, logical, or call expression that yields a boolean.",
+            spec_refs: &["§17"],
+        },
+        // Context validation (bock-air/validate_context.rs).
+        DiagnosticCodeInfo {
+            code: "E8011",
+            severity: Severity::Error,
+            summary: "Child security level less restrictive than parent.",
+            description: "An item's `@security` level is less restrictive than the level it inherits from an enclosing context, which would weaken the parent's guarantee.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "W8011",
+            severity: Severity::Warning,
+            summary: "Child declares `pii=false` but parent declares `pii=true`.",
+            description: "PII status is inherited: a child cannot drop a parent's `pii=true` to `pii=false`. The narrower flag is ignored and a warning is issued.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8013",
+            severity: Severity::Error,
+            summary: "Public item is missing context annotations (production mode).",
+            description: "In production (strict) mode every public item (`fn`/`class`/`trait`/`record`/`enum`) must carry a `@context` annotation. The standard-mode form of this rule is the warning `W8013`.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "W8013",
+            severity: Severity::Warning,
+            summary: "Public item is missing context annotations (standard mode).",
+            description: "In standard mode a public item (`fn`/`class`/`trait`/`record`/`enum`) without a `@context` annotation is flagged as a recommendation, once per item. Promotes to the error `E8013` in production (strict) mode; suppressed entirely in lax mode and for embedded-stdlib modules.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "W8015",
+            severity: Severity::Warning,
+            summary: "Unknown security level in `@security`.",
+            description: "A `@security(level: …)` string was not one of the known security levels; the annotation is kept but flagged.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8016",
+            severity: Severity::Error,
+            summary: "`@performance` budget must be positive.",
+            description: "A `@performance` budget (`max_latency` or `max_memory`) was zero or negative; budgets must be positive values.",
+            spec_refs: &["§17"],
+        },
+        // Capability verification, composition, and PII flow
+        // (bock-air/verify_capabilities.rs, compose_context.rs).
+        DiagnosticCodeInfo {
+            code: "E8020",
+            severity: Severity::Error,
+            summary: "Effect operation has no handler in scope.",
+            description: "A called effect operation has no handler installed in any enclosing scope and the effect is not declared, so it can never be discharged.",
+            spec_refs: &["§8", "§10"],
+        },
+        DiagnosticCodeInfo {
+            code: "W8020",
+            severity: Severity::Warning,
+            summary: "Effect declared-but-unused, or PII-tainted signature without security context.",
+            description: "Two checks currently share this code (a `8xxx` overlap pending a renumbering decision). Capability verification: an effect declared in a function's `with` clause is never used in its body. Context composition: a function has PII-tainted types in its signature but its module lacks a `@security` context acknowledging PII.",
+            spec_refs: &["§8", "§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8021",
+            severity: Severity::Error,
+            summary: "Callee requires an undeclared capability.",
+            description: "A called function requires a capability that is not declared in the current scope, so the requirement cannot be satisfied.",
+            spec_refs: &["§9"],
+        },
+        DiagnosticCodeInfo {
+            code: "W8021",
+            severity: Severity::Warning,
+            summary: "Importing a PII-returning function into a module without a PII security context.",
+            description: "A `use` imports a function that returns PII-tainted types into a module whose `@security` context does not acknowledge PII.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "W8022",
+            severity: Severity::Warning,
+            summary: "PII-tainted type passed to a logging/output function.",
+            description: "A PII-tainted type flows into a logging or output sink, which is a potential data leak. One warning is emitted per call site.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "E8023",
+            severity: Severity::Error,
+            summary: "Public declaration is missing `@context` (production mode).",
+            description: "In production mode a public function, class, trait, or type must carry a `@context` annotation; capability verification rejects the bare declaration.",
+            spec_refs: &["§17"],
+        },
     ]
 }
 
@@ -402,5 +591,196 @@ mod tests {
                 info.code
             );
         }
+    }
+
+    // ── Emission ↔ catalog correspondence (Q-error-catalog-completeness) ───────
+
+    /// Parse a catalog `code` string into `(prefix, number)`.
+    ///
+    /// Every catalog code must be a plain `E`/`W` followed by digits — no
+    /// disambiguation suffixes like `"E1005 (module)"`, which neither parse
+    /// nor round-trip through [`crate::DiagnosticCode`]'s `Display`.
+    fn parse_code(code: &str) -> Option<(char, u16)> {
+        let mut chars = code.chars();
+        let prefix = chars.next()?;
+        if !matches!(prefix, 'E' | 'W') {
+            return None;
+        }
+        let digits: String = chars.collect();
+        let number: u16 = digits.parse().ok()?;
+        Some((prefix, number))
+    }
+
+    #[test]
+    fn every_catalog_code_parses_and_round_trips() {
+        for info in diagnostic_catalog() {
+            let (prefix, number) = parse_code(info.code).unwrap_or_else(|| {
+                panic!(
+                    "catalog code {:?} is not a parseable `E`/`W` + digits code \
+                     (no suffixes like `(module)` — split or fold collisions instead)",
+                    info.code
+                )
+            });
+            // Severity prefix must agree with the declared severity.
+            let expected_prefix = match info.severity {
+                Severity::Error => 'E',
+                Severity::Warning => 'W',
+                // Info/Hint diagnostics are not catalogued today; guard anyway.
+                Severity::Info | Severity::Hint => prefix,
+            };
+            assert_eq!(
+                prefix, expected_prefix,
+                "code {} prefix disagrees with its severity {:?}",
+                info.code, info.severity
+            );
+            // Display must reproduce the catalog string exactly.
+            let rendered = crate::DiagnosticCode { prefix, number }.to_string();
+            assert_eq!(
+                rendered, info.code,
+                "catalog code {:?} does not round-trip through DiagnosticCode \
+                 Display (got {rendered:?})",
+                info.code
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_has_no_duplicate_codes() {
+        let mut seen = std::collections::BTreeSet::new();
+        for info in diagnostic_catalog() {
+            assert!(
+                seen.insert(info.code),
+                "duplicate catalog entry for code {:?}",
+                info.code
+            );
+        }
+    }
+
+    /// Scan a Rust source string for `DiagnosticCode { prefix: 'X', number: N }`
+    /// constructions, returning the set of rendered code strings (e.g. `E8003`).
+    ///
+    /// Only "real" emitted codes — `number >= 1000` — are collected; the small
+    /// numbers (`1`, `42`, `99`, `204`, …) are exclusively diagnostic
+    /// *test fixtures* that construct a `DiagnosticCode` directly and are not
+    /// part of the emitted vocabulary.
+    fn scan_emitted_codes(src: &str) -> std::collections::BTreeSet<String> {
+        // Strip whitespace between tokens so the pattern can be matched without
+        // caring about line breaks / indentation in the multi-line struct
+        // literal. We only need a flattened, whitespace-collapsed view.
+        let flat: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut out = std::collections::BTreeSet::new();
+        let needle = "DiagnosticCode { prefix: '";
+        let mut rest = flat.as_str();
+        while let Some(pos) = rest.find(needle) {
+            rest = &rest[pos + needle.len()..];
+            // Next char is the prefix; then `' , number: <digits>`.
+            let mut it = rest.chars();
+            let Some(prefix) = it.next() else { break };
+            if !matches!(prefix, 'E' | 'W') {
+                continue;
+            }
+            // Locate `number:` after the prefix.
+            let Some(num_pos) = rest.find("number:") else {
+                break;
+            };
+            let after = rest[num_pos + "number:".len()..].trim_start();
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(number) = digits.parse::<u16>() {
+                if number >= 1000 {
+                    out.insert(format!("{prefix}{number:04}"));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn scan_emitted_codes_basic() {
+        let src = r#"
+            self.diag.error(
+                DiagnosticCode { prefix: 'E', number: 8003 },
+                "x", span,
+            );
+            let c = DiagnosticCode {
+                prefix: 'W',
+                number: 1001,
+            };
+            // a test fixture, must be ignored:
+            DiagnosticCode { prefix: 'E', number: 204 }
+        "#;
+        let codes = scan_emitted_codes(src);
+        assert!(codes.contains("E8003"), "got {codes:?}");
+        assert!(codes.contains("W1001"), "got {codes:?}");
+        assert!(
+            !codes.contains("E0204"),
+            "test fixtures (<1000) must be skipped: {codes:?}"
+        );
+    }
+
+    /// Every diagnostic code actually emitted by a compiler crate must have a
+    /// catalog entry. This is the standing guard for
+    /// Q-error-catalog-completeness: the catalog is the single registry, and
+    /// an unregistered emitted code is a defect (an editor/agent cannot look it
+    /// up). The scan walks every `compiler/crates/*/src/**/*.rs` for
+    /// `DiagnosticCode { prefix, number >= 1000 }` constructions.
+    ///
+    /// If this fails, add the missing code to `diagnostic_catalog()` (do NOT
+    /// renumber an existing emission — that is a design decision).
+    #[test]
+    fn every_emitted_code_is_registered() {
+        let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("bock-errors lives under compiler/crates/");
+
+        let registered: std::collections::BTreeSet<String> = diagnostic_catalog()
+            .iter()
+            .map(|i| i.code.to_string())
+            .collect();
+
+        let mut emitted = std::collections::BTreeSet::new();
+        let mut files_scanned = 0usize;
+        let mut stack = vec![crates_dir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Only descend into `src/` trees and crate roots; skip
+                    // `target/` and hidden dirs.
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if name == "target" || name.starts_with('.') {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    if let Ok(src) = std::fs::read_to_string(&path) {
+                        files_scanned += 1;
+                        emitted.extend(scan_emitted_codes(&src));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            files_scanned > 50,
+            "expected to scan the whole crates tree, only saw {files_scanned} files \
+             (CARGO_MANIFEST_DIR layout changed?)"
+        );
+        // Sanity floor: the scan must find the well-known codes.
+        for expected in ["E1001", "E2000", "E4001", "E6005", "E8003", "W1001"] {
+            assert!(
+                emitted.contains(expected),
+                "scanner failed to find {expected}; scan is broken"
+            );
+        }
+
+        let unregistered: Vec<&String> = emitted.difference(&registered).collect();
+        assert!(
+            unregistered.is_empty(),
+            "these emitted diagnostic codes are NOT in the catalog \
+             (register them in diagnostic_catalog(); do not renumber): {unregistered:?}"
+        );
     }
 }

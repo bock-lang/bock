@@ -1,5 +1,5 @@
 // TEST: map_contains_rejected
-// EXPECT: error E4013 at 14:23
+// EXPECT: error E4013 at 14:21
 //
 // DQ22: `contains` is NOT a `Map` method. Map membership is `contains_key`
 // (key) / `contains_value` (value); bare `contains` is `Set`-only (a Set has

@@ -1,5 +1,5 @@
 // TEST: list_insert_non_mut_receiver
-// EXPECT: error E5004 at 14:5
+// EXPECT: error E5004 at 14:3
 //
 // DQ30: `insert` is an in-place mutator
 // (`insert(mut self, index: Int, value: T) -> Void`) — it inserts into the

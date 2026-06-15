@@ -2340,7 +2340,31 @@ impl<'src> Parser<'src> {
         let start = self.peek().span;
         let _ = self.advance(); // consume `if`
 
-        let _ = self.expect(TokenKind::LParen);
+        // The condition must be parenthesized: `if (cond) { ... }`. A missing
+        // `(` here used to fall into the generic E2000 "expected `(`" catch-all
+        // (via `expect`), which states the token but not the rule or the fix.
+        // Emit the purpose-built parens-required diagnostic (E2030) with a
+        // concrete one-edit repair so an agent can fix it from the text alone
+        // (Q-diag-structure-misc (b)). Then keep parsing as if the `(` were
+        // present so a real condition is still read.
+        let had_lparen = if self.at(TokenKind::LParen) {
+            let _ = self.advance();
+            true
+        } else {
+            let span = self.peek().span;
+            let found = self.peek().kind.clone();
+            self.diagnostics
+                .error(
+                    DiagnosticCode {
+                        prefix: 'E',
+                        number: 2030,
+                    },
+                    format!("`if` condition must be parenthesized, found `{found}`"),
+                    span,
+                )
+                .note("wrap the condition in parentheses: `if (cond) { ... }`");
+            false
+        };
 
         // Check for `if-let`: `if (let Some(v) = expr)`
         let (let_pattern, condition) = if self.at(TokenKind::Let) {
@@ -2353,7 +2377,12 @@ impl<'src> Parser<'src> {
             (None, self.parse_expr())
         };
 
-        let _ = self.expect(TokenKind::RParen);
+        // Only require the closing `)` if we saw the opening one; otherwise the
+        // single E2030 already reported the missing parens and a second
+        // "expected `)`" would be noise for the same root cause.
+        if had_lparen {
+            let _ = self.expect(TokenKind::RParen);
+        }
         self.skip_newlines();
 
         let then_block = self.parse_block();
