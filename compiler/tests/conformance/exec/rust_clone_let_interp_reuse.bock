@@ -1,0 +1,42 @@
+// TEST: exec_rust_clone_let_interp_reuse
+// EXPECT: output "1,2,3,3"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-rust-clone-insertion-gaps (let-binding reuse inside one interpolation). A
+// non-Copy `let` binding (`xs: List[Int]` → a Rust `Vec`) is consumed BY VALUE
+// by a free function inside a string interpolation and then read AGAIN in the
+// SAME interpolation: `"${join(xs)},${xs.len()}"`. The first interpolation
+// segment lowers to `join(xs)` (moves `xs`); the second lowers to
+// `(xs).len()` — a use of the moved `xs` (E0382).
+//
+// Bock value semantics permit reusing `xs` after the call (every other backend
+// re-reads it freely); the Rust backend must seed `xs` into its move-reuse clone
+// set so the by-value `join(xs)` clones. The seeding heuristic must match the
+// one `seed_reused_params` already uses (`count > 1 || used-in-loop`) — the bare
+// `count > 1` form was already correct here in principle (`xs` appears twice),
+// confirming the let-seeding simply needed to consult the reused set the same
+// way the parameter seeding does.
+//
+// Before the fix the emitted Rust was `format!("{},{}", join(xs), (xs).len() …)`
+// with `join(xs)` un-cloned; js/ts/python/go ran fine.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = ""
+  for v in xs {
+    if (out == "") {
+      out = "${v}"
+    } else {
+      out = "${out},${v}"
+    }
+  }
+  return out
+}
+
+fn main() -> Void {
+  let xs: List[Int] = [1, 2, 3]
+  println("${join(xs)},${xs.len()}")
+}
