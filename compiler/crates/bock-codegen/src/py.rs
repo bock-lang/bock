@@ -842,7 +842,13 @@ fn value_needs_stmt_form(value: &AIRNode) -> bool {
         NodeKind::Match { arms, .. } => {
             crate::generator::match_has_statement_arm(arms)
                 || control_flow_has_raise_branch(value)
-                || match_arm_drops_leading_stmts(arms)
+                // A let-EXPRESSION-position match (`let x = match … { … }`) must
+                // route the same payload/field-binding shapes to statement form
+                // as the function-tail/return value path: the `(lambda __v: …)`
+                // value chain cannot bind a record-pattern field or a user-enum
+                // constructor payload, so without this the binding is left free
+                // (`NameError`). Q-py-letexpr-match-namerror.
+                || match_value_needs_stmt_form(arms)
         }
         NodeKind::Loop { .. } | NodeKind::While { .. } => true,
         NodeKind::If { .. } => {
@@ -1005,7 +1011,39 @@ fn match_value_needs_stmt_form(arms: &[AIRNode]) -> bool {
                     if matches!(pattern.kind, NodeKind::RecordPat { .. })
             )
         })
+        || arms
+            .iter()
+            .any(|arm| matches!(&arm.kind, NodeKind::MatchArm { pattern, .. } if arm_constructor_binds_payload(pattern)))
         || match_arm_drops_leading_stmts(arms)
+}
+
+/// Whether `pattern` is a **constructor pattern that binds a payload the
+/// `(lambda __v: …)` value chain cannot bind** — i.e. a user-enum variant such
+/// as `Circle(r)` / `Rect(w, h)`. [`PyEmitCtx::emit_arm_value`] only binds the
+/// payload of the runtime constructors `Some(x)`/`Ok(x)`/`Err(x)` (and the
+/// payload-less `None`); for any *other* constructor it emits the arm body with
+/// the field bindings left FREE, so a value-position / let-expression match
+/// `let label = match s { Circle(r) => r … }` lowered to `(lambda __v: r …)(s)`
+/// and raised `NameError: name 'r'` at run time (Q-py-letexpr-match-namerror /
+/// Q-py-valuepos-match-payload-namebind — same root). Routing such a match to
+/// the statement-form `match`/`case`, whose `emit_pattern` binds
+/// `case Shape_Circle(_0=r):` by position, makes the binding resolve. The
+/// chain-supported `Some`/`None`/`Ok`/`Err` shapes are left on the chain.
+fn arm_constructor_binds_payload(pattern: &AIRNode) -> bool {
+    let NodeKind::ConstructorPat { path, fields } = &pattern.kind else {
+        return false;
+    };
+    // The runtime Optional/Result constructors are bound by the value chain.
+    let leaf = path.segments.last().map_or("", |s| s.name.as_str());
+    if matches!(leaf, "Some" | "None" | "Ok" | "Err") {
+        return false;
+    }
+    // Any field that introduces a binding (a bare `BindPat`, or a nested
+    // structured sub-pattern that itself binds) cannot be left free in the
+    // expression chain.
+    fields
+        .iter()
+        .any(|f| !matches!(f.kind, NodeKind::WildcardPat))
 }
 
 /// Whether any **value-position** `match` arm carries a leading statement that
@@ -12497,6 +12535,117 @@ mod tests {
         assert!(
             !has_python3() || check_py_syntax(&stubbed),
             "generated python must parse, got:\n{stubbed}"
+        );
+    }
+
+    /// The predicate that drives the fix: a user-enum constructor pattern that
+    /// binds a payload (`Circle(r)`) needs statement form, but the runtime
+    /// `Some`/`None`/`Ok`/`Err` shapes (handled by the value chain) do not.
+    #[test]
+    fn arm_constructor_binds_payload_distinguishes_user_from_runtime() {
+        let user_bind = node(
+            1,
+            NodeKind::ConstructorPat {
+                path: type_path(&["Circle"]),
+                fields: vec![bind_pat(2, "r")],
+            },
+        );
+        assert!(
+            arm_constructor_binds_payload(&user_bind),
+            "user-enum constructor binding a payload must route to statement form"
+        );
+        let some_bind = node(
+            3,
+            NodeKind::ConstructorPat {
+                path: type_path(&["Some"]),
+                fields: vec![bind_pat(4, "x")],
+            },
+        );
+        assert!(
+            !arm_constructor_binds_payload(&some_bind),
+            "Some(x) is bound by the value chain, stays off statement form"
+        );
+        let user_unit = node(
+            5,
+            NodeKind::ConstructorPat {
+                path: type_path(&["Red"]),
+                fields: vec![],
+            },
+        );
+        assert!(
+            !arm_constructor_binds_payload(&user_unit),
+            "a payload-less user variant binds nothing, stays off statement form"
+        );
+    }
+
+    /// Q-py-letexpr-match-namerror: a user-enum constructor-payload bind in a
+    /// LET-EXPRESSION-position match (`let a = match s { Circle(r) => r … }`)
+    /// must route to the statement-form `match`/`case` so `r` is bound — never
+    /// the `(lambda __v: r …)(s)` chain that leaves `r` free (`NameError`).
+    #[test]
+    fn py_letexpr_constructor_payload_routes_to_statement_form() {
+        let circle = node(
+            100,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    101,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Circle"]),
+                        fields: vec![bind_pat(102, "r")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(103, vec![], Some(id_node(104, "r")))),
+            },
+        );
+        let other = node(
+            110,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(111, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(block(112, vec![], Some(int_lit(113, "0")))),
+            },
+        );
+        let match_node = node(
+            120,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(121, "s")),
+                arms: vec![circle, other],
+            },
+        );
+        // `let a = match (s) { … }`; tail reads `a`.
+        let let_a = node(
+            130,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(131, "a")),
+                ty: None,
+                value: Box::new(match_node),
+            },
+        );
+        let f = node(
+            140,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("size"),
+                generic_params: vec![],
+                params: vec![param_node(141, "s")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(142, vec![let_a], Some(id_node(143, "a")))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("match s:") && out.contains("case Circle(_0=r):"),
+            "let-expr constructor-payload match must bind r via statement form, got:\n{out}"
+        );
+        assert!(
+            !out.contains("lambda __v"),
+            "must not lower the payload-binding match to a value lambda, got:\n{out}"
         );
     }
 
