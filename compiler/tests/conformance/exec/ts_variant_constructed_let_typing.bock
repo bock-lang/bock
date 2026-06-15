@@ -1,0 +1,90 @@
+// TEST: exec_ts_variant_constructed_let_typing
+// EXPECT: output "open 7;closed 3;dot;line 2 5;box 4 5"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression for Q-ts-variant-constructed-let-typing: on TS, a type-annotated
+// binding initialised by a single variant construction (`let g: Gate =
+// Open { ... }`) emitted as `const g: Gate = Gate_Open(7)` narrowed `g` to the
+// *construction* variant (`Gate_Open`), not its *declared union* (`Gate`). A
+// later `match g` on a SIBLING variant then failed `tsc --noEmit` with TS2678
+// ("Type '\"Closed\"' is not comparable to type '\"Open\"'") because the
+// const-init narrowed `_tag` excludes the sibling tag, plus TS2339 on the
+// sibling's payload field (`._tag` narrowed to `never`).
+//
+// The fix widens the initialiser to the declared union (`Gate_Open(7) as Gate`)
+// so the binding carries the declared type at every use site. CRITICAL to the
+// exposure: each `match` is on the LET BINDING itself, in the SAME scope as its
+// declaration (not on a function parameter — that path never narrows), and at
+// least one arm reads a SIBLING variant the binding was not constructed as.
+//
+// All three payload shapes are covered so the widening fires for each
+// construction node kind: struct (`RecordConstruct`), tuple (`Call` on a
+// variant name), and unit (bare `Identifier`).
+//
+// The matches are STATEMENT-position (each arm appends to a mutable `out`
+// accumulator), so the whole expected output is a single `;`-joined line the
+// harness diffs as one string — and statement matches keep this fixture clear
+// of the unrelated Python VALUE-position-match payload-binding lowering (a
+// separate backend defect; see FOUND in the PR).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+enum Gate {
+  Open { level: Int }
+  Closed { reason: Int }
+}
+
+enum Shape {
+  Dot
+  Line(Int, Int)
+  Box { w: Int, h: Int }
+}
+
+fn main() -> Void {
+  let mut out: String = ""
+
+  // Struct variant bound + matched in-scope: the `Closed` arm reads a field the
+  // binding was not constructed with, so without widening the match fails to
+  // compile under tsc strict mode.
+  let g: Gate = Open { level: 7 }
+  match g {
+    Open { level } => out = out + "open ${level}"
+    Closed { reason } => out = out + "closed ${reason}"
+  }
+
+  // A second binding constructed as the OTHER struct variant, to prove the
+  // widening is not specific to the first variant declared.
+  let c: Gate = Closed { reason: 3 }
+  match c {
+    Open { level } => out = out + ";open ${level}"
+    Closed { reason } => out = out + ";closed ${reason}"
+  }
+
+  // Unit variant bound + matched in-scope.
+  let d: Shape = Dot
+  match d {
+    Dot => out = out + ";dot"
+    Line(a, b) => out = out + ";line ${a} ${b}"
+    Box { w, h } => out = out + ";box ${w} ${h}"
+  }
+
+  // Tuple variant bound + matched in-scope.
+  let l: Shape = Line(2, 5)
+  match l {
+    Dot => out = out + ";dot"
+    Line(a, b) => out = out + ";line ${a} ${b}"
+    Box { w, h } => out = out + ";box ${w} ${h}"
+  }
+
+  // Struct variant of the second enum, bound + matched in-scope.
+  let bx: Shape = Box { w: 4, h: 5 }
+  match bx {
+    Dot => out = out + ";dot"
+    Line(a, b) => out = out + ";line ${a} ${b}"
+    Box { w, h } => out = out + ";box ${w} ${h}"
+  }
+
+  println(out)
+}
