@@ -157,6 +157,41 @@ fn js_module_uses_eq(items: &[AIRNode]) -> bool {
     })
 }
 
+/// The structural comparison runtime: lower a bounded `T: Comparable`'s
+/// `a.compare(b)` through this so it dispatches to the instantiated type's own
+/// `compare` method when present (a record/enum carrying an `impl Comparable`),
+/// falling back to the native `<`/`===` ternary for a primitive instantiation
+/// (where `compare` is the intrinsic ordering). Without it the bounded bridge
+/// emitted the native ternary unconditionally, so `(a) < (b)` on two RECORDS is
+/// always `false` (object `<` coerces to `NaN`) and `(a) === (b)` is reference
+/// identity — every comparison wrongly returned `Greater`, silently mis-ordering
+/// `max`/`min`/sort over a user `Comparable` type. The emitted `compare` method
+/// takes `(self, other)` (the desugared self-call duplicates the receiver), so
+/// the helper calls `a.compare(a, b)`. Mirrors [`EQ_RUNTIME_JS`]'s `__bockEq`.
+/// (Q-bounded-comparable-codegen.)
+const COMPARE_RUNTIME_JS: &str = "\
+// ── Bock structural comparison runtime ──
+const __bockCompare = (a, b) => {
+  if (a !== null && typeof a === \"object\" && typeof a.compare === \"function\") {
+    return a.compare(a, b);
+  }
+  return (a < b ? { _tag: \"Less\" } : (a === b ? { _tag: \"Equal\" } : { _tag: \"Greater\" }));
+};
+";
+
+/// True if the module contains a bounded `T: Comparable` `compare` bridge call
+/// (whose instantiation may be a record), so [`COMPARE_RUNTIME_JS`]'s
+/// `__bockCompare` must be emitted. Mirrors [`js_module_uses_eq`]. The
+/// `TraitBound:Comparable` recv-kind tag is the checker's signal that a
+/// `.compare(..)` dispatches through the generic bound rather than a concrete
+/// type.
+fn js_module_uses_compare(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let dbg = format!("{n:?}");
+        dbg.contains("TraitBound:Comparable")
+    })
+}
+
 /// The shared per-module runtime module name (without extension). In the
 /// per-module (native-import) emission path the concurrency and range runtime
 /// helpers live in one file — `_bock_runtime.js` at the build root — and every
@@ -321,6 +356,7 @@ impl CodeGenerator for JsGenerator {
         let mut runtime_concurrency = false;
         let mut runtime_range = false;
         let mut runtime_eq = false;
+        let mut runtime_compare = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let own_path = crate::generator::module_path_string(module).unwrap_or_default();
@@ -358,6 +394,7 @@ impl CodeGenerator for JsGenerator {
             runtime_concurrency |= ctx.needs_runtime_concurrency;
             runtime_range |= ctx.needs_runtime_range;
             runtime_eq |= ctx.needs_runtime_eq;
+            runtime_compare |= ctx.needs_runtime_compare;
             let (mut content, mappings) = ctx.finish();
 
             // The entry file gets the `main()` invocation appended exactly once.
@@ -389,7 +426,7 @@ impl CodeGenerator for JsGenerator {
 
         // Shared runtime module with exactly the helpers referenced, each
         // `export`ed so consuming modules can `import { … }` them.
-        if runtime_concurrency || runtime_range || runtime_eq {
+        if runtime_concurrency || runtime_range || runtime_eq || runtime_compare {
             let mut content = String::new();
             if runtime_concurrency {
                 content.push_str(&export_runtime_consts(CONCURRENCY_RUNTIME_JS));
@@ -401,6 +438,10 @@ impl CodeGenerator for JsGenerator {
             }
             if runtime_eq {
                 content.push_str(&export_runtime_consts(EQ_RUNTIME_JS));
+                content.push('\n');
+            }
+            if runtime_compare {
+                content.push_str(&export_runtime_consts(COMPARE_RUNTIME_JS));
                 content.push('\n');
             }
             files.push(OutputFile {
@@ -605,6 +646,10 @@ struct EmitCtx {
     /// emitted in the single-module self-contained path. Deduped exactly as
     /// [`Self::range_runtime_emitted`].
     eq_runtime_emitted: bool,
+    /// Set once the structural-comparison runtime ([`COMPARE_RUNTIME_JS`]) has
+    /// been emitted in the single-module self-contained path. Deduped exactly as
+    /// [`Self::eq_runtime_emitted`]. (Q-bounded-comparable-codegen.)
+    compare_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Maps a variant name to its enum so a
     /// unit-variant reference lowers to the frozen `{enum}_{variant}` const, a
     /// struct/tuple construction lowers to the `{enum}_{variant}(..)` factory,
@@ -641,6 +686,11 @@ struct EmitCtx {
     /// As [`Self::needs_runtime_concurrency`], for the DQ29 structural-equality
     /// runtime (`__bockEq`).
     needs_runtime_eq: bool,
+    /// As [`Self::needs_runtime_concurrency`], for the bounded-`Comparable`
+    /// structural-comparison runtime (`__bockCompare`). Set when this module
+    /// lowers a `T: Comparable` `compare` bridge call.
+    /// (Q-bounded-comparable-codegen.)
+    needs_runtime_compare: bool,
     /// Implicit cross-module imports for the per-module path — names this module
     /// references but neither declares locally nor imports via an explicit `use`
     /// (e.g. a §18.2-prelude trait used as a base in an `impl`). Computed in
@@ -739,12 +789,14 @@ impl EmitCtx {
             concurrency_runtime_emitted: false,
             range_runtime_emitted: false,
             eq_runtime_emitted: false,
+            compare_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
             per_module: false,
             needs_runtime_concurrency: false,
             needs_runtime_range: false,
             needs_runtime_eq: false,
+            needs_runtime_compare: false,
             implicit_imports: Vec::new(),
             public_symbols: HashMap::new(),
             self_module_path: String::new(),
@@ -866,7 +918,11 @@ impl EmitCtx {
         let ext = "js";
 
         // Shared runtime: `import { … } from "./…/_bock_runtime.js"`.
-        if self.needs_runtime_concurrency || self.needs_runtime_range || self.needs_runtime_eq {
+        if self.needs_runtime_concurrency
+            || self.needs_runtime_range
+            || self.needs_runtime_eq
+            || self.needs_runtime_compare
+        {
             let mut names: Vec<&str> = Vec::new();
             if self.needs_runtime_concurrency {
                 names.extend(["__bockChannelNew", "__bockSpawn"]);
@@ -876,6 +932,9 @@ impl EmitCtx {
             }
             if self.needs_runtime_eq {
                 names.push("__bockEq");
+            }
+            if self.needs_runtime_compare {
+                names.push("__bockCompare");
             }
             let spec = crate::generator::esm_relative_specifier(
                 &self.self_module_path,
@@ -2422,6 +2481,23 @@ impl EmitCtx {
             let _ = write!(self.buf, "__bockEq({recv_str}, {other})");
             return Ok(true);
         }
+        // Q-bounded-comparable-codegen: a bounded `T: Comparable` `compare`
+        // receiver may be instantiated with a RECORD whose ordering lives in its
+        // own `compare` method — the native `<`/`===` ternary the
+        // `emit_bridge_method` `compare` arm emits is correct ONLY for a
+        // primitive instantiation. Route through `__bockCompare`, which calls the
+        // value's `compare` method when present and falls back to the native
+        // ternary for primitives.
+        if method == "compare" {
+            let Some(other) = rest.first() else {
+                return Ok(false);
+            };
+            let recv_str = self.expr_to_string(recv)?;
+            let other = self.expr_to_string(&other.value)?;
+            self.needs_runtime_compare = true;
+            let _ = write!(self.buf, "__bockCompare({recv_str}, {other})");
+            return Ok(true);
+        }
         self.emit_bridge_method(recv, method, rest)
     }
 
@@ -2496,6 +2572,9 @@ impl EmitCtx {
                     if js_module_uses_eq(items) {
                         self.needs_runtime_eq = true;
                     }
+                    if js_module_uses_compare(items) {
+                        self.needs_runtime_compare = true;
+                    }
                     // Real ESM imports (runtime, explicit `use`, implicit prelude)
                     // at the top of the file, before any declaration.
                     self.emit_esm_imports(imports)?;
@@ -2519,6 +2598,11 @@ impl EmitCtx {
                         self.buf.push_str(EQ_RUNTIME_JS);
                         self.buf.push('\n');
                         self.eq_runtime_emitted = true;
+                    }
+                    if !self.compare_runtime_emitted && js_module_uses_compare(items) {
+                        self.buf.push_str(COMPARE_RUNTIME_JS);
+                        self.buf.push('\n');
+                        self.compare_runtime_emitted = true;
                     }
                 }
                 // `@test` functions are transpiled separately into Vitest/Jest

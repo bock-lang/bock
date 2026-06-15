@@ -214,6 +214,36 @@ fn module_uses_eq(items: &[AIRNode]) -> bool {
     })
 }
 
+/// The structural comparison runtime: lower a bounded `T: Comparable`'s
+/// `a.compare(b)` through this so it dispatches to the instantiated type's own
+/// `compare` method when present (a record/enum carrying an `impl Comparable`),
+/// falling back to the native ternary for a primitive instantiation. Without it
+/// the bounded bridge emitted the native ternary unconditionally, so `(a) < (b)`
+/// on two RECORDS is always `false` and `(a) === (b)` is reference identity —
+/// every comparison wrongly returned `Greater`, mis-ordering `max`/`min`/sort
+/// over a user `Comparable` type. The emitted `compare` method takes
+/// `(self, other)`, so the helper calls `a.compare(a, b)`. Mirrors
+/// [`EQ_RUNTIME_TS`]'s `__bockEq`. (Q-bounded-comparable-codegen.)
+const COMPARE_RUNTIME_TS: &str = "// ── Bock structural comparison runtime ──
+type __BockOrdering = { _tag: \"Less\" } | { _tag: \"Equal\" } | { _tag: \"Greater\" };
+const __bockCompare = (a: any, b: any): __BockOrdering => {
+  if (a !== null && typeof a === \"object\" && typeof a.compare === \"function\") {
+    return a.compare(a, b);
+  }
+  return (a < b ? { _tag: \"Less\" } : (a === b ? { _tag: \"Equal\" } : { _tag: \"Greater\" }));
+};
+";
+
+/// True if the module contains a bounded `T: Comparable` `compare` bridge call,
+/// so [`COMPARE_RUNTIME_TS`]'s `__bockCompare` must be emitted. Mirrors
+/// [`module_uses_eq`].
+fn module_uses_compare(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let dbg = format!("{n:?}");
+        dbg.contains("TraitBound:Comparable")
+    })
+}
+
 /// The shared per-module runtime module name (without extension). In the
 /// per-module (native-import) emission path the Optional/Result runtime *types*
 /// (`BockOption`, `BockResult`) and the concurrency / range runtime *helpers*
@@ -370,6 +400,7 @@ impl CodeGenerator for TsGenerator {
         let mut runtime_concurrency = false;
         let mut runtime_range = false;
         let mut runtime_eq = false;
+        let mut runtime_compare = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let own_path = crate::generator::module_path_string(module).unwrap_or_default();
@@ -407,6 +438,7 @@ impl CodeGenerator for TsGenerator {
             runtime_concurrency |= ctx.needs_runtime_concurrency;
             runtime_range |= ctx.needs_runtime_range;
             runtime_eq |= ctx.needs_runtime_eq;
+            runtime_compare |= ctx.needs_runtime_compare;
             let (mut content, mappings) = ctx.finish();
 
             if i == entry_idx && crate::generator::module_declares_main_fn(module) {
@@ -438,7 +470,12 @@ impl CodeGenerator for TsGenerator {
         // Shared runtime module: Optional/Result types and concurrency/range
         // helpers, each `export`ed (types via `export type`, values via `export
         // const`) so consuming modules `import` / `import type` them.
-        if runtime_optional || runtime_result || runtime_concurrency || runtime_range || runtime_eq
+        if runtime_optional
+            || runtime_result
+            || runtime_concurrency
+            || runtime_range
+            || runtime_eq
+            || runtime_compare
         {
             let mut content = String::new();
             if runtime_optional {
@@ -455,6 +492,10 @@ impl CodeGenerator for TsGenerator {
             }
             if runtime_range {
                 content.push_str(&export_runtime_decls(RANGE_RUNTIME_TS));
+                content.push('\n');
+            }
+            if runtime_compare {
+                content.push_str(&export_runtime_decls(COMPARE_RUNTIME_TS));
                 content.push('\n');
             }
             if runtime_eq {
@@ -684,6 +725,10 @@ struct TsEmitCtx {
     /// Set once the structural-equality runtime ([`EQ_RUNTIME_TS`]) has been
     /// emitted; deduped exactly as [`Self::range_runtime_emitted`].
     eq_runtime_emitted: bool,
+    /// Set once the structural-comparison runtime ([`COMPARE_RUNTIME_TS`]) has
+    /// been emitted in the single-module self-contained path. Deduped exactly as
+    /// [`Self::eq_runtime_emitted`]. (Q-bounded-comparable-codegen.)
+    compare_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Same role as the JS backend's: route
     /// a unit-variant reference to the `{enum}_{variant}` const, a struct/tuple
     /// construction to the factory, and recognise `RecordPat` arms as ADT.
@@ -754,6 +799,10 @@ struct TsEmitCtx {
     needs_runtime_concurrency: bool,
     needs_runtime_range: bool,
     needs_runtime_eq: bool,
+    /// As [`Self::needs_runtime_eq`], for the bounded-`Comparable`
+    /// structural-comparison runtime (`__bockCompare`).
+    /// (Q-bounded-comparable-codegen.)
+    needs_runtime_compare: bool,
     /// Implicit cross-module imports for the per-module path — names this module
     /// references but neither declares locally nor imports via an explicit `use`.
     /// Computed in `generate_project`; emitted as ESM imports by the `Module` arm.
@@ -856,6 +905,7 @@ impl TsEmitCtx {
             concurrency_runtime_emitted: false,
             range_runtime_emitted: false,
             eq_runtime_emitted: false,
+            compare_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
@@ -868,6 +918,7 @@ impl TsEmitCtx {
             needs_runtime_concurrency: false,
             needs_runtime_range: false,
             needs_runtime_eq: false,
+            needs_runtime_compare: false,
             implicit_imports: Vec::new(),
             public_symbols: HashMap::new(),
             self_module_path: String::new(),
@@ -1009,6 +1060,9 @@ impl TsEmitCtx {
         }
         if self.needs_runtime_eq {
             value_names.push("__bockEq");
+        }
+        if self.needs_runtime_compare {
+            value_names.push("__bockCompare");
         }
         if !type_names.is_empty() || !value_names.is_empty() {
             let spec = crate::generator::esm_relative_specifier(
@@ -2632,6 +2686,24 @@ impl TsEmitCtx {
             let _ = write!(self.buf, "__bockEq({recv_str}, {other})");
             return Ok(true);
         }
+        // Q-bounded-comparable-codegen: a bounded `T: Comparable` `compare`
+        // receiver may be instantiated with a RECORD whose ordering lives in its
+        // own `compare` method — the native `<`/`===` ternary the
+        // `emit_bridge_method` `compare` arm emits is correct ONLY for a
+        // primitive instantiation (object `<` coerces to `NaN`; `===` is
+        // reference identity). Route through `__bockCompare`, which calls the
+        // value's `compare` method when present and falls back to the native
+        // ternary for primitives.
+        if method == "compare" {
+            let Some(other) = rest.first() else {
+                return Ok(false);
+            };
+            let recv_str = self.expr_to_string(recv)?;
+            let other = self.expr_to_string(&other.value)?;
+            self.needs_runtime_compare = true;
+            let _ = write!(self.buf, "__bockCompare({recv_str}, {other})");
+            return Ok(true);
+        }
         self.emit_bridge_method(recv, method, rest, None)
     }
 
@@ -2968,6 +3040,9 @@ impl TsEmitCtx {
                     if module_uses_eq(items) {
                         self.needs_runtime_eq = true;
                     }
+                    if module_uses_compare(items) {
+                        self.needs_runtime_compare = true;
+                    }
                     self.emit_esm_imports(imports)?;
                 } else {
                     // Single-module self-contained emit (`generate_module`, used
@@ -2994,6 +3069,11 @@ impl TsEmitCtx {
                         self.buf.push_str(RANGE_RUNTIME_TS);
                         self.buf.push('\n');
                         self.range_runtime_emitted = true;
+                    }
+                    if !self.compare_runtime_emitted && module_uses_compare(items) {
+                        self.buf.push_str(COMPARE_RUNTIME_TS);
+                        self.buf.push('\n');
+                        self.compare_runtime_emitted = true;
                     }
                     if !self.eq_runtime_emitted && module_uses_eq(items) {
                         self.buf.push_str(EQ_RUNTIME_TS);

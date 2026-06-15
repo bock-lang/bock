@@ -238,6 +238,12 @@ class _BockOrderingGreater:
 _bock_less = _BockOrderingLess()
 _bock_equal = _BockOrderingEqual()
 _bock_greater = _BockOrderingGreater()
+
+def _bock_compare(a, b):
+    m = getattr(a, 'compare', None)
+    if callable(m):
+        return m(b)
+    return _bock_less if a < b else (_bock_equal if a == b else _bock_greater)
 ";
 
 /// Runtime helper for the DQ30 in-place `List` mutators whose Python lowering
@@ -1463,6 +1469,7 @@ impl CodeGenerator for PyGenerator {
                     "_bock_less",
                     "_bock_equal",
                     "_bock_greater",
+                    "_bock_compare",
                 ]);
             }
             if runtime_concurrency {
@@ -3414,6 +3421,24 @@ impl PyEmitCtx {
         else {
             return Ok(false);
         };
+        // Q-bounded-comparable-codegen: a bounded `T: Comparable` `compare`
+        // receiver may be instantiated with a RECORD whose ordering lives in its
+        // own `compare` method — the native `<`/`==` ternary the
+        // `emit_bridge_method` `compare` arm emits raises `TypeError: '<' not
+        // supported between instances of 'Money'`. Route through the
+        // `_bock_compare` runtime helper, which calls the value's `compare`
+        // method when present and falls back to the native ternary for a
+        // primitive instantiation.
+        if method == "compare" {
+            let Some(other) = rest.first() else {
+                return Ok(false);
+            };
+            let recv_str = self.expr_to_string(recv)?;
+            let other = self.expr_to_string(&other.value)?;
+            self.needs_runtime_ordering = true;
+            let _ = write!(self.buf, "_bock_compare({recv_str}, {other})");
+            return Ok(true);
+        }
         self.emit_bridge_method(recv, method, rest)
     }
 

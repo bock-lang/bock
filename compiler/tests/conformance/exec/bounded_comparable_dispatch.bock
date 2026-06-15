@@ -1,0 +1,63 @@
+// TEST: bounded_comparable_dispatch
+// EXPECT: output "150;150;99"
+// EXPECT: targets js, ts, python
+//
+// Regression for Q-bounded-comparable-codegen: a `fn max[T: Comparable](a, b)`
+// instantiated with a *user* `Comparable` type (a record carrying an
+// `impl Comparable`) must dispatch the bounded `a.compare(b)` through the
+// instantiated type's own `compare` method.
+//
+// Before the fix the bounded `compare` bridge emitted the *native* ordering
+// ternary unconditionally:
+//   - js/ts: `((a) < (b) ? Less : ((a) === (b) ? Equal : Greater))` — but `<`
+//     on two objects coerces to `NaN` (always false) and `===` is reference
+//     identity (always false), so every comparison wrongly returned `Greater`.
+//     `max_of(99, 150)` then returned `99` (the WRONG operand).
+//   - python: `(_bock_less if (a) < (b) else …)` raised
+//     `TypeError: '<' not supported between instances of 'Money'`.
+//
+// The fix routes the bounded `compare` through the `__bockCompare` (js/ts) /
+// `_bock_compare` (python) runtime helper, which calls the value's own
+// `compare` method when present and falls back to the native ternary for a
+// primitive instantiation. The three `max_of` calls below exercise both
+// argument orders (a>b, a<b) plus an equal pair, so a "always Greater" or
+// "always native <" regression changes the output.
+//
+// NOTE — targets js, ts, python only: the rust and go backends carry a separate,
+// pre-existing defect for `T: Comparable` over a user type (rust lowers the
+// bound to `Ord`, which `Money` does not implement → E0277; go's `any` does not
+// satisfy the `__bockOrdered` constraint). That is the half #299 explicitly left
+// untouched and is tracked separately (FOUND on rs.rs/go.rs); this fixture pins
+// the js/ts/python fix.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale, see
+// hello_world.bock).
+module main
+
+record Money {
+  cents: Int,
+}
+
+impl Comparable for Money {
+  fn compare(self, other: Money) -> Ordering {
+    self.cents.compare(other.cents)
+  }
+}
+
+fn max_of[T: Comparable](a: T, b: T) -> T {
+  if (a.compare(b) == Greater) {
+    a
+  } else {
+    b
+  }
+}
+
+fn main() -> Void {
+  let small = Money { cents: 99 }
+  let big = Money { cents: 150 }
+  // a > b: pick a (150); a < b: pick b (150); a == b: pick b (99).
+  let m1 = max_of(big, small)
+  let m2 = max_of(small, big)
+  let m3 = max_of(small, small)
+  println("${m1.cents};${m2.cents};${m3.cents}")
+}
