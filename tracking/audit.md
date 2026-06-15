@@ -2678,3 +2678,23 @@ FOUND/OPEN filed: 8 (Wave 3) + the Wave-B per-backend bugs (mostly closed by #37
 State at close: main cd4c383, 0 open PRs (all 8 feature + 8 dependabot merged), worktrees/branches pruned. Every PR CI-verified 15/15 on its branch incl. Windows; final-HEAD CI confirmatory.
 Awaiting operator: OQ1/R1 (marketing positioning handoff at tracking/handoffs/2026-06-15-marketing-positioning.md) — the only
   pending non-engineering item.
+
+[2026-06-15 20:55 UTC] ✦ POSITIONING (OQ1/R1) RESOLVED + §1.1 amendment landed
+  Input: the marketing chat returned the operator-signed resolution for OQ1 (wedge) + R1 (identity) + OQ2 framing + a
+    website-scope call, resolving handoff 2026-06-15-marketing-positioning.md.
+  Options: this is a RECONCILE, not a decision (the operator signed). Scope: land the §1.1 spec amendment (Design supplied
+    the truth basis; explicitly delegated to the orchestrator) + the hub reconcile; ROUTE (not publish) the external copy.
+  Decision: landed the §1.1 amendment ("...conformance-tested for semantic equivalence: ...verified to behave identically
+    on every target it ships to.") + changelog 20260615-s1.1-equivalence-amendment; milestones POSITIONING RESOLVED entry +
+    wedge-route registration; escalations RESOLVED entry (+ a low filename-convention flag to the operator); queue
+    Positioning follow-ups (Q-sdk-vendor-demo impl; Q-wedge-usecases-page + Q-getstarted-copy-lock marketing/ESCALATE);
+    handoff RESOLVED banner; rolling note + STATUS regenerated.
+  Verification: tracking + spec-doc only — no compiler crate, and spec/bock-spec.md is NOT in the docs/ mdbook tree, so the
+    cargo/mdbook gate has no applicable surface. Spec change paired with its changelog per spec/CLAUDE.md.
+  Reasoning: within authority — reconciling a Design-supplied, operator-signed amendment (NOT deciding core spec). The
+    public verb is "verifies," not "proves," per the R9 validation ledger (covered surface, not exhaustive proof). The
+    identity sentence + ALL website copy stay marketing-owned + human-approved; routed (copy-lock unblocked, wedge route
+    registered pending/404) but nothing external published.
+  Follow-up: the operator-decision bundle (R1/R6/OQ1-OQ4) is now FULLY dispositioned — no pending operator/Design items.
+    Next concrete work: Q-sdk-vendor-demo (impl, gates the marketing wedge page) + the Wave-C engineering tail. The
+    wedge-page + get-started copy are marketing work that escalates at publication.

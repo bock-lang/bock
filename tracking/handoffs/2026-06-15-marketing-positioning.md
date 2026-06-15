@@ -1,5 +1,19 @@
 # Handoff → Marketing chat: v1 positioning (OQ1 wedge + R1 identity)
 
+> **✅ RESOLVED 2026-06-15 (operator-signed via marketing chat).** Landed by the orchestrator:
+> §1.1 spec amendment (changelog `20260615-s1.1-equivalence-amendment`) + hub reconcile
+> (`escalations.md` 2026-06-15 05:02 · `milestones.md` POSITIONING RESOLVED · `queue.md` Positioning
+> follow-ups). Signed decisions (durable record):
+> - **OQ1 = nested split:** identity = the **guarantee** (hero); launch wedge = **SDK/library vendors**
+>   (proof surface); macro narrative = the **trust-scarcity shift** (air cover, not a capability lead).
+> - **R1 identity sentence (verbatim, signed):** "Bock is the deterministic substrate for AI-built
+>   software: an executable specification language whose compiler produces idiomatic code for five
+>   platforms and verifies the five behave identically, with every AI decision in the pipeline logged,
+>   pinned, and reproducible." (Marketing-owned + human-approved; NOT auto-published.)
+> - **Website:** homepage guarantee-led; new SDK-vendor use-cases page (pending route); `/get-started`
+>   copy lock UNBLOCKED. OQ2 corpus = equivalence-moat evidence for the wedge.
+> Original delegation handoff preserved below.
+
 **From:** Orchestrator (via the 2026-06-15 escalation walk-through)
 **Decider:** marketing chat ↔ operator, interactively
 **Status:** delegated, NOT pre-decided
