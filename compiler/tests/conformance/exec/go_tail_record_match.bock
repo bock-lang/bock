@@ -1,0 +1,54 @@
+// TEST: exec_go_tail_record_match
+// EXPECT: output "x=7;sum=12;both=5 7;nested=21"
+// EXPECT: targets js, ts, python, rust, go
+//
+// A tail-position `match` over a plain (non-enum) record
+// (Q-go-tailmatch-unreachable-panic, HIGH, wrong-output class). On Go the
+// match's single record arm ran (producing correct output) and THEN execution
+// fell through to an emitted `panic("unreachable")`, because a `Void` function
+// tail `match` was lowered as a value-producing IIFE —
+// `func() interface{} { …arm…; panic("unreachable") }()` — whose trailing
+// exhaustiveness guard is unreachable for a total record match but still
+// *executes* after the matched arm. The other four targets emitted the arm in
+// statement position and were correct, so the program's output diverged only on
+// go. The fix routes a non-returning tail `match` to the statement-position
+// lowering (a Go if-chain / `switch`), which emits no trailing `unreachable`
+// guard for a total plain/record match, so the arm is the function's terminal
+// statement.
+//
+// `report` is the repro: a `Void` function whose **tail statement** is a
+// `match` over a record, after a preceding `let` statement (so the body is a
+// multi-statement block ending in a match — the `emit_return == false` no-value
+// path). The single record arm is a `{ ... }` block (not a bare expression) that
+// binds all three fields by shorthand, runs further `let`s, and emits exactly
+// one `println`, covering the block-tail arm, multi-field shorthand binds, and a
+// preceding-statement value (`doubled`) that survives into the arm body. A `print`/`process.stdout.write` would trip
+// the ts harness's `tsc --noEmit` (TS2591, no `@types/node`), so the void-call
+// arm uses `println` (→ `console.log`); `println` is itself a void call routed
+// through the same IIFE, so it exercises the identical defect.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record Bundle {
+  x: Int
+  lo: Int
+  hi: Int
+}
+
+fn report(b: Bundle) -> Void {
+  let doubled = b.x * 2
+  match b {
+    Bundle { x, lo, hi } => {
+      let sum = lo + hi
+      let both = "${lo} ${hi}"
+      let nested = x + doubled
+      println("x=${x};sum=${sum};both=${both};nested=${nested}")
+    }
+  }
+}
+
+fn main() -> Void {
+  report(Bundle { x: 7, lo: 5, hi: 7 })
+}
