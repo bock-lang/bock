@@ -777,25 +777,81 @@ fn find_project_root(entry: &Path) -> Option<PathBuf> {
 /// Recursively discover `.bock` files in the given directory.
 fn discover_bock_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    discover_bock_files_recursive(dir, &mut files)?;
+    // The entry directory is scanned as the root: an unreadable root is a
+    // genuine error the caller asked for. Sub-directories encountered during
+    // recursion are skipped gracefully if unreadable (see below).
+    discover_bock_files_recursive(dir, &mut files, true)?;
     files.sort();
     Ok(files)
 }
 
 /// Recursive helper for file discovery.
-fn discover_bock_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| anyhow::anyhow!("could not read directory '{}': {e}", dir.display()))?;
+///
+/// Sibling-module discovery (Q-test-interp-crossfile-use) walks the whole
+/// project subtree rooted at the resolved `bock.project` directory. That
+/// subtree can legitimately contain directories this process cannot read
+/// (e.g. a root-owned, `0o000` scratch dir that happens to sit under the
+/// resolved root — which occurs when a stray `bock.project` marker in an
+/// ancestor like `/tmp` pins the root unexpectedly wide). An unreadable
+/// *sibling* directory must never abort the test run: it is unrelated to the
+/// test file under compilation. We therefore skip it with a warning and
+/// continue, rather than `?`-propagating the `read_dir` error (which used to
+/// turn a permission error on an irrelevant scanned dir into a spurious
+/// compilation failure — and a panic in the unit-test harness, which
+/// `.unwrap()`s `run_tests_in_file`). `is_root` is `true` only for the
+/// directory the caller explicitly handed us; for that one an unreadable
+/// directory remains a hard error.
+fn discover_bock_files_recursive(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    is_root: bool,
+) -> anyhow::Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if !is_root => {
+            // An unreadable directory encountered while walking the project
+            // subtree is skipped, not fatal — it is unrelated to the test
+            // file being compiled. Surface a warning so the skip is visible.
+            eprintln!(
+                "warning: skipping unreadable directory '{}': {e}",
+                dir.display()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "could not read directory '{}': {e}",
+                dir.display()
+            ));
+        }
+    };
 
     for entry in entries {
-        let entry = entry?;
+        // A per-entry `read_dir` iteration error (e.g. a racing unlink) on a
+        // sibling subtree must likewise not abort discovery of the rest.
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) if !is_root => {
+                eprintln!(
+                    "warning: skipping unreadable entry under '{}': {e}",
+                    dir.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "could not read entry under '{}': {e}",
+                    dir.display()
+                ));
+            }
+        };
         let path = entry.path();
         if path.is_dir() {
             // Skip hidden directories and common non-source dirs
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if !name_str.starts_with('.') && name_str != "target" && name_str != "node_modules" {
-                discover_bock_files_recursive(&path, files)?;
+                discover_bock_files_recursive(&path, files, false)?;
             }
         } else if path.is_file() {
             if let Some(ext) = path.extension() {
@@ -817,8 +873,17 @@ mod tests {
     use std::fs;
 
     /// Helper: create a temp dir with a Bock test file and run tests on it.
+    ///
+    /// A `bock.project` marker is written into the isolated tempdir so
+    /// `find_project_root` stops here rather than walking up into a shared
+    /// scratch dir (e.g. `/tmp`) that may hold a stray `bock.project` from
+    /// another process — which would otherwise pin the project root absurdly
+    /// wide and drag every unrelated `.bock` under that ancestor into the
+    /// sibling scan. Bounding the root to the tempdir keeps these unit tests
+    /// hermetic.
     async fn run_test_on_source(source: &str) -> Vec<TestResult> {
         let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("bock.project"), "[project]\nname = \"t\"\n").unwrap();
         let file_path = dir.path().join("test.bock");
         fs::write(&file_path, source).unwrap();
         run_tests_in_file(&file_path, &None).await.unwrap()
@@ -895,6 +960,9 @@ fn test_beta() {
 }
 "#;
         let dir = tempfile::tempdir().unwrap();
+        // Bound the project root to this tempdir (see `run_test_on_source`) so
+        // the sibling scan stays hermetic against a stray ancestor marker.
+        fs::write(dir.path().join("bock.project"), "[project]\nname = \"t\"\n").unwrap();
         let file_path = dir.path().join("test.bock");
         fs::write(&file_path, source).unwrap();
 
@@ -928,6 +996,89 @@ fn not_a_test() {
         let files = discover_bock_files(dir.path()).unwrap();
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|f| f.extension().unwrap() == "bock"));
+    }
+
+    /// Regression (Q-bocktest-discovery-readdir-unwrap): an unreadable
+    /// sub-directory encountered while scanning the project subtree must be
+    /// skipped, not abort discovery. Before the fix, `read_dir` on such a dir
+    /// `?`-propagated a `Permission denied` error out of discovery (and a
+    /// panic in the test harness). The root dir's own `.bock` files must still
+    /// be discovered around the unreadable sibling.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_discover_skips_unreadable_subdir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.bock"), "").unwrap();
+
+        // A root-owned-style scratch dir we cannot read (0o000).
+        let locked = dir.path().join("snap-private");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("hidden.bock"), "").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Discovery must not error: the unreadable subtree is skipped, the
+        // readable `.bock` at the root is still found.
+        let result = discover_bock_files(dir.path());
+
+        // Restore perms before any assertion can unwind, so tempdir cleanup
+        // (which must descend into the dir) succeeds either way.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let files = result.expect("unreadable subdir must not abort discovery");
+        assert_eq!(
+            files.len(),
+            1,
+            "only the readable root .bock should be found: {files:?}"
+        );
+        assert!(files[0].ends_with("a.bock"));
+    }
+
+    /// Regression (Q-bocktest-discovery-readdir-unwrap): end-to-end, an
+    /// unreadable sibling directory under the resolved project root must not
+    /// abort a `bock test` run. This is the exact shape of the original repro:
+    /// a `bock.project` marker pins the root, the sibling scan descends into a
+    /// `0o000` dir, and the test file's own tests must still run + pass.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_tests_in_file_skips_unreadable_sibling() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        // A `bock.project` marker pins this dir as the project root, so the
+        // sibling scan walks the whole subtree below it.
+        fs::write(
+            root.path().join("bock.project"),
+            "[project]\nname = \"t\"\n",
+        )
+        .unwrap();
+
+        let test_file = root.path().join("sample_test.bock");
+        fs::write(
+            &test_file,
+            "@test\nfn test_ok() {\n    expect(1 + 1).to_equal(2)\n}\n",
+        )
+        .unwrap();
+
+        // Unreadable sibling directory directly under the project root.
+        let locked = root.path().join("snap-private");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Must NOT panic / abort: returns Ok and the real test runs + passes.
+        let result = run_tests_in_file(&test_file, &None).await;
+
+        // Restore perms so tempdir teardown can descend and clean up.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let results = result.expect("unreadable sibling dir must not abort the test run");
+        assert_eq!(results.len(), 1, "the sample test should have run");
+        assert!(
+            results[0].passed,
+            "sample test should pass: {:?}",
+            results[0].error
+        );
     }
 
     #[tokio::test]
