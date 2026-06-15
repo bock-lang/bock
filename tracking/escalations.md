@@ -143,7 +143,7 @@ types as an unimplemented follow-up.
 **Recommendation:** none on the merits (core-spec is Design's). The proposed matrix
 follows Rust/Swift precedent (no `Float: Hashable`; conservative on `Bool` ordering).
 **Awaiting:** Design ratification of the normative matrix; non-blocking.
-**Status:** pending
+**Status:** RESOLVED 2026-06-15 (ratified — see the walk-through entry below; design-questions DQ10).
 
 ## [2026-05-30 03:37 UTC] core.convert design questions (DQ11)
 
@@ -159,7 +159,7 @@ conversion matrix (parallels DQ10); (2) whether canonical conversions are sealed
 **Recommendation:** none on the merits (Design's call). Defaults follow the §18.3
 surface + Rust/Swift precedent; refining any is non-breaking.
 **Awaiting:** Design ratification; non-blocking (R1 proceeds).
-**Status:** pending
+**Status:** RESOLVED 2026-06-15 (ratified — see the walk-through entry below; design-questions DQ11).
 
 ## [2026-05-30 04:19 UTC] core.iter protocol shape (DQ12)
 
@@ -175,7 +175,7 @@ requires `Iterable` for built-ins (planned: native fast path for built-ins).
 **Recommendation:** none on merits (Design's). The floor is implementable now;
 ratify the normative surface before/as iter resumes post-codegen-workstream.
 **Awaiting:** Design ratification; non-blocking.
-**Status:** pending
+**Status:** RESOLVED 2026-06-15 (ratified — see the walk-through entry below; design-questions DQ12).
 
 ## [2026-05-30 07:15 UTC] §18.2 prelude membership — TryFrom/Error (DQ13)
 
@@ -188,7 +188,7 @@ aren't in §18.2's literal trait list (the orchestrator's dispatch prompt named 
 **Recommendation:** none on merits (Design's call); both are defensible and the change
 is one-line either way.
 **Awaiting:** Design ratification; non-blocking.
-**Status:** pending
+**Status:** RESOLVED 2026-06-15 (amend §18.2 to include them — see the walk-through entry below; design-questions DQ13).
 
 ## [2026-05-30 15:24 UTC] core.iter blocked on the List-codegen substrate — scope/roadmap (operator) + R1 floor (Design, DQ16)
 
@@ -282,11 +282,11 @@ misleading vs the shipped generic `Iterator[T]`/`Iterable[T]` (DQ12) — clarify
 **Recommendation:** none on the merits (Design's call). The shipped floor follows DQ12/DQ14/DQ15 + Rust/Swift
 precedent; all three are additive/reversible.
 **Awaiting:** Design ratification; non-blocking (R1 continues to `effect`).
-**Status:** pending
+**Status:** RESOLVED 2026-06-15 (ratified — see the walk-through entry below; design-questions DQ24).
 
-> Standing non-blocking Design queue (filed; queue not blocked on any): DQ10, DQ11, DQ12, DQ13, DQ16-residue,
-> DQ17, DQ18, DQ19, DQ20, DQ21, DQ22, DQ23, DQ24, DQ25, Bool-interp spelling. The orchestrator proceeds on safe defaults
-> and reconciles spec/divergences as Design decides.
+> Standing non-blocking Design queue — **CLEARED 2026-06-15.** DQ10/DQ11/DQ12/DQ13/DQ14/DQ15/DQ24/DQ31 ratified or
+> ruled in the 2026-06-15 walk-through; DQ16/DQ18/DQ19/DQ20/DQ22/DQ23/DQ25 decided earlier; DQ17 closed non-normative;
+> DQ21 → impl backlog; Bool-interp spelling folded into DQ23. **No open Design questions remain.**
 
 ## [2026-05-31 22:35 UTC] core.effect v1 surface — 8 questions (DQ25) → Design
 
@@ -413,7 +413,8 @@ custom-eq record behaves differently inside vs outside a container; **(c)** reje
 carries a custom impl — strict, surfaces the ambiguity.
 **Recommendation:** none on the merits (Design's call); (a) is the reading most consistent with the DQ29 ruling text.
 **Awaiting:** Design ruling on DQ31.
-**Status:** pending — filed 2026-06-10. The divergent corner is deliberately NOT fixture-pinned until ruled.
+**Status:** RESOLVED 2026-06-15 — Design ruled **option (a) + codegen provenance specialization** (full text in
+design-questions DQ31; §18.5 sentence added; impl → `queue.md` Q-dq31-container-element-eq). See the walk-through entry below.
 
 ## [2026-06-09 14:47 UTC] DQ30 — return-contract for the in-place `List` mutators `pop`/`insert`/`remove`/`reverse`
 
@@ -462,4 +463,50 @@ logic and the project's verification-first track record. On OQ3: the audit's arg
 clear since MS-projectmode. On OQ4: OQ2/OQ3 decide the context — if v1 ships now, defer the §10.8 demo behind the
 release-window work and revisit at the first v1.x planning pass.
 **Awaiting:** operator responses (any subset; items are independent).
-**Status:** pending
+**Status:** RESOLVED 2026-06-15 (operator walk-through).
+
+**Response (2026-06-15, operator):** all six dispositioned —
+- **R1 (identity sign-off):** NOT signed in the orchestrator loop — **teed up in a marketing-chat handoff** for the
+  interactive marketing ↔ operator session (the §1.1 amendment + downstream copy follow the signed sentence).
+- **R6 (verification over surface-area):** **ratified** → recorded in `milestones.md` (PROPOSED → adopted).
+- **OQ1 (wedge):** NOT dictated — **delegated to the marketing handoff**, which presents three plausible theories
+  (audit's SDK-vendor lead; orchestrator's lead-with-the-guarantee/funnel read; operator's industry-wide
+  governance/assurance read, un-narrowed from "audit-critical orgs") for the marketing session to decide.
+- **OQ2 (open corpus):** **publish** the context pack + synthetic corpus as open artifacts.
+- **OQ3 (v1 timing):** **clear a defined hardening pass first**, then cut 1.0. Scope = **everything ready except pure
+  docs** (D2-polish defers); correctness-first ordering (the equivalence cluster A–D leads). → `milestones.md`
+  MS-v1.0-hardening + release-prep; → `queue.md` hardening grouping.
+- **OQ4 (§10.8 runtime-AI demo):** **defer behind the release window**; revisit at first v1.x planning (R9 ledger
+  holds; R6's verification track leads v1.x).
+
+**Authorized actions:** the marketing handoff lands at `tracking/handoffs/2026-06-15-marketing-positioning.md`; R6/OQ2/
+OQ4 + the MS-v1.0-hardening milestone + v1.0-timing reconcile into `milestones.md`/`queue.md`; OQ1/R1 route to the
+marketing chat. See the consolidated 2026-06-15 walk-through entry below.
+
+## [2026-06-15 04:12 UTC] Escalation walk-through (operator) — batch dispositions
+
+**Type:** strategic + design (core-spec)
+**Severity:** low (nothing blocking — DQ29/DQ30 already cleared the queue's Design gate)
+**Trigger:** the operator walked the pending escalation register. Two buckets resolved.
+**Bucket A — stdlib-surface Design ratifications (all RESOLVED 2026-06-15; spec was already reconciled, so these bless
+the shipped floor and close the escalations):**
+- **DQ10** primitive-conformance matrix → ratified as shipped (§18.5 matrix + IEEE/Bool caveats stand).
+- **DQ11** `core.convert` (4 pts) → ratified (fixed `ConvertError`, unsealed, no `TryInto`, named matrix); §18.3
+  `core.convert` now pins it.
+- **DQ12** iter protocol shape → ratified (generic `Iterator[T]`/`Iterable[T]`, eager floor, dual iteration model).
+- **DQ13** prelude membership → **amend §18.2** to include `TryFrom`+`Error` (already listed; ratified).
+- **DQ14** `iter()` return type → accept v1 floor (concrete `ListIterator`); existentials/assoc-types → v1.x.
+- **DQ15** combinator dispatch → ratified concrete; generic-bound → v1.x.
+- **DQ24** iter surface refinements → ratified (six combinators, inherent-`next`, §6.5 annotated).
+- **DQ31** container `==` element semantics → **RULED** (Design 2026-06-15): option (a) semantics (container equality
+  defers to the element's `Equatable` conformance) + a codegen provenance specialization (native path for
+  structural-default elements, element-`eq` loop only for custom-impl elements); the DQ29 predicate gains a three-state
+  provenance answer as the impl prerequisite. Full ruling in design-questions DQ31; §18.5 sentence added; impl →
+  `queue.md` Q-dq31-container-element-eq.
+**Bucket B — strategic operator bundle:** dispositioned in the 2026-06-09 design-audit entry above (R1/OQ1 → marketing
+handoff; R6 ratified; OQ2 publish; OQ3 hardening-pass-first, scope = everything-ready-except-docs; OQ4 deferred).
+**Reconciled this pass (one PR `chore/tracking-20260615-0412`):** spec §18.2/§18.3/§18.5/§6.5 confirmed/touched +
+changelog `20260615-stdlib-ratifications-dq31.md`; design-questions DQ10–DQ15/DQ24/DQ31 → DECIDED; milestones (R6
+adopted, MS-v1.0-hardening, release-prep, OQ2/OQ4); queue (Q-dq31-container-element-eq filed, hardening grouping);
+marketing handoff committed; STATUS/ROADMAP regenerated.
+**Status:** resolved (Bucket A); Bucket B resolved except OQ1/R1 (delegated, awaiting the marketing session).
