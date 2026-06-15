@@ -2593,12 +2593,12 @@ impl TsEmitCtx {
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
-        let Some((recv, method, rest, _prim)) =
+        let Some((recv, method, rest, prim)) =
             crate::generator::primitive_bridge_call(node, callee, args)
         else {
             return Ok(false);
         };
-        self.emit_bridge_method(recv, method, rest)
+        self.emit_bridge_method(recv, method, rest, Some(prim))
     }
 
     /// Lower a sealed-core-trait bridge method on a *bounded generic type
@@ -2632,17 +2632,30 @@ impl TsEmitCtx {
             let _ = write!(self.buf, "__bockEq({recv_str}, {other})");
             return Ok(true);
         }
-        self.emit_bridge_method(recv, method, rest)
+        self.emit_bridge_method(recv, method, rest, None)
     }
 
     /// Shared body of the primitive / trait-bound bridges: emit the native TS form
     /// of `compare` (the `Ordering` ternary), `eq` (`===`), or `to_string`/
     /// `display` (`String(..)`).
+    ///
+    /// `widen_prim` is the receiver's primitive type name (`"Int"`, `"Float"`,
+    /// …) when this is the concrete `Primitive:<Ty>` bridge, or `None` for the
+    /// trait-bound bridge (whose receiver is a generic `T`). When present, the
+    /// `eq` arm widens the receiver with a `as <ts-type>` assertion before
+    /// `===`: two distinct *literal* operands (`(3).eq(4)`) would otherwise be
+    /// inferred as the literal types `3`/`4`, which `tsc` rejects under
+    /// `strictNullChecks` as TS2367 ("this comparison appears to be
+    /// unintentional because the types '3' and '4' have no overlap"). The cast
+    /// widens the `3` to `number`, so the comparison is between `number` and a
+    /// literal — overlapping, hence accepted — while the runtime `===` is
+    /// unchanged. (Q-ts-primitive-eq-literal-overlap.)
     fn emit_bridge_method(
         &mut self,
         recv: &AIRNode,
         method: &str,
         rest: &[bock_air::AirArg],
+        widen_prim: Option<&str>,
     ) -> Result<bool, CodegenError> {
         let recv_str = self.expr_to_string(recv)?;
         match method {
@@ -2663,7 +2676,16 @@ impl TsEmitCtx {
                     return Ok(false);
                 };
                 let other = self.expr_to_string(&other.value)?;
-                let _ = write!(self.buf, "(({recv_str}) === ({other}))");
+                // Widen the receiver to its primitive TS type so two distinct
+                // literal operands (`(3).eq(4)`) compare as `number === 3`
+                // rather than the literal-only `3 === 4` (TS2367). See the
+                // method doc-comment.
+                if let Some(prim) = widen_prim {
+                    let ts_ty = self.map_type_name(prim);
+                    let _ = write!(self.buf, "(({recv_str} as {ts_ty}) === ({other}))");
+                } else {
+                    let _ = write!(self.buf, "(({recv_str}) === ({other}))");
+                }
             }
             "to_string" | "display" => {
                 let _ = write!(self.buf, "String({recv_str})");
