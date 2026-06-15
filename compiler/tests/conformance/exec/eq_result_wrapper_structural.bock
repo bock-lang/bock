@@ -1,0 +1,35 @@
+// TEST: eq_result_wrapper_structural
+// EXPECT: output "ok_eq:true;ok_ne:false;err_eq:true;ok_vs_err:false;cross:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-py-go-wrapper-structural-eq: structural `==` on the `Result[T, E]` wrapper.
+// Two `Ok(x)` compare equal iff their payloads are equal; two `Err(e)` likewise;
+// an `Ok` never equals an `Err` even when their payloads coincide. Before this
+// fix the Python runtime wrapper classes (`_BockOk`/`_BockErr`) had no `__eq__`,
+// so `Ok("a") == Ok("a")` fell back to object identity and printed `false`. The
+// wrapper `__eq__` first matches the variant (Ok vs Err), then routes payload
+// comparison through `==` (honoring a custom-`eq` payload).
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn main() -> Void {
+  let a: Result[String, Int] = Ok("a")
+  let b: Result[String, Int] = Ok("a")
+  let c: Result[String, Int] = Ok("b")
+  let e1: Result[String, Int] = Err(7)
+  let e2: Result[String, Int] = Err(7)
+
+  let ok_eq: Bool = a == b
+  let ok_ne: Bool = a == c
+  let err_eq: Bool = e1 == e2
+  let ok_vs_err: Bool = a == e1
+  // An Ok and an Err whose payloads would coincide structurally must still
+  // differ on the variant tag.
+  let sevenOk: Result[Int, Int] = Ok(7)
+  let sevenErr: Result[Int, Int] = Err(7)
+  let cross: Bool = sevenOk == sevenErr
+
+  println("ok_eq:${ok_eq};ok_ne:${ok_ne};err_eq:${err_eq};ok_vs_err:${ok_vs_err};cross:${cross}")
+}

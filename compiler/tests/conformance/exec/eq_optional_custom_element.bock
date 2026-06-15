@@ -1,0 +1,47 @@
+// TEST: eq_optional_custom_element
+// EXPECT: output "ci_eq:true;ci_ne:false;none_vs_some:false"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-py-go-wrapper-structural-eq: an `Optional[T]` wrapping a record with a
+// custom `impl Equatable` must defer payload comparison to that `eq`. `Tag`
+// compares its `name` CASE-INSENSITIVELY, so `Some(Tag{"HELLO"}) ==
+// Some(Tag{"hello"})` is TRUE even though the payloads differ structurally.
+//
+// Two backends were wrong here before the fix:
+//   * Python — the `_BockSome` wrapper had no `__eq__`, so `==` fell to object
+//     identity (`false`). The fix's wrapper `__eq__` compares payloads with
+//     Python `==`, which dispatches `Tag.__eq__` → the custom `eq`.
+//   * Go — the wrapper compares through `reflect.DeepEqual` (field-wise over the
+//     wrapper's unexported `tag`/`v`), which ignores the user `impl Equatable`
+//     on the payload and would mis-compare `"HELLO"` vs `"hello"` as not-equal.
+//     The fix special-cases the wrapper in `__bockEqCustom` so the payload
+//     defers to its `Eq` method.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Equatable}
+
+record Tag {
+  name: String,
+}
+
+impl Equatable for Tag {
+  public fn eq(self, other: Tag) -> Bool {
+    self.name.to_lower() == other.name.to_lower()
+  }
+}
+
+fn main() -> Void {
+  let a: Optional[Tag] = Some(Tag { name: "HELLO" })
+  let b: Optional[Tag] = Some(Tag { name: "hello" })
+  let c: Optional[Tag] = Some(Tag { name: "world" })
+  let n: Optional[Tag] = None
+
+  let ci_eq: Bool = a == b
+  let ci_ne: Bool = a == c
+  let none_vs_some: Bool = n == a
+
+  println("ci_eq:${ci_eq};ci_ne:${ci_ne};none_vs_some:${none_vs_some}")
+}
