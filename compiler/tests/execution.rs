@@ -454,8 +454,15 @@ fn run_one(
 
     match registry.run(target, &build_dir) {
         Ok(output) => {
-            let actual = output.stdout.trim_end_matches(['\n', '\r']);
-            let expected_trimmed = expected.trim_end_matches(['\n', '\r']);
+            // Normalize line endings before comparing: Bock programs emit
+            // `\n`, but some Windows toolchains/consoles inject `\r`. Strip all
+            // `\r` so multi-line `// EXPECT: output` fixtures match on every
+            // platform (single-line outputs were already covered by the old
+            // trailing trim, but interior `\r\n` was not).
+            let actual_norm = output.stdout.replace('\r', "");
+            let actual = actual_norm.trim_end_matches('\n');
+            let expected_norm = expected.replace('\r', "");
+            let expected_trimmed = expected_norm.trim_end_matches('\n');
             if actual == expected_trimmed {
                 Outcome::Passed
             } else {
