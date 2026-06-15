@@ -3046,6 +3046,27 @@ impl TsEmitCtx {
         format!("<{}>", items.join(", "))
     }
 
+    /// Use-site type-argument list for a generic declaration: just the
+    /// parameter names (`<T>`, `<T, U>`), with no `extends` bounds. This is the
+    /// form a *reference* to the generic type takes (e.g. a variant interface
+    /// named inside its enum's union alias, or a constructor factory's return
+    /// type), as distinct from [`Self::generic_params_to_ts`], which is the
+    /// *declaration* form that carries the bounds.
+    ///
+    /// Mismatching the two — declaring `interface Box_Full<T>` but referencing
+    /// it as a bare `Box_Full` in the union alias `type Box<T> = Box_Full | …`
+    /// — fails `tsc` with TS2314 ("Generic type requires N type argument(s)"),
+    /// because the alias body supplies the wrong type-argument arity. Both the
+    /// union alias and the variant factories must reference each variant
+    /// interface at its declared arity, which this helper supplies.
+    fn generic_args_to_ts(&self, params: &[bock_ast::GenericParam]) -> String {
+        if params.is_empty() {
+            return String::new();
+        }
+        let items: Vec<String> = params.iter().map(|p| p.name.name.clone()).collect();
+        format!("<{}>", items.join(", "))
+    }
+
     // ── Top-level dispatch ──────────────────────────────────────────────────
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
@@ -3252,13 +3273,19 @@ impl TsEmitCtx {
                     ""
                 };
                 let generics = self.generic_params_to_ts(generic_params);
+                // Use-site type-argument list (`<T>`, no bounds) for referencing
+                // each variant interface inside the union alias. The variant
+                // interfaces are declared as `Box_Full<T>` / `Box_Empty<T>`
+                // (carrying `generics`), so the alias body must reference them
+                // at the same arity or `tsc` rejects with TS2314.
+                let type_args = self.generic_args_to_ts(generic_params);
 
                 // Emit discriminated union type
                 let variant_names: Vec<String> = variants
                     .iter()
                     .filter_map(|v| {
                         if let NodeKind::EnumVariant { name: vn, .. } = &v.kind {
-                            Some(format!("{}_{}", name.name, vn.name))
+                            Some(format!("{}_{}{type_args}", name.name, vn.name))
                         } else {
                             None
                         }
@@ -4194,13 +4221,34 @@ impl TsEmitCtx {
         if let NodeKind::EnumVariant { name, payload } = &variant.kind {
             let vname = &name.name;
             let generics = self.generic_params_to_ts(generic_params);
+            // Use-site type-argument list (`<T>`, no bounds) for the variant's
+            // *references* — its constructor-factory return type, and (for a
+            // unit variant) its `const` annotation. Declaring the interface
+            // `Box_Full<T>` but returning a bare `Box_Full` from the factory
+            // fails `tsc` with TS2314; the return type must carry the same args.
+            let type_args = self.generic_args_to_ts(generic_params);
+            // Default-parameter form of the generic params, so a generic *unit*
+            // variant — whose type param is phantom (unused in the variant
+            // body) — can be both referenced with explicit args inside the
+            // union alias (`Box_Empty<T>`) AND named with zero args on its
+            // frozen `const` (`const Box_Empty: Box_Empty`). Without the
+            // `= unknown` default the zero-arg const annotation fails TS2314.
+            let unit_generics = if generic_params.is_empty() {
+                String::new()
+            } else {
+                let items: Vec<String> = generic_params
+                    .iter()
+                    .map(|p| format!("{} = unknown", p.name.name))
+                    .collect();
+                format!("<{}>", items.join(", "))
+            };
             let qualified = format!("{enum_name}_{vname}");
 
             match payload {
                 EnumVariantPayload::Unit => {
                     // Interface for unit variant
                     self.writeln(&format!(
-                        "interface {qualified}{generics} {{ readonly _tag: \"{vname}\"; }}"
+                        "interface {qualified}{unit_generics} {{ readonly _tag: \"{vname}\"; }}"
                     ));
                     self.writeln(&format!(
                         "const {qualified}: {qualified} = Object.freeze({{ _tag: \"{vname}\" as const }});"
@@ -4224,7 +4272,7 @@ impl TsEmitCtx {
                     let field_names: Vec<&str> =
                         fields.iter().map(|f| f.name.name.as_str()).collect();
                     self.writeln(&format!(
-                        "function {qualified}{generics}({}): {qualified} {{",
+                        "function {qualified}{generics}({}): {qualified}{type_args} {{",
                         field_params.join(", "),
                     ));
                     self.indent += 1;
@@ -4254,7 +4302,7 @@ impl TsEmitCtx {
                     let param_names: Vec<String> =
                         (0..elems.len()).map(|i| format!("_{i}")).collect();
                     self.writeln(&format!(
-                        "function {qualified}{generics}({}): {qualified} {{",
+                        "function {qualified}{generics}({}): {qualified}{type_args} {{",
                         param_decls.join(", "),
                     ));
                     self.indent += 1;
@@ -7552,19 +7600,32 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![enum_decl]));
-        // Union type
+        // Union type: each variant reference carries the enum's type args
+        // (`Option_None<T> | Option_Some<T>`), at the same arity the variant
+        // interfaces declare — referencing them bare fails `tsc` with TS2314
+        // (Q-ts-generic-enum-codegen).
         assert!(
-            out.contains("export type Option<T> = Option_None | Option_Some;"),
+            out.contains("export type Option<T> = Option_None<T> | Option_Some<T>;"),
             "got: {out}"
         );
-        // Unit variant
-        assert!(out.contains("interface Option_None"), "got: {out}");
+        // Unit variant: a phantom (unused) type param gets an `= unknown`
+        // default so the zero-arg `const Option_None: Option_None` annotation is
+        // valid while the union still references it as `Option_None<T>`.
+        assert!(
+            out.contains("interface Option_None<T = unknown>"),
+            "got: {out}"
+        );
         assert!(out.contains("readonly _tag: \"None\""), "got: {out}");
-        // Struct variant
+        assert!(
+            out.contains("const Option_None: Option_None = "),
+            "got: {out}"
+        );
+        // Struct variant: interface and factory return type carry consistent
+        // arity (`Option_Some<T>` … `: Option_Some<T>`).
         assert!(out.contains("interface Option_Some<T>"), "got: {out}");
         assert!(out.contains("readonly value: T"), "got: {out}");
         assert!(
-            out.contains("function Option_Some<T>(value: T): Option_Some"),
+            out.contains("function Option_Some<T>(value: T): Option_Some<T>"),
             "got: {out}"
         );
     }
