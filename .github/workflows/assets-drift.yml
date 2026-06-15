@@ -1,0 +1,56 @@
+name: Assets Drift
+
+# Guards that the VS Code extension's compiler-derived assets stay in sync with
+# their single source of truth (the compiler vocab + spec/bock-spec.md). The
+# extension consumes these at runtime; they are *generated* by
+# `tools/scripts/sync-vocab.sh` (which builds `bock-dump-vocab` and copies the
+# spec). Nothing previously re-ran that script in CI, so drift could land
+# silently (e.g. a spec amendment merged without regenerating the asset). This
+# job regenerates and diffs, failing on any drift.
+#
+# Triggers deliberately do NOT inherit ci.yml's `spec/**` / `**.md` path-ignore:
+# a spec edit is precisely a change that can drift assets/spec/bock-spec.md, so
+# this guard must run for those.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  assets-drift:
+    name: vocab + spec assets in sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Regenerate extension assets
+        run: ./tools/scripts/sync-vocab.sh
+      - name: Assert assets match committed output
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- \
+              extensions/vscode/assets/vocab.json \
+              extensions/vscode/assets/spec/; then
+            echo "::error::Extension assets are out of sync with the compiler/spec." \
+              "Run 'tools/scripts/sync-vocab.sh' and commit the result."
+            exit 1
+          fi
+          echo "Extension assets are in sync."
