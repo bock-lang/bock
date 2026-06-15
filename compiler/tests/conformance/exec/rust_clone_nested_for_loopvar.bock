@@ -1,0 +1,39 @@
+// TEST: exec_rust_clone_nested_for_loopvar
+// EXPECT: output "[a]1;[a]2;[b]1;[b]2;"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-rust-clone-insertion-gaps (nested-`for` loop-variable + iterable reuse). A
+// non-Copy outer loop variable (`tag: String`) is passed BY VALUE to a helper
+// inside an inner loop, and the inner iterable is itself iterated once per outer
+// iteration. Two distinct moves are at play:
+//   - the outer `tag` is moved into `label(tag)` on the FIRST inner iteration,
+//     so the SECOND inner iteration references a moved binding, and
+//   - the inner `nums` list is moved by `for n in nums` on the FIRST outer
+//     iteration, so the SECOND outer iteration iterates a moved binding.
+//
+// Bock value semantics permit both reuses (every other backend re-reads freely);
+// the Rust backend must seed both the loop variable and the reused iterable into
+// its clone-insertion sets — the same `> 1 || identifier_used_in_loop(...)`
+// heuristic `seed_reused_params` already uses — so the by-value emission clones
+// instead of moving. Before the fix the emitted Rust hit E0382 on both shapes
+// while js/ts/python/go ran cleanly.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+fn label(s: String) -> String {
+  return "[" + s + "]"
+}
+
+fn main() -> Void {
+  let tags: List[String] = ["a", "b"]
+  let nums: List[Int] = [1, 2]
+  let mut out: String = ""
+  for tag in tags {
+    for n in nums {
+      out = out + label(tag) + "${n};"
+    }
+  }
+  println(out)
+}

@@ -4167,14 +4167,22 @@ impl RsEmitCtx {
                 // by value to a call and *also* reads it afterward
                 // (`is_category(e, …)` then `e.amount`), the first pass moves it
                 // (`E0382`). Seed it as a reused binding so the call-arg emitter
-                // clones the by-value pass. Only when read more than once and not
-                // a `Copy` scalar (cloning those is needless noise).
+                // clones the by-value pass. Move-reused when read by value more
+                // than once, OR read even once inside a NESTED loop — a nested
+                // `for` re-executes that by-value read on every inner iteration,
+                // so the loop var is moved on the first inner pass and gone on
+                // the second (`for tag in tags { for n in nums { label(tag) } }`,
+                // the nested-loop shape). This mirrors `seed_reused_params`'
+                // `count > 1 || identifier_used_in_loop` heuristic. A `Copy`
+                // scalar is never moved (cloning it is needless noise).
                 let prev_reused = self.reused_let_bindings.clone();
                 let mut loop_bindings = Vec::new();
                 Self::collect_pattern_binding_names(pattern, &mut loop_bindings);
                 for b in &loop_bindings {
                     let rs_name = to_snake_case(b);
-                    if Self::count_identifier_uses(body, &rs_name) > 1 {
+                    if Self::count_identifier_uses(body, &rs_name) > 1
+                        || Self::identifier_used_in_loop(body, &rs_name)
+                    {
                         self.reused_let_bindings.insert(rs_name);
                     }
                 }
@@ -4970,7 +4978,15 @@ impl RsEmitCtx {
                     let fname = to_snake_case(&f.name.name);
                     if let Some(val) = &f.value {
                         let _ = write!(self.buf, "{fname}: ");
-                        self.emit_expr(val)?;
+                        // A record-literal field value is a by-value position,
+                        // exactly like a call argument: a reused, non-`Copy`
+                        // binding used as a field value (`Pair { left: tag,
+                        // right: tag }`) is moved by the first field and would be
+                        // `E0382` at the second. Route through `emit_call_arg`
+                        // (borrow=false) so the same `arg_needs_clone` / reused-fn
+                        // borrow logic that guards call args also clones a reused
+                        // field value here. (`emit_expr` alone bypassed it.)
+                        self.emit_call_arg(val, false)?;
                     } else {
                         self.buf.push_str(&fname);
                     }
@@ -5480,15 +5496,35 @@ impl RsEmitCtx {
         impl bock_air::visitor::Visitor for LoopUseScan<'_> {
             fn visit_node(&mut self, node: &AIRNode) {
                 match &node.kind {
-                    NodeKind::For { body, .. }
-                    | NodeKind::While { body, .. }
-                    | NodeKind::Loop { body, .. } => {
+                    NodeKind::For { iterable, body, .. } => {
+                        // A NESTED loop's iterable IS re-executed once per
+                        // surrounding-loop iteration (`for n in nums` inside
+                        // `for tag in tags`), so a binding used only as that
+                        // iterable is still move-reused across outer iterations
+                        // — scan it when already inside a loop. The OUTERMOST
+                        // loop's iterable runs exactly once, so it is not counted
+                        // (skipped while `in_loop == 0`).
+                        if self.in_loop > 0 {
+                            bock_air::visitor::Visitor::visit_node(self, iterable);
+                        }
                         self.in_loop += 1;
                         bock_air::visitor::Visitor::visit_node(self, body);
                         self.in_loop -= 1;
-                        // The loop's non-body children (iterable/condition) are
-                        // not re-executed per iteration; skip the default walk so
-                        // they aren't double-visited or wrongly counted.
+                    }
+                    NodeKind::While { condition, body } => {
+                        // As above for `while`'s condition: a nested `while`
+                        // re-evaluates its condition every outer iteration.
+                        if self.in_loop > 0 {
+                            bock_air::visitor::Visitor::visit_node(self, condition);
+                        }
+                        self.in_loop += 1;
+                        bock_air::visitor::Visitor::visit_node(self, body);
+                        self.in_loop -= 1;
+                    }
+                    NodeKind::Loop { body, .. } => {
+                        self.in_loop += 1;
+                        bock_air::visitor::Visitor::visit_node(self, body);
+                        self.in_loop -= 1;
                     }
                     NodeKind::Identifier { name } => {
                         if self.in_loop > 0 && to_snake_case(&name.name) == self.name {
@@ -5795,6 +5831,45 @@ impl RsEmitCtx {
         Ok(())
     }
 
+    /// True when `scrutinee` is a move-reused binding (used again after the
+    /// `match`, so it is in the reuse clone set) AND some arm's pattern moves a
+    /// field out of it — a record/constructor/tuple pattern that introduces at
+    /// least one binding. In that case the scrutinee must be matched on a
+    /// `.clone()` so the original binding survives the partial move (`E0382`).
+    /// A pattern that binds nothing (bare variant, wildcard, literal,
+    /// whole-scrutinee bind) moves nothing and needs no clone.
+    fn match_scrutinee_needs_clone(&self, scrutinee: &AIRNode, arms: &[AIRNode]) -> bool {
+        if !self.arg_is_reused_binding(scrutinee) {
+            return false;
+        }
+        arms.iter().any(|arm| {
+            let NodeKind::MatchArm { pattern, .. } = &arm.kind else {
+                return false;
+            };
+            Self::pattern_moves_fields(pattern)
+        })
+    }
+
+    /// True when `pat` destructures and binds at least one field by value — a
+    /// record/constructor/tuple/list pattern introducing a `BindPat`. Such a
+    /// pattern moves the bound (possibly non-`Copy`) field out of the matched
+    /// value. A whole-value bind (`other => …`, a top-level `BindPat`) is NOT a
+    /// field move — it rebinds the whole scrutinee, which the existing
+    /// whole-scrutinee handling already covers — so it does not count here.
+    fn pattern_moves_fields(pat: &AIRNode) -> bool {
+        match &pat.kind {
+            NodeKind::ConstructorPat { .. }
+            | NodeKind::RecordPat { .. }
+            | NodeKind::TuplePat { .. }
+            | NodeKind::ListPat { .. } => {
+                let mut names = Vec::new();
+                Self::collect_pattern_binding_names(pat, &mut names);
+                !names.is_empty()
+            }
+            _ => false,
+        }
+    }
+
     /// Emit the scrutinee expression for a `match`, choosing the `.as_slice()` /
     /// `.as_str()` wrap, and seed [`Self::str_rebind_match_binds`] for a mixed
     /// string-literal / whole-scrutinee-bind match. Shared by the statement-form
@@ -5846,7 +5921,21 @@ impl RsEmitCtx {
                 }
             }
         } else {
-            self.emit_expr(scrutinee)?;
+            // A record/constructor/tuple pattern arm binds the scrutinee's
+            // fields BY VALUE, moving non-`Copy` fields out of the scrutinee
+            // (`match u { User { name, age } => … }` moves the `String` `name`).
+            // If the scrutinee is a binding reused after the match (`u.name`
+            // later), matching on `u` directly leaves it partially moved and a
+            // later read is `E0382`. Match on `u.clone()` so the original
+            // binding stays intact — analogous to `iterable_is_reused` cloning a
+            // reused `for` iterable. A pattern that binds nothing (a bare
+            // variant / wildcard / literal) moves nothing, so no clone.
+            if self.match_scrutinee_needs_clone(scrutinee, arms) {
+                self.emit_expr(scrutinee)?;
+                self.buf.push_str(".clone()");
+            } else {
+                self.emit_expr(scrutinee)?;
+            }
         }
         Ok(prev_rebind)
     }
@@ -6271,9 +6360,15 @@ impl RsEmitCtx {
             // Seed the move-reuse clone set for this block's `let` bindings: a
             // non-`Copy` binding read by value more than once is moved by its
             // first by-value consumer, so later free-fn arg passes must clone
-            // (`E0382`). Unioned into (not replacing) any outer-block set so a
-            // reused binding from an enclosing block stays cloned in nested
-            // blocks; saved/restored so the additions never leak outward.
+            // (`E0382`). A binding read even ONCE inside a loop is also reused —
+            // the loop re-executes that read each iteration, moving it on the
+            // first pass and leaving it gone on the second (a `let nums = …`
+            // iterated by a nested `for n in nums` once per outer iteration).
+            // This mirrors `seed_reused_params`' `count > 1 ||
+            // identifier_used_in_loop` heuristic. Unioned into (not replacing)
+            // any outer-block set so a reused binding from an enclosing block
+            // stays cloned in nested blocks; saved/restored so the additions
+            // never leak outward.
             let prev_reused_let = self.reused_let_bindings.clone();
             // Track which `let` bindings hold a Rust collection so an
             // interpolation of one formats with `{:?}` (a `Vec`/`HashMap`/
@@ -6291,7 +6386,9 @@ impl RsEmitCtx {
                 {
                     if let NodeKind::BindPat { name, .. } = &pattern.kind {
                         let rs_name = to_snake_case(&name.name);
-                        if Self::count_identifier_uses(node, &rs_name) > 1 {
+                        if Self::count_identifier_uses(node, &rs_name) > 1
+                            || Self::identifier_used_in_loop(node, &rs_name)
+                        {
                             self.reused_let_bindings.insert(rs_name.clone());
                         }
                         if ty.as_deref().is_some_and(Self::type_is_display_collection)
@@ -6312,10 +6409,15 @@ impl RsEmitCtx {
             for s in stmts {
                 self.emit_node(s)?;
             }
-            self.reused_let_bindings = prev_reused_let;
-            self.collection_bindings = prev_collection;
-            self.fn_typed_bindings = prev_fn_typed;
-            self.task_bound_names = prev;
+            // The block's tail expression is in the SAME scope as the block's
+            // `let` bindings, so it must be emitted while the seeded move-reuse
+            // clone set is still live — a tail that reuses a block binding by
+            // value (`println("${join(xs)},${xs.len()}")`, an interpolation tail
+            // whose first segment moves `xs` and whose second re-reads it) needs
+            // the same `.clone()` insertion a body statement would get. Restoring
+            // the block-scope sets BEFORE emitting the tail dropped that seeding
+            // and re-introduced `E0382`. Restore in every exit path AFTER the
+            // tail instead.
             if let Some(t) = tail {
                 // A statement tail (`return`/`break`/`continue`/assignment) is
                 // emitted via the statement emitter — `emit_expr` has no arm
@@ -6323,21 +6425,29 @@ impl RsEmitCtx {
                 // `/* unsupported */`.
                 if crate::generator::node_is_statement(t) {
                     self.emit_stmt(t)?;
+                    self.reused_let_bindings = prev_reused_let;
+                    self.collection_bindings = prev_collection;
+                    self.fn_typed_bindings = prev_fn_typed;
+                    self.task_bound_names = prev;
                     return Ok(());
                 }
                 // Tail expression without semicolon (Rust implicit return).
                 self.write_indent();
-                let prev = self.returning_fn_closure;
+                let prev_returning = self.returning_fn_closure;
                 self.returning_fn_closure = self.return_closure_tail;
                 let clone_tail = self.tail_ident_needs_clone(t);
                 let r = self.emit_expr(t);
                 if clone_tail {
                     self.buf.push_str(".clone()");
                 }
-                self.returning_fn_closure = prev;
+                self.returning_fn_closure = prev_returning;
                 r?;
                 self.buf.push('\n');
             }
+            self.reused_let_bindings = prev_reused_let;
+            self.collection_bindings = prev_collection;
+            self.fn_typed_bindings = prev_fn_typed;
+            self.task_bound_names = prev;
         } else if crate::generator::node_is_statement(node) {
             self.emit_stmt(node)?;
         } else {

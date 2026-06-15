@@ -1,0 +1,45 @@
+// TEST: exec_rust_clone_match_scrutinee_reuse
+// EXPECT: output "summary: Ada is 30 (Ada)"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Q-rust-clone-insertion-gaps (record-pattern match-scrutinee reuse). A reused
+// binding (`u: User`) is matched by a record pattern that binds its non-Copy
+// (`String`) field by value (`User { name, age } => …`), which MOVES that field
+// out of `u`; the binding `u` is then read again afterwards (`u.name`). Bock's
+// value semantics permit reusing `u` after the match (every other backend
+// re-reads the record freely); the Rust backend must `match u.clone() { … }`
+// when the scrutinee is a reused binding and an arm's record/constructor pattern
+// moves a non-Copy field, so the post-match `u.name` does not reference a
+// partially-moved value.
+//
+// Before the fix the emitted Rust matched on `u` directly, moving `name` out of
+// it, and the trailing `u.name` was E0382 ("use of partially moved value");
+// js/ts/python/go ran fine. This fixture uses a STATEMENT-position `match`
+// deliberately: the let-EXPRESSION-position record-pattern match has a SEPARATE
+// pre-existing Python-codegen defect (the IIFE-lambda lowering never binds the
+// pattern variables — tracked as a FOUND for the py.rs owner), so it is avoided
+// here to keep this fixture's failure isolated to the Rust clone gap.
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+record User {
+  name: String,
+  age: Int,
+}
+
+fn describe(u: User) -> String {
+  let mut summary: String = "summary:"
+  match u {
+    User { name, age } => {
+      summary = "${summary} ${name} is ${age}"
+    }
+  }
+  return "${summary} (${u.name})"
+}
+
+fn main() -> Void {
+  let u: User = User { name: "Ada", age: 30 }
+  println(describe(u))
+}
