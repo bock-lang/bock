@@ -686,6 +686,13 @@ impl JsScaffolder {
             // the emitted tree imports via `.ts` specifiers, which that flag both
             // accepts and rewrites to `.js` on emit.
             dev_deps.push(("typescript", "^5.7.0"));
+            // Give real users the full Node global/type surface after `npm
+            // install` (`process`, `Buffer`, etc.). NOTE: the conformance harness
+            // and `bock build` project-mode validation never run `npm install`, so
+            // this dev-dep alone does NOT fix the no-`node_modules` `tsc --noEmit`
+            // path — the vendored `node-globals.d.ts` ambient shim (emitted in
+            // `scaffold`) handles that (Q-ts-print-scaffold-types).
+            dev_deps.push(("@types/node", "^22.0.0"));
         }
         if js_prettier_enabled(ctx.config) {
             dev_deps.push(("prettier", "^3.0.0"));
@@ -822,6 +829,22 @@ impl Scaffolder for JsScaffolder {
         ];
         if self.is_ts() {
             files.push(out_file("tsconfig.json", Self::tsconfig_json()));
+            // Vendored ambient shim for Node globals (Q-ts-print-scaffold-types).
+            // Bare `print(...)` lowers to `process.stdout.write(...)` on TS;
+            // `process` is a Node global not in TypeScript's bundled libs, so a
+            // build-time `tsc --noEmit -p .` (project-mode validation, and the
+            // conformance harness) fails with `TS2591: Cannot find name 'process'`
+            // because neither path runs `npm install` to materialize
+            // `@types/node`. `declare var process: any;` resolves `process` with
+            // no `node_modules` present AND coexists with the real `@types/node`
+            // once installed (it neither conflicts with nor narrows it — unlike a
+            // structural decl / `NodeJS.Process` merge / `typeRoots` stub, all of
+            // which regressed `process.argv`). This file matches the existing
+            // `"include": ["**/*.ts"]` glob, so no `tsconfig.json` change is needed.
+            files.push(out_file(
+                "node-globals.d.ts",
+                "declare var process: any;\n".to_string(),
+            ));
         }
         if js_prettier_enabled(ctx.config) {
             files.push(out_file(".prettierrc.json", Self::prettierrc()));
@@ -1656,6 +1679,17 @@ formatter = "prettier"
         assert!(file(&files, "README.md")
             .content
             .contains("tsc -p . && node main.js"));
+        // `@types/node` gives `npm install` users the full Node type surface;
+        // see `node-globals.d.ts` below for the no-install (build/conformance)
+        // path. (Q-ts-print-scaffold-types.)
+        assert!(pkg.content.contains("\"@types/node\""));
+        // Vendored ambient shim so bare `print(...)` (→ `process.stdout.write`)
+        // type-checks under `tsc --noEmit -p .` with no `node_modules` present
+        // (the conformance/build-validation path never runs `npm install`).
+        assert!(has(&files, "node-globals.d.ts"));
+        assert!(file(&files, "node-globals.d.ts")
+            .content
+            .contains("declare var process: any;"));
     }
 
     #[test]
