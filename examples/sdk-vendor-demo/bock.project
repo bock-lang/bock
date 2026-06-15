@@ -1,0 +1,21 @@
+# textkit — a small string/slug utility library an SDK vendor would ship.
+#
+# ONE Bock source project. `bock build --all-targets` emits a NATIVE package
+# for each of the five v1 targets (js, ts, python, rust, go): npm package.json,
+# tsconfig.json, pyproject.toml, Cargo.toml, go.mod — plus the `@test`
+# functions transpiled into each target's native test framework (vitest,
+# pytest, `cargo test`, `go test`).
+
+[project]
+name = "textkit"
+version = "0.1.0"
+
+[strictness]
+# Standard/development strictness: public items carry @context annotations,
+# so this project type-checks and builds with zero warnings.
+default = "development"
+
+[targets]
+# The launch wedge: one library, five native packages.
+primary = "js"
+additional = ["ts", "python", "rust", "go"]

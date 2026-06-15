@@ -1,0 +1,185 @@
+//! textkit — a tiny string / slug / validation utility library.
+//!
+//! This is the kind of small, dependency-free utility package an SDK vendor
+//! ships: a handful of pure public functions, a public enum, a public record,
+//! and a few `@test` functions. It is written ONCE in Bock and compiled to
+//! native packages for JavaScript, TypeScript, Python, Rust, and Go — every
+//! target gets the same behavior.
+//!
+//! Everything here is deterministic and pure (no IO, no AI-assisted codegen),
+//! so `bock build --all-targets --deterministic` produces identical behavior
+//! on all five targets, and the transpiled `@test` functions run green under
+//! each target's native test framework (vitest / pytest / cargo test / go test).
+
+module main
+
+// ─── Public types ──────────────────────────────────────────────────
+
+/// The casing transform to apply to a piece of text.
+@context("Casing transforms supported by textkit. Used by `apply_casing`.")
+public enum Casing { Lower, Upper, Kebab }
+
+/// A URL-safe slug plus its character length — the result of `slugify`.
+@context("A normalized, URL-safe slug and its length. Returned by `slugify`.")
+public record Slug {
+  value: String
+  length: Int
+}
+
+// ─── Core string helpers ───────────────────────────────────────────
+
+/// Collapse a run of two spaces into one, repeatedly, until none remain.
+/// Used by `normalize` to fold arbitrary internal whitespace down to single
+/// spaces without relying on regex (which is not uniform across targets).
+@context("Collapse repeated double-spaces in `s` down to single spaces.")
+public fn collapse_spaces(s: String) -> String {
+  let mut out = s
+  for _i in 0..8 {
+    out = out.replace("  ", " ")
+  }
+  out
+}
+
+/// Trim, lowercase, and collapse internal whitespace into single spaces.
+@context("Normalize `s`: trim ends, lowercase, and single-space the interior.")
+public fn normalize(s: String) -> String {
+  let lowered = s.trim().to_lower()
+  collapse_spaces(lowered)
+}
+
+/// Apply a `Casing` transform to `s`.
+@context("Apply the requested `Casing` transform to `s`.")
+public fn apply_casing(s: String, casing: Casing) -> String {
+  match casing {
+    Lower => s.to_lower()
+    Upper => s.to_upper()
+    Kebab => normalize(s).replace(" ", "-")
+  }
+}
+
+// ─── Slugs ─────────────────────────────────────────────────────────
+
+/// Turn arbitrary text into a URL-safe kebab-case slug.
+@context("Produce a URL-safe kebab-case `Slug` from arbitrary input text.")
+public fn slugify(s: String) -> Slug {
+  let kebab = apply_casing(s, Kebab)
+  Slug { value: kebab, length: kebab.len() }
+}
+
+/// Truncate `s` to at most `max` characters (no ellipsis).
+@context("Truncate `s` to at most `max` characters. Shorter strings pass through.")
+public fn truncate(s: String, max: Int) -> String {
+  if (s.len() <= max) {
+    s
+  } else {
+    s.substring(0, max)
+  }
+}
+
+// ─── Validation ────────────────────────────────────────────────────
+
+/// A conservative, target-uniform check that `slug` looks like a slug:
+/// non-empty, all-lowercase, and free of spaces. (We compare against the
+/// lowercased form rather than scanning code points so the rule is identical
+/// on every target.)
+@context("Return true when `slug` is non-empty, lowercase, and space-free.")
+public fn is_valid_slug(slug: String) -> Bool {
+  let lowered = slug.to_lower()
+  let no_spaces = !slug.contains(" ")
+  let non_empty = !slug.is_empty()
+  let already_lower = slug == lowered
+  non_empty && no_spaces && already_lower
+}
+
+// ─── Tests (transpiled into each target's native test framework) ───
+
+/// `@test` functions placed in the build set are transpiled per target:
+/// `bock.test.{js,ts}` (vitest), `test_bock.py` (pytest),
+/// `src/bock_tests.rs` (`cargo test`), and `bock_test.go` (`go test`).
+
+@test
+fn test_normalize_trims_and_lowers() {
+  expect(normalize("  Hello   World  ")).to_equal("hello world")
+}
+
+@test
+fn test_slugify_basic() {
+  let s = slugify("Hello World")
+  expect(s.value).to_equal("hello-world")
+}
+
+@test
+fn test_slugify_length() {
+  let s = slugify("Foo Bar")
+  expect(s.length).to_equal(7)
+}
+
+// The `apply_casing` enum paths are exercised through the public `slugify`
+// (which selects `Kebab` internally) and through the driver below, which
+// prints `apply_casing(..., Upper)` / `apply_casing(..., Kebab)` on all five
+// targets with byte-identical output. The `@test` bodies here deliberately
+// avoid naming a bare enum *variant* as a call argument: see FOUND-codegen-1
+// in this directory's README — the per-target test-file import collector
+// (js/ts/python) omits enum-variant constructor symbols, so a transpiled test
+// like `apply_casing("x", Upper)` references an undefined `Casing_Upper`.
+@test
+fn test_slugify_kebab_path() {
+  // `slugify` routes through `apply_casing(..., Kebab)`, so this covers the
+  // kebab casing branch without naming the variant in the test body.
+  let s = slugify("Some Title Here")
+  expect(s.value).to_equal("some-title-here")
+}
+
+@test
+fn test_truncate_shorter_passes_through() {
+  expect(truncate("abc", 10)).to_equal("abc")
+}
+
+@test
+fn test_truncate_cuts() {
+  expect(truncate("abcdefgh", 5)).to_equal("abcde")
+}
+
+@test
+fn test_is_valid_slug_true() {
+  let ok = is_valid_slug("hello-world")
+  expect(ok).to_equal(true)
+}
+
+@test
+fn test_is_valid_slug_rejects_spaces() {
+  let bad = is_valid_slug("hello world")
+  expect(bad).to_equal(false)
+}
+
+@test
+fn test_is_valid_slug_rejects_upper() {
+  let bad = is_valid_slug("Hello")
+  expect(bad).to_equal(false)
+}
+
+// ─── Driver ────────────────────────────────────────────────────────
+
+/// A small driver that exercises the public surface and prints results.
+/// `bock run` (interpreter) and the five compiled targets all emit the
+/// SAME bytes here — that byte-identical stdout is the equivalence proof.
+fn main() {
+  println("=== textkit demo ===")
+
+  let s1 = slugify("  Hello   World  ")
+  println("slugify(\"  Hello   World  \") -> ${s1.value} (len ${s1.length})")
+
+  let s2 = slugify("The Quick Brown Fox")
+  println("slugify(\"The Quick Brown Fox\") -> ${s2.value} (len ${s2.length})")
+
+  println("apply_casing(\"abc def\", Upper) -> ${apply_casing("abc def", Upper)}")
+  println("apply_casing(\"Foo Bar\", Kebab) -> ${apply_casing("Foo Bar", Kebab)}")
+  println("normalize(\"  A  B  C  \") -> ${normalize("  A  B  C  ")}")
+  println("truncate(\"abcdefgh\", 5) -> ${truncate("abcdefgh", 5)}")
+  println("truncate(\"abc\", 5) -> ${truncate("abc", 5)}")
+
+  println("is_valid_slug(\"hello-world\") -> ${is_valid_slug("hello-world")}")
+  println("is_valid_slug(\"Hello World\") -> ${is_valid_slug("Hello World")}")
+
+  println("=== done ===")
+}
