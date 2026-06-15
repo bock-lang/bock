@@ -11,7 +11,7 @@ changes.
 
 ---
 
-## Build status (as of main 16e0486, 2026-06-10 — combined-tree re-verified post fix-wave #341–#345: fmt/clippy/test/doc all clean, conformance 0 failed ×2 [~850 pairs incl. the wave's new fixtures; wall 332/341s, baseline-consistent]; row detail below measured at 0567568 + the wave's ~36 new tests)
+## Build status (as of main 8619f0a, 2026-06-15 — MS-v1.0-hardening Waves 1–3 complete [#352–#357, #368–#373]: fmt/clippy/test/doc all clean, conformance 0 failed ×2; final-HEAD CI green incl. Windows. The conformance EXECUTION lane now walks the whole tree — **248 output fixtures across 4 categories / 1053 (fixture,target) pairs**, up from exec-only [#372], with line-ending-agnostic stdout comparison. Combined-tree re-verified via octopus of the 6 Wave-3 lanes. Local-only caveat: `bock test`'s discovery `read_dir().unwrap()` panics if an ancestor dir is unreadable [Q-bocktest-discovery-readdir-unwrap] — env-specific [`/tmp/snap-private-tmp`], passes in CI's clean /tmp)
 
 | What | State |
 |------|-------|
