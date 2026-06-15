@@ -14,6 +14,12 @@ the Bock identity.
   positioning, or marketing. The audit's lean on timing (OQ3, operator's call): release-prep now —
   the governance window is open. Repositioned identity (equivalence + auditability lead; convenience
   pitch retired) awaits operator sign-off (R1, escalations) before any external copy moves.
+- **★ v1.0 timing + scope DECIDED (2026-06-15, operator walk-through):** ship on current scope, but **clear a
+  defined hardening pass first** (OQ3) before the cut — **scope = everything ready except pure docs** (D2-polish
+  defers to v1.2), correctness-first (the equivalence cluster leads). → **MS-v1.0-hardening** (below). Identity
+  sign-off (R1) + marketing wedge (OQ1) **delegated to the marketing chat**
+  (`tracking/handoffs/2026-06-15-marketing-positioning.md`); R6 ratified; OQ2 publish; OQ4 (§10.8 demo) deferred to
+  v1.x. The v1.0 cut + release actions (all escalate) follow the hardening pass + the marketing copy lock.
 - **Property claims:** "one language, many targets" (JS/TS/Py/Rust/Go
   codegen parity on examples); "effects on every function"; "targeted
   output, not a runtime".
@@ -66,16 +72,21 @@ the Bock identity.
     `20260610-design-audit-spec-touches.md`).
   - **First v1.x design pass = `Q-ai-loop-design-pass`** (agentic repair-loop /
     AI-layer composability: loop budgets, convergence, fallback policy — R5).
-  - **Prioritization principle (R6, PROPOSED — operator ratification pending,
-    see escalations):** verification features over surface-area features —
-    property testing (`@property`) → runtime guardrails (§15.4) → refinement
-    predicates (§4.7), ahead of new targets / FFI breadth.
+  - **Prioritization principle (R6, RATIFIED 2026-06-15 — operator walk-through):**
+    verification features over surface-area features — property testing
+    (`@property`) → runtime guardrails (§15.4) → refinement predicates (§4.7),
+    ahead of new targets / FFI breadth.
+  - **Runtime-AI pillar (OQ4, operator 2026-06-15): DEFER** the §10.8
+    adaptive-effect-handlers end-to-end demo behind the release window; revisit
+    at the first v1.x planning pass (R9 keeps §10.8 specced-unvalidated; the R6
+    verification track leads).
   - **Target demand-gate (R7, affirms §1.3 posture):** a v1.x target is added
     only on concrete demand + a fully automated end-to-end conformance lane —
     never on a calendar.
   - **Model-familiarity workstream (R3/R-A, queue):** Q-context-pack ·
     Q-synthetic-corpus · Q-diagnostics-agent-audit; + Q-dogfood-tool (R8).
-    Corpus publication is OQ2 (operator).
+    Corpus publication: **OQ2 → PUBLISH** (operator, 2026-06-15) — the context
+    pack + synthetic corpus ship as open artifacts.
 
 ## v1.2 — Deferred Loose Ends
 **Theme:** finish what v1.0 deferred.
@@ -184,3 +195,28 @@ exercises the stdlib's FREE functions but not the real-world-shaped method/closu
   `Q-examples-codegen-misc` (minor/triage). Plus `Q-examples-exec-coverage` (M, the gate — built in parallel, disjoint
   files). LESSON (carried in memory `conformance-green-is-not-sufficient`): conformance fixtures must include
   real-world-shaped programs / the examples must be exec-tested — green conformance gave false confidence.
+
+## MS-v1.0-hardening — v1.0 PREREQUISITE (opened 2026-06-15) — drain the ready queue to a clean floor before the cut
+**Theme:** v1.0 engineering scope is complete (stdlib 11/11 ×5, codegen-completeness, project mode, examples green); the
+operator chose (OQ3) to clear a **defined hardening pass** before cutting 1.0 rather than ship-and-patch. **Scope =
+everything ready except pure docs** (D2-polish defers to v1.2). Correctness-first ordering: the equivalence cluster
+leads, since "the five behave identically" is the headline guarantee.
+- **Boundary principle:** a 1.0 blocker is anything that produces silent cross-target divergence, interpreter-oracle
+  divergence (R11), silent-wrong output, or a target that won't compile/run a valid program. Diagnostics-credibility +
+  chores ride in this pass too (operator chose the thorough boundary), but **behind** the correctness cluster.
+- **Tier A–D — equivalence cluster (lead):** interp parity `Q-interp-list-concat` / `Q-interp-compare-ordering` /
+  `Q-interp-float-ieee-equality` (R11); silent-wrong codegen `Q-go-tailmatch-unreachable-panic` /
+  `Q-displayable-interpolation-dispatch` / `Q-bounded-comparable-codegen` / `Q-js-handling-let-redeclaration`;
+  soundness/won't-compile `Q-bracket-bounds-unenforced` / `Q-prelude-impl-missing-import` /
+  `Q-rust-clone-insertion-gaps` + `Q-rust-callarg-borrow-mismatch` / `Q-ts-variant-constructed-let-typing`; +
+  **`Q-dq31-container-element-eq`** (the DQ31 ruling impl, NEW 2026-06-15).
+- **Diagnostics-credibility:** `Q-error-catalog-completeness`, `Q-diag-structure-misc`, `Q-diag-brief-span-format`,
+  `Q-errors-render-byte-col-drift`, `Q-w1001-effect-import-false-positive`.
+- **Chores/cleanup:** `Q-context-pack-reconcile`, `Q-examples-matrix-undodge`, bock-core cleanup
+  (`Q-core-dead-equals-registration` / `Q-core-legacy-list-builtins`), `Q-exec-output-directive-wiring`,
+  `Q-ts-print-scaffold-types`.
+- **Acceptance:** the ready queue is drained to {pure docs (D2-polish) ∪ v1.x-deferred}; the combined-tree gate stays
+  green every PR; the equivalence cluster lands first. After acceptance → v1.0 release-prep (spec version stamp,
+  user-facing release notes, distribution — all release ACTIONS escalate) + the marketing copy lock (gated on R1/OQ1).
+- **Defers (NOT in this pass):** `D2-polish` (pure docs → v1.2); the audit's v1.x workstreams (Q-mcp-server,
+  Q-ai-loop-design-pass, the model-familiarity items beyond Q-context-pack-reconcile).

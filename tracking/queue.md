@@ -407,6 +407,12 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ## Ready
 
+> **★ v1.0-hardening pass (operator OQ3, 2026-06-15):** the operator chose to drain this Ready queue to a clean floor
+> before cutting v1.0 — **scope = everything ready except pure docs** (D2-polish defers to v1.2). Correctness-first: the
+> equivalence cluster (interp parity / silent-wrong codegen / soundness / won't-compile + `Q-dq31-container-element-eq`)
+> lands **before** the diagnostics-credibility batch and the chores. Item→tier mapping: **MS-v1.0-hardening**
+> (`milestones.md`). Dispatch in file-disjoint waves like #341–#349.
+
 ### Design-audit follow-ups (filed 2026-06-10, from `designs/2026-06-09-design-audit.md`)
 
 - **[Q-context-pack] versioned model-familiarity context pack** — feature · **DONE (#339)** ·
@@ -663,6 +669,21 @@ targets, an examples test-suite un-broken, every diagnostic re-rendered) — sur
   the total-order `OrdF64` wrapper is load-bearing for `BTreeMap`/`Set` internals; split the boundary (IEEE semantics at
   `==` evaluation, total order inside containers), don't remove the wrapper. Pin with an interp-side NaN fixture when
   fixed (the ×5 target fixture already exists from #347). FOUND 2026-06-10 (#347).
+
+### DQ31-implementation (filed 2026-06-15, RULED 2026-06-15)
+
+- **[Q-dq31-container-element-eq] container `==` must defer to element `Equatable` conformance (DQ31 ruling)** — impl ·
+  ready · **v1.0-hardening** · `compiler/crates/bock-types/` (Equatable predicate) + `bock-codegen/` (×5) +
+  `bock-interp/` · — · links DQ31, #347, Q-equatable-gating-user-types · note: implement the DQ31 ruling
+  (design-questions DQ31; §18.5 "Container equality defers to element conformance"). **Step 1 (prerequisite, do first):**
+  extend the DQ29 structural-Equatable predicate from boolean → **three-state provenance** (`StructuralDefault` /
+  `CustomImpl` / `NotEquatable`, recursive — any `CustomImpl` in the element tree → loop path; any `NotEquatable` →
+  rejected). **Step 2:** codegen-path selection ×5 — native deep-equality (`==` / `reflect.DeepEqual` / native
+  structural) for structural-default elements; per-element `eq` loop ONLY when an element carries a custom
+  `impl Equatable`; Map/Set key-matching + membership route through the custom `eq`. **Step 3:** ×5 fixtures incl. the
+  custom-`eq` `Map` case that currently diverges under structural compare (the corner #347 left deliberately un-pinned),
+  nested-container provenance, and poison-rejection on both paths. Codegen specialization is an optimization note (not
+  normative); the observable result IS normative. FOUND 2026-06-10 (#347, DQ31); RULED 2026-06-15.
 
 ### DQ30-implementation follow-ups (filed 2026-06-10, FOUND via #349)
 

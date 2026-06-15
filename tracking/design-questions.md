@@ -47,7 +47,38 @@ decided→link)`
 > Design: **DQ31** (container element-equality under an explicit `impl Equatable` — rule-3 corner from #347's pinning;
 > low/corner, nothing gated on it) + DV19–DV24 dispositions. DQ10/DQ11 remain ratification-pending (non-blocking).
 
-### DQ31 — container `==` element semantics when elements carry an explicit `impl Equatable`
+### DQ31 — container `==` element semantics when elements carry an explicit `impl Equatable` — DECIDED (Design, 2026-06-15)
+
+**RULING (Design chat, 2026-06-15 03:43 UTC): option (a) as semantics, with a required codegen specialization.**
+The three-way framing conflated a *semantic* question (what does container equality mean) with a *codegen* question
+(what instructions are emitted); they separate cleanly. **Semantics (forced, not chosen):** container `==` always
+defers to the element type's `Equatable` conformance — a `List[T]`/`Set[T]`/`Map[K,V]` is Equatable iff its elements
+are (DQ29 conditional rule), and "is Equatable" means "compares using whatever `eq` the element conforms with." A type
+has one equality; there is no coherent reading where `T`'s equality differs inside `List[T]`. This is DQ29 rule 6
+("explicit impl wins") read across the container boundary. **Codegen (specialize on conformance provenance, which the
+checker already computes):** element uses the **structural default** → emit the **native path** (`==` Rust,
+`reflect.DeepEqual` Go, native structural js/ts/python) — observably identical to a per-element loop *because the
+element's equality is structural by definition*; element carries a **custom `impl Equatable`** → emit the
+**per-element loop** calling that `eq`. So (a)'s priced cost lands ONLY on custom-impl containers; the common case keeps
+native efficiency AND correctness (same shape as the #106 primitive bridge — one semantics, two codegen paths selected
+by a checker-tracked property). **(b) rejected** as a correctness bug (silently breaks the exact case custom impls exist
+for — e.g. a case-insensitive-key `Map` — and re-introduces target-dependent results). **(c) rejected** as amputating
+the feature. **`Map`/`Set` membership and key-matching must also route through the element's `eq` (not just the final
+comparison); order-independence (DQ29 rule 3) governs which elements pair up, this ruling governs how a matched pair is
+compared.** Poison composes unchanged (non-Equatable element → container non-Equatable → `==` rejected, both paths).
+**Implementation prerequisite (scope in, do not discover mid-session):** extend the DQ29 structural-Equatable predicate
+from a boolean to a **three-state provenance answer** per type — `StructuralDefault` / `CustomImpl` / `NotEquatable`,
+computed recursively (a type is `StructuralDefault` only if it has no custom `eq` AND every field/element/payload is
+`StructuralDefault`; any `CustomImpl` in the tree → container takes the loop path; any `NotEquatable` → rejected). Both
+the gate and the codegen-path selection consume it, so it is the engineer session's first step. **Spec:** §18.5 gains a
+sentence (container equality defers to the element's conformance, observable result target-independent); §18.3
+`List`/`Map`/`Set` cross-reference it; the codegen specialization is an **optimization note, not normative** (backends
+MAY always use the loop path, SHOULD use the native path for structural-default elements). Reconciled in the 2026-06-15
+hub pass (changelog `20260615-stdlib-ratifications-dq31.md`). Implementation → `queue.md` Q-dq31-container-element-eq
+(the DQ31 follow-up to Q-equatable-gating-user-types). With DQ29/DQ30/DQ31 ruled, the `==`/mutator design surface is
+fully specified.
+
+### DQ31 (original question, for the record)
 
 - **Question:** DQ29's rule 3 makes `List[T]`/`Map[K,V]`/`Set[T]` Equatable iff their parameters are, but does not pin
   WHICH equality the container comparison uses when `T` has an explicit (custom) `impl Equatable`: the impl's `eq` or
@@ -58,7 +89,7 @@ decided→link)`
   fixture passes ×5 only at top level; the in-container case is the divergent corner — deliberately not pinned). The
   consistent reading of DQ29 rule 6 (explicit impl wins) suggests element `eq` should be honored inside containers too,
   but rust/go would then need per-element loops instead of native equality — a codegen-cost decision Design should weigh.
-- **Status:** escalated → Design (escalations.md, 2026-06-10)
+- **Status:** DECIDED — see the ruling block above (option (a) + codegen provenance specialization; 2026-06-15).
 
 ### DQ29 — does structural record/enum equality satisfy `Equatable` for `==`/`!=` operator-gating? — DECIDED (Design, 2026-06-10)
 
@@ -143,7 +174,8 @@ Closed Q-list-mut-pop-insert-remove. **With DQ29 + DQ30 ruled, the queue's Desig
   minus Bool; Displayable: all; Hashable: all minus Float) and proceeds on it;
   Design ratifies/refines (additive, low-cost). Also flags: §18.5 operator-gating
   for *user* types is unimplemented (separate follow-up).
-- **Status:** escalated → Design (escalations.md)
+- **Status:** DECIDED 2026-06-15 (ratified) — the §18.5 normative matrix (already in spec) is blessed as the v1
+  surface; the IEEE/Bool caveats stand. Changelog `20260615-stdlib-ratifications-dq31.md`.
 
 ### DQ11 — `core.convert` design questions (4 sub-points)
 - **Questions** (surfaced by `core.convert` #110; shipped the floor, escalated for
@@ -161,7 +193,9 @@ Closed Q-list-mut-pop-insert-remove. **With DQ29 + DQ30 ruled, the queue's Desig
      `TryInto`. **Omitted** (no `TryFrom⇒TryInto` blanket).
 - **§:** §18.3 / §18.5 · **context:** all four are additive/refineable; the impl
   proceeds on the floor. Reconcile §18.3 if Design ratifies/changes any.
-- **Status:** escalated → Design (escalations.md)
+- **Status:** DECIDED 2026-06-15 (ratified) — the shipped floor (fixed `ConvertError`, unsealed primitive→primitive,
+  no `TryInto`, the named conversion matrix) is the v1 surface; §18.3 `core.convert` now pins it. Changelog
+  `20260615-stdlib-ratifications-dq31.md`.
 
 ### DQ12 — `core.iter` protocol shape
 - **Questions** (surfaced by the `core.iter` plan; iter is PAUSED on Q-codegen-fixes,
@@ -177,7 +211,9 @@ Closed Q-list-mut-pop-insert-remove. **With DQ29 + DQ30 ruled, the queue's Desig
 - **§:** §18.3 / §18.5 / §18.2 · **context:** ship the minimum-useful floor when iter
   resumes; Design ratifies the normative surface. Pairs with DQ10/DQ11 as stdlib-
   surface ratification.
-- **Status:** escalated → Design (escalations.md)
+- **Status:** DECIDED 2026-06-15 (ratified) — generic `Iterator[T]`/`Iterable[T]`, eager `List`-returning floor, the
+  native/desugar dual iteration model — all already normative in §18.3 `core.iter` — blessed as the v1 surface.
+  Refinements tracked under DQ24. Changelog `20260615-stdlib-ratifications-dq31.md`.
 
 ### DQ13 — §18.2 prelude membership (`TryFrom`, `Error`)
 - **Question:** §18.2's literal trait list (Comparable/Equatable/Hashable/Displayable/
@@ -189,7 +225,9 @@ Closed Q-list-mut-pop-insert-remove. **With DQ29 + DQ30 ruled, the queue's Desig
   over-specified them). Reversible/low-harm in v1-dev. FYI not a question: the §18.2
   traits without core definitions yet (Serializable/Cloneable/Default/Hashable/
   Iterator/Iterable) are name-level prelude only until their `core.*` ship — expected.
-- **Status:** escalated → Design (escalations.md)
+- **Status:** DECIDED 2026-06-15 (ratified) — **amend to include** `TryFrom` + `Error` in the prelude. §18.2 already
+  lists both (spec was kept consistent); this ratifies them as auto-imported. Changelog
+  `20260615-stdlib-ratifications-dq31.md`.
 
 ### DQ14 — `core.iter`: `Iterable.iter()` return type without `impl Trait`/associated types
 - **Question:** the compiler has neither associated types (parsed but inert end-to-end) nor
@@ -198,14 +236,18 @@ Closed Q-list-mut-pop-insert-remove. **With DQ29 + DQ30 ruled, the queue's Desig
   the stdlib `ListIterator`, not its own iterator type — a real expressiveness limit. Accept this
   v1 floor, have `iter()` return `Self`, or pull forward existential/assoc-type returns?
 - **§:** §18.3 · **context:** surfaced by the `core.iter` plan; non-blocking to the floor.
-- **Status:** escalated → Design (escalations.md)
+- **Status:** DECIDED 2026-06-15 (ratified) — **accept the v1 floor** (`iter()` returns the concrete `ListIterator[T]`);
+  existential / associated-type returns (`iter() -> Self`) are Reserved for v1.x (already so noted in §18.3 `core.iter`).
+  Changelog `20260615-stdlib-ratifications-dq31.md`.
 
 ### DQ15 — `core.iter`: combinator dispatch — concrete vs generic-bound
 - **Question:** are v1 combinators `fn map[I: Iterator[T], U](it: I, …)` (generic-bound dispatch
   via the less-exercised `type_var_bounds` path) or `fn map[T,U](it: ListIterator[T], …)`
   (concrete)? The floor ships concrete (proven path). Ratify the normative surface.
 - **§:** §18.3 · **context:** surfaced by the `core.iter` plan; non-blocking.
-- **Status:** escalated → Design (escalations.md)
+- **Status:** DECIDED 2026-06-15 (ratified) — **concrete** combinator dispatch on `ListIterator[T]` is the v1 surface;
+  generic-bound dispatch (`I: Iterator[T]`) is Reserved for v1.x (already so noted in §18.3 `core.iter`). Changelog
+  `20260615-stdlib-ratifications-dq31.md`.
 
 ### DQ16 — `core.iter` R1 floor: List-backed vs List-free (**BLOCKS core.iter**)
 - **Question:** the DQ12 R1 floor (a `ListIterator[T]` over `List[T]` + 6 List-returning
@@ -326,7 +368,10 @@ Closed Q-list-mut-pop-insert-remove. **With DQ29 + DQ30 ruled, the queue's Desig
   for the stdlib — clarify/annotate, or leave as a generic trait-syntax illustration?
 - **§:** §18.3 / §18.5 / §6.5 / §18.2 · **context:** surfaced by core.iter R1 (#151/#152). Non-blocking — the
   floor is shipped and exercised ×5; refining any of the three is additive.
-- **Status:** escalated → Design (escalations.md)
+- **Status:** DECIDED 2026-06-15 (ratified) — the shipped surface stands: the **six** combinators
+  (`to_list`/`count`/`fold`/`map`/`filter`/`take`) are the normative v1 set; `ListIterator` satisfying `Iterator` via an
+  **inherent `next`** is acceptable (single-method-namespace rule, §6.4/6.7); §6.5's associated-type `Collection`
+  example is annotated as illustration. All already in §18.3/§6.5. Changelog `20260615-stdlib-ratifications-dq31.md`.
 
 ### DQ25 — `core.effect` v1 surface (8 sub-questions — the floor is UNDER-SPECIFIED)
 - **Question:** §18.3:1728 says only "`core.effect` (v1) — Effect system primitives" with no §18.3.x
