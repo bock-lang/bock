@@ -3342,9 +3342,19 @@ impl EmitCtx {
                 Ok(())
             }
             NodeKind::HandlingBlock { handlers, body } => {
-                // handling block → scoped handler instantiation
+                // handling block → scoped handler instantiation. The emitted
+                // `{ … }` is its own JS lexical block, so it gets a fresh `let`
+                // scope frame: a name first bound in one `handling` block and
+                // re-bound in a *sibling* `handling` block is two independent
+                // declarations (each block-scoped), not a redeclaration. Without
+                // a fresh frame the redeclaration tracker would carry the prior
+                // block's `declared` set into this one and rewrite the second
+                // `let x = …` into a bare `x = …`, referencing a name that went
+                // out of scope when the first block closed (ReferenceError under
+                // strict mode; a leaked global in sloppy mode).
                 self.writeln("{");
                 self.indent += 1;
+                self.enter_let_scope(body);
                 let old_handler_vars = self.current_handler_vars.clone();
                 for h in handlers {
                     let effect_name = h
@@ -3373,6 +3383,7 @@ impl EmitCtx {
                     self.emit_stmt(body)?;
                 }
                 self.current_handler_vars = old_handler_vars;
+                self.leave_let_scope();
                 self.indent -= 1;
                 self.writeln("}");
                 Ok(())
@@ -7837,6 +7848,72 @@ mod tests {
         assert!(
             out.contains("const __logger = stdoutLogger()"),
             "handling block should instantiate handler, got: {out}"
+        );
+    }
+
+    #[test]
+    fn sibling_handling_blocks_do_not_share_let_scope() {
+        use bock_air::AirHandlerPair;
+
+        // Two *sibling* `handling` blocks, each `let part = …` under the SAME
+        // name. Each block lowers to its own `{ … }` JS lexical scope, so both
+        // must declare a fresh `const part` — neither may be rewritten into a
+        // bare `part = …` assignment against the other (which would reference a
+        // name that went out of scope when the first block closed). Regression
+        // for Q-js-handling-let-redeclaration.
+        let make_handling = |id: u32, val: &str| {
+            node(
+                id,
+                NodeKind::HandlingBlock {
+                    handlers: vec![AirHandlerPair {
+                        effect: type_path(&["Logger"]),
+                        handler: Box::new(node(
+                            id + 1,
+                            NodeKind::Call {
+                                callee: Box::new(id_node(id + 2, "StdoutLogger")),
+                                args: vec![],
+                                type_args: vec![],
+                            },
+                        )),
+                    }],
+                    body: Box::new(block(
+                        id + 3,
+                        vec![let_binding(id + 4, "part", false, str_lit(id + 6, val))],
+                        Some(id_node(id + 7, "part")),
+                    )),
+                },
+            )
+        };
+        let main_fn = node(
+            40,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    41,
+                    vec![make_handling(50, "first"), make_handling(70, "second")],
+                    None,
+                )),
+            },
+        );
+
+        let out = gen(&module(vec![], vec![main_fn]));
+        assert_eq!(
+            out.matches("const part = ").count(),
+            2,
+            "each sibling handling block should declare its own `const part`, got: {out}"
+        );
+        assert!(
+            !out.contains("\n  part = "),
+            "no sibling handling block may rewrite its `let part` into a bare \
+             assignment, got: {out}"
         );
     }
 
