@@ -1,0 +1,49 @@
+// TEST: eq_map_custom_value
+// EXPECT: output "eq:true;ne:false;order:true"
+// EXPECT: targets js, ts, python, rust, go
+//
+// DQ31 (§18.5 "Container equality defers to element conformance"): a `Map`
+// whose VALUE type carries an explicit `impl Equatable` must compare its
+// values through that custom `eq` during `Map == Map`. `Bucket` is equal under
+// `v % 10`, so `{"a": Bucket{12}} == {"a": Bucket{2}}` is TRUE (the values are
+// custom-equal) and `{"a": Bucket{12}} == {"a": Bucket{13}}` is FALSE. Map
+// equality stays ORDER-INDEPENDENT (the `order` assertion): the key-matching
+// loop pairs `"a"`/`"b"` regardless of insertion order, then defers each value
+// comparison to the element `eq`.
+//
+// This is the case that diverges TODAY (#347): Go's `reflect.DeepEqual`
+// compared map values structurally (FALSE for custom-equal buckets) and Rust's
+// `HashMap<_, Bucket> ==` needed a `PartialEq` Bucket did not derive. The fix
+// pins byte-identical results across all five targets. (A custom-`eq` *key*
+// type additionally needs `Hashable` to be a Map key / Set member at all on
+// Rust/Go/Python — a SEPARATE gap from DQ31's container-`==` ruling; see the
+// PR's FOUND note. Here the key is `String`, so the map is constructible
+// everywhere and the ruling is exercised on the value type.)
+//
+// `main` is intentionally NOT `public` (see hello_world.bock for the Go
+// entry-point rationale).
+module main
+
+use core.compare.{Equatable}
+
+record Bucket {
+  v: Int,
+}
+
+impl Equatable for Bucket {
+  public fn eq(self, other: Bucket) -> Bool {
+    self.v % 10 == other.v % 10
+  }
+}
+
+fn main() -> Void {
+  let m1: Map[String, Bucket] = { "a": Bucket { v: 12 }, "b": Bucket { v: 23 } }
+  let m2: Map[String, Bucket] = { "a": Bucket { v: 2 }, "b": Bucket { v: 3 } }
+  let m3: Map[String, Bucket] = { "a": Bucket { v: 12 }, "b": Bucket { v: 24 } }
+  // Same associations, reversed insertion order — equality is content-based.
+  let m1r: Map[String, Bucket] = { "b": Bucket { v: 23 }, "a": Bucket { v: 12 } }
+  let eq: Bool = m1 == m2
+  let ne: Bool = m1 == m3
+  let order: Bool = m1 == m1r
+  println("eq:${eq};ne:${ne};order:${order}")
+}

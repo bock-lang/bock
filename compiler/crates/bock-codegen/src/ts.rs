@@ -208,6 +208,7 @@ fn module_uses_eq(items: &[AIRNode]) -> bool {
         let dbg = format!("{n:?}");
         dbg.contains("\"user_eq\": String(\"structural\")")
             || dbg.contains("\"user_eq\": String(\"deep\")")
+            || dbg.contains("\"user_eq\": String(\"deep_custom\")")
             || dbg.contains("\"user_eq\": String(\"generic\")")
             || dbg.contains("TraitBound:Equatable")
     })

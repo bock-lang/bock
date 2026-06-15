@@ -74,7 +74,13 @@ fn js_module_uses_range(items: &[AIRNode]) -> bool {
 /// tuples, `List`/`Map`/`Set`, `Optional`/`Result`, and bounded generics): JS
 /// `===` on two objects is reference identity, so every stamped equality (see
 /// [`crate::generator::user_eq_kind`], lanes `"structural"`/`"deep"`/
-/// `"generic"`) lowers to `__bockEq(a, b)` instead.
+/// `"deep_custom"`/`"generic"`) lowers to `__bockEq(a, b)` instead.
+///
+/// The `"deep_custom"` lane (DQ31: a container whose element tree carries a
+/// custom `impl Equatable`) needs no special handling here — `__bockEq` already
+/// dispatches through an element's `eq` method when present (the `a.eq` check
+/// below), so the custom element equality is honored inside the collection,
+/// including `Map` key-matching and `Set` membership.
 ///
 /// Semantics:
 /// - non-objects fall through to `===` — which keeps the IEEE `NaN !== NaN`
@@ -145,6 +151,7 @@ fn js_module_uses_eq(items: &[AIRNode]) -> bool {
         let dbg = format!("{n:?}");
         dbg.contains("\"user_eq\": String(\"structural\")")
             || dbg.contains("\"user_eq\": String(\"deep\")")
+            || dbg.contains("\"user_eq\": String(\"deep_custom\")")
             || dbg.contains("\"user_eq\": String(\"generic\")")
             || dbg.contains("TraitBound:Equatable")
     })

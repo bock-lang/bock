@@ -435,6 +435,25 @@ impl Interpreter {
                     };
                     return Ok(Value::Bool(if matches!(op, BinOp::Eq) { eq } else { !eq }));
                 }
+                // DQ31 (§18.5 container equality defers to element conformance):
+                // the `"deep_custom"` lane — a container (`List`/`Map`/`Set`/
+                // `Optional`/`Result`/tuple, or a record/enum carrying one)
+                // whose element tree has an explicit `impl Equatable`. Native
+                // `Value` equality is structural and would ignore the element's
+                // custom `eq`; instead recurse, dispatching element comparison
+                // (and Map-key / Set-member matching) through that `eq`, the
+                // same observable result the compiled targets produce.
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && matches!(
+                        node.metadata.get("user_eq"),
+                        Some(bock_air::Value::String(kind)) if kind == "deep_custom"
+                    )
+                {
+                    let l = self.eval_expr(left).await?;
+                    let r = self.eval_expr(right).await?;
+                    let eq = self.values_equal_custom(&l, &r).await?;
+                    return Ok(Value::Bool(if matches!(op, BinOp::Eq) { eq } else { !eq }));
+                }
                 self.eval_binary_op(*op, left, right).await
             }
 
@@ -2424,6 +2443,121 @@ impl Interpreter {
                 value,
                 updated_self: None,
             }))
+        }
+    }
+
+    /// DQ31 (§18.5 container equality defers to element conformance):
+    /// recursively compare two values for the `"deep_custom"` lane, dispatching
+    /// any record element that carries a custom `impl Equatable` through its
+    /// `eq` method. Containers recurse element-wise; `Map`/`Set` match keys /
+    /// members order-independently under the same recursive equality so an
+    /// element's custom `eq` governs key-matching and membership/dedup, not
+    /// only the final comparison. Any non-custom value compares structurally
+    /// (the native `Value` `==`), so all-structural sub-trees behave exactly
+    /// as the `"deep"`/`"structural"` lanes' native equality.
+    #[async_recursion]
+    async fn values_equal_custom(&mut self, a: &Value, b: &Value) -> Result<bool, RuntimeError> {
+        match (a, b) {
+            // A record whose type registers a custom `eq` defines its own
+            // equality; dispatch through it. A record without an `eq` method
+            // (structural default) falls through to recursive field comparison
+            // via the catch-all below.
+            (Value::Record(rv), Value::Record(_))
+                if self
+                    .method_table
+                    .get(&rv.type_name)
+                    .is_some_and(|m| m.contains_key("eq")) =>
+            {
+                match self.try_call_impl_method(a, "eq", vec![b.clone()]).await? {
+                    Some(outcome) => Ok(matches!(outcome.value, Value::Bool(true))),
+                    None => Ok(a == b),
+                }
+            }
+            (Value::Record(ra), Value::Record(rb)) => {
+                if ra.type_name != rb.type_name || ra.fields.len() != rb.fields.len() {
+                    return Ok(false);
+                }
+                for (k, av) in &ra.fields {
+                    match rb.fields.get(k) {
+                        Some(bv) if self.values_equal_custom(av, bv).await? => {}
+                        _ => return Ok(false),
+                    }
+                }
+                Ok(true)
+            }
+            (Value::List(xs), Value::List(ys)) | (Value::Tuple(xs), Value::Tuple(ys)) => {
+                if xs.len() != ys.len() {
+                    return Ok(false);
+                }
+                for (x, y) in xs.iter().zip(ys.iter()) {
+                    if !self.values_equal_custom(x, y).await? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            (Value::Optional(x), Value::Optional(y)) => match (x, y) {
+                (None, None) => Ok(true),
+                (Some(xv), Some(yv)) => self.values_equal_custom(xv, yv).await,
+                _ => Ok(false),
+            },
+            (Value::Result(x), Value::Result(y)) => match (x, y) {
+                (Ok(xv), Ok(yv)) | (Err(xv), Err(yv)) => self.values_equal_custom(xv, yv).await,
+                _ => Ok(false),
+            },
+            (Value::Map(xs), Value::Map(ys)) => {
+                if xs.len() != ys.len() {
+                    return Ok(false);
+                }
+                // Order-independent, key-matched under recursive custom eq.
+                let ys: Vec<(&Value, &Value)> = ys.iter().collect();
+                for (xk, xv) in xs {
+                    let mut found = false;
+                    for (yk, yv) in &ys {
+                        if self.values_equal_custom(xk, yk).await?
+                            && self.values_equal_custom(xv, yv).await?
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            (Value::Set(xs), Value::Set(ys)) => {
+                if xs.len() != ys.len() {
+                    return Ok(false);
+                }
+                let ys: Vec<&Value> = ys.iter().collect();
+                for x in xs {
+                    let mut found = false;
+                    for y in &ys {
+                        if self.values_equal_custom(x, y).await? {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            (Value::Enum(ea), Value::Enum(eb)) => {
+                if ea.type_name != eb.type_name || ea.variant != eb.variant {
+                    return Ok(false);
+                }
+                match (&ea.payload, &eb.payload) {
+                    (None, None) => Ok(true),
+                    (Some(x), Some(y)) => self.values_equal_custom(x, y).await,
+                    _ => Ok(false),
+                }
+            }
+            // Primitives and any other shape: native structural equality.
+            _ => Ok(a == b),
         }
     }
 

@@ -1,0 +1,25 @@
+// TEST: opgate_eq_list_fn_element
+// EXPECT: error E4015 at 23:23
+//
+// DQ31 (§18.5 "Container equality defers to element conformance") + DQ29
+// poison rule (unchanged): a container of a NON-Equatable element rejects `==`.
+// `Callback` holds an `Fn` field, which has no equality, so neither `Callback`
+// nor `List[Callback]` is Equatable — the operator gate reports E4015 naming
+// the offending element path (`[..].handler`) and leaf type (`Fn(Int) -> Int`),
+// machine-actionable per the diagnostics-review criterion. The three-state
+// provenance predicate yields `NotEquatable` here; the gate (which decides
+// conformance with the structural-Equatable witness) is what reports it.
+module main
+
+record Callback {
+  name: String,
+  handler: Fn(Int) -> Int,
+}
+
+fn main() -> Void {
+  let double: Fn(Int) -> Int = (x) => x * 2
+  let a: List[Callback] = [Callback { name: "d", handler: double }]
+  let b: List[Callback] = [Callback { name: "t", handler: double }]
+  let same: Bool = a == b
+  println("${same}")
+}
