@@ -2,14 +2,14 @@
 // EXPECT: output "boom"
 //
 // A `main` that constructs an error via `core.error.error(...)` and prints its
-// message. This fixture lives under `stdlib/` (directive-harness scope: loaded,
-// not cross-target executed). The cross-target *execution* of `core.error`
-// `.message()` is covered by `conformance/exec/exec_core_error.bock`, which
-// runs on rust + go (the Q-go-error-message fix locked there). The js/ts/python
-// equivalents are a pre-existing field/method-name collision (see that fixture's
-// header) tracked separately. This fixture is also validated by the CLI-level
-// `bock run` smoke test in bock-cli's `stdlib_error` integration suite against
-// the interpreter.
+// message. The conformance execution lane (#372) walks the whole tree and runs
+// every `// EXPECT: output` fixture, so this is compiled and executed on each
+// present target, stdout-diffed against the directive above. The richer
+// field/method-name collision lock for `core.error` (`.message()` method vs the
+// `message` field) lives in `conformance/exec/exec_core_error.bock`, which reads
+// both members on all five targets (the Q-go-error-message fix is locked there).
+// This fixture is also validated by the CLI-level `bock run` smoke test in
+// bock-cli's `stdlib_error` integration suite against the interpreter.
 module main
 
 use core.error.{error}
