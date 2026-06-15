@@ -32,7 +32,8 @@ To launch the extension in a host VS Code window:
 
 Only `assets/vocab.json` and the bundled spec copy under `assets/spec/`
 are **generated** — by `tools/scripts/sync-vocab.sh` (`bock-dump-vocab`
-output plus a copy of `spec/sections/`). Do not hand-edit those two; the
+output plus a copy of the single-file spec `spec/bock-spec.md`). Do not
+hand-edit those two; the
 right fix is upstream:
 
 - New keyword? Add it to the lexer.
