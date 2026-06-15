@@ -2652,3 +2652,29 @@ Awaiting operator: R1/R6/OQ1–OQ4. Awaiting Design: DQ31, DV19–DV24.
     robustness, Q-core-bool-compare-dead LOW, 2 doc-prose chores) + 3 Design OPENs to formalize as DQ entries.
     NEXT: drain the 8 dependabot PRs (#359–366 — stale pre-#367 base, need `@dependabot rebase` onto e9f4299 → merge
     round-robin across the extensions/vscode + website shared lockfiles; regex #364 independent).
+
+═══ DAILY DIGEST — 2026-06-15 (MS-v1.0-hardening Waves 3 + B; the big autonomous block) ═══
+Merged this block: 8 feature PRs (#368–#373 Wave 3 · #375–#376 Wave B) + 2 tracking PRs (#374, #377) + 8 dependabot bumps
+  (#359–366). main 397161f → cd4c383. All CI-verified incl. Windows; 0 red merges.
+★ MS-v1.0-hardening WAVES 1–3 + B ALL COMPLETE — the cross-target codegen correctness floor is clean.
+  Wave 3 (#368–#373): rust clone-insertion (4 reuse shapes) · js/ts sibling-handling let-scope · ts print scaffold shim ·
+    context-pack v0.1.1 · sync-vocab single-file-spec repoint (un-broke the spec panel) · whole-tree output-execution wiring
+    (248 fixtures / 1053 pairs).
+  Wave B (#375–#376): the entangled cross-backend trait-dispatch family in one codegen session — bounded-Comparable dispatch,
+    prelude-trait base emission, ${..} Displayable interpolation x5+interp, rust Equatable/PartialEq E0034, ts primitive-eq
+    TS2367, go handling let-scope, py let-expr/value match binding — plus examples-matrix undodge (#375).
+PROCESS (the headline lesson): this block ran entirely under the background-agent Write/Edit constraint. Working model that
+  emerged: agents run as read-only SCOUTS (investigate, propose exact fix) OR as Bash-authorized APPLIERS (edit via python3
+  through Bash — explicitly sanctioned), and the ORCHESTRATOR publishes (push + PR + merge). The recurring failure was agents
+  backgrounding the final cargo gate and stalling; recovered every time by committing the already-applied work (incremental
+  commits kept partial state clean) and treating per-PR CI as the gate. 7 agent stalls recovered, nothing rewritten.
+VERIFICATION CATCHES: (1) the combined octopus gate caught a REAL Windows CRLF bug in Wave 3's new multi-line output fixture
+  (fixed by normalizing line endings in the harness comparison). (2) The combined gate's lone local RED was correctly
+  DIAGNOSED as a pre-existing ENV fragility (bock test discovery read_dir().unwrap() panicking on /tmp/snap-private-tmp),
+  NOT a regression — proven by per-PR CI passing on clean /tmp. Filed as Q-bocktest-discovery-readdir-unwrap.
+FOUND/OPEN filed: 8 (Wave 3) + the Wave-B per-backend bugs (mostly closed by #376). Remaining v1.0-hardening = a small Wave-C
+  tail (Q-ts-generic-enum-codegen, Q-py-go-wrapper-structural-eq, the readdir-unwrap robustness fix, 2 doc chores) + 3 Design
+  OPENs to formalize as DQ entries.
+State at close: main cd4c383, 0 open PRs (all 8 feature + 8 dependabot merged), worktrees/branches pruned. Every PR CI-verified 15/15 on its branch incl. Windows; final-HEAD CI confirmatory.
+Awaiting operator: OQ1/R1 (marketing positioning handoff at tracking/handoffs/2026-06-15-marketing-positioning.md) — the only
+  pending non-engineering item.
