@@ -522,6 +522,26 @@ func __bockCompare[T int64 | float64 | string | rune | int | uint64 | float32](a
 }
 ";
 
+/// Runtime for a `${expr}` interpolation part: render a value whose Bock type
+/// has a `Displayable` impl through its `ToString` method (the user
+/// `to_string` lowers to a `ToString() string` value-receiver method on Go)
+/// rather than the struct default (`fmt.Sprintf("%v", p)` → `{3 7}`). The
+/// `__bockStringer` interface is satisfied by exactly those types; every other
+/// value falls through to `%v`. Gated by [`go_module_uses_str`]; its own `fmt`
+/// import is emitted into the runtime file. (Q-displayable-interpolation-dispatch.)
+const STR_RUNTIME_GO: &str = "// ── Bock display-string runtime ──
+type __bockStringer interface {
+	ToString() string
+}
+
+func __bockStr(x interface{}) string {
+	if s, ok := x.(__bockStringer); ok {
+		return s.ToString()
+	}
+	return fmt.Sprintf(\"%v\", x)
+}
+";
+
 /// The `__bockOrdered` constraint a `[T: Comparable]` sealed-core bound lowers to
 /// (GAP-C): the ordered primitive type-set, so a generic fn's `a.compare(b)` /
 /// `a > b` can use `<`/`==`/`>`. Self-contained (no `cmp` import), matching
@@ -549,6 +569,15 @@ fn go_module_uses_ordering(items: &[AIRNode]) -> bool {
             || s.contains("\"Greater\"")
             || s.contains("\"compare\"")
     })
+}
+
+/// True if any module contains a string interpolation (`${expr}`), so the
+/// [`STR_RUNTIME_GO`] `__bockStr` helper must be emitted into the runtime file.
+/// Mirrors [`go_module_uses_optional`]. (Q-displayable-interpolation-dispatch.)
+fn go_module_uses_str(items: &[AIRNode]) -> bool {
+    items
+        .iter()
+        .any(|n| format!("{n:?}").contains("Interpolation"))
 }
 
 /// True if a `match`\'s arms dispatch on the prelude `Ordering` variants
@@ -998,6 +1027,7 @@ impl GoGenerator {
         let mut uses_range = false;
         let mut uses_int_pow = false;
         let mut uses_deep_eq = false;
+        let mut uses_str = false;
         for (module, _) in modules {
             if let NodeKind::Module { items, .. } = &module.kind {
                 uses_concurrency |= go_module_uses_concurrency(items);
@@ -1007,6 +1037,7 @@ impl GoGenerator {
                 uses_range |= go_module_uses_range(items);
                 uses_int_pow |= go_module_uses_int_pow(items);
                 uses_deep_eq |= go_module_uses_deep_eq(items);
+                uses_str |= go_module_uses_str(items);
             }
         }
         // The real `core.compare.Ordering` enum is authoritative when reachable
@@ -1029,6 +1060,7 @@ impl GoGenerator {
             || uses_range
             || uses_int_pow
             || uses_deep_eq
+            || uses_str
             || emit_ordering
             || emit_ordered_constraint)
         {
@@ -1041,6 +1073,11 @@ impl GoGenerator {
         // modules only *call* the helper).
         if uses_deep_eq {
             content.push_str("import \"reflect\"\n\n");
+        }
+        if uses_str {
+            // `__bockStr` calls `fmt.Sprintf`; Go imports are per-file, and the
+            // runtime file is its own `package main` source.
+            content.push_str("import \"fmt\"\n\n");
         }
         if uses_concurrency {
             content.push_str(CONCURRENCY_RUNTIME_GO);
@@ -1080,6 +1117,10 @@ impl GoGenerator {
         }
         if uses_deep_eq {
             content.push_str(DEEP_EQ_RUNTIME_GO);
+            content.push('\n');
+        }
+        if uses_str {
+            content.push_str(STR_RUNTIME_GO);
             content.push('\n');
         }
         // Each runtime block is joined with a trailing `\n`, which leaves a blank
@@ -8685,9 +8726,21 @@ impl GoEmitCtx {
                 Ok(())
             }
             NodeKind::HandlingBlock { handlers, body } => {
-                // handling block → scoped handler instantiation
+                // handling block → scoped handler instantiation. The emitted
+                // `{ … }` is its own Go block scope, so it gets a fresh
+                // `go_declared_scopes` frame: a name first bound in one
+                // `handling` block and re-bound in a *sibling* `handling` block
+                // is two independent declarations (each block-scoped), not a
+                // redeclaration. Without a fresh frame the redeclaration tracker
+                // would carry the prior block's `declared` set into this one and
+                // rewrite the second `let part = …` into a bare `part = …` — a
+                // name that left scope when the first block closed (Go rejects it
+                // as `undefined: part`). Mirrors the js/ts fix
+                // (Q-js-handling-let-redeclaration, #371) on the Go backend
+                // (Q-go-handling-let-redeclaration).
                 self.writeln("{");
                 self.indent += 1;
+                self.go_declared_scopes.push(HashSet::new());
                 let old_handler_vars = self.current_handler_vars.clone();
                 let mut new_var_names = Vec::with_capacity(handlers.len());
                 for h in handlers {
@@ -8725,6 +8778,7 @@ impl GoEmitCtx {
                     self.emit_stmt(body)?;
                 }
                 self.current_handler_vars = old_handler_vars;
+                self.go_declared_scopes.pop();
                 self.indent -= 1;
                 self.writeln("}");
                 Ok(())
@@ -9772,15 +9826,23 @@ impl GoEmitCtx {
                             self.buf.push_str(&escape_go_string(s).replace('%', "%%"));
                         }
                         AirInterpolationPart::Expr(expr) => {
-                            self.buf.push_str("%v");
+                            // Q-displayable-interpolation-dispatch: render through
+                            // `__bockStr` (a `%s` verb over a `string`) so a user
+                            // value whose type has a `Displayable` impl (its
+                            // `ToString` method) shows via that method, not the
+                            // struct default (`%v` → `{3 7}`). Every other value
+                            // falls back to `fmt.Sprintf("%v", x)` inside the
+                            // helper, matching the prior `%v` form.
+                            self.buf.push_str("%s");
                             args.push(expr.clone());
                         }
                     }
                 }
                 self.buf.push('"');
                 for arg in &args {
-                    self.buf.push_str(", ");
+                    self.buf.push_str(", __bockStr(");
                     self.emit_expr(arg)?;
+                    self.buf.push(')');
                 }
                 self.buf.push(')');
                 Ok(())
@@ -11903,6 +11965,13 @@ impl GoEmitCtx {
             // `Instant`-typed program also exercises.)
             "Duration" => "int64".into(),
             "Instant" => "time.Time".into(),
+            // The prelude `Ordering` enum: when the real `core.compare.Ordering`
+            // is NOT reachable (no `use core.compare`), its variants lower to the
+            // `__bockOrdering` value runtime, so a `-> Ordering` annotation must
+            // render `__bockOrdering` to agree — the bare `Ordering` is an
+            // undefined Go type. When the enum IS reachable the user type is in
+            // scope and keeps its name. (Q-prelude-impl-missing-import.)
+            "Ordering" if !self.ordering_enum_reachable() => "__bockOrdering".into(),
             other => other.into(),
         }
     }
@@ -13780,7 +13849,12 @@ mod tests {
         );
         let out = gen(&module(vec![], vec![interp]));
         assert!(out.contains("fmt.Sprintf"), "got: {out}");
-        assert!(out.contains("Hello, %v!"), "got: {out}");
+        // Each `${expr}` part renders through `__bockStr` (a `%s` verb over a
+        // `string`) so a user value with a `Displayable` impl dispatches through
+        // its `ToString` (Q-displayable-interpolation-dispatch); other values
+        // fall back to `%v` inside the helper.
+        assert!(out.contains("Hello, %s!"), "got: {out}");
+        assert!(out.contains("__bockStr(name)"), "got: {out}");
         assert!(out.contains("import \"fmt\""), "got: {out}");
     }
 
@@ -13801,8 +13875,10 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![interp]));
+        // The `${n}` part renders through `__bockStr` (`%s`); the literal `%`
+        // bytes still double in the format string.
         assert!(
-            out.contains(r#"fmt.Sprintf("%v%% pass, 100%%%% raw", n)"#),
+            out.contains(r#"fmt.Sprintf("%s%% pass, 100%%%% raw", __bockStr(n))"#),
             "literal % must be doubled in the Sprintf format string, got: {out}"
         );
     }
@@ -15881,6 +15957,81 @@ mod tests {
         assert!(
             out.contains("__logger := stdoutLogger()"),
             "handling block should instantiate handler, got: {out}"
+        );
+    }
+
+    #[test]
+    fn sibling_handling_blocks_do_not_share_go_block_scope() {
+        use bock_air::AirHandlerPair;
+
+        // Two *sibling* `handling` blocks, each `let part = …` under the SAME
+        // name. Each block lowers to its own `{ … }` Go block scope, so both
+        // must declare a fresh `part := …` — neither may be rewritten into a
+        // bare `part = …` assignment against the other (a name that left scope
+        // when the first block closed; Go would reject it as `undefined: part`).
+        // Regression for Q-go-handling-let-redeclaration (mirrors the js/ts fix
+        // Q-js-handling-let-redeclaration, #371).
+        let make_handling = |id: u32, val: &str| {
+            node(
+                id,
+                NodeKind::HandlingBlock {
+                    handlers: vec![AirHandlerPair {
+                        effect: type_path(&["Logger"]),
+                        handler: Box::new(node(
+                            id + 1,
+                            NodeKind::Call {
+                                callee: Box::new(id_node(id + 2, "StdoutLogger")),
+                                args: vec![],
+                                type_args: vec![],
+                            },
+                        )),
+                    }],
+                    body: Box::new(block(
+                        id + 3,
+                        vec![node(
+                            id + 4,
+                            NodeKind::LetBinding {
+                                is_mut: false,
+                                pattern: Box::new(bind_pat(id + 5, "part")),
+                                ty: None,
+                                value: Box::new(str_lit(id + 6, val)),
+                            },
+                        )],
+                        Some(id_node(id + 7, "part")),
+                    )),
+                },
+            )
+        };
+        let main_fn = node(
+            40,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("main"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(
+                    41,
+                    vec![make_handling(50, "first"), make_handling(70, "second")],
+                    None,
+                )),
+            },
+        );
+
+        let out = gen(&module(vec![], vec![main_fn]));
+        assert_eq!(
+            out.matches("part := ").count(),
+            2,
+            "each sibling handling block should declare its own `part := …`, got: {out}"
+        );
+        assert!(
+            !out.contains("part = \""),
+            "no sibling handling block may rewrite its `let part` into a bare \
+             assignment, got: {out}"
         );
     }
 

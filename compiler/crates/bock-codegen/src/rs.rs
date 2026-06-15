@@ -111,6 +111,7 @@ impl CodeGenerator for RsGenerator {
         ctx.generic_decls =
             crate::generator::collect_generic_decls(&[(module, std::path::Path::new(""))]);
         ctx.collect_clone_targets(module);
+        ctx.collect_user_equatable_types(module);
         // Aliases first: `collect_fn_returning_fns` resolves a `Fn`-typed alias
         // in a return position, so the alias table must already be populated.
         ctx.collect_fn_type_aliases(module);
@@ -274,6 +275,7 @@ impl CodeGenerator for RsGenerator {
         }
         for (module, _) in modules {
             template.collect_clone_targets(module);
+            template.collect_user_equatable_types(module);
             template.collect_fn_returning_fns(module);
         }
         // Effect-op resolution needs the whole reachable set: a bare op in one
@@ -446,6 +448,7 @@ impl CodeGenerator for RsGenerator {
         }
         for (module, _) in modules {
             template.collect_clone_targets(module);
+            template.collect_user_equatable_types(module);
             template.collect_fn_returning_fns(module);
         }
         template.seed_effect_registries(modules);
@@ -658,6 +661,18 @@ struct RsEmitCtx {
     /// bound, or method resolution fails (`E0599`: trait bounds not satisfied).
     /// Populated by [`Self::collect_clone_targets`].
     clone_bound_records: std::collections::HashSet<String>,
+    /// Names of record/enum/class types that carry an explicit `impl Equatable`
+    /// (the checker's [`bock_types::checker::CUSTOM_EQ_META_KEY`] stamp). Such a
+    /// type is given BOTH an `impl Equatable` (its `eq`) AND a delegating
+    /// `impl PartialEq` (DQ31 — so it compares natively inside Rust containers;
+    /// see [`Self::emit_delegating_partial_eq`]), which makes a bare
+    /// `a.eq(&b)` ambiguous between `Equatable::eq` and `PartialEq::eq` (E0034).
+    /// A desugared `.eq` method call whose receiver is one of these types is
+    /// therefore emitted as the fully-qualified trait call
+    /// `Equatable::eq(&a, &b)`. Populated by
+    /// [`Self::collect_user_equatable_types`].
+    /// (Q-rust-equatable-eq-collision.)
+    user_equatable_types: std::collections::HashSet<String>,
     /// True while emitting a method body whose impl target is generic and clones
     /// `self` fields. Gates the `self.field` → `self.field.clone()` rewrite so it
     /// applies only inside such methods (never to general field reads, which
@@ -815,6 +830,7 @@ impl RsEmitCtx {
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             clone_target_records: std::collections::HashSet::new(),
             clone_bound_records: std::collections::HashSet::new(),
+            user_equatable_types: std::collections::HashSet::new(),
             in_clone_self_method: false,
             in_assign_target: false,
             self_operand_methods: std::collections::HashSet::new(),
@@ -858,6 +874,7 @@ impl RsEmitCtx {
             generic_decls: self.generic_decls.clone(),
             clone_target_records: self.clone_target_records.clone(),
             clone_bound_records: self.clone_bound_records.clone(),
+            user_equatable_types: self.user_equatable_types.clone(),
             in_clone_self_method: false,
             in_assign_target: false,
             self_operand_methods: self.self_operand_methods.clone(),
@@ -945,6 +962,33 @@ impl RsEmitCtx {
                 });
             if needs_clone_bound {
                 self.clone_bound_records.insert(target_name);
+            }
+        }
+    }
+
+    /// Populate [`Self::user_equatable_types`] with every record/enum/class type
+    /// that carries the checker's [`bock_types::checker::CUSTOM_EQ_META_KEY`]
+    /// stamp (an explicit `impl Equatable`). These types get both an
+    /// `impl Equatable` and a delegating `impl PartialEq` (DQ31), so a desugared
+    /// `a.eq(&b)` on them must lower to the fully-qualified `Equatable::eq(&a,
+    /// &b)` to avoid the `PartialEq::eq`/`Equatable::eq` ambiguity (E0034).
+    /// (Q-rust-equatable-eq-collision.)
+    fn collect_user_equatable_types(&mut self, module: &AIRModule) {
+        let NodeKind::Module { items, .. } = &module.kind else {
+            return;
+        };
+        for item in items {
+            let name = match &item.kind {
+                NodeKind::RecordDecl { name, .. }
+                | NodeKind::EnumDecl { name, .. }
+                | NodeKind::ClassDecl { name, .. } => name,
+                _ => continue,
+            };
+            if matches!(
+                item.metadata.get(bock_types::checker::CUSTOM_EQ_META_KEY),
+                Some(bock_air::Value::Bool(true))
+            ) {
+                self.user_equatable_types.insert(name.name.clone());
             }
         }
     }
@@ -2886,6 +2930,17 @@ impl RsEmitCtx {
             // concrete Rust forms, not the undefined identifiers.
             "Duration" => "i64".into(),
             "Instant" => "std::time::Instant".into(),
+            // The prelude `Ordering` enum: when the real `core.compare.Ordering`
+            // is NOT reachable (no `use core.compare`), its variants already
+            // lower to the `std::cmp::Ordering` bridge (see the `Identifier`
+            // arm), so the *type* annotation must agree — `fn compare(..) ->
+            // Ordering` becomes `-> std::cmp::Ordering`. Without this the
+            // annotation emitted the bare `Ordering` (E0425, undefined type) and
+            // even with the enum reachable a body `.cmp()` (std Ordering)
+            // mismatched a user-`Ordering` return (E0308). When the enum IS
+            // reachable the user `enum Ordering` is in scope and keeps its name.
+            // (Q-prelude-impl-missing-import.)
+            "Ordering" if !self.ordering_enum_reachable() => "std::cmp::Ordering".into(),
             other => other.into(),
         }
     }
@@ -3111,6 +3166,64 @@ impl RsEmitCtx {
         format!("\nwhere\n    {}", items.join(",\n    "))
     }
 
+    /// Synthesize a minimal local definition for each §18.2 prelude
+    /// (compiler-sealed) trait that an `impl` in this module targets but that is
+    /// neither a user-declared trait nor imported. The prelude makes these trait
+    /// names (`Comparable`/`Equatable`/`Displayable`/`Hashable`) resolvable
+    /// without a `use`, but Rust has no such trait unless one is emitted; the
+    /// declaring `core.*` module is unreachable (no real `use` edge), so codegen
+    /// emits the contract here. The synthesized signature matches what the
+    /// backend lowers an impl method to, so the `impl` type-checks against it.
+    /// (Q-prelude-impl-missing-import.)
+    fn emit_synthesized_prelude_traits(&mut self, items: &[AIRNode]) {
+        let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for item in items {
+            let NodeKind::ImplBlock {
+                trait_path: Some(tp),
+                ..
+            } = &item.kind
+            else {
+                continue;
+            };
+            let Some(trait_name) = tp.segments.last().map(|s| s.name.as_str()) else {
+                continue;
+            };
+            // Only an *unimplemented* sealed-core trait (no user `trait` decl)
+            // needs synthesis; a user trait of the same name is emitted normally.
+            if !crate::generator::is_unimplemented_sealed_core_trait(trait_name, &self.trait_decls)
+            {
+                continue;
+            }
+            if !emitted.insert(trait_name.to_string()) {
+                continue;
+            }
+            // The §18.2 prelude trait contracts (fixed by spec §18.3). `Ordering`
+            // lowers to the `std::cmp::Ordering` bridge here (the user enum is
+            // unreachable). A trait Rust does not recognise as one of these is
+            // skipped (no contract to synthesize).
+            // The operand is taken BY VALUE (`other: Self`) to match the impl
+            // method the backend emits for an unimplemented sealed-core trait:
+            // its `other: T` param is by value and the call site `a.compare(b)`
+            // passes by value too (these methods are NOT in `self_operand_methods`,
+            // which is seeded only from user `trait_decls`). A `&Self` trait
+            // declaration would mismatch the impl (E0053) and the call site
+            // (E0308).
+            let body = match trait_name {
+                "Comparable" => "fn compare(&self, other: Self) -> std::cmp::Ordering;",
+                "Equatable" => "fn eq(&self, other: Self) -> bool;",
+                "Displayable" => "fn to_string(&self) -> String;",
+                "Hashable" => "fn hash(&self) -> u64;",
+                _ => continue,
+            };
+            self.writeln(&format!("trait {trait_name} {{"));
+            self.indent += 1;
+            self.writeln(body);
+            self.indent -= 1;
+            self.writeln("}");
+            self.buf.push('\n');
+        }
+    }
+
     // ── Top-level dispatch ──────────────────────────────────────────────────
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
@@ -3141,6 +3254,16 @@ impl RsEmitCtx {
                         self.concurrency_runtime_emitted = true;
                     }
                 }
+                // §18.2 prelude-trait impls without an explicit `use`: a
+                // `impl Comparable for Foo` whose `core.compare` is unreachable
+                // (so no `use crate::core::compare::Comparable;` is emitted)
+                // references a trait Rust has never seen (E0405). The prelude
+                // makes the trait name resolvable without the import, so codegen
+                // must provide the definition itself. Synthesize a minimal local
+                // `trait <Name> { … }` for each sealed-core trait impl'd here that
+                // is not a user-declared trait and not imported.
+                // (Q-prelude-impl-missing-import.)
+                self.emit_synthesized_prelude_traits(items);
                 // `@test` functions are NOT emitted into the runtime module
                 // tree: they are transpiled separately into the target's test
                 // framework (project mode, §20.6.2 — see `generate_tests`). Their
@@ -3446,6 +3569,40 @@ impl RsEmitCtx {
                 self.indent -= 1;
                 self.in_clone_self_method = prev_clone_self;
                 self.writeln("}");
+                // Q-displayable-interpolation-dispatch: a user `impl Displayable`
+                // (its `to_string` is the type's display form) ALSO gets a
+                // delegating `impl std::fmt::Display`, so a `${p}` interpolation
+                // — lowered to `format!("…{}…", p)` — renders through the user's
+                // `to_string` rather than failing `E0277` (`Point` doesn't
+                // implement `Display`). Mirrors the DQ31 delegating-`PartialEq`
+                // pattern. Fires only for a `Displayable` impl that actually
+                // declares a `to_string` instance method.
+                if let Some(tp) = trait_path {
+                    let trait_leaf = tp.segments.last().map(|s| s.name.as_str());
+                    let has_to_string = methods.iter().any(|m| {
+                        matches!(&m.kind, NodeKind::FnDecl { name, .. } if name.name == "to_string")
+                    });
+                    if trait_leaf == Some("Displayable") && has_to_string {
+                        self.buf.push('\n');
+                        self.writeln(&format!(
+                            "impl{generics} std::fmt::Display for {target_name}{where_cl} {{"
+                        ));
+                        self.indent += 1;
+                        self.writeln(
+                            "fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {",
+                        );
+                        self.indent += 1;
+                        // Fully-qualify through the trait so it is unambiguous
+                        // whether or not the type also has an inherent `to_string`
+                        // (and so it works against the §18.2-synthesized
+                        // `trait Displayable`).
+                        self.writeln("write!(f, \"{}\", Displayable::to_string(self))");
+                        self.indent -= 1;
+                        self.writeln("}");
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                }
                 Ok(())
             }
             NodeKind::EffectDecl {
@@ -4742,6 +4899,32 @@ impl RsEmitCtx {
                 if let Some((recv, method, rest)) =
                     crate::generator::desugared_self_call(callee, args)
                 {
+                    // Q-rust-equatable-eq-collision: a user `impl Equatable`'s
+                    // `eq` on a type that also carries the DQ31 delegating
+                    // `PartialEq` (both have an `eq(&self, &Self) -> bool`) makes
+                    // a value-receiver `a.eq(&b)` ambiguous (E0034). Emit the
+                    // fully-qualified trait call `Equatable::eq(&a, &b)` instead.
+                    // Gated on the checker's `recv_kind = "User:<T>"` stamp where
+                    // `<T>` is one of the explicit-`impl Equatable` types — so a
+                    // same-named inherent `eq` on a non-Equatable type (no
+                    // delegating `PartialEq`, no ambiguity) keeps the plain
+                    // method form.
+                    if method.name == "eq" {
+                        if let Some(ty) = crate::generator::raw_recv_kind(node)
+                            .and_then(|k| k.strip_prefix("User:"))
+                        {
+                            if self.user_equatable_types.contains(ty) {
+                                if let Some(other) = rest.first() {
+                                    self.buf.push_str("Equatable::eq(&");
+                                    self.emit_expr(recv)?;
+                                    self.buf.push_str(", &");
+                                    self.emit_expr(&other.value)?;
+                                    self.buf.push(')');
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
                     self.emit_expr(recv)?;
                     let _ = write!(self.buf, ".{}", to_snake_case(&method.name));
                     self.buf.push('(');
@@ -7483,6 +7666,98 @@ mod tests {
         let mut ctx = RsEmitCtx::new();
         ctx.emit_expr(&ts_call).unwrap();
         assert_eq!(ctx.buf, "(1_i64).to_string()", "got: {}", ctx.buf);
+    }
+
+    /// Q-rust-equatable-eq-collision: a `.eq` desugared self-call whose receiver
+    /// is a user type with an explicit `impl Equatable` (so it also carries the
+    /// DQ31 delegating `PartialEq`) is emitted as the fully-qualified
+    /// `Equatable::eq(&a, &b)`, not the ambiguous `a.eq(&b)` (E0034).
+    #[test]
+    fn user_equatable_eq_emits_fully_qualified_trait_call() {
+        // `a.eq(b)` desugared: Call(FieldAccess(a, eq), [a, b]), stamped with
+        // the checker's `recv_kind = "User:Key"`.
+        let recv = id_node(20, "a");
+        let other = id_node(23, "b");
+        let callee = node(
+            21,
+            NodeKind::FieldAccess {
+                object: Box::new(recv.clone()),
+                field: ident("eq"),
+            },
+        );
+        let mut call = node(
+            22,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                args: vec![
+                    AirArg {
+                        label: None,
+                        value: recv,
+                    },
+                    AirArg {
+                        label: None,
+                        value: other,
+                    },
+                ],
+                type_args: vec![],
+            },
+        );
+        call.metadata.insert(
+            bock_types::checker::RECV_KIND_META_KEY.to_string(),
+            bock_air::Value::String("User:Key".to_string()),
+        );
+
+        let mut ctx = RsEmitCtx::new();
+        ctx.user_equatable_types.insert("Key".to_string());
+        ctx.emit_expr(&call).unwrap();
+        assert_eq!(ctx.buf, "Equatable::eq(&a, &b)", "got: {}", ctx.buf);
+    }
+
+    /// The disambiguation is gated on the receiver being a *registered*
+    /// explicit-`impl Equatable` user type. A same-named `eq` on a type with no
+    /// such impl (not in the registry → no delegating `PartialEq`, no ambiguity)
+    /// keeps the plain value-receiver method form.
+    #[test]
+    fn non_equatable_eq_keeps_plain_method_call() {
+        let recv = id_node(20, "a");
+        let other = id_node(23, "b");
+        let callee = node(
+            21,
+            NodeKind::FieldAccess {
+                object: Box::new(recv.clone()),
+                field: ident("eq"),
+            },
+        );
+        let mut call = node(
+            22,
+            NodeKind::Call {
+                callee: Box::new(callee),
+                args: vec![
+                    AirArg {
+                        label: None,
+                        value: recv,
+                    },
+                    AirArg {
+                        label: None,
+                        value: other,
+                    },
+                ],
+                type_args: vec![],
+            },
+        );
+        call.metadata.insert(
+            bock_types::checker::RECV_KIND_META_KEY.to_string(),
+            bock_air::Value::String("User:Other".to_string()),
+        );
+
+        // `Other` is NOT registered as an explicit-`impl Equatable` type.
+        let mut ctx = RsEmitCtx::new();
+        ctx.emit_expr(&call).unwrap();
+        assert!(
+            ctx.buf.contains("a.eq(") && !ctx.buf.contains("Equatable::eq"),
+            "non-Equatable eq should stay a plain method call, got: {}",
+            ctx.buf
+        );
     }
 
     /// Without the annotation, the call falls through to the generic

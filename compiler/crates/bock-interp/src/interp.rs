@@ -2974,22 +2974,49 @@ impl Interpreter {
                 AirInterpolationPart::Literal(s) => result.push_str(s),
                 AirInterpolationPart::Expr(expr) => {
                     let val = self.eval_expr(expr).await?;
-                    // Use Displayable.display trait method if registered,
-                    // otherwise fall back to Rust Display impl.
-                    let tag = TypeTag::of(&val);
-                    let displayed =
-                        match self
-                            .builtins
-                            .call(tag, "display", std::slice::from_ref(&val))
-                        {
-                            Some(Ok(Value::String(s))) => s.to_string(),
-                            _ => val.to_string(),
-                        };
+                    let displayed = self.display_string(&val).await?;
                     result.push_str(&displayed);
                 }
             }
         }
         Ok(Value::String(BockString::new(result)))
+    }
+
+    /// Render a value to its display `String` for a `${…}` interpolation part,
+    /// dispatching through the value's `Displayable` impl when one exists
+    /// (Q-displayable-interpolation-dispatch). A user record/class that declares
+    /// `impl Displayable for T { fn to_string(self) -> String }` (or a `display`
+    /// method) must be rendered via that method — not the structural fallback
+    /// (`Point {x: 3, y: 7}`), matching how the compiled targets dispatch a
+    /// `${p}` through the type's `to_string`. Resolution order: a user impl
+    /// `to_string`/`display` method (the §18.2 `Displayable` contract), then the
+    /// builtin `display` (primitives' canonical stringification), then the
+    /// structural `Value::to_string` fallback.
+    #[async_recursion]
+    async fn display_string(&mut self, val: &Value) -> Result<String, RuntimeError> {
+        // A user `Displayable` impl on a record/class: call its `to_string`
+        // (or `display`) method through the user method table.
+        if matches!(val, Value::Record(_)) {
+            for method in ["to_string", "display"] {
+                if let Some(outcome) = self.try_call_impl_method(val, method, Vec::new()).await? {
+                    if let Value::String(s) = outcome.value {
+                        return Ok(s.to_string());
+                    }
+                }
+            }
+        }
+        // Primitives' canonical stringification (the builtin `display`), else
+        // the structural fallback.
+        let tag = TypeTag::of(val);
+        Ok(
+            match self
+                .builtins
+                .call(tag, "display", std::slice::from_ref(val))
+            {
+                Some(Ok(Value::String(s))) => s.to_string(),
+                _ => val.to_string(),
+            },
+        )
     }
 
     // ── Range construction ─────────────────────────────────────────────────

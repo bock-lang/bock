@@ -1,0 +1,58 @@
+// TEST: py_letexpr_match_payload_bind
+// EXPECT: output "Ada is 36;circle=9;rect=12"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression for Q-py-letexpr-match-namerror (and its shared-root sibling
+// Q-py-valuepos-match-payload-namebind): a `match` in LET-EXPRESSION position
+// (`let x = match (v) { … }`) whose arms bind a *record-pattern field* or a
+// *user-enum constructor payload* lowered, on the Python backend, to a value
+// chain `(lambda __v: f"{name} …")(v)` that tested the variant but never bound
+// the pattern variables — so the arm body referenced free names and raised
+// `NameError: name 'name'` / `name 'r'` at run time. (The same defect affected
+// the function-tail/return value position: `emit_arm_value` only bound the
+// runtime `Some`/`Ok`/`Err` payloads, leaving a user variant's fields free.)
+//
+// The fix routes these payload/field-binding match shapes to the statement-form
+// `match`/`case`, whose `emit_pattern` binds `case User(name=name, age=age):`
+// and `case Shape_Circle(_0=r):` correctly. The chain-supported
+// `Some`/`None`/`Ok`/`Err` shapes are left on the value chain (their payloads
+// are still bound). The other four backends already bound these correctly; this
+// fixture pins all five so the python form can never silently regress.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale, see
+// hello_world.bock).
+module main
+
+record User {
+  name: String,
+  age: Int,
+}
+
+enum Shape {
+  Circle(Int)
+  Rect(Int, Int)
+}
+
+fn describe(u: User) -> String {
+  // Record-pattern field bind in let-EXPRESSION position.
+  let label = match (u) {
+    User { name, age } => "${name} is ${age}"
+  }
+  label
+}
+
+fn area(s: Shape) -> Int {
+  // User-enum constructor-payload bind in let-EXPRESSION position.
+  let a = match (s) {
+    Circle(r) => r * r
+    Rect(w, h) => w * h
+  }
+  a
+}
+
+fn main() -> Void {
+  let u = User { name: "Ada", age: 36 }
+  let c = area(Circle(3))
+  let r = area(Rect(3, 4))
+  println("${describe(u)};circle=${c};rect=${r}")
+}

@@ -1,6 +1,6 @@
 // TEST: interpreter_primitive_eq_bridge
 // EXPECT: output "int=true;float=true;bool=true;string=true;char=true;neq=false"
-// EXPECT: targets js, python, rust, go
+// EXPECT: targets js, ts, python, rust, go
 //
 // The Equatable primitive bridge under the reference interpreter: `a.eq(b)`
 // on a concrete primitive receiver must dispatch to native equality, exactly
@@ -10,6 +10,15 @@
 // Q-interp-assert-primitives: before the fix the interpreter had no `eq`
 // builtin on the primitive type tags (only the never-referenced `equals`)
 // and every call died with `method 'eq' not found on Int`.
+//
+// `ts` was previously excluded (Q-ts-primitive-eq-literal-overlap, a loud skip
+// added by #372): the `neq` case `(3).eq(4)` lowered to `(3) === (4)`, which
+// `tsc --noEmit` rejects as TS2367 ("this comparison appears to be
+// unintentional because the types '3' and '4' have no overlap") since both
+// operands are distinct literal types. The ts backend now widens the receiver
+// with a `as <ts-type>` assertion (`(3 as number) === (4)`), so the comparison
+// is between `number` and a literal — overlapping, accepted — with identical
+// runtime behavior. ts is therefore back in the target set.
 //
 // The end-to-end `bock test` runs of `assert_eq`/`assert_ne` over primitives
 // are asserted by `bock-cli/tests/test_command.rs`.

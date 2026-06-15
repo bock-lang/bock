@@ -86,6 +86,15 @@ fn py_module_uses_propagate(items: &[AIRNode]) -> bool {
     items.iter().any(|n| format!("{n:?}").contains("Propagate"))
 }
 
+/// True if the module contains a string interpolation (`${expr}`), so the
+/// [`STR_RUNTIME_PY`] `_bock_str` helper must be emitted. Gates that prelude,
+/// mirroring [`py_module_uses_propagate`]. (Q-displayable-interpolation-dispatch.)
+fn py_module_uses_str(items: &[AIRNode]) -> bool {
+    items
+        .iter()
+        .any(|n| format!("{n:?}").contains("Interpolation"))
+}
+
 /// True if the module uses a `List` functional combinator that lowers to one of
 /// the [`LIST_FUNCTIONAL_RUNTIME_PY`] helpers (`reduce`/`fold`/`find`/`for_each`).
 /// Gates emission of that prelude, mirroring [`py_module_uses_optional`]. `map`/
@@ -238,6 +247,12 @@ class _BockOrderingGreater:
 _bock_less = _BockOrderingLess()
 _bock_equal = _BockOrderingEqual()
 _bock_greater = _BockOrderingGreater()
+
+def _bock_compare(a, b):
+    m = getattr(a, 'compare', None)
+    if callable(m):
+        return m(b)
+    return _bock_less if a < b else (_bock_equal if a == b else _bock_greater)
 ";
 
 /// Runtime helper for the DQ30 in-place `List` mutators whose Python lowering
@@ -256,6 +271,22 @@ const LIST_MUTATOR_RUNTIME_PY: &str = "\
 # ── Bock List in-place-mutator runtime ──
 def _bock_list_abort(op, i, n):
     raise IndexError(f'List.{op}: index {i} out of bounds (len {n})')
+";
+
+/// Runtime for a `${expr}` interpolation part: render a value with a
+/// `Displayable` impl through its `to_string` method rather than the structural
+/// `repr`/`str` (a dataclass `Point(x=3, y=7)`). The user `Displayable.to_string`
+/// is emitted as a `to_string(self)` method (distinct from Python's `__str__`),
+/// so the helper detects it by `callable(getattr(x, 'to_string', None))` and
+/// calls `x.to_string()`. Primitives and other values fall back to `str(x)`.
+/// Gated by [`py_module_uses_str`]. (Q-displayable-interpolation-dispatch.)
+const STR_RUNTIME_PY: &str = "\
+# ── Bock display-string runtime ──
+def _bock_str(x):
+    m = getattr(x, 'to_string', None)
+    if callable(m):
+        return m()
+    return str(x)
 ";
 
 /// Runtime helpers for the closure-taking `List` combinators whose Python form
@@ -842,7 +873,13 @@ fn value_needs_stmt_form(value: &AIRNode) -> bool {
         NodeKind::Match { arms, .. } => {
             crate::generator::match_has_statement_arm(arms)
                 || control_flow_has_raise_branch(value)
-                || match_arm_drops_leading_stmts(arms)
+                // A let-EXPRESSION-position match (`let x = match … { … }`) must
+                // route the same payload/field-binding shapes to statement form
+                // as the function-tail/return value path: the `(lambda __v: …)`
+                // value chain cannot bind a record-pattern field or a user-enum
+                // constructor payload, so without this the binding is left free
+                // (`NameError`). Q-py-letexpr-match-namerror.
+                || match_value_needs_stmt_form(arms)
         }
         NodeKind::Loop { .. } | NodeKind::While { .. } => true,
         NodeKind::If { .. } => {
@@ -1005,7 +1042,39 @@ fn match_value_needs_stmt_form(arms: &[AIRNode]) -> bool {
                     if matches!(pattern.kind, NodeKind::RecordPat { .. })
             )
         })
+        || arms
+            .iter()
+            .any(|arm| matches!(&arm.kind, NodeKind::MatchArm { pattern, .. } if arm_constructor_binds_payload(pattern)))
         || match_arm_drops_leading_stmts(arms)
+}
+
+/// Whether `pattern` is a **constructor pattern that binds a payload the
+/// `(lambda __v: …)` value chain cannot bind** — i.e. a user-enum variant such
+/// as `Circle(r)` / `Rect(w, h)`. [`PyEmitCtx::emit_arm_value`] only binds the
+/// payload of the runtime constructors `Some(x)`/`Ok(x)`/`Err(x)` (and the
+/// payload-less `None`); for any *other* constructor it emits the arm body with
+/// the field bindings left FREE, so a value-position / let-expression match
+/// `let label = match s { Circle(r) => r … }` lowered to `(lambda __v: r …)(s)`
+/// and raised `NameError: name 'r'` at run time (Q-py-letexpr-match-namerror /
+/// Q-py-valuepos-match-payload-namebind — same root). Routing such a match to
+/// the statement-form `match`/`case`, whose `emit_pattern` binds
+/// `case Shape_Circle(_0=r):` by position, makes the binding resolve. The
+/// chain-supported `Some`/`None`/`Ok`/`Err` shapes are left on the chain.
+fn arm_constructor_binds_payload(pattern: &AIRNode) -> bool {
+    let NodeKind::ConstructorPat { path, fields } = &pattern.kind else {
+        return false;
+    };
+    // The runtime Optional/Result constructors are bound by the value chain.
+    let leaf = path.segments.last().map_or("", |s| s.name.as_str());
+    if matches!(leaf, "Some" | "None" | "Ok" | "Err") {
+        return false;
+    }
+    // Any field that introduces a binding (a bare `BindPat`, or a nested
+    // structured sub-pattern that itself binds) cannot be left free in the
+    // expression chain.
+    fields
+        .iter()
+        .any(|f| !matches!(f.kind, NodeKind::WildcardPat))
 }
 
 /// Whether any **value-position** `match` arm carries a leading statement that
@@ -1328,6 +1397,7 @@ impl CodeGenerator for PyGenerator {
         let mut runtime_list_functional = false;
         let mut runtime_list_mutators = false;
         let mut runtime_propagate = false;
+        let mut runtime_str = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let mut ctx = PyEmitCtx::new();
@@ -1354,6 +1424,7 @@ impl CodeGenerator for PyGenerator {
             runtime_list_functional |= ctx.needs_runtime_list_functional;
             runtime_list_mutators |= ctx.needs_runtime_list_mutators;
             runtime_propagate |= ctx.needs_runtime_propagate;
+            runtime_str |= ctx.needs_runtime_str;
             let mut content = ctx.finish();
 
             // The entry file gets the `if __name__ == "__main__": main()`
@@ -1392,6 +1463,7 @@ impl CodeGenerator for PyGenerator {
             || runtime_list_functional
             || runtime_list_mutators
             || runtime_propagate
+            || runtime_str
         {
             let mut content = String::new();
             // Every runtime name is underscore-prefixed, which `from … import *`
@@ -1425,6 +1497,7 @@ impl CodeGenerator for PyGenerator {
                     "_bock_less",
                     "_bock_equal",
                     "_bock_greater",
+                    "_bock_compare",
                 ]);
             }
             if runtime_concurrency {
@@ -1453,6 +1526,11 @@ impl CodeGenerator for PyGenerator {
                 content.push_str(PROPAGATE_RUNTIME_PY);
                 content.push('\n');
                 all_names.extend(["_BockPropagate", "_bock_try"]);
+            }
+            if runtime_str {
+                content.push_str(STR_RUNTIME_PY);
+                content.push('\n');
+                all_names.push("_bock_str");
             }
             let all_list = all_names
                 .iter()
@@ -1726,6 +1804,9 @@ struct PyEmitCtx {
     /// `_BockPropagate`) has been emitted; deduped exactly as
     /// [`Self::optional_runtime_emitted`].
     propagate_runtime_emitted: bool,
+    /// Set once the display-string runtime ([`STR_RUNTIME_PY`]) has been inlined
+    /// in the single-module self-contained path. (Q-displayable-interpolation-dispatch.)
+    str_runtime_emitted: bool,
     /// Set when an enum decl emits a `Name = Union[...]` alias, so the preamble
     /// imports `Union` from `typing`.
     needs_union_import: bool,
@@ -1786,6 +1867,9 @@ struct PyEmitCtx {
     /// operator, so it imports `_bock_try` / `_BockPropagate` from the shared
     /// `RUNTIME_MODULE_PY`. Mirrors [`Self::needs_runtime_optional`].
     needs_runtime_propagate: bool,
+    /// As [`Self::needs_runtime_propagate`], for the display-string runtime
+    /// (`_bock_str`). (Q-displayable-interpolation-dispatch.)
+    needs_runtime_str: bool,
     /// Implicit cross-module imports for the per-module path, as
     /// `(module_path, symbol_name)` pairs — names this module references but
     /// neither declares locally nor imports via an explicit `use` (e.g. a
@@ -1900,6 +1984,7 @@ impl PyEmitCtx {
             list_functional_runtime_emitted: false,
             list_mutator_runtime_emitted: false,
             propagate_runtime_emitted: false,
+            str_runtime_emitted: false,
             needs_union_import: false,
             needs_typing_callable: Cell::new(false),
             needs_typing_any: Cell::new(false),
@@ -1917,6 +2002,7 @@ impl PyEmitCtx {
             needs_runtime_list_functional: false,
             needs_runtime_list_mutators: false,
             needs_runtime_propagate: false,
+            needs_runtime_str: false,
             implicit_imports: Vec::new(),
             field_method_collisions: std::collections::HashSet::new(),
             const_names: std::collections::HashSet::new(),
@@ -2007,7 +2093,8 @@ impl PyEmitCtx {
                 || self.needs_runtime_concurrency
                 || self.needs_runtime_list_functional
                 || self.needs_runtime_list_mutators
-                || self.needs_runtime_propagate)
+                || self.needs_runtime_propagate
+                || self.needs_runtime_str)
         {
             let _ = writeln!(preamble, "from {RUNTIME_MODULE_PY} import *");
         }
@@ -3376,6 +3463,24 @@ impl PyEmitCtx {
         else {
             return Ok(false);
         };
+        // Q-bounded-comparable-codegen: a bounded `T: Comparable` `compare`
+        // receiver may be instantiated with a RECORD whose ordering lives in its
+        // own `compare` method — the native `<`/`==` ternary the
+        // `emit_bridge_method` `compare` arm emits raises `TypeError: '<' not
+        // supported between instances of 'Money'`. Route through the
+        // `_bock_compare` runtime helper, which calls the value's `compare`
+        // method when present and falls back to the native ternary for a
+        // primitive instantiation.
+        if method == "compare" {
+            let Some(other) = rest.first() else {
+                return Ok(false);
+            };
+            let recv_str = self.expr_to_string(recv)?;
+            let other = self.expr_to_string(&other.value)?;
+            self.needs_runtime_ordering = true;
+            let _ = write!(self.buf, "_bock_compare({recv_str}, {other})");
+            return Ok(true);
+        }
         self.emit_bridge_method(recv, method, rest)
     }
 
@@ -3626,6 +3731,9 @@ impl PyEmitCtx {
                     if py_module_uses_propagate(items) {
                         self.needs_runtime_propagate = true;
                     }
+                    if py_module_uses_str(items) {
+                        self.needs_runtime_str = true;
+                    }
                 } else {
                     // Single-module self-contained emit (`generate_module`, used
                     // by unit tests): the module's runtime preludes are inlined
@@ -3675,6 +3783,11 @@ impl PyEmitCtx {
                         self.buf.push_str(PROPAGATE_RUNTIME_PY);
                         self.buf.push('\n');
                         self.propagate_runtime_emitted = true;
+                    }
+                    if !self.str_runtime_emitted && py_module_uses_str(items) {
+                        self.buf.push_str(STR_RUNTIME_PY);
+                        self.buf.push('\n');
+                        self.str_runtime_emitted = true;
                     }
                 }
                 // Per-module path: emit the module's cross-module imports as
@@ -3902,6 +4015,20 @@ impl PyEmitCtx {
                         } = &im.kind
                         {
                             let trait_name = tp.segments.last().map(|s| s.name.clone())?;
+                            // A prelude (compiler-sealed) trait with no user
+                            // `trait` declaration — `Comparable`/`Equatable`/
+                            // `Displayable`/`Hashable` used without a definition,
+                            // §18.2 — emits NO Python ABC, so it must not be a
+                            // base class (`class Foo(Comparable)` raises
+                            // `NameError: Comparable`). Its `compare`/`eq`/… is
+                            // emitted directly on the class, which Python dispatches
+                            // by duck typing. (Q-prelude-impl-missing-import.)
+                            if crate::generator::is_unimplemented_sealed_core_trait(
+                                &trait_name,
+                                &self.trait_decls,
+                            ) {
+                                return None;
+                            }
                             // An impl with no instance methods (e.g. `From`, whose
                             // only method `from` is associated) carries no
                             // instance contract and is often a prelude trait not
@@ -4064,6 +4191,16 @@ impl PyEmitCtx {
                 }
                 for tp in traits {
                     if let Some(seg) = tp.segments.last() {
+                        // Skip a prelude (compiler-sealed) trait with no user
+                        // `trait` decl: it emits no Python ABC, so it cannot be a
+                        // base class. See the record-decl arm
+                        // (Q-prelude-impl-missing-import).
+                        if crate::generator::is_unimplemented_sealed_core_trait(
+                            &seg.name,
+                            &self.trait_decls,
+                        ) {
+                            continue;
+                        }
                         bases.push(seg.name.clone());
                     }
                 }
@@ -4074,6 +4211,12 @@ impl PyEmitCtx {
                     } = &im.kind
                     {
                         if let Some(seg) = tp.segments.last() {
+                            if crate::generator::is_unimplemented_sealed_core_trait(
+                                &seg.name,
+                                &self.trait_decls,
+                            ) {
+                                continue;
+                            }
                             bases.push(seg.name.clone());
                         }
                     }
@@ -5784,7 +5927,15 @@ impl PyEmitCtx {
                                 self.emit_expr(expr)?;
                                 self.buf.push_str(") else 'false'");
                             } else {
+                                // Q-displayable-interpolation-dispatch: render
+                                // through `_bock_str` so a user value with a
+                                // `Displayable` impl (its `to_string` method)
+                                // shows via that method, not the dataclass
+                                // `repr`. Primitives fall back to `str(x)`.
+                                self.needs_runtime_str = true;
+                                self.buf.push_str("_bock_str(");
                                 self.emit_expr(expr)?;
+                                self.buf.push(')');
                             }
                             self.buf.push('}');
                         }
@@ -9137,7 +9288,9 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("f\"Hello, {name}!\""), "got: {out}");
+        // `${name}` renders through `_bock_str`
+        // (Q-displayable-interpolation-dispatch).
+        assert!(out.contains("f\"Hello, {_bock_str(name)}!\""), "got: {out}");
     }
 
     #[test]
@@ -9179,8 +9332,14 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
+        // Each `${expr}` part renders through `_bock_str` so a user value with a
+        // `Displayable` impl dispatches through its `to_string`
+        // (Q-displayable-interpolation-dispatch); primitives fall back to
+        // `str(x)`.
         assert!(
-            out.contains("f\"\"\"=== {title} ===\n{msg}\n================\"\"\""),
+            out.contains(
+                "f\"\"\"=== {_bock_str(title)} ===\n{_bock_str(msg)}\n================\"\"\""
+            ),
             "got: {out}"
         );
         // Single-line interpolation should still use regular f-string
@@ -9226,7 +9385,9 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("f\"Hi {name}\""), "got: {out}");
+        // `${name}` renders through `_bock_str`
+        // (Q-displayable-interpolation-dispatch).
+        assert!(out.contains("f\"Hi {_bock_str(name)}\""), "got: {out}");
         assert!(
             !out.contains("f\"\"\""),
             "should not use triple quotes: {out}"
@@ -12497,6 +12658,117 @@ mod tests {
         assert!(
             !has_python3() || check_py_syntax(&stubbed),
             "generated python must parse, got:\n{stubbed}"
+        );
+    }
+
+    /// The predicate that drives the fix: a user-enum constructor pattern that
+    /// binds a payload (`Circle(r)`) needs statement form, but the runtime
+    /// `Some`/`None`/`Ok`/`Err` shapes (handled by the value chain) do not.
+    #[test]
+    fn arm_constructor_binds_payload_distinguishes_user_from_runtime() {
+        let user_bind = node(
+            1,
+            NodeKind::ConstructorPat {
+                path: type_path(&["Circle"]),
+                fields: vec![bind_pat(2, "r")],
+            },
+        );
+        assert!(
+            arm_constructor_binds_payload(&user_bind),
+            "user-enum constructor binding a payload must route to statement form"
+        );
+        let some_bind = node(
+            3,
+            NodeKind::ConstructorPat {
+                path: type_path(&["Some"]),
+                fields: vec![bind_pat(4, "x")],
+            },
+        );
+        assert!(
+            !arm_constructor_binds_payload(&some_bind),
+            "Some(x) is bound by the value chain, stays off statement form"
+        );
+        let user_unit = node(
+            5,
+            NodeKind::ConstructorPat {
+                path: type_path(&["Red"]),
+                fields: vec![],
+            },
+        );
+        assert!(
+            !arm_constructor_binds_payload(&user_unit),
+            "a payload-less user variant binds nothing, stays off statement form"
+        );
+    }
+
+    /// Q-py-letexpr-match-namerror: a user-enum constructor-payload bind in a
+    /// LET-EXPRESSION-position match (`let a = match s { Circle(r) => r … }`)
+    /// must route to the statement-form `match`/`case` so `r` is bound — never
+    /// the `(lambda __v: r …)(s)` chain that leaves `r` free (`NameError`).
+    #[test]
+    fn py_letexpr_constructor_payload_routes_to_statement_form() {
+        let circle = node(
+            100,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    101,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Circle"]),
+                        fields: vec![bind_pat(102, "r")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(103, vec![], Some(id_node(104, "r")))),
+            },
+        );
+        let other = node(
+            110,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(111, NodeKind::WildcardPat)),
+                guard: None,
+                body: Box::new(block(112, vec![], Some(int_lit(113, "0")))),
+            },
+        );
+        let match_node = node(
+            120,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(121, "s")),
+                arms: vec![circle, other],
+            },
+        );
+        // `let a = match (s) { … }`; tail reads `a`.
+        let let_a = node(
+            130,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(131, "a")),
+                ty: None,
+                value: Box::new(match_node),
+            },
+        );
+        let f = node(
+            140,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                is_async: false,
+                name: ident("size"),
+                generic_params: vec![],
+                params: vec![param_node(141, "s")],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(142, vec![let_a], Some(id_node(143, "a")))),
+            },
+        );
+        let out = gen(&module(vec![], vec![f]));
+        assert!(
+            out.contains("match s:") && out.contains("case Circle(_0=r):"),
+            "let-expr constructor-payload match must bind r via statement form, got:\n{out}"
+        );
+        assert!(
+            !out.contains("lambda __v"),
+            "must not lower the payload-binding match to a value lambda, got:\n{out}"
         );
     }
 

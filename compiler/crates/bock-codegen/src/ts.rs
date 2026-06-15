@@ -214,6 +214,62 @@ fn module_uses_eq(items: &[AIRNode]) -> bool {
     })
 }
 
+/// The structural comparison runtime: lower a bounded `T: Comparable`'s
+/// `a.compare(b)` through this so it dispatches to the instantiated type's own
+/// `compare` method when present (a record/enum carrying an `impl Comparable`),
+/// falling back to the native ternary for a primitive instantiation. Without it
+/// the bounded bridge emitted the native ternary unconditionally, so `(a) < (b)`
+/// on two RECORDS is always `false` and `(a) === (b)` is reference identity —
+/// every comparison wrongly returned `Greater`, mis-ordering `max`/`min`/sort
+/// over a user `Comparable` type. The emitted `compare` method takes
+/// `(self, other)`, so the helper calls `a.compare(a, b)`. Mirrors
+/// [`EQ_RUNTIME_TS`]'s `__bockEq`. (Q-bounded-comparable-codegen.)
+const COMPARE_RUNTIME_TS: &str = "// ── Bock structural comparison runtime ──
+type __BockOrdering = { _tag: \"Less\" } | { _tag: \"Equal\" } | { _tag: \"Greater\" };
+const __bockCompare = (a: any, b: any): __BockOrdering => {
+  if (a !== null && typeof a === \"object\" && typeof a.compare === \"function\") {
+    return a.compare(a, b);
+  }
+  return (a < b ? { _tag: \"Less\" } : (a === b ? { _tag: \"Equal\" } : { _tag: \"Greater\" }));
+};
+";
+
+/// True if the module contains a bounded `T: Comparable` `compare` bridge call,
+/// so [`COMPARE_RUNTIME_TS`]'s `__bockCompare` must be emitted. Mirrors
+/// [`module_uses_eq`].
+fn module_uses_compare(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let dbg = format!("{n:?}");
+        dbg.contains("TraitBound:Comparable")
+    })
+}
+
+/// The display-string runtime: lower a `${expr}` interpolation part through this
+/// so a user value with a `Displayable` impl (its emitted `to_string` method) is
+/// rendered via that method, not the structural `[object Object]`. Primitives /
+/// arrays / plain objects fall back to native `String(x)`. The user `to_string`
+/// is `T.prototype.to_string = function(self) { … }` (snake_case, distinct from
+/// JS `toString`), so the helper detects it by `typeof x.to_string ===
+/// "function"` and calls `x.to_string(x)`. Mirrors `STR_RUNTIME_JS` in `js.rs`.
+/// (Q-displayable-interpolation-dispatch.)
+const STR_RUNTIME_TS: &str = "// ── Bock display-string runtime ──
+const __bockStr = (x: any): string => {
+  if (x !== null && typeof x === \"object\" && typeof x.to_string === \"function\") {
+    return x.to_string(x);
+  }
+  return String(x);
+};
+";
+
+/// True if the module contains a string interpolation (`${expr}`), so
+/// [`STR_RUNTIME_TS`]'s `__bockStr` must be emitted. Mirrors [`module_uses_eq`].
+fn module_uses_str(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let dbg = format!("{n:?}");
+        dbg.contains("Interpolation")
+    })
+}
+
 /// The shared per-module runtime module name (without extension). In the
 /// per-module (native-import) emission path the Optional/Result runtime *types*
 /// (`BockOption`, `BockResult`) and the concurrency / range runtime *helpers*
@@ -370,6 +426,8 @@ impl CodeGenerator for TsGenerator {
         let mut runtime_concurrency = false;
         let mut runtime_range = false;
         let mut runtime_eq = false;
+        let mut runtime_compare = false;
+        let mut runtime_str = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let own_path = crate::generator::module_path_string(module).unwrap_or_default();
@@ -407,6 +465,8 @@ impl CodeGenerator for TsGenerator {
             runtime_concurrency |= ctx.needs_runtime_concurrency;
             runtime_range |= ctx.needs_runtime_range;
             runtime_eq |= ctx.needs_runtime_eq;
+            runtime_compare |= ctx.needs_runtime_compare;
+            runtime_str |= ctx.needs_runtime_str;
             let (mut content, mappings) = ctx.finish();
 
             if i == entry_idx && crate::generator::module_declares_main_fn(module) {
@@ -438,7 +498,13 @@ impl CodeGenerator for TsGenerator {
         // Shared runtime module: Optional/Result types and concurrency/range
         // helpers, each `export`ed (types via `export type`, values via `export
         // const`) so consuming modules `import` / `import type` them.
-        if runtime_optional || runtime_result || runtime_concurrency || runtime_range || runtime_eq
+        if runtime_optional
+            || runtime_result
+            || runtime_concurrency
+            || runtime_range
+            || runtime_eq
+            || runtime_compare
+            || runtime_str
         {
             let mut content = String::new();
             if runtime_optional {
@@ -455,6 +521,14 @@ impl CodeGenerator for TsGenerator {
             }
             if runtime_range {
                 content.push_str(&export_runtime_decls(RANGE_RUNTIME_TS));
+                content.push('\n');
+            }
+            if runtime_compare {
+                content.push_str(&export_runtime_decls(COMPARE_RUNTIME_TS));
+                content.push('\n');
+            }
+            if runtime_str {
+                content.push_str(&export_runtime_decls(STR_RUNTIME_TS));
                 content.push('\n');
             }
             if runtime_eq {
@@ -684,6 +758,13 @@ struct TsEmitCtx {
     /// Set once the structural-equality runtime ([`EQ_RUNTIME_TS`]) has been
     /// emitted; deduped exactly as [`Self::range_runtime_emitted`].
     eq_runtime_emitted: bool,
+    /// Set once the structural-comparison runtime ([`COMPARE_RUNTIME_TS`]) has
+    /// been emitted in the single-module self-contained path. Deduped exactly as
+    /// [`Self::eq_runtime_emitted`]. (Q-bounded-comparable-codegen.)
+    compare_runtime_emitted: bool,
+    /// Set once the display-string runtime ([`STR_RUNTIME_TS`]) has been emitted
+    /// in the single-module self-contained path. (Q-displayable-interpolation-dispatch.)
+    str_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Same role as the JS backend's: route
     /// a unit-variant reference to the `{enum}_{variant}` const, a struct/tuple
     /// construction to the factory, and recognise `RecordPat` arms as ADT.
@@ -754,6 +835,13 @@ struct TsEmitCtx {
     needs_runtime_concurrency: bool,
     needs_runtime_range: bool,
     needs_runtime_eq: bool,
+    /// As [`Self::needs_runtime_eq`], for the bounded-`Comparable`
+    /// structural-comparison runtime (`__bockCompare`).
+    /// (Q-bounded-comparable-codegen.)
+    needs_runtime_compare: bool,
+    /// As [`Self::needs_runtime_eq`], for the display-string runtime
+    /// (`__bockStr`). (Q-displayable-interpolation-dispatch.)
+    needs_runtime_str: bool,
     /// Implicit cross-module imports for the per-module path — names this module
     /// references but neither declares locally nor imports via an explicit `use`.
     /// Computed in `generate_project`; emitted as ESM imports by the `Module` arm.
@@ -856,6 +944,8 @@ impl TsEmitCtx {
             concurrency_runtime_emitted: false,
             range_runtime_emitted: false,
             eq_runtime_emitted: false,
+            compare_runtime_emitted: false,
+            str_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
@@ -868,6 +958,8 @@ impl TsEmitCtx {
             needs_runtime_concurrency: false,
             needs_runtime_range: false,
             needs_runtime_eq: false,
+            needs_runtime_compare: false,
+            needs_runtime_str: false,
             implicit_imports: Vec::new(),
             public_symbols: HashMap::new(),
             self_module_path: String::new(),
@@ -1009,6 +1101,12 @@ impl TsEmitCtx {
         }
         if self.needs_runtime_eq {
             value_names.push("__bockEq");
+        }
+        if self.needs_runtime_compare {
+            value_names.push("__bockCompare");
+        }
+        if self.needs_runtime_str {
+            value_names.push("__bockStr");
         }
         if !type_names.is_empty() || !value_names.is_empty() {
             let spec = crate::generator::esm_relative_specifier(
@@ -2593,12 +2691,12 @@ impl TsEmitCtx {
         callee: &AIRNode,
         args: &[bock_air::AirArg],
     ) -> Result<bool, CodegenError> {
-        let Some((recv, method, rest, _prim)) =
+        let Some((recv, method, rest, prim)) =
             crate::generator::primitive_bridge_call(node, callee, args)
         else {
             return Ok(false);
         };
-        self.emit_bridge_method(recv, method, rest)
+        self.emit_bridge_method(recv, method, rest, Some(prim))
     }
 
     /// Lower a sealed-core-trait bridge method on a *bounded generic type
@@ -2632,17 +2730,48 @@ impl TsEmitCtx {
             let _ = write!(self.buf, "__bockEq({recv_str}, {other})");
             return Ok(true);
         }
-        self.emit_bridge_method(recv, method, rest)
+        // Q-bounded-comparable-codegen: a bounded `T: Comparable` `compare`
+        // receiver may be instantiated with a RECORD whose ordering lives in its
+        // own `compare` method — the native `<`/`===` ternary the
+        // `emit_bridge_method` `compare` arm emits is correct ONLY for a
+        // primitive instantiation (object `<` coerces to `NaN`; `===` is
+        // reference identity). Route through `__bockCompare`, which calls the
+        // value's `compare` method when present and falls back to the native
+        // ternary for primitives.
+        if method == "compare" {
+            let Some(other) = rest.first() else {
+                return Ok(false);
+            };
+            let recv_str = self.expr_to_string(recv)?;
+            let other = self.expr_to_string(&other.value)?;
+            self.needs_runtime_compare = true;
+            let _ = write!(self.buf, "__bockCompare({recv_str}, {other})");
+            return Ok(true);
+        }
+        self.emit_bridge_method(recv, method, rest, None)
     }
 
     /// Shared body of the primitive / trait-bound bridges: emit the native TS form
     /// of `compare` (the `Ordering` ternary), `eq` (`===`), or `to_string`/
     /// `display` (`String(..)`).
+    ///
+    /// `widen_prim` is the receiver's primitive type name (`"Int"`, `"Float"`,
+    /// …) when this is the concrete `Primitive:<Ty>` bridge, or `None` for the
+    /// trait-bound bridge (whose receiver is a generic `T`). When present, the
+    /// `eq` arm widens the receiver with a `as <ts-type>` assertion before
+    /// `===`: two distinct *literal* operands (`(3).eq(4)`) would otherwise be
+    /// inferred as the literal types `3`/`4`, which `tsc` rejects under
+    /// `strictNullChecks` as TS2367 ("this comparison appears to be
+    /// unintentional because the types '3' and '4' have no overlap"). The cast
+    /// widens the `3` to `number`, so the comparison is between `number` and a
+    /// literal — overlapping, hence accepted — while the runtime `===` is
+    /// unchanged. (Q-ts-primitive-eq-literal-overlap.)
     fn emit_bridge_method(
         &mut self,
         recv: &AIRNode,
         method: &str,
         rest: &[bock_air::AirArg],
+        widen_prim: Option<&str>,
     ) -> Result<bool, CodegenError> {
         let recv_str = self.expr_to_string(recv)?;
         match method {
@@ -2663,7 +2792,16 @@ impl TsEmitCtx {
                     return Ok(false);
                 };
                 let other = self.expr_to_string(&other.value)?;
-                let _ = write!(self.buf, "(({recv_str}) === ({other}))");
+                // Widen the receiver to its primitive TS type so two distinct
+                // literal operands (`(3).eq(4)`) compare as `number === 3`
+                // rather than the literal-only `3 === 4` (TS2367). See the
+                // method doc-comment.
+                if let Some(prim) = widen_prim {
+                    let ts_ty = self.map_type_name(prim);
+                    let _ = write!(self.buf, "(({recv_str} as {ts_ty}) === ({other}))");
+                } else {
+                    let _ = write!(self.buf, "(({recv_str}) === ({other}))");
+                }
             }
             "to_string" | "display" => {
                 let _ = write!(self.buf, "String({recv_str})");
@@ -2721,6 +2859,17 @@ impl TsEmitCtx {
     }
 
     /// Map Bock type names to TS equivalents.
+    /// True when the real `core.compare.Ordering` enum is reachable in this
+    /// program (its `Less` variant is a registered user enum variant). When
+    /// `core.compare` is `use`d, the actual `Ordering` union type is emitted and
+    /// imported; otherwise the prelude form (a bare structural `{ _tag: … }`
+    /// union) is used. Mirrors the rust/go backends.
+    fn ordering_enum_reachable(&self) -> bool {
+        self.enum_variants
+            .get("Less")
+            .is_some_and(|info| info.enum_name == "Ordering")
+    }
+
     fn map_type_name(&self, name: &str) -> String {
         match name {
             "Int" => "number".into(),
@@ -2755,6 +2904,16 @@ impl TsEmitCtx {
             // `now_monotonic()` / `sleep(duration: Duration)`) they must render
             // `number`, not the undefined identifiers `Duration`/`Instant`.
             "Duration" | "Instant" => "number".into(),
+            // The prelude `Ordering` enum: when the real `core.compare.Ordering`
+            // is NOT reachable (no `use core.compare`), its variants lower to a
+            // bare structural tagged union (`{ _tag: "Less" }` …), so a
+            // `-> Ordering` annotation must render that union — the bare
+            // `Ordering` is an undefined TS name (TS2304). When the enum IS
+            // reachable the imported `Ordering` union type is in scope and keeps
+            // its name. (Q-prelude-impl-missing-import.)
+            "Ordering" if !self.ordering_enum_reachable() => {
+                "({ _tag: \"Less\" } | { _tag: \"Equal\" } | { _tag: \"Greater\" })".into()
+            }
             other => other.into(),
         }
     }
@@ -2925,6 +3084,12 @@ impl TsEmitCtx {
                     if module_uses_eq(items) {
                         self.needs_runtime_eq = true;
                     }
+                    if module_uses_compare(items) {
+                        self.needs_runtime_compare = true;
+                    }
+                    if module_uses_str(items) {
+                        self.needs_runtime_str = true;
+                    }
                     self.emit_esm_imports(imports)?;
                 } else {
                     // Single-module self-contained emit (`generate_module`, used
@@ -2951,6 +3116,16 @@ impl TsEmitCtx {
                         self.buf.push_str(RANGE_RUNTIME_TS);
                         self.buf.push('\n');
                         self.range_runtime_emitted = true;
+                    }
+                    if !self.compare_runtime_emitted && module_uses_compare(items) {
+                        self.buf.push_str(COMPARE_RUNTIME_TS);
+                        self.buf.push('\n');
+                        self.compare_runtime_emitted = true;
+                    }
+                    if !self.str_runtime_emitted && module_uses_str(items) {
+                        self.buf.push_str(STR_RUNTIME_TS);
+                        self.buf.push('\n');
+                        self.str_runtime_emitted = true;
                     }
                     if !self.eq_runtime_emitted && module_uses_eq(items) {
                         self.buf.push_str(EQ_RUNTIME_TS);
@@ -3319,7 +3494,24 @@ impl TsEmitCtx {
                 } else {
                     ""
                 };
-                if let Some(tp) = trait_path {
+                // A §18.2 prelude (compiler-sealed) trait with no user `trait`
+                // decl — `Comparable`/`Equatable`/`Displayable`/`Hashable` used
+                // without a `use core.compare` — emits NO TS interface, so an
+                // `interface Foo extends Comparable` references an undefined name
+                // (TS2304). Treat such an impl like a trait-less one: emit the
+                // concrete method signatures on the merged interface, but with no
+                // `extends` clause (TS dispatches the method by structural typing,
+                // and `Ordering` maps to its runtime form via `type_to_ts`).
+                // (Q-prelude-impl-missing-import.)
+                let prelude_trait = trait_path.as_ref().is_some_and(|tp| {
+                    tp.segments.last().is_some_and(|seg| {
+                        crate::generator::is_unimplemented_sealed_core_trait(
+                            &seg.name,
+                            &self.trait_decls,
+                        )
+                    })
+                });
+                if let Some(tp) = trait_path.as_ref().filter(|_| !prelude_trait) {
                     let trait_base = tp
                         .segments
                         .iter()
@@ -5104,9 +5296,15 @@ impl TsEmitCtx {
                             self.buf.push_str(&escape_template_literal(s));
                         }
                         AirInterpolationPart::Expr(expr) => {
-                            self.buf.push_str("${");
+                            // Q-displayable-interpolation-dispatch: render through
+                            // `__bockStr` so a user value with a `Displayable`
+                            // impl (its `to_string` method) shows via that method,
+                            // not `[object Object]`. Primitives fall back to
+                            // native `String(x)`.
+                            self.needs_runtime_str = true;
+                            self.buf.push_str("${__bockStr(");
                             self.emit_expr(expr)?;
-                            self.buf.push('}');
+                            self.buf.push_str(")}");
                         }
                     }
                 }
@@ -8254,7 +8452,9 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("`Hello, ${name}!`"), "got: {out}");
+        // Rendered through `__bockStr` so a user `Displayable` value dispatches
+        // through its `to_string` (Q-displayable-interpolation-dispatch).
+        assert!(out.contains("`Hello, ${__bockStr(name)}!`"), "got: {out}");
     }
 
     // ── Collections ─────────────────────────────────────────────────────────

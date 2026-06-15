@@ -1,0 +1,42 @@
+// TEST: displayable_interpolation_dispatch
+// EXPECT: output "point=(3, 7);count=2"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression for Q-displayable-interpolation-dispatch: a `${value}` string
+// interpolation of a user value whose type carries a `Displayable` impl must
+// render through that impl's `to_string`, not the structural form. Before the
+// fix the part dispatched structurally on every surface:
+//   - interpreter: `Point {x: 3, y: 7}` (the `Value`'s debug form)
+//   - js/ts:       `[object Object]`
+//   - python:      `Point(x=3, y=7)` (the dataclass repr)
+//   - go:          `{3 7}` (the struct's `%v`)
+//   - rust:        E0277 (`Point` doesn't implement `Display`)
+//
+// The fix renders each `${expr}` part through a per-target display helper
+// (`__bockStr` on js/ts/go, `_bock_str` on python, `display_string` in the
+// interpreter) that dispatches to the value's own `to_string`/`ToString` method
+// when present, and on rust emits a delegating `impl std::fmt::Display` for any
+// `impl Displayable` type so `format!("{}", p)` routes through `to_string`. A
+// plain primitive part (`${count}`) still renders natively, so the second field
+// guards against a regression that over-routes primitives.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale, see
+// hello_world.bock).
+module main
+
+record Point {
+  x: Int,
+  y: Int,
+}
+
+impl Displayable for Point {
+  fn to_string(self) -> String {
+    "(${self.x}, ${self.y})"
+  }
+}
+
+fn main() -> Void {
+  let p = Point { x: 3, y: 7 }
+  let count = 2
+  println("point=${p};count=${count}")
+}
