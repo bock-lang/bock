@@ -1,8 +1,8 @@
 # Bock Context Pack
 
-**Pack version:** 0.1.0
+**Pack version:** 0.1.1
 **Derived from:** `spec/bock-spec.md` — 23 sections, spec version 0.1.0-draft (March 2026)
-**Repo commit:** `bef33b7` (the `main` commit this pack was authored and verified against)
+**Repo commit:** `397161f` (the `main` commit this pack was authored and verified against)
 **Verified:** every ```bock code block in this file passes `bock check`
 (enforced by `tools/scripts/verify-context-pack.sh`); the worked examples in
 §6 were additionally executed (interpreter and/or transpiled targets — each
@@ -461,8 +461,12 @@ Rules:
   `ConsoleLog` (prints `[log] <message>`), constructor `console_log()`.
 - `core.time` owns the `Clock` effect (`Instant.now()`, `sleep(duration)`).
 - Calling an op like `log("x")` in a function that neither declares
-  `with Log` nor sits inside a `handling` block fails name resolution —
-  you get `E1001 undefined name`, not an effect-specific error.
+  `with Log` nor sits inside a `handling` block is an effect-system
+  violation: you get `E6005` — "`log` is an operation of effect `Log`,
+  but the effect is neither declared by the enclosing function nor handled
+  here" — with a note stating the fix (add `with Log`, or wrap the call in
+  `handling (Log with <handler>) { ... }`). The lambda-handler form
+  `Log.handler(...)` is reserved until v1.x and reports `E6006`.
 
 ### 3.10 Capabilities and annotations
 
@@ -575,7 +579,7 @@ number's meaning depends on the pass (disambiguate by message).
 
 | Code | Meaning | Typical fix |
 |---|---|---|
-| E1001 | Lexer: unexpected character. Resolver: **undefined name** | Most often: a name not in scope. Check imports; if it's an effect op (`log`), declare `with Log` on the function |
+| E1001 | Lexer: unexpected character. Resolver: **undefined name** | Most often: a name not in scope. Check imports. (A bare effect op like `log` outside `with`/`handling` is **E6005**, not this — see the 6xxx table) |
 | E1002/E1003/E1004 | Unterminated string / bad escape / bad char literal | Fix the literal |
 | E1005 | Lexer: invalid digit for base. Resolver: **module not found** | Check the `use` path and that the file declares `module <path>` |
 | E1006 | Lexer: unterminated `/* */`. Resolver: **symbol not found in module** | The module exists but doesn't export that name |
@@ -602,7 +606,7 @@ number's meaning depends on the pass (disambiguate by message).
 
 | Code | Meaning | Typical fix |
 |---|---|---|
-| E4001 | Type mismatch | Includes method bodies whose last expression disagrees with the declared return type |
+| E4001 | Type mismatch — message reads `expected \`T\`, found \`U\`` (plain type names, no `Primitive(Int)` Debug leak) | Includes method bodies whose last expression disagrees with the declared return type. Direction-aware conversion hints fire when applicable: `Int`→`String` suggests `.to_string()`, `Float`→`Int` suggests `.to_int()` (truncates toward zero) |
 | E4002 | Undefined variable | |
 | E4003 | Arity mismatch in call | |
 | E4004 | Value is not callable | Type names are not values; `Type.method()` only |
@@ -612,6 +616,7 @@ number's meaning depends on the pass (disambiguate by message).
 | E4012 | Two uses: (a) same method name defined twice for one type (single method namespace, §6.7); (b) `.into()`/`from`/`try_from` conversion unresolved | (a) delete the duplicate; (b) add the `From`/`Into` impl, or give `.into()` a typed destination |
 | E4013 | No such method on a concrete type (with "did you mean...?") | Don't invent APIs — the built-in method set is closed. `map.contains(...)` → `contains_key` |
 | E4014 | Bare module import (`use core.error`) | `use core.error.{Error}` |
+| E4015 | `==`/`!=` operand (or an `Equatable`-bound instantiation) is not `Equatable` (DQ29) — records/enums conform **structurally** iff every field/payload type conforms (recursively); containers iff their element types do; classes need an explicit `impl` | Implement `Equatable` for the type, or remove the comparison. The message names the offending field path and type (e.g. an `Fn` field poisons the type) |
 
 **5xxx — ownership.**
 
@@ -620,7 +625,7 @@ number's meaning depends on the pass (disambiguate by message).
 | E5001 | Use after move | Restructure, or take a borrow (reads borrow implicitly) |
 | E5002 | `mut` borrow of a non-`mut` binding | Declare `let mut` |
 | E5003 | Value moved inside a loop body | Move it outside the loop or clone per-iteration |
-| E5004 | `push`/`append` on a non-`mut` receiver | `let mut`, or build functionally with `+`/`concat` |
+| E5004 | In-place `List` mutator on a non-`mut` receiver — `push`/`append` (DQ18) plus `pop`/`remove_at`/`insert`/`reverse` and indexed `set` (DQ30) | `let mut` (or a `mut` parameter), or build functionally with `+`/`concat` |
 
 **6xxx — effects / 7xxx — capabilities.** Symmetric pairs; the W-variants
 are development-mode warnings that promote to errors in production.
@@ -629,6 +634,8 @@ are development-mode warnings that promote to errors in production.
 |---|---|---|
 | E6001 / W6002 | Function uses an effect not in its `with` clause | Add `with <Effect>` |
 | E6003 / W6004 | Callee's effect escapes the caller's declaration | Declare it on the caller or wrap the call in `handling` |
+| E6005 | Effect op called with its effect neither declared nor handled — "`log` is an operation of effect `Log`, but the effect is neither declared … nor handled here" (resolver pass; **not** `E1001`) | Add `with <Effect>` to the enclosing function, or wrap the call in `handling (<Effect> with <handler>) { ... }` |
+| E6006 | Lambda-handler form `Effect.handler(...)` is reserved until v1.x (checker pass) | Use the v1 handler form: a record + `impl <Effect> for <Record>`, installed via `handle`/`handling` |
 | E7001 / W7002 | Function requires an ungranted capability | Add `@requires(Capability.X)` |
 | E7003 / W7004 | Callee capability not declared by caller | Same — capabilities propagate |
 
@@ -725,9 +732,9 @@ available: 2
 
 ### 6.2 Enums with payloads, Result, `?`, guard
 
-Verified: `bock check` ✓ · js ✓ (full output below) · interpreter runs the
-`Ok` path but currently aborts on the `Err` paths — a known interpreter
-defect with `?` (see §8); the code is correct per spec §7.10.
+Verified: `bock check` ✓ · interpreter ✓ (all three paths) · js ✓ (full
+output below). The interpreter now propagates `Err` through `?` correctly
+(fixed since 0.1.0, [#342]); the code is correct per spec §7.10.
 
 ```bock
 //! Port configuration — enums with payloads, Result, `?`, guard, match.
@@ -1001,9 +1008,12 @@ Tests: 4 passed, 0 failed, 4 total
 9. **No implicit numeric coercion**: `Int / Int` truncates toward zero
    (`17 / 5 == 3`); `Int + Float` is a type error — `.to_float()` first.
 10. **Effect ops need `with` or a `handling` scope.** Calling `log("x")`
-    without `with Log` gives the unintuitive `E1001 undefined name 'log'`.
-    Also, `handling (...) { ... }` is a statement — assign results to a
-    `let mut` declared outside.
+    without `with Log` (or an enclosing `handling` block) gives the
+    effect-specific `E6005` — "`log` is an operation of effect `Log`, but
+    the effect is neither declared … nor handled here" — with a note stating
+    the fix. The lambda-handler form `Log.handler(...)` is `E6006` (reserved
+    until v1.x). Also, `handling (...) { ... }` is a statement — assign
+    results to a `let mut` declared outside.
 11. **Don't invent stdlib.** No file I/O, HTTP, JSON, regex, env vars, or
     random in v1 (§4). The built-in method set is closed; anything else is
     `E4013`. `core.effect.Log`'s op is `log(message)` — one argument, no
@@ -1016,9 +1026,9 @@ Tests: 4 passed, 0 failed, 4 total
 14. **Interpolating user types**: implement `Displayable` but call
     `.to_string()` explicitly inside `${...}` — direct `${value}` dispatch
     through Displayable is not wired yet (§8).
-15. **Tests**: `expect(x).to_equal(y)` works without imports; `assert_eq`
-    currently fails at interpreter runtime on primitives (§8) — prefer
-    `expect`. `assert_*`/`fail` need `use core.test.{...}`.
+15. **Tests**: `expect(x).to_equal(y)` works without imports; `assert_eq`/
+    `assert_ne` now work on primitives in the interpreter too (`Int`/`Float`/
+    `Bool`/`String`/`Char`). `assert_*`/`fail` need `use core.test.{...}`.
 16. **Annotate public items with `@context`** or every public declaration
     warns (`W8013`) — and fails under `--strict`.
 17. **One method namespace per type**: don't define `render` in both the
@@ -1032,52 +1042,47 @@ Tests: 4 passed, 0 failed, 4 total
 
 ---
 
-## 8. Known divergences (as of pack 0.1.0)
+## 8. Known divergences (as of pack 0.1.1)
 
 True statements about the current implementation that contradict the spec or
 naive expectations. Don't fight these; don't "fix" correct user code around
 them. Each is tracked for repair — a future pack version removes entries as
 they close.
 
-1. **`?` aborts in the interpreter.** On transpiled targets (verified: js)
-   `expr?` correctly early-returns the `Err` from the enclosing function.
-   Under `bock run` / `bock test`, a propagated `Err` currently escapes all
-   the way out and aborts: `runtime error: propagated error: ...`. Code
-   using `?` is still correct — exercise its error paths on a transpiled
-   target, or match explicitly where interpreter execution matters.
-2. **`${value}` does not dispatch through `Displayable`.** The interpreter
+**Fixed since 0.1.0** (entries removed in 0.1.1, all landed by [#342]): the
+interpreter's `?` operator now propagates `Err`/`None` cleanly at the call
+boundary instead of aborting; `assert_eq`/`assert_ne` now work on primitives
+in the interpreter (`Int`/`Float`/`Bool`/`String`/`Char`); and `bock test`
+now resolves cross-file `use main.{…}` imports (the test path mirrors project
+resolution).
+
+1. **`${value}` does not dispatch through `Displayable`.** The interpreter
    prints a structural form (`Money {cents: 7}`), js prints
    `[object Object]`. Call `.to_string()` explicitly (spec §18.5 says
    interpolation should dispatch; it doesn't yet).
-3. **User-type `==` mis-lowers on js** to reference equality even with
+2. **User-type `==` mis-lowers on js** to reference equality even with
    `impl Equatable` (the interpreter is correct). Call `.eq()` explicitly
    in code that ships to targets. Direct `<`/`>` via `Comparable` lower
    correctly on js.
-4. **Generic comparisons under a trait bound mis-lower on targets.**
+3. **Generic comparisons under a trait bound mis-lower on targets.**
    `fn largest[T: Comparable](a: T, b: T)` using `a < b` (or even
    `a.compare(b)`) returns wrong results on js. Keep comparisons concrete
    (compare extracted `Int`/`String` keys) until this closes.
-5. **Qualified variant patterns don't parse** (`Status.Active =>`), despite
+4. **Qualified variant patterns don't parse** (`Status.Active =>`), despite
    grammar §21.11 — use bare names. Qualified *construction* of fieldless
    variants (`Status.Active` as an expression) passes `bock check` but is
    an interpreter runtime error (`undefined variable: Status`) and per
    §6.7 should be rejected statically.
-6. **`assert_eq`/`assert_ne` fail at interpreter runtime on primitives**
-   (`method 'eq' not found on Int`). Use `expect(x).to_equal(y)`.
-7. **Spurious `W1001 unused import`** for effect names used only in
+5. **Spurious `W1001 unused import`** for effect names used only in
    `with` / `handling` / `impl ... for` positions (e.g. `Log`). Keep the
    import; the warning is harmless.
-8. **`bock test` can't resolve cross-file imports** (`use main.{...}` from a
-   sibling test file fails with `module main not found` on the interpreter
-   path). Keep `@test` functions in the same file as the code under test,
-   or run tests through transpiled project mode.
-9. **Statement-position `if/else` with arms ending in `println` truncates
+6. **Statement-position `if/else` with arms ending in `println` truncates
    the rest of the function on the python target** (the lowering emits
    `return print(...)`). Bind the result (`let msg = if ... `) and print
    once, or structure so the `if` is the tail expression.
-10. **Re-declaring the same `let` name in sibling `handling` blocks
-    mis-lowers on js** (second block drops the declaration). Use distinct
-    names.
+7. **Re-declaring the same `let` name in sibling `handling` blocks
+   mis-lowers on js** (second block drops the declaration). Use distinct
+   names.
 
 ---
 
