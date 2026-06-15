@@ -407,11 +407,36 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 
 ## Ready
 
-> **★ v1.0-hardening pass (operator OQ3, 2026-06-15):** the operator chose to drain this Ready queue to a clean floor
-> before cutting v1.0 — **scope = everything ready except pure docs** (D2-polish defers to v1.2). Correctness-first: the
-> equivalence cluster (interp parity / silent-wrong codegen / soundness / won't-compile + `Q-dq31-container-element-eq`)
-> lands **before** the diagnostics-credibility batch and the chores. Item→tier mapping: **MS-v1.0-hardening**
-> (`milestones.md`). Dispatch in file-disjoint waves like #341–#349.
+> **★ v1.0-hardening pass (operator OQ3, 2026-06-15)** — drain the Ready queue to a clean floor before the v1.0 cut;
+> scope = everything ready except pure docs (D2-polish → v1.2); correctness-first. See **MS-v1.0-hardening**
+> (`milestones.md`). Dispatched in file-disjoint waves like #341–#349.
+>
+> **★★ WAVE 1 + WAVE 2 COMPLETE (2026-06-15, #352–#357) — the equivalence cluster + diagnostics-credibility landed.**
+> The 14 items below are **CLOSED by these PRs** (their inline `· ready ·` tags are superseded by this block pending the
+> next orchestrator startup-reconcile against the repo, per the "repo wins" rule):
+> - `Q-go-tailmatch-unreachable-panic` → **#352** · `Q-ts-variant-constructed-let-typing` → **#353**
+> - `Q-interp-list-concat` · `Q-interp-compare-ordering` · `Q-interp-float-ieee-equality` · `Q-core-dead-equals-registration` · `Q-core-legacy-list-builtins` → **#354**
+> - `Q-bracket-bounds-unenforced` → **#355**
+> - `Q-error-catalog-completeness` · `Q-diag-structure-misc` · `Q-diag-brief-span-format` · `Q-errors-render-byte-col-drift` · `Q-w1001-effect-import-false-positive` → **#356**
+> - `Q-dq31-container-element-eq` → **#357**
+>
+> **REMAINING (Wave 3 + chores — NOT yet dispatched; the wind-down stopped here cleanly):**
+> - **Wave 3 (per-backend codegen families, share codegen files → run after DQ31, now landed):** `Q-rust-clone-insertion-gaps` + `Q-rust-callarg-borrow-mismatch` (rust ownership) · `Q-displayable-interpolation-dispatch` · `Q-bounded-comparable-codegen` · `Q-js-handling-let-redeclaration` · `Q-prelude-impl-missing-import`
+> - **Chores:** `Q-context-pack-reconcile` · `Q-examples-matrix-undodge` · `Q-exec-output-directive-wiring` · `Q-ts-print-scaffold-types` · `Q-sync-vocab-script-stale`
+> - Plus the FOUND/OPEN below (filed this pass). `D2-polish` defers to v1.2 (pure docs).
+
+### v1.0-hardening FOUND/OPEN (filed 2026-06-15, surfaced by #352–#357)
+
+Bugs (→ queue, for a later wave):
+- **[Q-py-valuepos-match-payload-namebind] python: value-position `match` with a payload-binding arm mis-lowers to a broken lambda (bound var unbound → `NameError`)** — bug · ready · `compiler/crates/bock-codegen/src/py.rs` · — · links #353 · note: js/ts/rust/go correct; Python only. FOUND 2026-06-15 (#353).
+- **[Q-ts-generic-enum-codegen] ts: generic user enums emit broken TS (TS2314 — union alias `Box<number>` vs `Box_Full<T>`/`Box_Empty<T>` interfaces with mismatched type-arg arity)** — bug · ready · `compiler/crates/bock-codegen/src/ts.rs` · — · links #353 · note: fails before any narrowing concern. FOUND 2026-06-15 (#353).
+- **[Q-py-go-wrapper-structural-eq] structural `Optional`/`Result` `==` broken on Python (`_BockSome`/`_BockOk` lack `__eq__`); custom-`eq`-inside-wrapper corner on Go (unexported reflection fields)** — bug · ready · `compiler/crates/bock-codegen/src/{py,go}.rs` · — · links #357, DQ31 · note: pre-existing, surfaced building DQ31 fixtures (which use List/Map/record-wrapper composition instead); the Optional/Result wrapper element-eq corner is the follow-up. FOUND 2026-06-15 (#357).
+- **[Q-core-bool-compare-dead] bock-core registers `Bool.compare` but Bool is NOT `Comparable` (§18.5) — dead registration** — chore · ready · LOW · `compiler/crates/bock-core/` · — · links #354 · note: harmless (checker rejects `bool.compare` with E4003); left returning `Ordering` for consistency. Remove on next bock-core touch. FOUND 2026-06-15 (#354).
+
+Design questions (→ Design hub; captured here so they're not lost — formalize as DQ entries next session):
+- **OPEN: code-numbering collisions** — `E1001`/`E1005`/`E1006` each carry two meanings (lexer vs resolver); `W8020` has two (effect-unused vs PII-tainted-signature); `E2030` is emitted both for parens-required and for a missing fn name in `parse_fn_decl`. Renumbering is a design decision (not done unilaterally). FOUND 2026-06-15 (#356).
+- **OPEN: Hashable-on-collection-keys enforcement** — a custom-`eq` type used as a `Map` KEY / `Set` MEMBER needs `Hashable` to be constructible on Rust/Go/Python (`HashMap`/`HashSet` require `Hash+Eq`), but `bock check` doesn't enforce `Hashable` on collection keys, so such programs pass the checker but emit uncompilable Rust. Pre-existing, independent of `==`. FOUND 2026-06-15 (#357).
+- **OPEN: transitively-forwarded *unbounded* generic params** — a `fn g[U](x)` with no bound that forwards `x` into a `Comparable`-requiring callee is still accepted (arg is an unsolved `TypeVar`). Pre-existing; the `where`-clause path behaves identically (so #355 is at parity, not a regression). Catching it is a broader soundness improvement applying to both bound forms. FOUND 2026-06-15 (#355).
 
 ### Design-audit follow-ups (filed 2026-06-10, from `designs/2026-06-09-design-audit.md`)
 

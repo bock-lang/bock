@@ -222,6 +222,15 @@ leads, since "the five behave identically" is the headline guarantee.
 - **Chores/cleanup:** `Q-context-pack-reconcile`, `Q-examples-matrix-undodge`, bock-core cleanup
   (`Q-core-dead-equals-registration` / `Q-core-legacy-list-builtins`), `Q-exec-output-directive-wiring`,
   `Q-ts-print-scaffold-types`.
+- **Progress (2026-06-15) — WAVE 1 + WAVE 2 COMPLETE (#352–#357):** the equivalence cluster + diagnostics-credibility
+  landed (14 items). Wave 1: go tail-match (#352), ts variant-let (#353), interp/core parity ×5 (#354), bracket-bounds
+  soundness (#355). Wave 2: diagnostics-credibility batch (#356), DQ31 container element-eq (#357). All ×5-clean, gate +
+  examples-matrix green per PR; combined-tree main CI verified. Surfaced FOUND/OPEN (queue): 4 codegen/cleanup bugs +
+  3 design questions (code-renumbering, Hashable-on-collection-keys, transitive-unbounded generic bounds). **REMAINING:**
+  Wave 3 (per-backend codegen families: rust-ownership, displayable-interp-dispatch, bounded-comparable,
+  js-handling-let-redecl, prelude-impl-missing-import) + chores (context-pack-reconcile, examples-matrix-undodge,
+  exec-output-directive-wiring, ts-print-scaffold, sync-vocab-script) + the new FOUND bugs. Not yet dispatched (the
+  2026-06-15 session wound down cleanly at the Wave-2 boundary).
 - **Acceptance:** the ready queue is drained to {pure docs (D2-polish) ∪ v1.x-deferred}; the combined-tree gate stays
   green every PR; the equivalence cluster lands first. After acceptance → v1.0 release-prep (spec version stamp,
   user-facing release notes, distribution — all release ACTIONS escalate) + the marketing copy lock (gated on R1/OQ1).
