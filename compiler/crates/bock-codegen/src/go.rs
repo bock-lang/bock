@@ -11916,6 +11916,13 @@ impl GoEmitCtx {
             // `Instant`-typed program also exercises.)
             "Duration" => "int64".into(),
             "Instant" => "time.Time".into(),
+            // The prelude `Ordering` enum: when the real `core.compare.Ordering`
+            // is NOT reachable (no `use core.compare`), its variants lower to the
+            // `__bockOrdering` value runtime, so a `-> Ordering` annotation must
+            // render `__bockOrdering` to agree — the bare `Ordering` is an
+            // undefined Go type. When the enum IS reachable the user type is in
+            // scope and keeps its name. (Q-prelude-impl-missing-import.)
+            "Ordering" if !self.ordering_enum_reachable() => "__bockOrdering".into(),
             other => other.into(),
         }
     }

@@ -2743,6 +2743,17 @@ impl TsEmitCtx {
     }
 
     /// Map Bock type names to TS equivalents.
+    /// True when the real `core.compare.Ordering` enum is reachable in this
+    /// program (its `Less` variant is a registered user enum variant). When
+    /// `core.compare` is `use`d, the actual `Ordering` union type is emitted and
+    /// imported; otherwise the prelude form (a bare structural `{ _tag: … }`
+    /// union) is used. Mirrors the rust/go backends.
+    fn ordering_enum_reachable(&self) -> bool {
+        self.enum_variants
+            .get("Less")
+            .is_some_and(|info| info.enum_name == "Ordering")
+    }
+
     fn map_type_name(&self, name: &str) -> String {
         match name {
             "Int" => "number".into(),
@@ -2777,6 +2788,16 @@ impl TsEmitCtx {
             // `now_monotonic()` / `sleep(duration: Duration)`) they must render
             // `number`, not the undefined identifiers `Duration`/`Instant`.
             "Duration" | "Instant" => "number".into(),
+            // The prelude `Ordering` enum: when the real `core.compare.Ordering`
+            // is NOT reachable (no `use core.compare`), its variants lower to a
+            // bare structural tagged union (`{ _tag: "Less" }` …), so a
+            // `-> Ordering` annotation must render that union — the bare
+            // `Ordering` is an undefined TS name (TS2304). When the enum IS
+            // reachable the imported `Ordering` union type is in scope and keeps
+            // its name. (Q-prelude-impl-missing-import.)
+            "Ordering" if !self.ordering_enum_reachable() => {
+                "({ _tag: \"Less\" } | { _tag: \"Equal\" } | { _tag: \"Greater\" })".into()
+            }
             other => other.into(),
         }
     }
@@ -3341,7 +3362,24 @@ impl TsEmitCtx {
                 } else {
                     ""
                 };
-                if let Some(tp) = trait_path {
+                // A §18.2 prelude (compiler-sealed) trait with no user `trait`
+                // decl — `Comparable`/`Equatable`/`Displayable`/`Hashable` used
+                // without a `use core.compare` — emits NO TS interface, so an
+                // `interface Foo extends Comparable` references an undefined name
+                // (TS2304). Treat such an impl like a trait-less one: emit the
+                // concrete method signatures on the merged interface, but with no
+                // `extends` clause (TS dispatches the method by structural typing,
+                // and `Ordering` maps to its runtime form via `type_to_ts`).
+                // (Q-prelude-impl-missing-import.)
+                let prelude_trait = trait_path.as_ref().is_some_and(|tp| {
+                    tp.segments.last().is_some_and(|seg| {
+                        crate::generator::is_unimplemented_sealed_core_trait(
+                            &seg.name,
+                            &self.trait_decls,
+                        )
+                    })
+                });
+                if let Some(tp) = trait_path.as_ref().filter(|_| !prelude_trait) {
                     let trait_base = tp
                         .segments
                         .iter()

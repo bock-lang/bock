@@ -3940,6 +3940,20 @@ impl PyEmitCtx {
                         } = &im.kind
                         {
                             let trait_name = tp.segments.last().map(|s| s.name.clone())?;
+                            // A prelude (compiler-sealed) trait with no user
+                            // `trait` declaration — `Comparable`/`Equatable`/
+                            // `Displayable`/`Hashable` used without a definition,
+                            // §18.2 — emits NO Python ABC, so it must not be a
+                            // base class (`class Foo(Comparable)` raises
+                            // `NameError: Comparable`). Its `compare`/`eq`/… is
+                            // emitted directly on the class, which Python dispatches
+                            // by duck typing. (Q-prelude-impl-missing-import.)
+                            if crate::generator::is_unimplemented_sealed_core_trait(
+                                &trait_name,
+                                &self.trait_decls,
+                            ) {
+                                return None;
+                            }
                             // An impl with no instance methods (e.g. `From`, whose
                             // only method `from` is associated) carries no
                             // instance contract and is often a prelude trait not
@@ -4102,6 +4116,16 @@ impl PyEmitCtx {
                 }
                 for tp in traits {
                     if let Some(seg) = tp.segments.last() {
+                        // Skip a prelude (compiler-sealed) trait with no user
+                        // `trait` decl: it emits no Python ABC, so it cannot be a
+                        // base class. See the record-decl arm
+                        // (Q-prelude-impl-missing-import).
+                        if crate::generator::is_unimplemented_sealed_core_trait(
+                            &seg.name,
+                            &self.trait_decls,
+                        ) {
+                            continue;
+                        }
                         bases.push(seg.name.clone());
                     }
                 }
@@ -4112,6 +4136,12 @@ impl PyEmitCtx {
                     } = &im.kind
                     {
                         if let Some(seg) = tp.segments.last() {
+                            if crate::generator::is_unimplemented_sealed_core_trait(
+                                &seg.name,
+                                &self.trait_decls,
+                            ) {
+                                continue;
+                            }
                             bases.push(seg.name.clone());
                         }
                     }

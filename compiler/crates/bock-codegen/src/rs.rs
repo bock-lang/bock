@@ -2930,6 +2930,17 @@ impl RsEmitCtx {
             // concrete Rust forms, not the undefined identifiers.
             "Duration" => "i64".into(),
             "Instant" => "std::time::Instant".into(),
+            // The prelude `Ordering` enum: when the real `core.compare.Ordering`
+            // is NOT reachable (no `use core.compare`), its variants already
+            // lower to the `std::cmp::Ordering` bridge (see the `Identifier`
+            // arm), so the *type* annotation must agree — `fn compare(..) ->
+            // Ordering` becomes `-> std::cmp::Ordering`. Without this the
+            // annotation emitted the bare `Ordering` (E0425, undefined type) and
+            // even with the enum reachable a body `.cmp()` (std Ordering)
+            // mismatched a user-`Ordering` return (E0308). When the enum IS
+            // reachable the user `enum Ordering` is in scope and keeps its name.
+            // (Q-prelude-impl-missing-import.)
+            "Ordering" if !self.ordering_enum_reachable() => "std::cmp::Ordering".into(),
             other => other.into(),
         }
     }
@@ -3155,6 +3166,64 @@ impl RsEmitCtx {
         format!("\nwhere\n    {}", items.join(",\n    "))
     }
 
+    /// Synthesize a minimal local definition for each §18.2 prelude
+    /// (compiler-sealed) trait that an `impl` in this module targets but that is
+    /// neither a user-declared trait nor imported. The prelude makes these trait
+    /// names (`Comparable`/`Equatable`/`Displayable`/`Hashable`) resolvable
+    /// without a `use`, but Rust has no such trait unless one is emitted; the
+    /// declaring `core.*` module is unreachable (no real `use` edge), so codegen
+    /// emits the contract here. The synthesized signature matches what the
+    /// backend lowers an impl method to, so the `impl` type-checks against it.
+    /// (Q-prelude-impl-missing-import.)
+    fn emit_synthesized_prelude_traits(&mut self, items: &[AIRNode]) {
+        let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for item in items {
+            let NodeKind::ImplBlock {
+                trait_path: Some(tp),
+                ..
+            } = &item.kind
+            else {
+                continue;
+            };
+            let Some(trait_name) = tp.segments.last().map(|s| s.name.as_str()) else {
+                continue;
+            };
+            // Only an *unimplemented* sealed-core trait (no user `trait` decl)
+            // needs synthesis; a user trait of the same name is emitted normally.
+            if !crate::generator::is_unimplemented_sealed_core_trait(trait_name, &self.trait_decls)
+            {
+                continue;
+            }
+            if !emitted.insert(trait_name.to_string()) {
+                continue;
+            }
+            // The §18.2 prelude trait contracts (fixed by spec §18.3). `Ordering`
+            // lowers to the `std::cmp::Ordering` bridge here (the user enum is
+            // unreachable). A trait Rust does not recognise as one of these is
+            // skipped (no contract to synthesize).
+            // The operand is taken BY VALUE (`other: Self`) to match the impl
+            // method the backend emits for an unimplemented sealed-core trait:
+            // its `other: T` param is by value and the call site `a.compare(b)`
+            // passes by value too (these methods are NOT in `self_operand_methods`,
+            // which is seeded only from user `trait_decls`). A `&Self` trait
+            // declaration would mismatch the impl (E0053) and the call site
+            // (E0308).
+            let body = match trait_name {
+                "Comparable" => "fn compare(&self, other: Self) -> std::cmp::Ordering;",
+                "Equatable" => "fn eq(&self, other: Self) -> bool;",
+                "Displayable" => "fn to_string(&self) -> String;",
+                "Hashable" => "fn hash(&self) -> u64;",
+                _ => continue,
+            };
+            self.writeln(&format!("trait {trait_name} {{"));
+            self.indent += 1;
+            self.writeln(body);
+            self.indent -= 1;
+            self.writeln("}");
+            self.buf.push('\n');
+        }
+    }
+
     // ── Top-level dispatch ──────────────────────────────────────────────────
 
     fn emit_node(&mut self, node: &AIRNode) -> Result<(), CodegenError> {
@@ -3185,6 +3254,16 @@ impl RsEmitCtx {
                         self.concurrency_runtime_emitted = true;
                     }
                 }
+                // §18.2 prelude-trait impls without an explicit `use`: a
+                // `impl Comparable for Foo` whose `core.compare` is unreachable
+                // (so no `use crate::core::compare::Comparable;` is emitted)
+                // references a trait Rust has never seen (E0405). The prelude
+                // makes the trait name resolvable without the import, so codegen
+                // must provide the definition itself. Synthesize a minimal local
+                // `trait <Name> { … }` for each sealed-core trait impl'd here that
+                // is not a user-declared trait and not imported.
+                // (Q-prelude-impl-missing-import.)
+                self.emit_synthesized_prelude_traits(items);
                 // `@test` functions are NOT emitted into the runtime module
                 // tree: they are transpiled separately into the target's test
                 // framework (project mode, §20.6.2 — see `generate_tests`). Their

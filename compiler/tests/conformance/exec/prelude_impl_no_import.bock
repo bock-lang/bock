@@ -1,0 +1,56 @@
+// TEST: prelude_impl_no_import
+// EXPECT: output "less;equal;greater"
+// EXPECT: targets js, ts, python, rust, go
+//
+// Regression for Q-prelude-impl-missing-import: a record `impl Comparable for
+// Foo` written WITHOUT a `use core.compare` must still compile and run on every
+// target. The §18.2 prelude makes the trait name `Comparable` (and the
+// `Ordering` enum it returns, plus `Less`/`Equal`/`Greater`) resolvable without
+// an import, but `core.compare` is then NOT reachable through a real `use`
+// edge, so codegen previously referenced an undefined trait / base / type:
+//
+//   - rust:   `impl Comparable for Foo` → E0405 (no such trait); `-> Ordering`
+//             → E0425 (no such type). Now codegen synthesizes a local
+//             `trait Comparable { fn compare(&self, other: Self) ->
+//             std::cmp::Ordering; }` and maps the `Ordering` type annotation to
+//             the `std::cmp::Ordering` bridge (the variants already do).
+//   - python: `class Foo(Comparable):` → `NameError` (the prelude trait emits
+//             no ABC). Now codegen drops the base class — `compare` is a plain
+//             method Python dispatches by duck typing.
+//   - ts:     `interface Foo extends Comparable` + `: Ordering` → TS2304. Now
+//             codegen drops the `extends` clause and maps the `Ordering` type to
+//             its structural tagged union.
+//   - go:     `func (self Foo) Compare(other Foo) Ordering` → `undefined:
+//             Ordering`. Now the `Ordering` annotation maps to `__bockOrdering`.
+//   - js:     already worked (untyped), pinned here for cross-target parity.
+//
+// `main` is intentionally NOT `public` (Go entry-point rationale, see
+// hello_world.bock).
+module main
+
+record Foo {
+  rank: Int,
+}
+
+impl Comparable for Foo {
+  fn compare(self, other: Foo) -> Ordering {
+    self.rank.compare(other.rank)
+  }
+}
+
+fn name_of(s: String, a: Foo, b: Foo) -> String {
+  match (a.compare(b)) {
+    Less => "less"
+    Equal => "equal"
+    Greater => "greater"
+  }
+}
+
+fn main() -> Void {
+  let one = Foo { rank: 1 }
+  let two = Foo { rank: 2 }
+  let lt = name_of("lt", one, two)
+  let eq = name_of("eq", one, one)
+  let gt = name_of("gt", two, one)
+  println("${lt};${eq};${gt}")
+}
