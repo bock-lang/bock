@@ -192,6 +192,37 @@ fn js_module_uses_compare(items: &[AIRNode]) -> bool {
     })
 }
 
+/// The display-string runtime: lower a `${expr}` interpolation part through this
+/// so a user value with a `Displayable` impl (its emitted `to_string` method) is
+/// rendered via that method, not the structural `[object Object]`. For a
+/// primitive / array / plain object the helper falls back to native `String(x)`,
+/// matching what a bare `${x}` template substitution produced before. The user
+/// `to_string` is emitted as `T.prototype.to_string = function(self) { … }`
+/// (snake_case, distinct from JS's built-in `toString`), so the helper detects
+/// it by `typeof x.to_string === "function"` and calls `x.to_string(x)` (the
+/// receiver is passed both as the JS `this` and as the explicit `self` arg).
+/// (Q-displayable-interpolation-dispatch.)
+const STR_RUNTIME_JS: &str = "// ── Bock display-string runtime ──
+const __bockStr = (x) => {
+  if (x !== null && typeof x === \"object\" && typeof x.to_string === \"function\") {
+    return x.to_string(x);
+  }
+  return String(x);
+};
+";
+
+/// True if the module contains a string interpolation (`${expr}`), so
+/// [`STR_RUNTIME_JS`]'s `__bockStr` must be emitted. Mirrors
+/// [`js_module_uses_eq`]. Conservative: any module with an `Interpolation` node
+/// gets the helper; a module that only interpolates primitives still links a
+/// tiny dead helper (`#![allow(unused)]`-style — JS tree-shaking / harmless).
+fn js_module_uses_str(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let dbg = format!("{n:?}");
+        dbg.contains("Interpolation")
+    })
+}
+
 /// The shared per-module runtime module name (without extension). In the
 /// per-module (native-import) emission path the concurrency and range runtime
 /// helpers live in one file — `_bock_runtime.js` at the build root — and every
@@ -357,6 +388,7 @@ impl CodeGenerator for JsGenerator {
         let mut runtime_range = false;
         let mut runtime_eq = false;
         let mut runtime_compare = false;
+        let mut runtime_str = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let own_path = crate::generator::module_path_string(module).unwrap_or_default();
@@ -395,6 +427,7 @@ impl CodeGenerator for JsGenerator {
             runtime_range |= ctx.needs_runtime_range;
             runtime_eq |= ctx.needs_runtime_eq;
             runtime_compare |= ctx.needs_runtime_compare;
+            runtime_str |= ctx.needs_runtime_str;
             let (mut content, mappings) = ctx.finish();
 
             // The entry file gets the `main()` invocation appended exactly once.
@@ -426,7 +459,7 @@ impl CodeGenerator for JsGenerator {
 
         // Shared runtime module with exactly the helpers referenced, each
         // `export`ed so consuming modules can `import { … }` them.
-        if runtime_concurrency || runtime_range || runtime_eq || runtime_compare {
+        if runtime_concurrency || runtime_range || runtime_eq || runtime_compare || runtime_str {
             let mut content = String::new();
             if runtime_concurrency {
                 content.push_str(&export_runtime_consts(CONCURRENCY_RUNTIME_JS));
@@ -442,6 +475,10 @@ impl CodeGenerator for JsGenerator {
             }
             if runtime_compare {
                 content.push_str(&export_runtime_consts(COMPARE_RUNTIME_JS));
+                content.push('\n');
+            }
+            if runtime_str {
+                content.push_str(&export_runtime_consts(STR_RUNTIME_JS));
                 content.push('\n');
             }
             files.push(OutputFile {
@@ -650,6 +687,10 @@ struct EmitCtx {
     /// been emitted in the single-module self-contained path. Deduped exactly as
     /// [`Self::eq_runtime_emitted`]. (Q-bounded-comparable-codegen.)
     compare_runtime_emitted: bool,
+    /// Set once the display-string runtime ([`STR_RUNTIME_JS`]) has been emitted
+    /// in the single-module self-contained path. Deduped exactly as
+    /// [`Self::eq_runtime_emitted`]. (Q-displayable-interpolation-dispatch.)
+    str_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Maps a variant name to its enum so a
     /// unit-variant reference lowers to the frozen `{enum}_{variant}` const, a
     /// struct/tuple construction lowers to the `{enum}_{variant}(..)` factory,
@@ -691,6 +732,10 @@ struct EmitCtx {
     /// lowers a `T: Comparable` `compare` bridge call.
     /// (Q-bounded-comparable-codegen.)
     needs_runtime_compare: bool,
+    /// As [`Self::needs_runtime_concurrency`], for the display-string runtime
+    /// (`__bockStr`). Set when this module emits a `${expr}` interpolation.
+    /// (Q-displayable-interpolation-dispatch.)
+    needs_runtime_str: bool,
     /// Implicit cross-module imports for the per-module path — names this module
     /// references but neither declares locally nor imports via an explicit `use`
     /// (e.g. a §18.2-prelude trait used as a base in an `impl`). Computed in
@@ -790,6 +835,7 @@ impl EmitCtx {
             range_runtime_emitted: false,
             eq_runtime_emitted: false,
             compare_runtime_emitted: false,
+            str_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
             per_module: false,
@@ -797,6 +843,7 @@ impl EmitCtx {
             needs_runtime_range: false,
             needs_runtime_eq: false,
             needs_runtime_compare: false,
+            needs_runtime_str: false,
             implicit_imports: Vec::new(),
             public_symbols: HashMap::new(),
             self_module_path: String::new(),
@@ -922,6 +969,7 @@ impl EmitCtx {
             || self.needs_runtime_range
             || self.needs_runtime_eq
             || self.needs_runtime_compare
+            || self.needs_runtime_str
         {
             let mut names: Vec<&str> = Vec::new();
             if self.needs_runtime_concurrency {
@@ -935,6 +983,9 @@ impl EmitCtx {
             }
             if self.needs_runtime_compare {
                 names.push("__bockCompare");
+            }
+            if self.needs_runtime_str {
+                names.push("__bockStr");
             }
             let spec = crate::generator::esm_relative_specifier(
                 &self.self_module_path,
@@ -2575,6 +2626,9 @@ impl EmitCtx {
                     if js_module_uses_compare(items) {
                         self.needs_runtime_compare = true;
                     }
+                    if js_module_uses_str(items) {
+                        self.needs_runtime_str = true;
+                    }
                     // Real ESM imports (runtime, explicit `use`, implicit prelude)
                     // at the top of the file, before any declaration.
                     self.emit_esm_imports(imports)?;
@@ -2603,6 +2657,11 @@ impl EmitCtx {
                         self.buf.push_str(COMPARE_RUNTIME_JS);
                         self.buf.push('\n');
                         self.compare_runtime_emitted = true;
+                    }
+                    if !self.str_runtime_emitted && js_module_uses_str(items) {
+                        self.buf.push_str(STR_RUNTIME_JS);
+                        self.buf.push('\n');
+                        self.str_runtime_emitted = true;
                     }
                 }
                 // `@test` functions are transpiled separately into Vitest/Jest
@@ -4112,9 +4171,16 @@ impl EmitCtx {
                             self.buf.push_str(&escape_template_literal(s));
                         }
                         AirInterpolationPart::Expr(expr) => {
-                            self.buf.push_str("${");
+                            // Q-displayable-interpolation-dispatch: render the
+                            // part through `__bockStr` so a user value with a
+                            // `Displayable` impl (its `to_string` method) is shown
+                            // via that method, not `[object Object]`. Primitives /
+                            // arrays / plain objects fall back to native
+                            // `String(x)`, matching the prior bare `${x}`.
+                            self.needs_runtime_str = true;
+                            self.buf.push_str("${__bockStr(");
                             self.emit_expr(expr)?;
-                            self.buf.push('}');
+                            self.buf.push_str(")}");
                         }
                     }
                 }
@@ -6278,7 +6344,11 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("`Hello, ${name}!`"));
+        // The interpolated part is rendered through `__bockStr` so a user value
+        // with a `Displayable` impl dispatches through its `to_string`
+        // (Q-displayable-interpolation-dispatch); a primitive falls back to
+        // native `String(x)`.
+        assert!(out.contains("`Hello, ${__bockStr(name)}!`"));
     }
 
     #[test]

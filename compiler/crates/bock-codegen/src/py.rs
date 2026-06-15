@@ -86,6 +86,15 @@ fn py_module_uses_propagate(items: &[AIRNode]) -> bool {
     items.iter().any(|n| format!("{n:?}").contains("Propagate"))
 }
 
+/// True if the module contains a string interpolation (`${expr}`), so the
+/// [`STR_RUNTIME_PY`] `_bock_str` helper must be emitted. Gates that prelude,
+/// mirroring [`py_module_uses_propagate`]. (Q-displayable-interpolation-dispatch.)
+fn py_module_uses_str(items: &[AIRNode]) -> bool {
+    items
+        .iter()
+        .any(|n| format!("{n:?}").contains("Interpolation"))
+}
+
 /// True if the module uses a `List` functional combinator that lowers to one of
 /// the [`LIST_FUNCTIONAL_RUNTIME_PY`] helpers (`reduce`/`fold`/`find`/`for_each`).
 /// Gates emission of that prelude, mirroring [`py_module_uses_optional`]. `map`/
@@ -262,6 +271,22 @@ const LIST_MUTATOR_RUNTIME_PY: &str = "\
 # ── Bock List in-place-mutator runtime ──
 def _bock_list_abort(op, i, n):
     raise IndexError(f'List.{op}: index {i} out of bounds (len {n})')
+";
+
+/// Runtime for a `${expr}` interpolation part: render a value with a
+/// `Displayable` impl through its `to_string` method rather than the structural
+/// `repr`/`str` (a dataclass `Point(x=3, y=7)`). The user `Displayable.to_string`
+/// is emitted as a `to_string(self)` method (distinct from Python's `__str__`),
+/// so the helper detects it by `callable(getattr(x, 'to_string', None))` and
+/// calls `x.to_string()`. Primitives and other values fall back to `str(x)`.
+/// Gated by [`py_module_uses_str`]. (Q-displayable-interpolation-dispatch.)
+const STR_RUNTIME_PY: &str = "\
+# ── Bock display-string runtime ──
+def _bock_str(x):
+    m = getattr(x, 'to_string', None)
+    if callable(m):
+        return m()
+    return str(x)
 ";
 
 /// Runtime helpers for the closure-taking `List` combinators whose Python form
@@ -1372,6 +1397,7 @@ impl CodeGenerator for PyGenerator {
         let mut runtime_list_functional = false;
         let mut runtime_list_mutators = false;
         let mut runtime_propagate = false;
+        let mut runtime_str = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let mut ctx = PyEmitCtx::new();
@@ -1398,6 +1424,7 @@ impl CodeGenerator for PyGenerator {
             runtime_list_functional |= ctx.needs_runtime_list_functional;
             runtime_list_mutators |= ctx.needs_runtime_list_mutators;
             runtime_propagate |= ctx.needs_runtime_propagate;
+            runtime_str |= ctx.needs_runtime_str;
             let mut content = ctx.finish();
 
             // The entry file gets the `if __name__ == "__main__": main()`
@@ -1436,6 +1463,7 @@ impl CodeGenerator for PyGenerator {
             || runtime_list_functional
             || runtime_list_mutators
             || runtime_propagate
+            || runtime_str
         {
             let mut content = String::new();
             // Every runtime name is underscore-prefixed, which `from … import *`
@@ -1498,6 +1526,11 @@ impl CodeGenerator for PyGenerator {
                 content.push_str(PROPAGATE_RUNTIME_PY);
                 content.push('\n');
                 all_names.extend(["_BockPropagate", "_bock_try"]);
+            }
+            if runtime_str {
+                content.push_str(STR_RUNTIME_PY);
+                content.push('\n');
+                all_names.push("_bock_str");
             }
             let all_list = all_names
                 .iter()
@@ -1771,6 +1804,9 @@ struct PyEmitCtx {
     /// `_BockPropagate`) has been emitted; deduped exactly as
     /// [`Self::optional_runtime_emitted`].
     propagate_runtime_emitted: bool,
+    /// Set once the display-string runtime ([`STR_RUNTIME_PY`]) has been inlined
+    /// in the single-module self-contained path. (Q-displayable-interpolation-dispatch.)
+    str_runtime_emitted: bool,
     /// Set when an enum decl emits a `Name = Union[...]` alias, so the preamble
     /// imports `Union` from `typing`.
     needs_union_import: bool,
@@ -1831,6 +1867,9 @@ struct PyEmitCtx {
     /// operator, so it imports `_bock_try` / `_BockPropagate` from the shared
     /// `RUNTIME_MODULE_PY`. Mirrors [`Self::needs_runtime_optional`].
     needs_runtime_propagate: bool,
+    /// As [`Self::needs_runtime_propagate`], for the display-string runtime
+    /// (`_bock_str`). (Q-displayable-interpolation-dispatch.)
+    needs_runtime_str: bool,
     /// Implicit cross-module imports for the per-module path, as
     /// `(module_path, symbol_name)` pairs — names this module references but
     /// neither declares locally nor imports via an explicit `use` (e.g. a
@@ -1945,6 +1984,7 @@ impl PyEmitCtx {
             list_functional_runtime_emitted: false,
             list_mutator_runtime_emitted: false,
             propagate_runtime_emitted: false,
+            str_runtime_emitted: false,
             needs_union_import: false,
             needs_typing_callable: Cell::new(false),
             needs_typing_any: Cell::new(false),
@@ -1962,6 +2002,7 @@ impl PyEmitCtx {
             needs_runtime_list_functional: false,
             needs_runtime_list_mutators: false,
             needs_runtime_propagate: false,
+            needs_runtime_str: false,
             implicit_imports: Vec::new(),
             field_method_collisions: std::collections::HashSet::new(),
             const_names: std::collections::HashSet::new(),
@@ -2052,7 +2093,8 @@ impl PyEmitCtx {
                 || self.needs_runtime_concurrency
                 || self.needs_runtime_list_functional
                 || self.needs_runtime_list_mutators
-                || self.needs_runtime_propagate)
+                || self.needs_runtime_propagate
+                || self.needs_runtime_str)
         {
             let _ = writeln!(preamble, "from {RUNTIME_MODULE_PY} import *");
         }
@@ -3689,6 +3731,9 @@ impl PyEmitCtx {
                     if py_module_uses_propagate(items) {
                         self.needs_runtime_propagate = true;
                     }
+                    if py_module_uses_str(items) {
+                        self.needs_runtime_str = true;
+                    }
                 } else {
                     // Single-module self-contained emit (`generate_module`, used
                     // by unit tests): the module's runtime preludes are inlined
@@ -3738,6 +3783,11 @@ impl PyEmitCtx {
                         self.buf.push_str(PROPAGATE_RUNTIME_PY);
                         self.buf.push('\n');
                         self.propagate_runtime_emitted = true;
+                    }
+                    if !self.str_runtime_emitted && py_module_uses_str(items) {
+                        self.buf.push_str(STR_RUNTIME_PY);
+                        self.buf.push('\n');
+                        self.str_runtime_emitted = true;
                     }
                 }
                 // Per-module path: emit the module's cross-module imports as
@@ -5877,7 +5927,15 @@ impl PyEmitCtx {
                                 self.emit_expr(expr)?;
                                 self.buf.push_str(") else 'false'");
                             } else {
+                                // Q-displayable-interpolation-dispatch: render
+                                // through `_bock_str` so a user value with a
+                                // `Displayable` impl (its `to_string` method)
+                                // shows via that method, not the dataclass
+                                // `repr`. Primitives fall back to `str(x)`.
+                                self.needs_runtime_str = true;
+                                self.buf.push_str("_bock_str(");
                                 self.emit_expr(expr)?;
+                                self.buf.push(')');
                             }
                             self.buf.push('}');
                         }
@@ -9230,7 +9288,9 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("f\"Hello, {name}!\""), "got: {out}");
+        // `${name}` renders through `_bock_str`
+        // (Q-displayable-interpolation-dispatch).
+        assert!(out.contains("f\"Hello, {_bock_str(name)}!\""), "got: {out}");
     }
 
     #[test]
@@ -9272,8 +9332,14 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
+        // Each `${expr}` part renders through `_bock_str` so a user value with a
+        // `Displayable` impl dispatches through its `to_string`
+        // (Q-displayable-interpolation-dispatch); primitives fall back to
+        // `str(x)`.
         assert!(
-            out.contains("f\"\"\"=== {title} ===\n{msg}\n================\"\"\""),
+            out.contains(
+                "f\"\"\"=== {_bock_str(title)} ===\n{_bock_str(msg)}\n================\"\"\""
+            ),
             "got: {out}"
         );
         // Single-line interpolation should still use regular f-string
@@ -9319,7 +9385,9 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("f\"Hi {name}\""), "got: {out}");
+        // `${name}` renders through `_bock_str`
+        // (Q-displayable-interpolation-dispatch).
+        assert!(out.contains("f\"Hi {_bock_str(name)}\""), "got: {out}");
         assert!(
             !out.contains("f\"\"\""),
             "should not use triple quotes: {out}"

@@ -3569,6 +3569,40 @@ impl RsEmitCtx {
                 self.indent -= 1;
                 self.in_clone_self_method = prev_clone_self;
                 self.writeln("}");
+                // Q-displayable-interpolation-dispatch: a user `impl Displayable`
+                // (its `to_string` is the type's display form) ALSO gets a
+                // delegating `impl std::fmt::Display`, so a `${p}` interpolation
+                // — lowered to `format!("…{}…", p)` — renders through the user's
+                // `to_string` rather than failing `E0277` (`Point` doesn't
+                // implement `Display`). Mirrors the DQ31 delegating-`PartialEq`
+                // pattern. Fires only for a `Displayable` impl that actually
+                // declares a `to_string` instance method.
+                if let Some(tp) = trait_path {
+                    let trait_leaf = tp.segments.last().map(|s| s.name.as_str());
+                    let has_to_string = methods.iter().any(|m| {
+                        matches!(&m.kind, NodeKind::FnDecl { name, .. } if name.name == "to_string")
+                    });
+                    if trait_leaf == Some("Displayable") && has_to_string {
+                        self.buf.push('\n');
+                        self.writeln(&format!(
+                            "impl{generics} std::fmt::Display for {target_name}{where_cl} {{"
+                        ));
+                        self.indent += 1;
+                        self.writeln(
+                            "fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {",
+                        );
+                        self.indent += 1;
+                        // Fully-qualify through the trait so it is unambiguous
+                        // whether or not the type also has an inherent `to_string`
+                        // (and so it works against the §18.2-synthesized
+                        // `trait Displayable`).
+                        self.writeln("write!(f, \"{}\", Displayable::to_string(self))");
+                        self.indent -= 1;
+                        self.writeln("}");
+                        self.indent -= 1;
+                        self.writeln("}");
+                    }
+                }
                 Ok(())
             }
             NodeKind::EffectDecl {

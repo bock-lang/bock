@@ -244,6 +244,32 @@ fn module_uses_compare(items: &[AIRNode]) -> bool {
     })
 }
 
+/// The display-string runtime: lower a `${expr}` interpolation part through this
+/// so a user value with a `Displayable` impl (its emitted `to_string` method) is
+/// rendered via that method, not the structural `[object Object]`. Primitives /
+/// arrays / plain objects fall back to native `String(x)`. The user `to_string`
+/// is `T.prototype.to_string = function(self) { … }` (snake_case, distinct from
+/// JS `toString`), so the helper detects it by `typeof x.to_string ===
+/// "function"` and calls `x.to_string(x)`. Mirrors `STR_RUNTIME_JS` in `js.rs`.
+/// (Q-displayable-interpolation-dispatch.)
+const STR_RUNTIME_TS: &str = "// ── Bock display-string runtime ──
+const __bockStr = (x: any): string => {
+  if (x !== null && typeof x === \"object\" && typeof x.to_string === \"function\") {
+    return x.to_string(x);
+  }
+  return String(x);
+};
+";
+
+/// True if the module contains a string interpolation (`${expr}`), so
+/// [`STR_RUNTIME_TS`]'s `__bockStr` must be emitted. Mirrors [`module_uses_eq`].
+fn module_uses_str(items: &[AIRNode]) -> bool {
+    items.iter().any(|n| {
+        let dbg = format!("{n:?}");
+        dbg.contains("Interpolation")
+    })
+}
+
 /// The shared per-module runtime module name (without extension). In the
 /// per-module (native-import) emission path the Optional/Result runtime *types*
 /// (`BockOption`, `BockResult`) and the concurrency / range runtime *helpers*
@@ -401,6 +427,7 @@ impl CodeGenerator for TsGenerator {
         let mut runtime_range = false;
         let mut runtime_eq = false;
         let mut runtime_compare = false;
+        let mut runtime_str = false;
 
         for (i, (module, source_path)) in modules.iter().enumerate() {
             let own_path = crate::generator::module_path_string(module).unwrap_or_default();
@@ -439,6 +466,7 @@ impl CodeGenerator for TsGenerator {
             runtime_range |= ctx.needs_runtime_range;
             runtime_eq |= ctx.needs_runtime_eq;
             runtime_compare |= ctx.needs_runtime_compare;
+            runtime_str |= ctx.needs_runtime_str;
             let (mut content, mappings) = ctx.finish();
 
             if i == entry_idx && crate::generator::module_declares_main_fn(module) {
@@ -476,6 +504,7 @@ impl CodeGenerator for TsGenerator {
             || runtime_range
             || runtime_eq
             || runtime_compare
+            || runtime_str
         {
             let mut content = String::new();
             if runtime_optional {
@@ -496,6 +525,10 @@ impl CodeGenerator for TsGenerator {
             }
             if runtime_compare {
                 content.push_str(&export_runtime_decls(COMPARE_RUNTIME_TS));
+                content.push('\n');
+            }
+            if runtime_str {
+                content.push_str(&export_runtime_decls(STR_RUNTIME_TS));
                 content.push('\n');
             }
             if runtime_eq {
@@ -729,6 +762,9 @@ struct TsEmitCtx {
     /// been emitted in the single-module self-contained path. Deduped exactly as
     /// [`Self::eq_runtime_emitted`]. (Q-bounded-comparable-codegen.)
     compare_runtime_emitted: bool,
+    /// Set once the display-string runtime ([`STR_RUNTIME_TS`]) has been emitted
+    /// in the single-module self-contained path. (Q-displayable-interpolation-dispatch.)
+    str_runtime_emitted: bool,
     /// User-enum-variant registry (DV14). Same role as the JS backend's: route
     /// a unit-variant reference to the `{enum}_{variant}` const, a struct/tuple
     /// construction to the factory, and recognise `RecordPat` arms as ADT.
@@ -803,6 +839,9 @@ struct TsEmitCtx {
     /// structural-comparison runtime (`__bockCompare`).
     /// (Q-bounded-comparable-codegen.)
     needs_runtime_compare: bool,
+    /// As [`Self::needs_runtime_eq`], for the display-string runtime
+    /// (`__bockStr`). (Q-displayable-interpolation-dispatch.)
+    needs_runtime_str: bool,
     /// Implicit cross-module imports for the per-module path — names this module
     /// references but neither declares locally nor imports via an explicit `use`.
     /// Computed in `generate_project`; emitted as ESM imports by the `Module` arm.
@@ -906,6 +945,7 @@ impl TsEmitCtx {
             range_runtime_emitted: false,
             eq_runtime_emitted: false,
             compare_runtime_emitted: false,
+            str_runtime_emitted: false,
             enum_variants: crate::generator::EnumVariantRegistry::new(),
             generic_decls: crate::generator::GenericDeclRegistry::new(),
             trait_decls: crate::generator::TraitDeclRegistry::new(),
@@ -919,6 +959,7 @@ impl TsEmitCtx {
             needs_runtime_range: false,
             needs_runtime_eq: false,
             needs_runtime_compare: false,
+            needs_runtime_str: false,
             implicit_imports: Vec::new(),
             public_symbols: HashMap::new(),
             self_module_path: String::new(),
@@ -1063,6 +1104,9 @@ impl TsEmitCtx {
         }
         if self.needs_runtime_compare {
             value_names.push("__bockCompare");
+        }
+        if self.needs_runtime_str {
+            value_names.push("__bockStr");
         }
         if !type_names.is_empty() || !value_names.is_empty() {
             let spec = crate::generator::esm_relative_specifier(
@@ -3043,6 +3087,9 @@ impl TsEmitCtx {
                     if module_uses_compare(items) {
                         self.needs_runtime_compare = true;
                     }
+                    if module_uses_str(items) {
+                        self.needs_runtime_str = true;
+                    }
                     self.emit_esm_imports(imports)?;
                 } else {
                     // Single-module self-contained emit (`generate_module`, used
@@ -3074,6 +3121,11 @@ impl TsEmitCtx {
                         self.buf.push_str(COMPARE_RUNTIME_TS);
                         self.buf.push('\n');
                         self.compare_runtime_emitted = true;
+                    }
+                    if !self.str_runtime_emitted && module_uses_str(items) {
+                        self.buf.push_str(STR_RUNTIME_TS);
+                        self.buf.push('\n');
+                        self.str_runtime_emitted = true;
                     }
                     if !self.eq_runtime_emitted && module_uses_eq(items) {
                         self.buf.push_str(EQ_RUNTIME_TS);
@@ -5244,9 +5296,15 @@ impl TsEmitCtx {
                             self.buf.push_str(&escape_template_literal(s));
                         }
                         AirInterpolationPart::Expr(expr) => {
-                            self.buf.push_str("${");
+                            // Q-displayable-interpolation-dispatch: render through
+                            // `__bockStr` so a user value with a `Displayable`
+                            // impl (its `to_string` method) shows via that method,
+                            // not `[object Object]`. Primitives fall back to
+                            // native `String(x)`.
+                            self.needs_runtime_str = true;
+                            self.buf.push_str("${__bockStr(");
                             self.emit_expr(expr)?;
-                            self.buf.push('}');
+                            self.buf.push_str(")}");
                         }
                     }
                 }
@@ -8394,7 +8452,9 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![f]));
-        assert!(out.contains("`Hello, ${name}!`"), "got: {out}");
+        // Rendered through `__bockStr` so a user `Displayable` value dispatches
+        // through its `to_string` (Q-displayable-interpolation-dispatch).
+        assert!(out.contains("`Hello, ${__bockStr(name)}!`"), "got: {out}");
     }
 
     // ── Collections ─────────────────────────────────────────────────────────

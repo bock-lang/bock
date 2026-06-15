@@ -522,6 +522,26 @@ func __bockCompare[T int64 | float64 | string | rune | int | uint64 | float32](a
 }
 ";
 
+/// Runtime for a `${expr}` interpolation part: render a value whose Bock type
+/// has a `Displayable` impl through its `ToString` method (the user
+/// `to_string` lowers to a `ToString() string` value-receiver method on Go)
+/// rather than the struct default (`fmt.Sprintf("%v", p)` → `{3 7}`). The
+/// `__bockStringer` interface is satisfied by exactly those types; every other
+/// value falls through to `%v`. Gated by [`go_module_uses_str`]; its own `fmt`
+/// import is emitted into the runtime file. (Q-displayable-interpolation-dispatch.)
+const STR_RUNTIME_GO: &str = "// ── Bock display-string runtime ──
+type __bockStringer interface {
+	ToString() string
+}
+
+func __bockStr(x interface{}) string {
+	if s, ok := x.(__bockStringer); ok {
+		return s.ToString()
+	}
+	return fmt.Sprintf(\"%v\", x)
+}
+";
+
 /// The `__bockOrdered` constraint a `[T: Comparable]` sealed-core bound lowers to
 /// (GAP-C): the ordered primitive type-set, so a generic fn's `a.compare(b)` /
 /// `a > b` can use `<`/`==`/`>`. Self-contained (no `cmp` import), matching
@@ -549,6 +569,15 @@ fn go_module_uses_ordering(items: &[AIRNode]) -> bool {
             || s.contains("\"Greater\"")
             || s.contains("\"compare\"")
     })
+}
+
+/// True if any module contains a string interpolation (`${expr}`), so the
+/// [`STR_RUNTIME_GO`] `__bockStr` helper must be emitted into the runtime file.
+/// Mirrors [`go_module_uses_optional`]. (Q-displayable-interpolation-dispatch.)
+fn go_module_uses_str(items: &[AIRNode]) -> bool {
+    items
+        .iter()
+        .any(|n| format!("{n:?}").contains("Interpolation"))
 }
 
 /// True if a `match`\'s arms dispatch on the prelude `Ordering` variants
@@ -998,6 +1027,7 @@ impl GoGenerator {
         let mut uses_range = false;
         let mut uses_int_pow = false;
         let mut uses_deep_eq = false;
+        let mut uses_str = false;
         for (module, _) in modules {
             if let NodeKind::Module { items, .. } = &module.kind {
                 uses_concurrency |= go_module_uses_concurrency(items);
@@ -1007,6 +1037,7 @@ impl GoGenerator {
                 uses_range |= go_module_uses_range(items);
                 uses_int_pow |= go_module_uses_int_pow(items);
                 uses_deep_eq |= go_module_uses_deep_eq(items);
+                uses_str |= go_module_uses_str(items);
             }
         }
         // The real `core.compare.Ordering` enum is authoritative when reachable
@@ -1029,6 +1060,7 @@ impl GoGenerator {
             || uses_range
             || uses_int_pow
             || uses_deep_eq
+            || uses_str
             || emit_ordering
             || emit_ordered_constraint)
         {
@@ -1041,6 +1073,11 @@ impl GoGenerator {
         // modules only *call* the helper).
         if uses_deep_eq {
             content.push_str("import \"reflect\"\n\n");
+        }
+        if uses_str {
+            // `__bockStr` calls `fmt.Sprintf`; Go imports are per-file, and the
+            // runtime file is its own `package main` source.
+            content.push_str("import \"fmt\"\n\n");
         }
         if uses_concurrency {
             content.push_str(CONCURRENCY_RUNTIME_GO);
@@ -1080,6 +1117,10 @@ impl GoGenerator {
         }
         if uses_deep_eq {
             content.push_str(DEEP_EQ_RUNTIME_GO);
+            content.push('\n');
+        }
+        if uses_str {
+            content.push_str(STR_RUNTIME_GO);
             content.push('\n');
         }
         // Each runtime block is joined with a trailing `\n`, which leaves a blank
@@ -9785,15 +9826,23 @@ impl GoEmitCtx {
                             self.buf.push_str(&escape_go_string(s).replace('%', "%%"));
                         }
                         AirInterpolationPart::Expr(expr) => {
-                            self.buf.push_str("%v");
+                            // Q-displayable-interpolation-dispatch: render through
+                            // `__bockStr` (a `%s` verb over a `string`) so a user
+                            // value whose type has a `Displayable` impl (its
+                            // `ToString` method) shows via that method, not the
+                            // struct default (`%v` → `{3 7}`). Every other value
+                            // falls back to `fmt.Sprintf("%v", x)` inside the
+                            // helper, matching the prior `%v` form.
+                            self.buf.push_str("%s");
                             args.push(expr.clone());
                         }
                     }
                 }
                 self.buf.push('"');
                 for arg in &args {
-                    self.buf.push_str(", ");
+                    self.buf.push_str(", __bockStr(");
                     self.emit_expr(arg)?;
+                    self.buf.push(')');
                 }
                 self.buf.push(')');
                 Ok(())
@@ -13800,7 +13849,12 @@ mod tests {
         );
         let out = gen(&module(vec![], vec![interp]));
         assert!(out.contains("fmt.Sprintf"), "got: {out}");
-        assert!(out.contains("Hello, %v!"), "got: {out}");
+        // Each `${expr}` part renders through `__bockStr` (a `%s` verb over a
+        // `string`) so a user value with a `Displayable` impl dispatches through
+        // its `ToString` (Q-displayable-interpolation-dispatch); other values
+        // fall back to `%v` inside the helper.
+        assert!(out.contains("Hello, %s!"), "got: {out}");
+        assert!(out.contains("__bockStr(name)"), "got: {out}");
         assert!(out.contains("import \"fmt\""), "got: {out}");
     }
 
@@ -13821,8 +13875,10 @@ mod tests {
             },
         );
         let out = gen(&module(vec![], vec![interp]));
+        // The `${n}` part renders through `__bockStr` (`%s`); the literal `%`
+        // bytes still double in the format string.
         assert!(
-            out.contains(r#"fmt.Sprintf("%v%% pass, 100%%%% raw", n)"#),
+            out.contains(r#"fmt.Sprintf("%s%% pass, 100%%%% raw", __bockStr(n))"#),
             "literal % must be doubled in the Sprintf format string, got: {out}"
         );
     }
