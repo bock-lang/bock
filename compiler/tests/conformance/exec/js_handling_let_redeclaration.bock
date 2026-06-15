@@ -1,0 +1,52 @@
+// TEST: js_handling_let_redeclaration
+// EXPECT: output "[first][second]"
+// EXPECT: targets js, ts, python, rust
+//
+// Regression for Q-js-handling-let-redeclaration: a `let` re-bound under the
+// SAME name in two *sibling* `handling { … }` blocks was dropped on the js/ts
+// backends. Each `handling` block lowers to its own `{ … }` JS lexical scope,
+// but the emitter never opened a fresh `let`-scope frame for it. The
+// redeclaration tracker therefore carried the first block's `declared` set into
+// the second block and rewrote its `let part = "second"` into a bare
+// `part = "second"` — an assignment to a name that went out of scope when the
+// first block closed. Under the harness's ESM (`{"type":"module"}`, strict)
+// execution this throws `ReferenceError: part is not defined` on js, and `tsc`
+// rejects the undeclared name (TS2304) on ts. The fix opens a fresh let-scope
+// per `handling` block (mirroring the value-position block IIFE), so each
+// sibling block declares its own block-scoped `const part`.
+//
+// The effect op `log` is genuinely invoked inside each block (it returns a
+// `[…]`-tagged copy of its argument); the two results accumulate into `acc`,
+// printed once with `println` so the harness's literal single-line
+// `output "…"` comparison matches. js/ts/python/rust only: the Go backend
+// (go.rs) carries the same block-scope defect (`part := …` in the first block,
+// bare `part = …` in the second → `undefined: part`), tracked separately as a
+// FOUND on go.rs; this fixture pins the js/ts fix (plus the already-correct
+// python/rust backends). `main` is intentionally NOT `public` (Go entry-point
+// rationale, see hello_world.bock).
+module main
+
+effect Log {
+  fn log(message: String) -> String
+}
+
+record Tagger {}
+
+impl Log for Tagger {
+  fn log(message: String) -> String {
+    "[${message}]"
+  }
+}
+
+fn main() -> Void {
+  let mut acc = ""
+  handling (Log with Tagger {}) {
+    let part = "first"
+    acc = acc + log(part)
+  }
+  handling (Log with Tagger {}) {
+    let part = "second"
+    acc = acc + log(part)
+  }
+  println(acc)
+}
