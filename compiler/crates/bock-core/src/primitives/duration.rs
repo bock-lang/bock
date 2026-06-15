@@ -14,9 +14,8 @@ pub fn register(registry: &mut BuiltinRegistry) {
     registry.register(TypeTag::Duration, "div", duration_div);
     registry.register(TypeTag::Duration, "negate", duration_negate);
 
-    // ── Comparable / Equatable ───────────────────────────────────────────
+    // ── Comparable ───────────────────────────────────────────────────────
     registry.register(TypeTag::Duration, "compare", duration_compare);
-    registry.register(TypeTag::Duration, "equals", duration_equals);
 
     // ── Displayable / Hashable ───────────────────────────────────────────
     registry.register(TypeTag::Duration, "display", duration_display);
@@ -155,18 +154,12 @@ fn duration_negate(args: &[Value]) -> Result<Value, RuntimeError> {
         .ok_or(RuntimeError::IntOverflow)
 }
 
-// ─── Comparable / Equatable ──────────────────────────────────────────────
+// ─── Comparable ──────────────────────────────────────────────────────────
 
 fn duration_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_duration(args, 0, "compare")?;
     let b = expect_duration(args, 1, "compare")?;
-    Ok(Value::Int(a.cmp(&b) as i64))
-}
-
-fn duration_equals(args: &[Value]) -> Result<Value, RuntimeError> {
-    let a = expect_duration(args, 0, "equals")?;
-    let b = expect_duration(args, 1, "equals")?;
-    Ok(Value::Bool(a == b))
+    Ok(Value::ordering(a.cmp(&b)))
 }
 
 // ─── Displayable / Hashable ──────────────────────────────────────────────
@@ -374,7 +367,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert_eq!(result, Value::Int(-1));
+        assert_eq!(result, Value::ordering(std::cmp::Ordering::Less));
     }
 
     #[test]

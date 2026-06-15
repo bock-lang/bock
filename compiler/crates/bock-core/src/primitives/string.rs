@@ -14,9 +14,6 @@ pub fn register(registry: &mut BuiltinRegistry) {
     // ── Comparable trait ─────────────────────────────────────────────────
     registry.register(TypeTag::String, "compare", string_compare);
 
-    // ── Equatable trait ──────────────────────────────────────────────────
-    registry.register(TypeTag::String, "equals", string_equals);
-
     // ── Hashable trait ───────────────────────────────────────────────────
     registry.register(TypeTag::String, "hash_code", string_hash_code);
 
@@ -97,15 +94,7 @@ fn string_add(args: &[Value]) -> Result<Value, RuntimeError> {
 fn string_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_str(args, 0, "compare")?;
     let b = expect_str(args, 1, "compare")?;
-    Ok(Value::Int(a.cmp(b) as i64))
-}
-
-// ─── Equatable ────────────────────────────────────────────────────────────────
-
-fn string_equals(args: &[Value]) -> Result<Value, RuntimeError> {
-    let a = expect_str(args, 0, "equals")?;
-    let b = expect_str(args, 1, "equals")?;
-    Ok(Value::Bool(a == b))
+    Ok(Value::ordering(a.cmp(b)))
 }
 
 // ─── Hashable ─────────────────────────────────────────────────────────────────
@@ -431,14 +420,10 @@ mod tests {
     fn compare_less() {
         let r = reg();
         let result = r.call(TypeTag::String, "compare", &[s("a"), s("b")]);
-        assert_eq!(result.unwrap().unwrap(), Value::Int(-1));
-    }
-
-    #[test]
-    fn equals_true() {
-        let r = reg();
-        let result = r.call(TypeTag::String, "equals", &[s("hi"), s("hi")]);
-        assert_eq!(result.unwrap().unwrap(), Value::Bool(true));
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Less)
+        );
     }
 
     #[test]

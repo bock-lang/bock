@@ -584,11 +584,47 @@ pub enum Value {
 /// Shared handle to a spawned async task. See [`Value::Future`].
 pub type FutureHandle = Arc<Mutex<Option<JoinHandle<Result<Value, RuntimeError>>>>>;
 
+impl Value {
+    /// Build the prelude `Ordering` enum value (`Less`/`Equal`/`Greater`)
+    /// from a [`std::cmp::Ordering`].
+    ///
+    /// `Comparable.compare` returns `Ordering`, and the five codegen targets
+    /// lower a primitive `.compare()` to a value that `match`es against the
+    /// `Less`/`Equal`/`Greater` variants. The interpreter — the cross-target
+    /// equivalence oracle — must produce the same enum value so a
+    /// `match (a).compare(b) { Less => … }` dispatches identically under
+    /// `bock run`/`bock test` (Q-interp-compare-ordering).
+    #[must_use]
+    pub fn ordering(ord: std::cmp::Ordering) -> Self {
+        let variant = match ord {
+            std::cmp::Ordering::Less => "Less",
+            std::cmp::Ordering::Equal => "Equal",
+            std::cmp::Ordering::Greater => "Greater",
+        };
+        Value::Enum(EnumValue {
+            type_name: "Ordering".to_string(),
+            variant: variant.to_string(),
+            payload: None,
+        })
+    }
+}
+
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
+            // IEEE 754 partial equality at the `==` boundary
+            // (Q-interp-float-ieee-equality, DV24): `NaN == NaN` is `false` on
+            // all five codegen targets, so the interpreter — the equivalence
+            // oracle — compares the raw `f64`s rather than the total-order
+            // `OrdF64` wrapper (whose `PartialEq` treats `NaN` as equal to
+            // itself). This propagates structurally: a record/list/tuple holding
+            // a `NaN` `Float` field is `!=` an identically-built one, matching
+            // the targets' field-wise IEEE equality (see the `eq_record_float_nan`
+            // fixture). The `OrdF64` total order is retained for `Value`'s `Ord`
+            // impl, which is what `BTreeMap`/`BTreeSet` keys use internally — the
+            // boundary between IEEE `==` and total-order containers is split here.
+            (Value::Float(a), Value::Float(b)) => a.0 == b.0,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
@@ -963,9 +999,21 @@ mod tests {
     }
 
     #[test]
-    fn float_equality() {
+    fn float_equality_is_ieee() {
+        // `Value`'s `==` uses IEEE 754 partial semantics at the boundary
+        // (Q-interp-float-ieee-equality): equal magnitudes compare equal,
+        // `-0.0 == 0.0` is `true`, and `NaN == NaN` is `false`. The total order
+        // lives in `Value`'s `Ord` impl (see `value_as_btreeset_element` and
+        // `ordf64_total_order_neg_zero_vs_pos_zero`), not here.
         assert_eq!(Value::Float(OrdF64(1.5)), Value::Float(OrdF64(1.5)));
-        assert_ne!(Value::Float(OrdF64(-0.0)), Value::Float(OrdF64(0.0)));
+        // IEEE: signed zeros are equal under `==`.
+        assert_eq!(Value::Float(OrdF64(-0.0)), Value::Float(OrdF64(0.0)));
+        // IEEE: NaN is never equal to anything, including itself.
+        assert_ne!(
+            Value::Float(OrdF64(f64::NAN)),
+            Value::Float(OrdF64(f64::NAN))
+        );
+        assert_ne!(Value::Float(OrdF64(1.5)), Value::Float(OrdF64(f64::NAN)));
     }
 
     #[test]

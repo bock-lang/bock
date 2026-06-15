@@ -16,9 +16,6 @@ pub fn register(registry: &mut BuiltinRegistry) {
     // ── Comparable trait ─────────────────────────────────────────────────
     registry.register(TypeTag::Int, "compare", int_compare);
 
-    // ── Equatable trait ──────────────────────────────────────────────────
-    registry.register(TypeTag::Int, "equals", int_equals);
-
     // ── Hashable trait ───────────────────────────────────────────────────
     registry.register(TypeTag::Int, "hash_code", int_hash_code);
 
@@ -119,19 +116,12 @@ fn int_negate(args: &[Value]) -> Result<Value, RuntimeError> {
 
 // ─── Comparable ───────────────────────────────────────────────────────────────
 
-/// Returns -1, 0, or 1 as an Int representing the ordering.
+/// Returns the prelude `Ordering` enum (`Less`/`Equal`/`Greater`), matching
+/// the value the five codegen targets produce for `(a).compare(b)`.
 fn int_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_int(args, 0, "compare")?;
     let b = expect_int(args, 1, "compare")?;
-    Ok(Value::Int(a.cmp(&b) as i64))
-}
-
-// ─── Equatable ────────────────────────────────────────────────────────────────
-
-fn int_equals(args: &[Value]) -> Result<Value, RuntimeError> {
-    let a = expect_int(args, 0, "equals")?;
-    let b = expect_int(args, 1, "equals")?;
-    Ok(Value::Bool(a == b))
+    Ok(Value::ordering(a.cmp(&b)))
 }
 
 // ─── Hashable ─────────────────────────────────────────────────────────────────
@@ -285,35 +275,30 @@ mod tests {
     fn compare_less() {
         let r = reg();
         let result = r.call(TypeTag::Int, "compare", &[Value::Int(1), Value::Int(2)]);
-        assert_eq!(result.unwrap().unwrap(), Value::Int(-1));
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Less)
+        );
     }
 
     #[test]
     fn compare_equal() {
         let r = reg();
         let result = r.call(TypeTag::Int, "compare", &[Value::Int(5), Value::Int(5)]);
-        assert_eq!(result.unwrap().unwrap(), Value::Int(0));
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Equal)
+        );
     }
 
     #[test]
     fn compare_greater() {
         let r = reg();
         let result = r.call(TypeTag::Int, "compare", &[Value::Int(5), Value::Int(2)]);
-        assert_eq!(result.unwrap().unwrap(), Value::Int(1));
-    }
-
-    #[test]
-    fn equals_true() {
-        let r = reg();
-        let result = r.call(TypeTag::Int, "equals", &[Value::Int(42), Value::Int(42)]);
-        assert_eq!(result.unwrap().unwrap(), Value::Bool(true));
-    }
-
-    #[test]
-    fn equals_false() {
-        let r = reg();
-        let result = r.call(TypeTag::Int, "equals", &[Value::Int(1), Value::Int(2)]);
-        assert_eq!(result.unwrap().unwrap(), Value::Bool(false));
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Greater)
+        );
     }
 
     #[test]

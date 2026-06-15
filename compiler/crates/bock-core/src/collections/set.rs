@@ -253,7 +253,7 @@ fn set_hash_code(args: &[Value]) -> Result<Value, RuntimeError> {
 fn set_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_set(args, 0, "compare")?;
     let b = expect_set(args, 1, "compare")?;
-    Ok(Value::Int(a.cmp(b) as i64))
+    Ok(Value::ordering(a.cmp(b)))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -517,6 +517,9 @@ mod tests {
             "compare",
             &[make_set(&[1, 2]), make_set(&[1, 3])],
         );
-        assert_eq!(result.unwrap().unwrap(), Value::Int(-1));
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Less)
+        );
     }
 }

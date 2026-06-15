@@ -1,0 +1,55 @@
+// TEST: interp_float_nan_equality
+// EXPECT: output "nan_eq:false;nan_ne:true;self:false;zero:true;rec:false;plain:true"
+//
+// Q-interp-float-ieee-equality (R11 oracle parity, DV24), interpreter side.
+// IEEE 754 partial equality holds at the `==` boundary under `bock run`:
+// `NaN == NaN` is `false` (and `!=` is `true`), a NaN is unequal even to itself,
+// and `-0.0 == 0.0` is `true`. This matches all five compiled targets, which use
+// native `==`. Before the fix the interpreter compared `Float`s through the
+// total-order `OrdF64` wrapper (whose equality treats `NaN` as equal to itself),
+// so `NaN == NaN` was wrongly `true` interp-only.
+//
+// The split is load-bearing: IEEE semantics apply at `==` (here and structurally,
+// through record/list fields — `rec` below), while the `OrdF64` TOTAL order is
+// retained for `Value`'s `Ord` impl so `Map`/`Set` keys stay well-ordered. The
+// ×5 cross-target reference for the structural-record case is
+// `conformance/exec/eq_record_float_nan.bock` (from #347).
+//
+// NaN is built portably as the overflow `inf - inf` (`1.0e308 * 10.0` ⇒ +inf on
+// every backend without raising). `main` is intentionally NOT `public`.
+module main
+
+record Reading {
+  label: String,
+  value: Float,
+}
+
+fn make_nan() -> Float {
+  let big: Float = 1.0e308
+  let inf: Float = big * 10.0
+  inf - inf
+}
+
+fn yesno(b: Bool) -> String {
+  if (b) {
+    return "true"
+  }
+  return "false"
+}
+
+fn main() -> Void {
+  let n1: Float = make_nan()
+  let n2: Float = make_nan()
+  let nan_eq: Bool = n1 == n2
+  let nan_ne: Bool = n1 != n2
+  let self_eq: Bool = n1 == n1
+  let neg_zero: Float = 0.0 - 0.0
+  let zero_eq: Bool = neg_zero == 0.0
+  let r1: Reading = Reading { label: "p", value: make_nan() }
+  let r2: Reading = Reading { label: "p", value: make_nan() }
+  let rec_eq: Bool = r1 == r2
+  let p1: Reading = Reading { label: "p", value: 1.5 }
+  let p2: Reading = Reading { label: "p", value: 1.5 }
+  let plain_eq: Bool = p1 == p2
+  println("nan_eq:${yesno(nan_eq)};nan_ne:${yesno(nan_ne)};self:${yesno(self_eq)};zero:${yesno(zero_eq)};rec:${yesno(rec_eq)};plain:${yesno(plain_eq)}")
+}

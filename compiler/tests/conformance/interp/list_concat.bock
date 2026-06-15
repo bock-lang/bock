@@ -1,0 +1,38 @@
+// TEST: interp_list_concat
+// EXPECT: output "3;1,2,3;1|2,3"
+//
+// Q-interp-list-concat (R11 oracle parity), interpreter side. The `+` operator
+// on two `List` operands is value-returning concatenation under `bock run`:
+// `[1] + [2, 3]` evaluates to a fresh `[1, 2, 3]`, mutating neither operand.
+// Before the fix the interpreter's `eval_binary_op` had no `List + List` arm and
+// raised `operator Add not supported for [..] and [..]`, REJECTING a program
+// every compiled target accepts — the oracle diverging from the five backends.
+// The cross-target ×5 reference is `conformance/exec/exec_list_concat.bock`; the
+// end-to-end interpreter run is also exercised by the now-passing
+// `examples/real-world/expense-tracker` test (`expenses + [expense]`).
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn join(xs: List[Int]) -> String {
+  let mut out: String = ""
+  let mut first: Bool = true
+  for x in xs {
+    if (first) {
+      out = "${x}"
+      first = false
+    } else {
+      out = "${out},${x}"
+    }
+  }
+  out
+}
+
+fn main() -> Void {
+  let left: List[Int] = [1]
+  let right: List[Int] = [2, 3]
+  let joined: List[Int] = left + right
+  // Operands are unchanged: re-joining them yields their original contents.
+  let operands: String = "${join(left)}|${join(right)}"
+  println("${joined.len()};${join(joined)};${operands}")
+}

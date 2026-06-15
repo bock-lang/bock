@@ -1,0 +1,37 @@
+// TEST: interp_compare_ordering
+// EXPECT: output "less;equal;greater;str-greater"
+//
+// Q-interp-compare-ordering (R11 oracle parity), interpreter side. A primitive's
+// `Comparable.compare` returns the prelude `Ordering` enum, so
+// `match a.compare(b) { Less => …, Equal => …, Greater => … }` dispatches under
+// `bock run` exactly as it does on the five compiled targets. Before the fix the
+// bock-core primitive bridge returned a bare `Int` (-1/0/1), so the `Ordering`
+// match arms never bound and the program diverged interp-only. The cross-target
+// ×5 references are `conformance/exec/primitive_compare.bock` (Int/String) and
+// `conformance/exec/exec_compare_ordering_more.bock` (Float/Char).
+//
+// `main` is intentionally NOT `public`.
+module main
+
+fn describe(a: Int, b: Int) -> String {
+  match a.compare(b) {
+    Less => return "less"
+    Equal => return "equal"
+    Greater => return "greater"
+  }
+}
+
+fn describeStr(a: String, b: String) -> String {
+  match a.compare(b) {
+    Less => return "str-less"
+    Equal => return "str-equal"
+    Greater => return "str-greater"
+  }
+}
+
+fn main() -> Void {
+  println(describe(1, 2))
+  println(describe(5, 5))
+  println(describe(9, 2))
+  println(describeStr("pear", "melon"))
+}

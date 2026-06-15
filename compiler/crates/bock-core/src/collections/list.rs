@@ -16,14 +16,14 @@ pub fn register(registry: &mut BuiltinRegistry) {
     registry.register(TypeTag::List, "contains", list_contains);
     registry.register(TypeTag::List, "index_of", list_index_of);
 
-    // ── Mutation (immutable — return new lists) ──────────────────────────
-    registry.register(TypeTag::List, "push", list_push);
-    registry.register(TypeTag::List, "pop", list_pop);
-    registry.register(TypeTag::List, "insert", list_insert);
-    registry.register(TypeTag::List, "remove", list_remove);
+    // ── Transformation (value-returning — produce new lists) ─────────────
+    // NOTE: `push`/`pop`/`insert`/`remove_at`/`reverse`/`set` are NOT here:
+    // since #349 (DQ30) those are in-place mut-self mutators intercepted by the
+    // interpreter (`LIST_INPLACE_MUTATORS`) before this value-returning
+    // registry, so any legacy value-returning entries for those names were dead
+    // (Q-core-legacy-list-builtins) and have been removed.
     registry.register(TypeTag::List, "concat", list_concat);
     registry.register(TypeTag::List, "slice", list_slice);
-    registry.register(TypeTag::List, "reverse", list_reverse);
     registry.register(TypeTag::List, "sort", list_sort);
     registry.register(TypeTag::List, "dedup", list_dedup);
     registry.register(TypeTag::List, "flatten", list_flatten);
@@ -155,60 +155,7 @@ fn list_index_of(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 }
 
-// ─── Mutation (immutable) ─────────────────────────────────────────────────────
-
-fn list_push(args: &[Value]) -> Result<Value, RuntimeError> {
-    let items = expect_list(args, 0, "push")?;
-    let val = args.get(1).ok_or(RuntimeError::ArityMismatch {
-        expected: 2,
-        got: args.len(),
-    })?;
-    let mut new_list = items.to_vec();
-    new_list.push(val.clone());
-    Ok(Value::List(new_list))
-}
-
-fn list_pop(args: &[Value]) -> Result<Value, RuntimeError> {
-    let items = expect_list(args, 0, "pop")?;
-    if items.is_empty() {
-        Ok(Value::List(vec![]))
-    } else {
-        Ok(Value::List(items[..items.len() - 1].to_vec()))
-    }
-}
-
-fn list_insert(args: &[Value]) -> Result<Value, RuntimeError> {
-    let items = expect_list(args, 0, "insert")?;
-    let idx = expect_int(args, 1, "insert")?;
-    let val = args.get(2).ok_or(RuntimeError::ArityMismatch {
-        expected: 3,
-        got: args.len(),
-    })?;
-    let idx = idx as usize;
-    if idx > items.len() {
-        return Err(RuntimeError::IndexOutOfBounds {
-            index: idx as i64,
-            len: items.len(),
-        });
-    }
-    let mut new_list = items.to_vec();
-    new_list.insert(idx, val.clone());
-    Ok(Value::List(new_list))
-}
-
-fn list_remove(args: &[Value]) -> Result<Value, RuntimeError> {
-    let items = expect_list(args, 0, "remove")?;
-    let idx = expect_int(args, 1, "remove")?;
-    if idx < 0 || idx as usize >= items.len() {
-        return Err(RuntimeError::IndexOutOfBounds {
-            index: idx,
-            len: items.len(),
-        });
-    }
-    let mut new_list = items.to_vec();
-    new_list.remove(idx as usize);
-    Ok(Value::List(new_list))
-}
+// ─── Transformation (value-returning) ─────────────────────────────────────────
 
 fn list_concat(args: &[Value]) -> Result<Value, RuntimeError> {
     let items = expect_list(args, 0, "concat")?;
@@ -230,13 +177,6 @@ fn list_slice(args: &[Value]) -> Result<Value, RuntimeError> {
     } else {
         Ok(Value::List(items[start..end].to_vec()))
     }
-}
-
-fn list_reverse(args: &[Value]) -> Result<Value, RuntimeError> {
-    let items = expect_list(args, 0, "reverse")?;
-    let mut new_list = items.to_vec();
-    new_list.reverse();
-    Ok(Value::List(new_list))
 }
 
 fn list_sort(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -510,7 +450,7 @@ fn list_hash_code(args: &[Value]) -> Result<Value, RuntimeError> {
 fn list_compare(args: &[Value]) -> Result<Value, RuntimeError> {
     let a = expect_list(args, 0, "compare")?;
     let b = expect_list(args, 1, "compare")?;
-    Ok(Value::Int(a.cmp(b) as i64))
+    Ok(Value::ordering(a.cmp(b)))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -643,70 +583,10 @@ mod tests {
         assert_eq!(result.unwrap().unwrap(), Value::Optional(None));
     }
 
-    // ── Mutation (immutable) ─────────────────────────────────────────────
-
-    #[test]
-    fn push_appends() {
-        let r = reg();
-        let result = r.call(TypeTag::List, "push", &[list(&[1]), Value::Int(2)]);
-        assert_eq!(result.unwrap().unwrap(), list(&[1, 2]));
-    }
-
-    #[test]
-    fn pop_removes_last() {
-        let r = reg();
-        let result = r.call(TypeTag::List, "pop", &[list(&[1, 2, 3])]);
-        assert_eq!(result.unwrap().unwrap(), list(&[1, 2]));
-    }
-
-    #[test]
-    fn pop_empty() {
-        let r = reg();
-        let result = r.call(TypeTag::List, "pop", &[list(&[])]);
-        assert_eq!(result.unwrap().unwrap(), list(&[]));
-    }
-
-    #[test]
-    fn insert_at_index() {
-        let r = reg();
-        let result = r.call(
-            TypeTag::List,
-            "insert",
-            &[list(&[1, 3]), Value::Int(1), Value::Int(2)],
-        );
-        assert_eq!(result.unwrap().unwrap(), list(&[1, 2, 3]));
-    }
-
-    #[test]
-    fn insert_out_of_bounds() {
-        let r = reg();
-        let result = r.call(
-            TypeTag::List,
-            "insert",
-            &[list(&[1]), Value::Int(5), Value::Int(2)],
-        );
-        assert!(matches!(
-            result.unwrap(),
-            Err(RuntimeError::IndexOutOfBounds { .. })
-        ));
-    }
-
-    #[test]
-    fn remove_at_index() {
-        let r = reg();
-        let result = r.call(TypeTag::List, "remove", &[list(&[1, 2, 3]), Value::Int(1)]);
-        assert_eq!(result.unwrap().unwrap(), list(&[1, 3]));
-    }
-
-    #[test]
-    fn remove_out_of_bounds() {
-        let r = reg();
-        let result = r.call(TypeTag::List, "remove", &[list(&[1]), Value::Int(5)]);
-        assert!(matches!(
-            result.unwrap(),
-            Err(RuntimeError::IndexOutOfBounds { .. })
-        ));
-    }
+    // ── Transformation (value-returning) ─────────────────────────────────
+    // The in-place mutators (`push`/`pop`/`insert`/`remove_at`/`reverse`/`set`)
+    // are owned by the interpreter's mut-self path (DQ30), not this registry,
+    // so they are not registered or tested here.
 
     #[test]
     fn concat_lists() {
@@ -735,13 +615,6 @@ mod tests {
             &[list(&[1, 2, 3]), Value::Int(-1), Value::Int(100)],
         );
         assert_eq!(result.unwrap().unwrap(), list(&[1, 2, 3]));
-    }
-
-    #[test]
-    fn reverse_list() {
-        let r = reg();
-        let result = r.call(TypeTag::List, "reverse", &[list(&[1, 2, 3])]);
-        assert_eq!(result.unwrap().unwrap(), list(&[3, 2, 1]));
     }
 
     #[test]
@@ -875,7 +748,10 @@ mod tests {
     async fn compare_lists() {
         let r = reg();
         let result = r.call(TypeTag::List, "compare", &[list(&[1, 2]), list(&[1, 3])]);
-        assert_eq!(result.unwrap().unwrap(), Value::Int(-1));
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Value::ordering(std::cmp::Ordering::Less)
+        );
     }
 
     #[tokio::test]
