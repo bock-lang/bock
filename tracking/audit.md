@@ -2717,3 +2717,40 @@ Awaiting operator: OQ1/R1 (marketing positioning handoff at tracking/handoffs/20
     (chosen over leaving the divergence). DQ formalization is FILE-only — the orchestrator does not decide core spec (→ Design).
   Follow-up: recover/verify/merge the 6 lanes (combined gate, same model as Waves A/B). DQ32/DQ33 await a Design ruling
     (non-blocking). Q-sdk-vendor-demo, once merged, unblocks the marketing wedge-page copy (Q-wedge-usecases-page, ESCALATE).
+
+[2026-06-15 22:52 UTC] ✦ WAVE C + SDK DEMO COMPLETE (#381–#386) — v1.0-hardening correctness floor clean
+  Input: operator directed "move forward on SDK vendor demo + Wave C tail with as much fan-out as possible" (after the
+    positioning resolution landed).
+  Decision: 6 file-disjoint Bash-auth applier lanes + the orchestrator tracking lane. Lanes → PRs: #385 ts generic-enum
+    arity · #386 py/go Optional/Result structural == · #383 bock-cli discovery skip-unreadable (+hermetic test helpers;
+    root cause = a stray ancestor bock.project pinning the project root to /tmp) · #384 bock-core dead Bool.compare +
+    2 doc-prose chores · #381 new assets-drift CI guard · #382 the textkit SDK-vendor demo (the wedge proof surface).
+  Verification: octopus of all 7 branches (shared base f70edde) → combined gate GREEN (fmt/clippy/test/doc/mdbook +
+    conformance ×2 0 failed; the previously env-failing bock-cli tests pass now that #383's hermetic helpers + the
+    stray-marker removal are in). Per-PR CI 15/15 each, incl. examples-exec on #382 (the demo passes the blocking gate
+    ×5) and the new assets-drift check on #381. Merged all 7; final main 8f38ba6.
+  Reasoning: all ready/within-authority impl + doc + infra; the SDK demo is the operator-requested proof for the marketing
+    wedge (examples/, no spec/semantics change). The assets-drift guard immediately caught a real drift (#379's §1.1
+    amendment had left the extension's bock-spec.md asset stale) — fixed in #381. No spec/design decisions taken.
+  Follow-up: 2 narrow codegen FOUNDs filed (Q-go-generic-enum-codegen — go enum marker-receiver carries `any`;
+    Q-transpiled-test-enum-variant-import — js/ts/py transpiled-TEST files drop enum-variant imports) + the
+    Q-error-code-renumbering chore. DQ32/DQ33 await Design. The v1.0 correctness floor is clean; the remaining tail is
+    narrow. Q-sdk-vendor-demo landing unblocks the marketing wedge-page copy (Q-wedge-usecases-page, ESCALATE).
+
+═══ SESSION-CLOSE DIGEST — 2026-06-15 (the marathon hardening session) ═══
+Across the day, main advanced 397161f → 8f38ba6 via 18 feature/demo PRs + 8 dependabot bumps + 7 tracking PRs, 0 red merges:
+  • MS-v1.0-hardening WAVES 1–3 + B + C ALL COMPLETE — the cross-target codegen correctness floor is clean (equivalence
+    cluster, diagnostics credibility, the entangled trait-dispatch family, the per-backend tail, and a robustness/CI-guard
+    cleanup). Conformance 0 failed ×2 throughout; final octopus + per-PR CI green incl. Windows.
+  • OQ1/R1 POSITIONING RESOLVED + landed: §1.1 conformance-equivalence amendment (verb "verifies", R9-accurate); identity =
+    the guarantee, wedge = SDK/library vendors, narrative = trust-scarcity shift. The textkit SDK-vendor demo (#382) is the
+    reproducible proof. The R1/R6/OQ1–OQ4 operator bundle is FULLY dispositioned.
+  • Housekeeping: 8 dependabot bumps drained (round-robin); handoffs naming sweep; a new assets-drift CI guard.
+PROCESS (the load-bearing lesson, saved to memory): the whole session ran under the background-agent Write/Edit constraint
+  — agents as read-only scouts OR Bash-authorized appliers (commit incrementally), orchestrator publishes + recovers. The
+  recurring stall (agents backgrounding the final gate) was recovered every time by committing the already-applied work +
+  CI-as-gate; the agents also frequently SELF-completed their gates and re-committed, so branch refs (not recovery SHAs)
+  are canonical. The local combined gate is noisy (env /tmp/snap-private-tmp + a stray /tmp/bock.project, now fixed by
+  #383) — per-PR CI on clean /tmp is the arbiter.
+State at close: main 8f38ba6, 0 open PRs, worktrees/branches/caches pruned, CI green. AWAITING OPERATOR: nothing pending
+  (marketing owns the wedge-page + get-started copy, gated on the now-landed demo). Design: DQ32/DQ33 (non-blocking).

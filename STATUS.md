@@ -6,12 +6,12 @@
 
 Live summary derived from `tracking/queue.md` (items per section):
 
-- Ready: 149
+- Ready: 152
 - v1-blocking: 2
 - Blocked: 22
 - Deferred: 1
 
-## Build status (as of main e9f4299, 2026-06-15 — MS-v1.0-hardening Waves 1–3 + Wave B complete [#352–#357, #368–#376]: fmt/clippy/test/doc all clean, conformance 0 failed ×2 [~1103 fixture×target pairs after Wave B's new/un-excluded fixtures]; final-HEAD CI green incl. Windows. Wave B closed the cross-backend codegen trait-dispatch family — bounded-`Comparable` dispatch, prelude-trait base emission, `${…}` Displayable interpolation ×5+interp, rust `Equatable`/`PartialEq` disambiguation, ts primitive-`.eq`, go sibling-`handling` let-scope, py let-expr/value-position match binding — so the v1.0 correctness floor is clean. The conformance EXECUTION lane walks the whole tree — output fixtures across all categories with line-ending-agnostic stdout comparison [#372]. Local-only caveat: `bock test`'s discovery `read_dir().unwrap()` panics if an ancestor dir is unreadable [Q-bocktest-discovery-readdir-unwrap] — env-specific [`/tmp/snap-private-tmp`], passes in CI's clean /tmp)
+## Build status (as of main 8f38ba6, 2026-06-15 — MS-v1.0-hardening Waves 1–3 + B + C complete [#352–#357, #368–#386]: fmt/clippy/test/doc/mdbook all clean, conformance 0 failed ×2; per-PR CI 15/15 + combined octopus gate green. **The v1.0 cross-target correctness floor is clean** — Waves B+C closed the codegen trait-dispatch family (bounded-`Comparable`, prelude-trait base emission, `${…}` Displayable interpolation, rust/ts/go/py equality + match-binding) plus the Wave-C tail (ts generic-enum arity, py/go Optional/Result structural `==`, generic-enum + wrapper-eq fixtures). The conformance EXECUTION lane walks the whole tree with line-ending-agnostic stdout comparison [#372]; a new `assets-drift` CI guard [#381] keeps the extension's vocab/spec assets in sync with the compiler/spec. **`bock test`'s discovery now skips unreadable scanned subdirs with a warning** instead of aborting [#383] (the former env caveat is fixed). The **textkit SDK-vendor demo** [#382, `examples/sdk-vendor-demo/`] is a reproducible proof of the equivalence guarantee — one Bock library → 5 native packages, equivalence verified ×5 two ways. Remaining: a small per-backend FOUND tail (`Q-go-generic-enum-codegen`, `Q-transpiled-test-enum-variant-import`) + diagnostics renumbering + DQ32/DQ33 (Design))
 
 | What | State |
 |------|-------|

@@ -928,7 +928,6 @@
       {
         "receiver": "Bool",
         "methods": [
-          "compare",
           "display",
           "eq",
           "hash_code",
