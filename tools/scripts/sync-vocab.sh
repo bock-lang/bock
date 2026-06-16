@@ -24,8 +24,12 @@ mkdir -p "$ASSETS_DIR"
 echo "==> Building bock-dump-vocab (release)"
 cargo build --release -p bock-vocab --bin bock-dump-vocab
 
+# Honor CARGO_TARGET_DIR (the worktree session pattern sets it per-branch);
+# fall back to ./target when unset. `cargo build` just wrote the binary there.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+
 echo "==> Writing $VOCAB_PATH"
-./target/release/bock-dump-vocab --pretty --output "$VOCAB_PATH"
+"$TARGET_DIR/release/bock-dump-vocab" --pretty --output "$VOCAB_PATH"
 
 echo "==> Syncing $SPEC_DIR/bock-spec.md"
 # The spec was consolidated into a single file (spec/bock-spec.md) by the K04
