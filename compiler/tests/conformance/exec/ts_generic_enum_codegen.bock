@@ -1,21 +1,19 @@
 // TEST: exec_ts_generic_enum_codegen
 // EXPECT: output "full=7;empty=0"
-// EXPECT: targets js, ts, python, rust
+// EXPECT: targets js, ts, python, rust, go
 //
 // A GENERIC user-defined enum (`enum Box[T] { Full(T), Empty }`), constructed at
 // a CONCRETE instantiation (`Box[Int]`) and matched. Regression fixture for
 // Q-ts-generic-enum-codegen.
 //
-// `go` is intentionally EXCLUDED from the target set: this is the first generic
-// *user enum* exec fixture in the suite, and it surfaced a PRE-EXISTING Go
-// codegen defect independent of the TS fix here (FOUND: Q-go-generic-enum-codegen).
-// The Go backend emits an invalid enum-marker-method receiver
-// `func (BoxFull[T any]) isBox()` — a Go receiver's type-parameter list must not
-// carry the `any` constraint (`func (BoxFull[T]) isBox()` is the valid form), so
-// `go build` fails with "unexpected name any, expected ]". That lives in the Go
-// backend (`go.rs`), out of scope for this TS-only change; it is filed as a FOUND
-// for a follow-up that owns `go.rs`. The other four targets (js, ts, python, rust)
-// all build and execute this fixture, printing `full=7;empty=0`.
+// Runs on ALL FIVE targets. This is the first generic *user enum* exec fixture
+// in the suite. It originally surfaced two independent codegen bugs, both now
+// fixed: the TS arity bug fixed here (Q-ts-generic-enum-codegen) and a Go
+// enum-receiver/instantiation defect (Q-go-generic-enum-codegen) — the Go
+// backend emitted an invalid generic enum-marker receiver `func (BoxFull[T any])`
+// and bare generic struct literals/type-switch cases; fixed in `go.rs` so `go`
+// was added to the target set above. All five build, execute, and print
+// `full=7;empty=0`.
 //
 // TS defect (TS2314 "Generic type requires N type argument(s)"): the enum union
 // type ALIAS was emitted with concretized/mismatched generic arity relative to

@@ -1604,6 +1604,16 @@ struct GoEmitCtx {
     /// using `current_fn_ret_type`, preserving the working Optional/Result/enum
     /// return-position behavior.
     current_expected_type: Option<String>,
+    /// The concrete Go type-argument suffix (`[int64]`) of the user enum whose
+    /// `match` is currently being lowered to a type-switch / type-assert chain,
+    /// or `""` when none / the enum is non-generic. A generic user enum's variant
+    /// structs carry the enum's params (`type BoxFull[T any] struct{…}`), so a
+    /// `case BoxFull[int64]:` / `_, ok := __v.(BoxFull[int64])` must spell the
+    /// concrete instantiation — Go rejects a bare generic type without
+    /// instantiation. Set from the scrutinee's inferred Go type before a match's
+    /// arms are emitted and restored afterwards (matches nest). See
+    /// [`Self::enum_variant_type_arg_suffix`].
+    current_match_enum_type_args: String,
     /// Expected collection element Go types for a collection literal emitted in
     /// a *typed context* (a `let x: List[T] = [...]`). A collection literal
     /// infers its element type from its elements, but an EMPTY literal (`[]`)
@@ -1839,6 +1849,7 @@ impl GoEmitCtx {
             current_fn_ret_type: None,
             current_fn_ret_type_node: None,
             current_expected_type: None,
+            current_match_enum_type_args: String::new(),
             current_fn_ret_collection_elem: None,
             fn_signatures: HashMap::new(),
             fn_sealed_bound: std::collections::HashSet::new(),
@@ -2314,6 +2325,43 @@ impl GoEmitCtx {
             }
         }
         saw_variant
+    }
+
+    /// The owning enum name of a user-enum match's arms, if any arm names a
+    /// registered variant. Used to recover the enum's generic instantiation
+    /// (`Box[int64]`) so a type-switch `case`/type-assert spells the concrete
+    /// variant struct (`case BoxFull[int64]:`). All arms of one match share an
+    /// enum (a type-switch on a single sealed-interface value), so the first
+    /// variant-bearing arm decides.
+    fn match_owner_enum_name(&self, arms: &[AIRNode]) -> Option<String> {
+        for arm in arms {
+            let NodeKind::MatchArm { pattern, .. } = &arm.kind else {
+                continue;
+            };
+            let path = match &pattern.kind {
+                NodeKind::ConstructorPat { path, .. } | NodeKind::RecordPat { path, .. } => path,
+                _ => continue,
+            };
+            if let Some(info) = self.user_variant_for_path(path) {
+                return Some(info.enum_name.clone());
+            }
+        }
+        None
+    }
+
+    /// The concrete generic type-arg suffix (`[int64]`) to apply to the variant
+    /// structs of a user-enum `match`, recovered from the scrutinee's inferred Go
+    /// type (`Box[int64]`) and the match's owning enum. `""` when the scrutinee
+    /// type is unknown, the enum is non-generic, or the inferred type is not
+    /// exactly `<enum>[...]`. Drives [`Self::current_match_enum_type_args`].
+    fn match_enum_type_arg_suffix(&self, scrutinee: &AIRNode, arms: &[AIRNode]) -> String {
+        let Some(enum_name) = self.match_owner_enum_name(arms) else {
+            return String::new();
+        };
+        match self.infer_go_expr_type(scrutinee) {
+            Some(full) => self.enum_variant_type_arg_suffix(&enum_name, &full),
+            None => String::new(),
+        }
     }
 
     /// True if any arm of a user-enum type-switch binds a payload field from the
@@ -4307,6 +4355,54 @@ impl GoEmitCtx {
             Some(rest.to_string())
         } else {
             None
+        }
+    }
+
+    /// The concrete Go type-argument suffix (`[int64]`) for a *generic user enum*
+    /// instantiation, recovered from a fully-rendered enum type string such as
+    /// `Box[int64]`. Go has no sum type, so a generic user enum lowers to a
+    /// sealed interface plus per-variant structs that ALL carry the enum's
+    /// type-param list (`type BoxFull[T any] struct{…}`); every *use* of a
+    /// variant struct — a construction (`BoxFull[int64]{…}`) and a type-switch
+    /// `case` (`case BoxFull[int64]:`) — must therefore spell the concrete args,
+    /// because Go rejects a bare generic type without instantiation. The args are
+    /// the same for every variant of one enum (they share the enum's params), so
+    /// they are read off the enum instantiation rather than per-variant.
+    ///
+    /// Returns `""` (no suffix) when the enum is non-generic, unregistered, or
+    /// `full_type` is not exactly `<enum_name>[...]` — keeping a non-generic enum
+    /// emitting the bare `BoxEmpty{}` / `case ShapeCircle:` it always did.
+    fn enum_variant_type_arg_suffix(&self, enum_name: &str, full_type: &str) -> String {
+        // A non-generic enum carries no params: never append a suffix.
+        if self
+            .generic_decls
+            .get(enum_name)
+            .is_none_or(|p| p.is_empty())
+        {
+            return String::new();
+        }
+        let Some(rest) = full_type.strip_prefix(enum_name) else {
+            return String::new();
+        };
+        // The remainder must be exactly a `[...]` arg list (so `Box` does not
+        // match `Boxer[…]`); reject an empty / unbracketed suffix.
+        if rest.starts_with('[') && rest.ends_with(']') && rest.len() > 2 {
+            rest.to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    /// The concrete type-arg suffix (`[int64]`) for constructing a variant of the
+    /// generic user enum `enum_name`, read from the binding's *expected* type
+    /// (`current_expected_type`, e.g. `Box[int64]` for `let f: Box[Int] =
+    /// Full(7)`). Returns `""` when there is no expected type, it names a
+    /// different enum, or the enum is non-generic. The construction-site analogue
+    /// of [`Self::enum_variant_type_arg_suffix`].
+    fn expected_enum_variant_type_arg_suffix(&self, enum_name: &str) -> String {
+        match self.current_expected_type.as_deref() {
+            Some(expected) => self.enum_variant_type_arg_suffix(enum_name, expected),
+            None => String::new(),
         }
     }
 
@@ -8102,6 +8198,13 @@ impl GoEmitCtx {
         if let NodeKind::EnumVariant { name, payload } = &variant.kind {
             let vname = &name.name;
             let type_params = self.format_generic_params(generic_params);
+            // The marker-method *receiver* type-param list must NOT carry the
+            // `any` constraint: a Go receiver writes the bare `[T]` form
+            // (`func (BoxFull[T]) isBox()`), whereas the constrained `[T any]`
+            // form is a syntax error in receiver position ("unexpected name any,
+            // expected ]"). The type DECLARATION above keeps the constrained
+            // `[T any]` form; the receiver uses the bare-name args.
+            let recv_type_params = self.format_generic_param_args(generic_params);
             match payload {
                 EnumVariantPayload::Unit => {
                     self.writeln(&format!("type {enum_name}{vname}{type_params} struct{{}}"));
@@ -8127,10 +8230,11 @@ impl GoEmitCtx {
                     self.writeln("}");
                 }
             }
-            // Implement the interface marker method.
+            // Implement the interface marker method. The receiver uses the
+            // bare `[T]` type-param form (`recv_type_params`), never `[T any]`.
             self.buf.push('\n');
             self.writeln(&format!(
-                "func ({enum_name}{vname}{type_params}) is{enum_name}() {{}}"
+                "func ({enum_name}{vname}{recv_type_params}) is{enum_name}() {{}}"
             ));
         }
         Ok(())
@@ -8918,12 +9022,17 @@ impl GoEmitCtx {
                     return Ok(());
                 }
                 // A unit-variant reference (`Empty`) → an empty variant-struct
-                // literal `ShapeEmpty{}`.
+                // literal `ShapeEmpty{}`. For a *generic* enum the variant struct
+                // carries the enum's type params (`type BoxEmpty[T any] struct{}`),
+                // so the literal must spell the concrete instantiation
+                // (`BoxEmpty[int64]{}`) drawn from the binding's expected type —
+                // Go rejects a bare generic struct literal.
                 if let Some(enum_name) = self
                     .user_variant_for_name(&name.name)
                     .map(|i| i.enum_name.clone())
                 {
-                    let _ = write!(self.buf, "{enum_name}{}{{}}", name.name);
+                    let type_args = self.expected_enum_variant_type_arg_suffix(&enum_name);
+                    let _ = write!(self.buf, "{enum_name}{}{type_args}{{}}", name.name);
                     return Ok(());
                 }
                 // A module-scope `const` is emitted verbatim at its declaration;
@@ -9140,13 +9249,19 @@ impl GoEmitCtx {
                 }
                 // A call whose callee names a registered tuple variant is a
                 // construction → the variant-struct literal
-                // `ShapeRect{Field0: 3.0, Field1: 4.0}`.
+                // `ShapeRect{Field0: 3.0, Field1: 4.0}`. For a *generic* enum the
+                // variant struct carries the enum's type params
+                // (`type BoxFull[T any] struct{…}`), so the literal must spell the
+                // concrete instantiation (`BoxFull[int64]{…}`) from the binding's
+                // expected type — Go does not infer struct type args from the
+                // field values, and rejects a bare generic struct literal.
                 if let NodeKind::Identifier { name } = &callee.kind {
                     if let Some(enum_name) = self
                         .user_variant_for_name(&name.name)
                         .map(|i| i.enum_name.clone())
                     {
-                        let _ = write!(self.buf, "{enum_name}{}{{", name.name);
+                        let type_args = self.expected_enum_variant_type_arg_suffix(&enum_name);
+                        let _ = write!(self.buf, "{enum_name}{}{type_args}{{", name.name);
                         for (i, arg) in args.iter().enumerate() {
                             if i > 0 {
                                 self.buf.push_str(", ");
@@ -10859,9 +10974,22 @@ impl GoEmitCtx {
         }
         self.indent += 1;
         self.switch_label_depth += 1;
+        // A generic user enum's variant structs carry the enum's type params, so
+        // each `case BoxFull[int64]:` must spell the concrete instantiation
+        // recovered from the scrutinee's type. Record it for the case emitter and
+        // restore afterwards (matches nest). Empty for non-generic / non-user-enum
+        // matches, leaving the bare `case ShapeCircle:` form unchanged.
+        let new_match_args = if user_enum {
+            self.match_enum_type_arg_suffix(scrutinee, arms)
+        } else {
+            String::new()
+        };
+        let prev_match_args =
+            std::mem::replace(&mut self.current_match_enum_type_args, new_match_args);
         for arm in arms {
             self.emit_match_arm(arm, user_enum, value_switch_binds)?;
         }
+        self.current_match_enum_type_args = prev_match_args;
         // Bock matches are exhaustive, but Go can't prove a type-switch covers
         // every implementor of a sealed interface (nor a value-switch every
         // `__bockOrdering` constant), so a function that returns a value after
@@ -11789,10 +11917,16 @@ impl GoEmitCtx {
             },
             NodeKind::ConstructorPat { path, .. } => {
                 // A user enum variant is a `{enum}{variant}` struct type
-                // (`ShapeRect`); fall back to the joined path otherwise.
+                // (`ShapeRect`); fall back to the joined path otherwise. For a
+                // generic enum the variant struct carries the enum's type params,
+                // so a `case BoxFull[int64]:` spells the concrete instantiation
+                // (`current_match_enum_type_args`, empty for a non-generic enum).
                 let variant_name = if let Some(info) = self.user_variant_for_path(path) {
                     let variant = path.segments.last().map_or("", |s| s.name.as_str());
-                    format!("{}{variant}", info.enum_name)
+                    format!(
+                        "{}{variant}{}",
+                        info.enum_name, self.current_match_enum_type_args
+                    )
                 } else {
                     path.segments
                         .iter()
@@ -11805,7 +11939,10 @@ impl GoEmitCtx {
             NodeKind::RecordPat { path, .. } => {
                 let type_name = if let Some(info) = self.user_variant_for_path(path) {
                     let variant = path.segments.last().map_or("", |s| s.name.as_str());
-                    format!("{}{variant}", info.enum_name)
+                    format!(
+                        "{}{variant}{}",
+                        info.enum_name, self.current_match_enum_type_args
+                    )
                 } else {
                     path.segments
                         .iter()
@@ -13167,6 +13304,214 @@ mod tests {
             "got: {out}"
         );
         assert!(out.contains("func (ShapeNone) isShape() {}"), "got: {out}");
+    }
+
+    /// Q-go-generic-enum-codegen: a *generic* user enum (`enum Box[T] { Full(T),
+    /// Empty }`) must emit Go that actually compiles. The per-variant structs and
+    /// the sealed interface all carry the enum's `[T any]` params, so:
+    ///   - the marker-method *receiver* uses the bare `[T]` form
+    ///     (`func (BoxFull[T]) isBox()`) — the constrained `[T any]` receiver is a
+    ///     Go syntax error ("unexpected name any, expected ]");
+    ///   - a construction spells the concrete instantiation (`BoxFull[int64]{…}`,
+    ///     `BoxEmpty[int64]{}`) recovered from the binding's expected type — Go
+    ///     rejects a bare generic struct literal;
+    ///   - a type-switch `case` spells it too (`case BoxFull[int64]:`).
+    #[test]
+    fn generic_user_enum_emits_valid_go() {
+        // enum Box[T] { Full(T), Empty }
+        let e = node(
+            1,
+            NodeKind::EnumDecl {
+                annotations: vec![],
+                visibility: Visibility::Public,
+                name: ident("Box"),
+                generic_params: vec![generic_param(2, "T")],
+                variants: vec![
+                    node(
+                        3,
+                        NodeKind::EnumVariant {
+                            name: ident("Full"),
+                            payload: EnumVariantPayload::Tuple(vec![named_type(4, "T")]),
+                        },
+                    ),
+                    node(
+                        5,
+                        NodeKind::EnumVariant {
+                            name: ident("Empty"),
+                            payload: EnumVariantPayload::Unit,
+                        },
+                    ),
+                ],
+            },
+        );
+        // `b: Box[Int]` parameter (a generic instantiation, args = [Int]).
+        let box_int = |id: u32| {
+            node(
+                id,
+                NodeKind::TypeNamed {
+                    path: type_path(&["Box"]),
+                    args: vec![named_type(id + 1, "Int")],
+                },
+            )
+        };
+        let b_param = node(
+            20,
+            NodeKind::Param {
+                pattern: Box::new(bind_pat(21, "b")),
+                ty: Some(Box::new(box_int(22))),
+                default: None,
+            },
+        );
+        // match b { Full(x) => return x  Empty => return 0 }
+        let full_arm = node(
+            30,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    31,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Full"]),
+                        fields: vec![bind_pat(32, "x")],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    33,
+                    vec![],
+                    Some(node(
+                        34,
+                        NodeKind::Return {
+                            value: Some(Box::new(id_node(35, "x"))),
+                        },
+                    )),
+                )),
+            },
+        );
+        let empty_arm = node(
+            36,
+            NodeKind::MatchArm {
+                pattern: Box::new(node(
+                    37,
+                    NodeKind::ConstructorPat {
+                        path: type_path(&["Empty"]),
+                        fields: vec![],
+                    },
+                )),
+                guard: None,
+                body: Box::new(block(
+                    38,
+                    vec![],
+                    Some(node(
+                        39,
+                        NodeKind::Return {
+                            value: Some(Box::new(int_lit(40, "0"))),
+                        },
+                    )),
+                )),
+            },
+        );
+        let match_expr = node(
+            41,
+            NodeKind::Match {
+                scrutinee: Box::new(id_node(42, "b")),
+                arms: vec![full_arm, empty_arm],
+            },
+        );
+        let unwrap_fn = node(
+            50,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("unwrap_or_zero"),
+                generic_params: vec![],
+                params: vec![b_param],
+                return_type: Some(Box::new(named_type(51, "Int"))),
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(52, vec![match_expr], None)),
+            },
+        );
+        // fn build() -> Void { let f: Box[Int] = Full(7); let e: Box[Int] = Empty }
+        let let_f = node(
+            60,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(61, "f")),
+                ty: Some(Box::new(box_int(62))),
+                value: Box::new(node(
+                    63,
+                    NodeKind::Call {
+                        callee: Box::new(id_node(64, "Full")),
+                        type_args: vec![],
+                        args: vec![AirArg {
+                            label: None,
+                            value: int_lit(65, "7"),
+                        }],
+                    },
+                )),
+            },
+        );
+        let let_e = node(
+            66,
+            NodeKind::LetBinding {
+                is_mut: false,
+                pattern: Box::new(bind_pat(67, "e")),
+                ty: Some(Box::new(box_int(68))),
+                value: Box::new(id_node(69, "Empty")),
+            },
+        );
+        let build_fn = node(
+            70,
+            NodeKind::FnDecl {
+                annotations: vec![],
+                visibility: Visibility::Private,
+                is_async: false,
+                name: ident("build"),
+                generic_params: vec![],
+                params: vec![],
+                return_type: None,
+                effect_clause: vec![],
+                where_clause: vec![],
+                body: Box::new(block(71, vec![let_f, let_e], None)),
+            },
+        );
+        let out = gen(&module(vec![], vec![e, unwrap_fn, build_fn]));
+        // Marker-method receivers use the bare `[T]` form, never `[T any]`.
+        assert!(
+            out.contains("func (BoxFull[T]) isBox() {}"),
+            "marker receiver must be bare `[T]`, got: {out}"
+        );
+        assert!(
+            out.contains("func (BoxEmpty[T]) isBox() {}"),
+            "marker receiver must be bare `[T]`, got: {out}"
+        );
+        assert!(
+            !out.contains("[T any])"),
+            "no receiver may carry the `[T any]` constraint, got: {out}"
+        );
+        // The type DECLARATIONS keep the constrained `[T any]` form.
+        assert!(
+            out.contains("type BoxFull[T any] struct {"),
+            "variant struct decl keeps `[T any]`, got: {out}"
+        );
+        // Type-switch cases spell the concrete instantiation.
+        assert!(
+            out.contains("case BoxFull[int64]:"),
+            "type-switch case must instantiate, got: {out}"
+        );
+        assert!(
+            out.contains("case BoxEmpty[int64]:"),
+            "type-switch case must instantiate, got: {out}"
+        );
+        // Constructions spell the concrete instantiation.
+        assert!(
+            out.contains("BoxFull[int64]{Field0: 7}"),
+            "tuple-variant construction must instantiate, got: {out}"
+        );
+        assert!(
+            out.contains("BoxEmpty[int64]{}"),
+            "unit-variant construction must instantiate, got: {out}"
+        );
     }
 
     /// Q-go-enum-return-boxing: a value-position `if` whose branches yield enum
