@@ -1622,12 +1622,22 @@ impl CodeGenerator for PyGenerator {
         // Import the functions under test, snake_cased, from each module.
         let mut import_lines: Vec<String> = Vec::new();
         for (i, (module, _)) in modules.iter().enumerate() {
-            let fn_names: Vec<String> = crate::generator::exportable_value_names(module)
+            let mut import_names: Vec<String> = crate::generator::exportable_value_names(module)
                 .into_iter()
                 .filter(|e| e.is_fn)
                 .map(|e| to_snake_case(&e.name))
                 .collect();
-            if fn_names.is_empty() {
+            // Enum-variant constructors a `@test` body may reference *bare* as a
+            // call argument (e.g. `apply_casing("x", Upper)` → emits an instance
+            // of the `{enum}_{variant}` `@dataclass`, `Casing_Upper()`). The
+            // runtime tree emits those dataclasses at module top level, but the
+            // class name is emitted *verbatim* (no snake_case), so import it under
+            // its exact value-name. Over-importing an unreferenced variant is a
+            // harmless dead import; under-importing a referenced one is a
+            // `NameError` at test runtime — so mirror the non-test path and
+            // include every public variant value-name.
+            import_names.extend(crate::generator::enum_variant_value_names(module));
+            if import_names.is_empty() {
                 continue;
             }
             let module_import = if i == entry_idx {
@@ -1637,7 +1647,7 @@ impl CodeGenerator for PyGenerator {
             };
             import_lines.push(format!(
                 "from {module_import} import {}",
-                fn_names.join(", ")
+                import_names.join(", ")
             ));
         }
         import_lines.sort_unstable();
