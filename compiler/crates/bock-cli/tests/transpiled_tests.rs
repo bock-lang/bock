@@ -182,6 +182,47 @@ fn test_optional() {
     p.flush().unwrap();
 }
 
+/// A project whose single `@test` passes a **bare enum variant** as a call
+/// argument (`apply_casing("hi", Upper)`, `Upper` a variant of `Casing`). The
+/// variant lowers to the emitted `Casing_Upper` constructor symbol, which the
+/// transpiled-test file must import from the module — the regression guarded by
+/// `Q-transpiled-test-enum-variant-import`. Before the fix the js/ts/python test
+/// file omitted the variant import (it collected only *functions*), so the test
+/// died with `ReferenceError` / `NameError` at runtime.
+fn write_enum_variant_arg_project(dir: &Path, name: &str) {
+    let src = "\
+module main
+
+public enum Casing {
+  Upper
+  Lower
+}
+
+public fn apply_casing(s: String, c: Casing) -> String {
+  match (c) {
+    Upper => s.to_upper()
+    Lower => s.to_lower()
+  }
+}
+
+fn main() {
+  println(apply_casing(\"hi\", Upper))
+}
+
+@test
+fn test_apply_casing_upper() {
+  expect(apply_casing(\"hi\", Upper)).to_equal(\"HI\")
+}
+";
+    let mut f = fs::File::create(dir.join("main.bock")).unwrap();
+    f.write_all(src.as_bytes()).unwrap();
+    f.flush().unwrap();
+    let project = format!("[project]\nname = \"{name}\"\nversion = \"0.1.0\"\n");
+    let mut p = fs::File::create(dir.join("bock.project")).unwrap();
+    p.write_all(project.as_bytes()).unwrap();
+    p.flush().unwrap();
+}
+
 /// Build `target` in project mode and assert success, returning the build dir.
 fn build_target(dir: &TempDir, target: &str) -> std::path::PathBuf {
     build_target_in(dir.path(), target)
@@ -260,6 +301,117 @@ fn test_files_emitted_per_target() {
             "{target}: test file missing test_add_works:\n{content}"
         );
     }
+}
+
+// ── REGRESSION: bare enum-variant call-arg import (Q-transpiled-test-enum-
+//    variant-import) ───────────────────────────────────────────────────────────
+
+/// The transpiled-test file for js/ts/python must import the enum-variant
+/// constructor symbol a `@test` body references *bare* as a call argument
+/// (`apply_casing("hi", Upper)` → `Casing_Upper`). This is a build-only check
+/// (no runner needed), so it always runs and pins the import-collection fix:
+/// previously the test file collected only *functions*, dropping the variant
+/// symbol and producing a `ReferenceError` / `NameError` at test runtime.
+#[test]
+fn transpiled_test_imports_bare_enum_variant_call_arg() {
+    let dir = TempDir::new().unwrap();
+    write_enum_variant_arg_project(dir.path(), "variant-arg-import-demo");
+    // (target file, the variant symbol the test body references, the `import`
+    // keyword the import line begins with).
+    let cases = [
+        ("js", "bock.test.js", "Casing_Upper", "import {"),
+        ("ts", "bock.test.ts", "Casing_Upper", "import {"),
+        ("python", "test_bock.py", "Casing_Upper", "from main import"),
+    ];
+    for (target, rel, variant_sym, import_kw) in cases {
+        let build_dir = build_target_in(dir.path(), target);
+        let content = fs::read_to_string(build_dir.join(rel)).unwrap();
+        // The variant symbol the body uses appears on an import line, not only at
+        // its use site — i.e. the module-import statement carries it.
+        let imported = content.lines().any(|l| {
+            let l = l.trim_start();
+            l.starts_with(import_kw) && l.contains(variant_sym)
+        });
+        assert!(
+            imported,
+            "{target}: transpiled test file omits the bare-call-arg enum variant \
+             `{variant_sym}` from its import list (Q-transpiled-test-enum-variant-\
+             import regression):\n{content}"
+        );
+    }
+}
+
+/// js: the bare enum-variant call-arg test runs green under Vitest (the variant
+/// import resolves; no `ReferenceError`).
+#[test]
+fn js_npm_test_runs_bare_enum_variant_arg() {
+    if !proceed_or_skip(
+        "js",
+        "npm",
+        have_npm(),
+        "install Node.js (provides npm; needs registry network)",
+    ) {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    write_enum_variant_arg_project(dir.path(), "variant-arg-import-demo");
+    let build_dir = build_target_in(dir.path(), "js");
+    npm_run_verify_n("js", &build_dir, 1);
+}
+
+/// ts: same as the js run-verify, through the TS emit path.
+#[test]
+fn ts_npm_test_runs_bare_enum_variant_arg() {
+    if !proceed_or_skip(
+        "ts",
+        "npm",
+        have_npm(),
+        "install Node.js (provides npm; needs registry network)",
+    ) {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    write_enum_variant_arg_project(dir.path(), "variant-arg-import-demo");
+    let build_dir = build_target_in(dir.path(), "ts");
+    npm_run_verify_n("ts", &build_dir, 1);
+}
+
+/// python: the bare enum-variant call-arg test runs green under pytest (the
+/// variant import resolves; no `NameError`).
+#[test]
+fn python_pytest_runs_bare_enum_variant_arg() {
+    let Some(py) = python_exe() else {
+        if !proceed_or_skip("python", "python", false, "install Python 3") {
+            return;
+        }
+        unreachable!();
+    };
+    if !proceed_or_skip(
+        "python",
+        "pytest",
+        have_pytest(py),
+        "install pytest (`pip install pytest` / venv); CI uses --break-system-packages",
+    ) {
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    write_enum_variant_arg_project(dir.path(), "variant-arg-import-demo");
+    let build_dir = build_target_in(dir.path(), "python");
+    let output = Command::new(py)
+        .args(["-m", "pytest", "-q"])
+        .current_dir(&build_dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "pytest failed on the bare enum-variant transpiled test:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "expected 1 passing transpiled pytest test, got:\nstdout: {stdout}\nstderr: {stderr}"
+    );
 }
 
 /// Rust wires its inline test module into the entry file.
@@ -346,8 +498,16 @@ fn have_npm() -> bool {
 }
 
 /// `npm install` then `npm test` inside `build_dir`, asserting the Vitest/Jest
-/// run passes all transpiled tests. Shared by the js and ts run-verify tests.
+/// run passes all transpiled tests. Shared by the js and ts run-verify tests
+/// (the standard 3-`@test` project).
 fn npm_run_verify(target: &str, build_dir: &Path) {
+    npm_run_verify_n(target, build_dir, 3);
+}
+
+/// As [`npm_run_verify`] but asserts exactly `n` passing tests — for projects
+/// with a different `@test` count (e.g. the single bare-enum-variant regression
+/// project).
+fn npm_run_verify_n(target: &str, build_dir: &Path, n: usize) {
     let install = Command::new("npm")
         .args(["install", "--no-audit", "--no-fund", "--loglevel=error"])
         .current_dir(build_dir)
@@ -370,11 +530,11 @@ fn npm_run_verify(target: &str, build_dir: &Path) {
         test.status.success(),
         "{target}: `npm test` failed on transpiled tests:\nstdout: {stdout}\nstderr: {stderr}"
     );
-    // Vitest/Jest both report a green summary line ("3 passed" / "Tests 3 passed").
+    // Vitest/Jest both report a green summary line ("N passed" / "Tests N passed").
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("3 passed") || combined.contains("3 pass"),
-        "{target}: expected 3 passing transpiled tests, got:\nstdout: {stdout}\nstderr: {stderr}"
+        combined.contains(&format!("{n} passed")) || combined.contains(&format!("{n} pass")),
+        "{target}: expected {n} passing transpiled tests, got:\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
 

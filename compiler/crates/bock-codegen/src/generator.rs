@@ -1441,12 +1441,23 @@ where
     // names, imported by their camelCased (emitted) name from the module's file.
     let mut import_lines: Vec<String> = Vec::new();
     for (i, (module, source_path)) in reachable.iter().enumerate() {
-        let fn_names: Vec<String> = exportable_value_names(module)
+        // Public functions, imported by their camelCased (emitted) name.
+        let mut import_names: Vec<String> = exportable_value_names(module)
             .into_iter()
             .filter(|e| e.is_fn)
             .map(|e| js_camel_case(&e.name))
             .collect();
-        if fn_names.is_empty() {
+        // Enum-variant constructors a `@test` body may reference *bare* as a
+        // call argument (e.g. `apply_casing("x", Upper)` → emits `Casing_Upper`,
+        // the frozen `{enum}_{variant}` const). The runtime tree exports these
+        // (js trailing `export { … }`, ts `enum_variant_value_names`), but unlike
+        // a function name they are emitted *verbatim* (no camelCase), so import
+        // them under their exact value-name. Over-importing an unreferenced
+        // variant is a harmless dead import; under-importing a referenced one is
+        // a `ReferenceError` at test runtime — so mirror the non-test path and
+        // include every public variant value-name.
+        import_names.extend(enum_variant_value_names(module));
+        if import_names.is_empty() {
             continue;
         }
         let spec = if i == entry_idx {
@@ -1465,7 +1476,7 @@ where
         let spec = spec.replace('\\', "/");
         import_lines.push(format!(
             "import {{ {} }} from \"{spec}\";",
-            fn_names.join(", ")
+            import_names.join(", ")
         ));
     }
     import_lines.sort_unstable();
