@@ -50,7 +50,7 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             code: "E1001",
             severity: Severity::Error,
             summary: "Unexpected character in source.",
-            description: "The lexer encountered a character it does not recognize as part of any valid token.",
+            description: "The lexer encountered a character it does not recognize as part of any valid token. (Lexer-only: the name-resolution pass reports an undefined name as `E1009`, an unfound module as `E1010`, and an unfound symbol as `E1011`.)",
             spec_refs: &["§1"],
         },
         DiagnosticCodeInfo {
@@ -74,24 +74,26 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             description: "A character literal is empty, contains more than one character, or has an invalid escape.",
             spec_refs: &["§1.3"],
         },
-        // `E1005`/`E1006` are each shared by the lexer and the name-resolution
-        // pass (a `1xxx` slot collision). Until a renumbering decision splits
-        // them, one parseable catalog entry per code covers both meanings.
         DiagnosticCodeInfo {
             code: "E1005",
             severity: Severity::Error,
-            summary: "Invalid digit for numeric literal, or imported module not found.",
-            description: "Two passes share this slot (a `1xxx` collision pending a renumbering decision). Lexer: a digit was found that is outside the range of the declared numeric base. Name resolution: a `use` path named a module the registry could not locate.",
-            spec_refs: &["§1.3", "§10"],
+            summary: "Invalid digit for numeric literal.",
+            description: "A digit was found that is outside the range of the declared numeric base (e.g. `8` in an octal literal or a non-hex digit after `0x`).",
+            spec_refs: &["§1.3"],
         },
         DiagnosticCodeInfo {
             code: "E1006",
             severity: Severity::Error,
-            summary: "Unterminated block comment, or imported symbol not found in module.",
-            description: "Two passes share this slot (a `1xxx` collision pending a renumbering decision). Lexer: a `/* ... */` block comment was opened but never closed before end of input. Name resolution: a `use` path names a module that exists but does not export the requested symbol.",
-            spec_refs: &["§1.2", "§10"],
+            summary: "Unterminated block comment.",
+            description: "A `/* ... */` block comment was opened but never closed before end of input.",
+            spec_refs: &["§1.2"],
         },
         // ── Name resolution (also 1xxx) ─────────────────────────────────
+        // The name-resolution pass (`bock-air/resolve.rs`) owns its own slots
+        // in the `1xxx` range; it does NOT share codes with the lexer. The
+        // former E1001/E1005/E1006 lexer↔resolver overlaps were split: the
+        // resolver's undefined-name → E1009, module-not-found → E1010, and
+        // symbol-not-found → E1011 (Q-error-code-renumbering).
         DiagnosticCodeInfo {
             code: "W1001",
             severity: Severity::Warning,
@@ -99,11 +101,6 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             description: "An import was declared but never referenced. Uses of an imported effect name in `with`, `handling`, and `impl … for` positions count as references (Q-w1001-effect-import-false-positive).",
             spec_refs: &["§10"],
         },
-        // Note: E1001 also overlaps — the lexer uses it for "unexpected
-        // character" and the resolver reuses it for "undefined name" at a
-        // different phase. Tooling disambiguates by pass context. This
-        // `1xxx` collision (E1001/E1005/E1006) is tracked for a renumbering
-        // decision; the catalog keeps one parseable entry per code.
         DiagnosticCodeInfo {
             code: "E1007",
             severity: Severity::Error,
@@ -116,6 +113,27 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             severity: Severity::Error,
             summary: "Circular module dependency.",
             description: "The `use` import graph contains a cycle, so the modules cannot be compiled in any dependency order. The message names every module in the cycle in order and points at one offending `use` edge. Fix by removing one of the `use` edges in the cycle, or by extracting the shared items into a third module that both can import.",
+            spec_refs: &["§10"],
+        },
+        DiagnosticCodeInfo {
+            code: "E1009",
+            severity: Severity::Error,
+            summary: "Undefined name.",
+            description: "An identifier reference could not be resolved to any binding in scope. Most often a name is not imported or is misspelled; check the `use` declarations. (A bare effect operation such as `log` called outside a `with` clause or `handling` block is reported separately as `E6005`, not this code.) Emitted by the name-resolution pass.",
+            spec_refs: &["§10"],
+        },
+        DiagnosticCodeInfo {
+            code: "E1010",
+            severity: Severity::Error,
+            summary: "Imported module not found.",
+            description: "A `use` path named a module the registry could not locate. Check the import path and that the target file declares `module <path>`. Emitted by the name-resolution pass.",
+            spec_refs: &["§10"],
+        },
+        DiagnosticCodeInfo {
+            code: "E1011",
+            severity: Severity::Error,
+            summary: "Imported symbol not found in module.",
+            description: "A `use` path names a module that exists but does not export the requested symbol. Emitted by the name-resolution pass.",
             spec_refs: &["§10"],
         },
         // ── Parser (2xxx) ───────────────────────────────────────────────
@@ -172,7 +190,7 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             code: "E2030",
             severity: Severity::Error,
             summary: "Parentheses required (lambda parameters / `if` condition).",
-            description: "A construct that requires parentheses was written without them. Lambda parameters must be parenthesized; single-identifier forms (`x => …`) are not accepted. An `if` condition must be parenthesized (`if (cond) { … }`); the diagnostic names the offending token and a note gives the wrapped form. (The parser also reuses this code for a missing function name after `fn` — a known overload pending a renumbering decision.)",
+            description: "A construct that requires parentheses was written without them. Lambda parameters must be parenthesized; single-identifier forms (`x => …`) are not accepted. An `if` condition must be parenthesized (`if (cond) { … }`); the diagnostic names the offending token and a note gives the wrapped form. (A missing function name after `fn` is reported separately as `E2073`.)",
             spec_refs: &["§5"],
         },
         DiagnosticCodeInfo {
@@ -230,6 +248,13 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             summary: "Expected method name.",
             description: "A method declaration inside a `trait`/`impl`/`class` expected a method name after `fn` and found a different token.",
             spec_refs: &["§4.4"],
+        },
+        DiagnosticCodeInfo {
+            code: "E2073",
+            severity: Severity::Error,
+            summary: "Expected function name.",
+            description: "A top-level (or nested) function declaration expected a function name after `fn` and found a different token.",
+            spec_refs: &["§4"],
         },
         DiagnosticCodeInfo {
             code: "E2090",
@@ -537,9 +562,9 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
         DiagnosticCodeInfo {
             code: "W8020",
             severity: Severity::Warning,
-            summary: "Effect declared-but-unused, or PII-tainted signature without security context.",
-            description: "Two checks currently share this code (a `8xxx` overlap pending a renumbering decision). Capability verification: an effect declared in a function's `with` clause is never used in its body. Context composition: a function has PII-tainted types in its signature but its module lacks a `@security` context acknowledging PII.",
-            spec_refs: &["§8", "§17"],
+            summary: "Effect declared-but-unused.",
+            description: "An effect declared in a function's `with` clause is never used in its body (capability verification). Drop the unused effect from the `with` clause. (A PII-tainted signature without a security context is reported separately as `W8023`.)",
+            spec_refs: &["§8"],
         },
         DiagnosticCodeInfo {
             code: "E8021",
@@ -560,6 +585,13 @@ pub fn diagnostic_catalog() -> Vec<DiagnosticCodeInfo> {
             severity: Severity::Warning,
             summary: "PII-tainted type passed to a logging/output function.",
             description: "A PII-tainted type flows into a logging or output sink, which is a potential data leak. One warning is emitted per call site.",
+            spec_refs: &["§17"],
+        },
+        DiagnosticCodeInfo {
+            code: "W8023",
+            severity: Severity::Warning,
+            summary: "PII-tainted signature without a security context.",
+            description: "A function has PII-tainted types in its signature but its module lacks a `@security` context acknowledging PII (e.g. `@security(level: \"confidential\")` or `@security(pii: true)`). Emitted by context composition.",
             spec_refs: &["§17"],
         },
         DiagnosticCodeInfo {

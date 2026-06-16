@@ -113,7 +113,7 @@ const REAL_ERROR_STDOUT = `{
   "error": {
     "diagnostics": [
       {
-        "code": "E2030",
+        "code": "E2073",
         "message": "expected function name, found \`{\`",
         "severity": "error",
         "span": { "col": 4, "end": 4, "line": 1, "start": 3 }
@@ -225,7 +225,7 @@ describe('air-model.parseAirJson (frontend error)', () => {
     if (result.kind !== 'frontend-error') throw new Error('unreachable');
     assert.equal(result.message, 'parsing failed');
     assert.equal(result.diagnostics.length, 2);
-    assert.equal(result.diagnostics[0].code, 'E2030');
+    assert.equal(result.diagnostics[0].code, 'E2073');
     assert.equal(result.diagnostics[0].severity, 'error');
     assert.deepEqual(result.diagnostics[1].span, {
       start: 12,

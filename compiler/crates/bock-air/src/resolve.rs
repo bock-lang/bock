@@ -27,14 +27,14 @@ use crate::registry::{ExportDetail, ExportKind, ExportedSymbol, ModuleRegistry, 
 
 const E_UNDEFINED: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
-    number: 1001,
+    number: 1009,
 };
 /// `E6005` — an effect **operation** was called, but the operation's effect is
 /// neither declared by the enclosing function (`with <Effect>`) nor handled in
 /// an enclosing scope (a `handling` block or a module-level `handle`). Effect
 /// ops are injected into scope only in those contexts, so the bare op name
 /// does not resolve — but reporting that as a generic "undefined name"
-/// (E1001) mis-categorizes an effect-system violation as a name-resolution
+/// (E1009) mis-categorizes an effect-system violation as a name-resolution
 /// miss, and the near-name suggestion (`did you mean `Log`?`) steers an agent
 /// toward a rename instead of the real fix (Q-diag-effect-violation-errors).
 /// Lives in the `6xxx` effects family because the violated rule is an
@@ -46,11 +46,11 @@ const E_EFFECT_OP_UNAVAILABLE: DiagnosticCode = DiagnosticCode {
 };
 const E_MODULE_NOT_FOUND: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
-    number: 1005,
+    number: 1010,
 };
 const E_SYMBOL_NOT_FOUND: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
-    number: 1006,
+    number: 1011,
 };
 const E_NOT_VISIBLE: DiagnosticCode = DiagnosticCode {
     prefix: 'E',
@@ -1130,7 +1130,7 @@ impl<'a> Resolver<'a> {
                     // where their effect is declared (`with <Effect>`) or
                     // handled (`handling` block / module `handle`). Report
                     // it as E6005 with the actual rule and fix — the generic
-                    // E1001 plus its near-name suggestion (`did you mean
+                    // E1009 plus its near-name suggestion (`did you mean
                     // `Log`?`) would steer the repair toward a rename.
                     let owning_effects = self.symbols.effects_declaring_op(&name.name);
                     if !owning_effects.is_empty() {
@@ -1602,7 +1602,7 @@ fn keyword_hint(name: &str) -> Option<&'static str> {
 ///
 /// After this call:
 /// - `symbols.resolutions` maps each identifier's usage NodeId to its definition.
-/// - Diagnostics include `E1001` errors for undefined names and `W1001`
+/// - Diagnostics include `E1009` errors for undefined names and `W1001`
 ///   warnings for unused imports.
 pub fn resolve_names(ast: &Module, symbols: &mut SymbolTable) -> DiagnosticBag {
     let mut diag = DiagnosticBag::new();
@@ -1614,8 +1614,8 @@ pub fn resolve_names(ast: &Module, symbols: &mut SymbolTable) -> DiagnosticBag {
 /// Resolve all names in `ast` with cross-file import resolution.
 ///
 /// Named imports (`use a.b.{X}`) and glob imports (`use a.b.*`) are resolved
-/// against the `registry`. Modules not found in the registry produce `E1005`
-/// diagnostics; missing or private symbols produce `E1006`/`E1007`.
+/// against the `registry`. Modules not found in the registry produce `E1010`
+/// diagnostics; missing or private symbols produce `E1011`/`E1007`.
 ///
 /// When the registry is empty (no modules registered), this behaves identically
 /// to [`resolve_names`] — single-file mode is preserved.
@@ -1938,7 +1938,7 @@ mod tests {
 
     /// Calling an effect op whose effect is neither declared (`with`) nor
     /// handled is an effect-system violation: E6005 naming the op, the
-    /// effect, and the fix — not a generic E1001 with a `did you mean
+    /// effect, and the fix — not a generic E1009 with a `did you mean
     /// `Log`?` rename suggestion.
     #[test]
     fn undeclared_effect_op_reports_e6005_with_fix() {
@@ -1973,9 +1973,9 @@ mod tests {
     }
 
     /// A genuinely-undefined name (no effect declares such an op) still
-    /// reports the resolver's E1001.
+    /// reports the resolver's E1009.
     #[test]
-    fn non_effect_op_typo_still_reports_e1001() {
+    fn non_effect_op_typo_still_reports_e1009() {
         let module = simple_module(
             vec![],
             vec![effect_log_item(1), main_calling(10, "totally_unknown")],
@@ -1986,7 +1986,7 @@ mod tests {
             .iter()
             .find(|d| d.severity == bock_errors::Severity::Error)
             .expect("an error diagnostic");
-        assert_eq!(d.code.to_string(), "E1001");
+        assert_eq!(d.code.to_string(), "E1009");
     }
 
     /// The op resolves fine when the function declares the effect — E6005

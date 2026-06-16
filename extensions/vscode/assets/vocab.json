@@ -1293,7 +1293,7 @@
         "code": "E1001",
         "severity": "error",
         "summary": "Unexpected character in source.",
-        "description": "The lexer encountered a character it does not recognize as part of any valid token.",
+        "description": "The lexer encountered a character it does not recognize as part of any valid token. (Lexer-only: the name-resolution pass reports an undefined name as `E1009`, an unfound module as `E1010`, and an unfound symbol as `E1011`.)",
         "spec_refs": [
           "§1"
         ],
@@ -1332,22 +1332,20 @@
       {
         "code": "E1005",
         "severity": "error",
-        "summary": "Invalid digit for numeric literal, or imported module not found.",
-        "description": "Two passes share this slot (a `1xxx` collision pending a renumbering decision). Lexer: a digit was found that is outside the range of the declared numeric base. Name resolution: a `use` path named a module the registry could not locate.",
+        "summary": "Invalid digit for numeric literal.",
+        "description": "A digit was found that is outside the range of the declared numeric base (e.g. `8` in an octal literal or a non-hex digit after `0x`).",
         "spec_refs": [
-          "§1.3",
-          "§10"
+          "§1.3"
         ],
         "related_codes": []
       },
       {
         "code": "E1006",
         "severity": "error",
-        "summary": "Unterminated block comment, or imported symbol not found in module.",
-        "description": "Two passes share this slot (a `1xxx` collision pending a renumbering decision). Lexer: a `/* ... */` block comment was opened but never closed before end of input. Name resolution: a `use` path names a module that exists but does not export the requested symbol.",
+        "summary": "Unterminated block comment.",
+        "description": "A `/* ... */` block comment was opened but never closed before end of input.",
         "spec_refs": [
-          "§1.2",
-          "§10"
+          "§1.2"
         ],
         "related_codes": []
       },
@@ -1376,6 +1374,36 @@
         "severity": "error",
         "summary": "Circular module dependency.",
         "description": "The `use` import graph contains a cycle, so the modules cannot be compiled in any dependency order. The message names every module in the cycle in order and points at one offending `use` edge. Fix by removing one of the `use` edges in the cycle, or by extracting the shared items into a third module that both can import.",
+        "spec_refs": [
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1009",
+        "severity": "error",
+        "summary": "Undefined name.",
+        "description": "An identifier reference could not be resolved to any binding in scope. Most often a name is not imported or is misspelled; check the `use` declarations. (A bare effect operation such as `log` called outside a `with` clause or `handling` block is reported separately as `E6005`, not this code.) Emitted by the name-resolution pass.",
+        "spec_refs": [
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1010",
+        "severity": "error",
+        "summary": "Imported module not found.",
+        "description": "A `use` path named a module the registry could not locate. Check the import path and that the target file declares `module <path>`. Emitted by the name-resolution pass.",
+        "spec_refs": [
+          "§10"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E1011",
+        "severity": "error",
+        "summary": "Imported symbol not found in module.",
+        "description": "A `use` path names a module that exists but does not export the requested symbol. Emitted by the name-resolution pass.",
         "spec_refs": [
           "§10"
         ],
@@ -1455,7 +1483,7 @@
         "code": "E2030",
         "severity": "error",
         "summary": "Parentheses required (lambda parameters / `if` condition).",
-        "description": "A construct that requires parentheses was written without them. Lambda parameters must be parenthesized; single-identifier forms (`x => …`) are not accepted. An `if` condition must be parenthesized (`if (cond) { … }`); the diagnostic names the offending token and a note gives the wrapped form. (The parser also reuses this code for a missing function name after `fn` — a known overload pending a renumbering decision.)",
+        "description": "A construct that requires parentheses was written without them. Lambda parameters must be parenthesized; single-identifier forms (`x => …`) are not accepted. An `if` condition must be parenthesized (`if (cond) { … }`); the diagnostic names the offending token and a note gives the wrapped form. (A missing function name after `fn` is reported separately as `E2073`.)",
         "spec_refs": [
           "§5"
         ],
@@ -1538,6 +1566,16 @@
         "description": "A method declaration inside a `trait`/`impl`/`class` expected a method name after `fn` and found a different token.",
         "spec_refs": [
           "§4.4"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "E2073",
+        "severity": "error",
+        "summary": "Expected function name.",
+        "description": "A top-level (or nested) function declaration expected a function name after `fn` and found a different token.",
+        "spec_refs": [
+          "§4"
         ],
         "related_codes": []
       },
@@ -1967,11 +2005,10 @@
       {
         "code": "W8020",
         "severity": "warning",
-        "summary": "Effect declared-but-unused, or PII-tainted signature without security context.",
-        "description": "Two checks currently share this code (a `8xxx` overlap pending a renumbering decision). Capability verification: an effect declared in a function's `with` clause is never used in its body. Context composition: a function has PII-tainted types in its signature but its module lacks a `@security` context acknowledging PII.",
+        "summary": "Effect declared-but-unused.",
+        "description": "An effect declared in a function's `with` clause is never used in its body (capability verification). Drop the unused effect from the `with` clause. (A PII-tainted signature without a security context is reported separately as `W8023`.)",
         "spec_refs": [
-          "§8",
-          "§17"
+          "§8"
         ],
         "related_codes": []
       },
@@ -2000,6 +2037,16 @@
         "severity": "warning",
         "summary": "PII-tainted type passed to a logging/output function.",
         "description": "A PII-tainted type flows into a logging or output sink, which is a potential data leak. One warning is emitted per call site.",
+        "spec_refs": [
+          "§17"
+        ],
+        "related_codes": []
+      },
+      {
+        "code": "W8023",
+        "severity": "warning",
+        "summary": "PII-tainted signature without a security context.",
+        "description": "A function has PII-tainted types in its signature but its module lacks a `@security` context acknowledging PII (e.g. `@security(level: \"confidential\")` or `@security(pii: true)`). Emitted by context composition.",
         "spec_refs": [
           "§17"
         ],

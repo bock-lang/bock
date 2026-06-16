@@ -574,17 +574,21 @@ sites in `bock-lexer`, `bock-parser`, `bock-air` (resolver + context), and
 `W` = warning. Warnings never fail `bock check`; `--strict` promotes
 strictness-gated ones.
 
-**1xxx — lexing and name resolution.** Two passes share the prefix; the
-number's meaning depends on the pass (disambiguate by message).
+**1xxx — lexing and name resolution.** The lexer owns `E1001`–`E1006`; the
+name-resolution pass owns the rest. Each code means exactly one thing.
 
 | Code | Meaning | Typical fix |
 |---|---|---|
-| E1001 | Lexer: unexpected character. Resolver: **undefined name** | Most often: a name not in scope. Check imports. (A bare effect op like `log` outside `with`/`handling` is **E6005**, not this — see the 6xxx table) |
+| E1001 | Lexer: unexpected character | Remove or fix the stray character |
 | E1002/E1003/E1004 | Unterminated string / bad escape / bad char literal | Fix the literal |
-| E1005 | Lexer: invalid digit for base. Resolver: **module not found** | Check the `use` path and that the file declares `module <path>` |
-| E1006 | Lexer: unterminated `/* */`. Resolver: **symbol not found in module** | The module exists but doesn't export that name |
-| E1007 | Symbol exists but is private | Add `public` at the definition |
-| W1001 | Unused import | Remove it (see §8 for a false-positive case) |
+| E1005 | Lexer: invalid digit for numeric base | e.g. `8` in an octal literal, or a non-hex digit after `0x` |
+| E1006 | Lexer: unterminated `/* */` block comment | Close the block comment |
+| E1007 | Resolver: symbol exists but is private | Add `public` at the definition |
+| E1008 | Resolver: circular module dependency | Break the `use` cycle (see §10) |
+| E1009 | Resolver: **undefined name** | Most often: a name not in scope. Check imports. (A bare effect op like `log` outside `with`/`handling` is **E6005**, not this — see the 6xxx table) |
+| E1010 | Resolver: **module not found** | Check the `use` path and that the file declares `module <path>` |
+| E1011 | Resolver: **symbol not found in module** | The module exists but doesn't export that name |
+| W1001 | Resolver: unused import | Remove it (see §8 for a false-positive case) |
 
 **2xxx — parser.**
 
@@ -594,7 +598,8 @@ number's meaning depends on the pass (disambiguate by message).
 | E2001/E2002 | Unexpected token / missing expected token | Read the caret; often a stray `;` or comma in a newline-separated body |
 | E2010 | Invalid declaration | Malformed top-level item |
 | E2020/E2021/E2022 | Invalid expression / pattern / type expression | |
-| E2030/E2031 | Invalid lambda parameter list | Lambda params must be parenthesized: `(x) => ...` |
+| E2030/E2031 | Parens required (lambda params / `if` condition) / invalid parameter | Lambda params must be parenthesized: `(x) => ...`; `if (cond) { ... }` |
+| E2073 | Expected function name after `fn` | Give the function a name: `fn name(...) { ... }` |
 | E2040 | Invalid generic parameter list | Generics use `[T]`, not `<T>` |
 | E2050 | Invalid `use` declaration | Use the braced form |
 | E2060/E2061 | Invalid annotation / const declaration | |
@@ -634,7 +639,7 @@ are development-mode warnings that promote to errors in production.
 |---|---|---|
 | E6001 / W6002 | Function uses an effect not in its `with` clause | Add `with <Effect>` |
 | E6003 / W6004 | Callee's effect escapes the caller's declaration | Declare it on the caller or wrap the call in `handling` |
-| E6005 | Effect op called with its effect neither declared nor handled — "`log` is an operation of effect `Log`, but the effect is neither declared … nor handled here" (resolver pass; **not** `E1001`) | Add `with <Effect>` to the enclosing function, or wrap the call in `handling (<Effect> with <handler>) { ... }` |
+| E6005 | Effect op called with its effect neither declared nor handled — "`log` is an operation of effect `Log`, but the effect is neither declared … nor handled here" (resolver pass; **not** the generic undefined-name `E1009`) | Add `with <Effect>` to the enclosing function, or wrap the call in `handling (<Effect> with <handler>) { ... }` |
 | E6006 | Lambda-handler form `Effect.handler(...)` is reserved until v1.x (checker pass) | Use the v1 handler form: a record + `impl <Effect> for <Record>`, installed via `handle`/`handling` |
 | E7001 / W7002 | Function requires an ungranted capability | Add `@requires(Capability.X)` |
 | E7003 / W7004 | Callee capability not declared by caller | Same — capabilities propagate |
@@ -654,6 +659,7 @@ verification).**
 | E8021 | Callee requires a capability not declared in the current scope | Add `@requires(Capability.X)` to the enclosing function |
 | W8022 | PII-tainted type passed to a logging/output function | Don't log PII; restructure |
 | E8023 | Public fn/class/trait/type missing `@context` (production) | Annotate |
+| W8023 | PII-tainted signature without a security context | Add `@security(level: "confidential")` or `@security(pii: true)` to the module |
 
 ---
 

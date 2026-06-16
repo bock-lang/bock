@@ -370,7 +370,7 @@ fn check_item_pii_signature(
                     diags.warning(
                         DiagnosticCode {
                             prefix: 'W',
-                            number: 8020,
+                            number: 8023,
                         },
                         format!(
                             "function `{}` has PII-tainted types in its signature but its \
