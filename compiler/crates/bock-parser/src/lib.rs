@@ -3204,7 +3204,7 @@ impl<'src> Parser<'src> {
             self.diagnostics.error(
                 DiagnosticCode {
                     prefix: 'E',
-                    number: 2030,
+                    number: 2073,
                 },
                 format!("expected function name, found `{}`", self.peek().kind),
                 name_span,

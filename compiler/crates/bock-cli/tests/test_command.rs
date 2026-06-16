@@ -232,7 +232,7 @@ fn write_project(name: &str, main_src: &str, test_rel: &str, test_src: &str) -> 
 /// `examples/*/test/` project layout must resolve `use main.{...}` against the
 /// sibling `src/main.bock`. Before the fix, the `bock test` interpreter path
 /// compiled only the embedded core stdlib plus the single test file — no
-/// sibling-module discovery — so the import died with `[E1005] module `main`
+/// sibling-module discovery — so the import died with `[E1010] module `main`
 /// not found` while the compiled-target (project build) path resolved it fine.
 #[test]
 fn test_crossfile_use_main_named_import_resolves() {
