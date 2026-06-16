@@ -2754,3 +2754,20 @@ PROCESS (the load-bearing lesson, saved to memory): the whole session ran under 
   #383) — per-PR CI on clean /tmp is the arbiter.
 State at close: main 8f38ba6, 0 open PRs, worktrees/branches/caches pruned, CI green. AWAITING OPERATOR: nothing pending
   (marketing owns the wedge-page + get-started copy, gated on the now-landed demo). Design: DQ32/DQ33 (non-blocking).
+
+[2026-06-16 02:42 UTC] ✦ v1.0-hardening ENGINEER TAIL DRAINED (#388–#391)
+  Input: operator "keep working through the tails, and if any more are found roll tight into them."
+  Decision: 3 file-disjoint lanes — Q-transpiled-test-enum-variant-import (#388) · Q-error-code-renumbering (#389) ·
+    Q-go-generic-enum-codegen (#390) — + a tooling fix Q-sync-vocab-cargo-target-dir (#391, the only new FOUND, done by
+    the orchestrator directly, merge-coordination-adjacent like the earlier A6 fix). The renumbering needed NO safety-valve
+    escalation (each of the 5 collisions had a clear primary to keep). The go fix was broader than reported — 4 variant-
+    struct sites, not just the marker receiver.
+  Verification: 3-lane octopus combined gate GREEN (fmt/clippy/test/doc + conformance ×2 0 failed) + per-PR CI 15/15 each;
+    #391's full CI (a tools/ change re-runs the matrix on the tail-1 code) green. NOTE: the assets-drift guard (#381) caught
+    a real vocab drift from #384's Bool.compare removal (regenerated in #387's reconcile) — the guard working as designed,
+    twice over.
+  Reasoning: all ready/within-authority impl + tooling; no spec/design decisions. Pre-1.0 user-facing code renumbering
+    documented in #389.
+  Follow-up: NO new FOUNDs — the tail converged. **The v1.0-hardening ENGINEERING scope is EMPTY.** Remaining is not
+    engineer work: DQ32/DQ33 → Design (non-blocking); the v1.0 release cut (escalates) pending the marketing copy lock
+    (marketing-owned); D2-polish → v1.2. Nothing is engineer-dispatchable or operator-pending.
