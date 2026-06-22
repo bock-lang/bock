@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@astrojs/cloudflare": "^13.7.0",
-    "astro": "^6.4.7"
+    "astro": "^6.4.8"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
