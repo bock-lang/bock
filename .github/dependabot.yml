@@ -19,6 +19,14 @@ updates:
     labels:
       - dependencies
       - javascript
+    ignore:
+      # @types/vscode must not exceed engines.vscode (vsce refuses to
+      # package otherwise). It tracks the SUPPORTED floor, not latest —
+      # bump it together with an intentional engines.vscode raise.
+      - dependency-name: "@types/vscode"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   - package-ecosystem: npm
     directory: /website
