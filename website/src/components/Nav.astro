@@ -3,7 +3,7 @@ import Mark from './Mark.astro';
 import Wordmark from './Wordmark.astro';
 
 interface Props {
-  current?: '/' | '/get-started';
+  current?: '/' | '/get-started' | '/use-cases';
 }
 
 const { current = '/' } = Astro.props;
@@ -16,6 +16,7 @@ const { current = '/' } = Astro.props;
       <Wordmark size={20} />
     </a>
     <div class="bock-nav__links">
+      <a href="/use-cases" class={current === '/use-cases' ? 'is-current' : undefined}>Use cases</a>
       <a href="/get-started" class={current === '/get-started' ? 'is-current' : undefined}>Get started</a>
       <a href="https://github.com/bock-lang/bock/blob/main/docs/src/SUMMARY.md">Docs</a>
       <a href="https://github.com/bock-lang/bock">GitHub →</a>

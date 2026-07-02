@@ -1,0 +1,203 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+import Button from '../components/Button.astro';
+import LinkArrow from '../components/LinkArrow.astro';
+
+const DEMO_URL = 'https://github.com/bock-lang/bock/tree/main/examples/sdk-vendor-demo';
+---
+
+<BaseLayout
+  title="Use cases | Bock"
+  description="Where Bock's cross-target equivalence guarantee earns its keep: shipping one library to five ecosystems, keeping shared logic identical across services, and adopting AI codegen with a review trail."
+>
+  <Nav current="/use-cases" />
+  <main class="bock-doc bock-usecases">
+    <header class="bock-doc__hero">
+      <div class="bock-container">
+        <h1 class="bock-doc__title">Use cases</h1>
+      </div>
+    </header>
+
+    <section class="bock-usecases__intro">
+      <div class="bock-container">
+        <p>
+          Bock's guarantee is specific: one source produces verified-identical
+          behavior in five languages, with every AI decision in the compiler
+          logged, pinned, and reproducible. Software teams are shipping more
+          code written by agents than ever, and the hard question has shifted
+          from &ldquo;can it be generated?&rdquo; to &ldquo;can it be
+          trusted?&rdquo; That question lands differently depending on what you
+          ship. This page describes the three situations where the guarantee
+          applies most directly, in order of how completely Bock covers them
+          today.
+        </p>
+        <p>
+          One scoping note first, because it keeps this page honest: the
+          equivalence guarantee is a multi-target guarantee. If you ship to one
+          language and write the code yourself, that language already serves
+          you, and the first two use cases below are not yours. The third is
+          different: a verified, auditable path for AI-generated code matters
+          at one target exactly as it does at five.
+        </p>
+      </div>
+    </section>
+
+    <section class="bock-usecases__case has-divider">
+      <div class="bock-container">
+        <h2>Ship one library to five ecosystems</h2>
+        <p class="bock-usecases__audience"><em>For SDK and library vendors.</em></p>
+        <p>
+          If your library exists as an npm package, a Python package, a crate,
+          and a Go module, you maintain several implementations of one promise:
+          that they all behave the same. Every port is a place for them to
+          quietly disagree, and every release multiplies the chance.
+        </p>
+        <p>
+          Bock collapses the ports into one source.
+          <code class="bock-inline-code">bock build --all-targets</code> emits
+          a native package for each target, complete with each ecosystem's
+          manifest: <code class="bock-inline-code">package.json</code> for
+          JavaScript and TypeScript,
+          <code class="bock-inline-code">pyproject.toml</code> for Python,
+          <code class="bock-inline-code">Cargo.toml</code> for Rust,
+          <code class="bock-inline-code">go.mod</code> for Go. Your
+          <code class="bock-inline-code">@test</code> functions transpile into
+          each ecosystem's own test framework and run there: vitest, pytest,
+          <code class="bock-inline-code">cargo test</code>,
+          <code class="bock-inline-code">go test</code>. The packages you
+          publish are plain code in each target language. No Bock runtime
+          ships.
+        </p>
+        <p>
+          The proof is in the repository. textkit is a small string and slug
+          utility library, the kind an SDK vendor ships, written once in Bock
+          in 185 lines. Its build emits all five native packages. All nine of
+          its tests pass through every native test runner. Its driver, compiled
+          for each target and run on each native runtime, prints byte-for-byte
+          identical output on all five: one checksum across five languages.
+          Every command and every output block in the demo is captured from a
+          real run, and the whole thing is reproducible from the repository.
+        </p>
+        <p><LinkArrow href={DEMO_URL}>See the textkit demo</LinkArrow></p>
+        <p>
+          The boundary, stated plainly: v1 covers self-contained logic emitted
+          as native packages. Parsing, validation, transformation, protocol and
+          business rules all fit. Calling target-native libraries from Bock
+          source is planned for v1.x. If your library is mostly a thin wrapper
+          over platform APIs, Bock is not yet the tool for it.
+        </p>
+      </div>
+    </section>
+
+    <section class="bock-usecases__case has-divider">
+      <div class="bock-container">
+        <h2>Keep shared logic identical across services</h2>
+        <p class="bock-usecases__audience"><em>For polyglot platform teams.</em></p>
+        <p>
+          The same validation rules live in a TypeScript edge service, a Python
+          data job, and a Go backend. Today their agreement is enforced by code
+          review and convention, and it degrades one small divergence at a
+          time, faster when agents are doing the maintenance.
+        </p>
+        <p>
+          Written in Bock, that shared logic is one source with five verified
+          realizations. A change lands once, builds everywhere, and the
+          conformance checks confirm the targets still agree before anything
+          ships. The divergences that slip past review are exactly the kind the
+          compiler's conformance testing exists to catch.
+        </p>
+      </div>
+    </section>
+
+    <section class="bock-usecases__case has-divider">
+      <div class="bock-container">
+        <h2>Adopt AI codegen with a review trail</h2>
+        <p class="bock-usecases__audience"><em>For teams that need to answer for what their agents wrote.</em></p>
+        <p>
+          Bock's compiler can call an AI model at specific stages of
+          compilation, and the pipeline is built so that doing so never costs
+          you an audit trail. Every AI decision is verified deterministically
+          before it is accepted, logged in a decision manifest, and
+          overridable. Production builds replay pinned decisions instead of
+          consulting the model, so builds are reproducible. A deterministic
+          fallback exists for every AI-assisted stage, and the AI path is
+          opt-in: by default, builds are fully rule-based.
+        </p>
+        <p>
+          The language carries governance in its signatures too. A function
+          that declares
+          <code class="bock-inline-code">with Network, Storage</code> has made
+          a machine-checked statement about what it can touch, which turns
+          &ldquo;what can this generated code actually do?&rdquo; from a review
+          question into a compiler question.
+        </p>
+        <p>
+          None of this requires multiple targets. The decision manifest, the
+          pins, and the effect checks apply to a single-target build unchanged.
+        </p>
+      </div>
+    </section>
+
+    <section class="bock-cta">
+      <div class="bock-container bock-cta__inner">
+        <h2 class="bock-usecases__cta-title">Start with the proof</h2>
+        <p class="bock-cta__body">
+          Clone the repository, build the compiler, and reproduce the textkit
+          demo yourself: five packages, five green test suites, one output.
+        </p>
+        <div class="bock-usecases__cta-buttons">
+          <Button href={DEMO_URL}>See the demo</Button>
+          <Button variant="ghost" href="/get-started">Get started</Button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</BaseLayout>
+
+<style>
+  .bock-usecases__intro {
+    padding-bottom: clamp(40px, 5vw, 64px);
+  }
+  .bock-usecases__intro p,
+  .bock-usecases__case p {
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--fg-muted);
+    max-width: 720px;
+  }
+  .bock-usecases__intro p + p,
+  .bock-usecases__case p + p {
+    margin-top: 16px;
+  }
+  .bock-usecases__case {
+    padding: clamp(48px, 6vw, 80px) 0;
+  }
+  .bock-usecases__case.has-divider {
+    border-top: 1px solid var(--rule);
+  }
+  .bock-usecases__case h2 {
+    font-size: clamp(26px, 3vw, 34px);
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+    margin-bottom: 8px;
+  }
+  .bock-usecases__audience {
+    color: var(--fg-dim);
+    margin-bottom: 20px;
+  }
+  .bock-usecases__cta-title {
+    font-size: clamp(26px, 3vw, 34px);
+    font-weight: 600;
+    letter-spacing: -0.015em;
+  }
+  .bock-usecases__cta-buttons {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+</style>
