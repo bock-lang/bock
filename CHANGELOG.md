@@ -8,6 +8,8 @@ _The Unreleased section is generated from merged-PR history by `tools/scripts/ge
 
 ## v1.0.0 — 2026-07-02
 
+- fix(website): revert astro 7 / cloudflare 14 majors; build docs+website on PRs (#410)
+- release: v1.0.0 (#409)
 - chore(deps-dev): bump eslint from 10.5.0 to 10.6.0 in /extensions/vscode (#406)
 - chore(deps-dev): bump @types/vscode in /extensions/vscode (#395)
 - chore(deps): bump rustyline from 14.0.0 to 18.0.1 (#402)
