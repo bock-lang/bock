@@ -17,7 +17,7 @@ REPL, formatter, LSP, and testing tiers have their own page
 > The authoritative, always-current command list is `bock --help`,
 > and every subcommand prints its own flags with
 > `bock <subcommand> --help`. The text below matches the v1 binary
-> (`bock 0.1.0`); if the two ever disagree, `--help` wins and this
+> (`bock 1.0.0`); if the two ever disagree, `--help` wins and this
 > page is the bug.
 
 ## Subcommands at a Glance
@@ -43,7 +43,7 @@ REPL, formatter, LSP, and testing tiers have their own page
 | `bock lsp`    | Start the language server over stdio.                     |
 
 `bock help` and `bock help <command>` print the same information as
-`--help`. The two global options are `-h`/`--help` and `-V`/`--version` (`bock --version` prints `bock 0.1.0`).
+`--help`. The two global options are `-h`/`--help` and `-V`/`--version` (`bock --version` prints `bock 1.0.0`).
 
 ## Build and Execute
 

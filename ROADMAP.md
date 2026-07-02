@@ -9,6 +9,14 @@ the Bock identity.
 
 ## v1.0 — Public Release
 **Theme:** ship what's already done — verify, polish, announce.
+- **★ v1.0.0 RELEASE-PREP (2026-07-02, operator-initiated):** the operator opened the release session. Sequence
+  chosen: drain the 13-PR dependabot backlog first (#393–#408, done — majors verified per-PR + combined-tree),
+  then the release-prep PR (version stamps 1.0.0 across workspace/internal-deps/extension/spec; CHANGELOG
+  `## v1.0.0 — 2026-07-02` promoted, `gen-changelog.sh --check` green — the release.yml gate; REPL banner
+  version de-hardcoded). Publish preflight verified (crate ownership doesdev ×16, `bock` first-time, harness
+  excluded). **The cut is HELD on** the marketing copy lock (artifacts handed to the marketing chat 2026-07-02)
+  + operator secrets confirmation (CRATES_IO_TOKEN / VSCE_PAT, marketplace publisher `bock-lang`); then
+  tag v1.0.0 → release.yml (binaries ×6 targets · crates.io · marketplace · GitHub release · docs/website).
 - **★ Design-audit affirmation (2026-06-09, `designs/2026-06-09-design-audit.md` R12/R-B):** ship v1
   **on current scope** — nothing in the audit grows v1.0; all its recommendations route to v1.x,
   positioning, or marketing. The audit's lean on timing (OQ3, operator's call): release-prep now —

@@ -1,8 +1,8 @@
 # The Bock Programming Language Specification
 
-**Version:** 0.1.0-draft
-**Date:** March 2026
-**Status:** Pre-implementation specification draft
+**Version:** 1.0.0
+**Date:** July 2026
+**Status:** v1.0 release specification
 
 ---
 
