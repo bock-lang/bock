@@ -290,7 +290,7 @@ expressions and statements, it accepts `:`-prefixed commands:
 
 ```text
 $ bock repl
-Bock REPL v0.1.0
+Bock REPL v1.0.0
 Type :help for available commands, :quit to exit.
 
 > :type 1 + 2

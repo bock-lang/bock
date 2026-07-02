@@ -2,7 +2,7 @@
   "name": "bock-lang",
   "displayName": "Bock Language",
   "description": "Official VS Code extension for the Bock programming language — syntax, LSP, spec panel, and decision manifest UI.",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "publisher": "bock-lang",
   "license": "MIT",
   "icon": "assets/icon.png",

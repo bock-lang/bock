@@ -65,7 +65,7 @@ impl Repl {
     }
 
     async fn run(&mut self) -> anyhow::Result<()> {
-        println!("Bock REPL v0.1.0");
+        println!("Bock REPL v{}", env!("CARGO_PKG_VERSION"));
         println!("Type :help for available commands, :quit to exit.\n");
 
         loop {

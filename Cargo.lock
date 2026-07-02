@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "bock"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bock-ai",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "bock-ai"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bock-air",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "bock-air"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-ast",
  "bock-errors",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "bock-ast"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-errors",
  "bock-source",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "bock-build"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bock-ai",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "bock-codegen"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bock-ai",
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "bock-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bock-ai",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "bock-errors"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ariadne",
  "thiserror 1.0.69",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "bock-fmt"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-ast",
  "bock-errors",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "bock-interp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-recursion",
  "bock-air",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "bock-lexer"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-errors",
  "bock-source",
@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "bock-lsp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-air",
  "bock-ast",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "bock-parser"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-ast",
  "bock-errors",
@@ -370,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "bock-pkg"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-errors",
  "flate2",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "bock-source"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-errors",
 ]
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "bock-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-air",
  "bock-ast",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "bock-vocab"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bock-ai",
  "bock-air",
