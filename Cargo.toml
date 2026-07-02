@@ -22,7 +22,7 @@ anyhow = "1"
 thiserror = "1"
 ariadne = "0.4"
 clap = { version = "4", features = ["derive"] }
-rustyline = "14"
+rustyline = "18"
 regex = "1"
 pretty_assertions = "1"
 
