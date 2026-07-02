@@ -7,6 +7,15 @@ on:
       - 'docs/**'
       - 'website/**'
       - '.github/workflows/docs.yml'
+  # Build (never deploy) on PRs touching the same paths: without this, a
+  # website/docs breakage is invisible until it lands on main — the astro-7
+  # dependabot major (#407) merged green-looking and broke the main Docs
+  # build 2026-07-02. The deploy job is gated to push events below.
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'website/**'
+      - '.github/workflows/docs.yml'
 
 permissions:
   contents: read
@@ -14,7 +23,10 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  # Scoped per ref: main pushes still serialize with each other (one Pages
+  # deploy at a time), while PR build-only runs neither queue behind nor
+  # block a main deploy.
+  group: pages-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -87,7 +99,8 @@ jobs:
     name: deploy
     runs-on: ubuntu-latest
     needs: [detect, build-docs, build-website]
-    if: needs.detect.outputs.has_docs == 'true' && needs.detect.outputs.has_website == 'true'
+    # push-only: pull_request runs build for verification but never deploy.
+    if: github.event_name == 'push' && needs.detect.outputs.has_docs == 'true' && needs.detect.outputs.has_website == 'true'
     timeout-minutes: 10
     environment:
       name: github-pages
