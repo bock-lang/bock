@@ -188,11 +188,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Collect every downloaded artifact file (download-artifact placed each
-          # artifact in its own subdirectory under ./artifacts).
-          mapfile -t assets < <(find ./artifacts -type f | sort)
+          # Every binary artifact contains a file literally named `bock` (or
+          # `bock.exe`), so uploading them raw collides on the release's asset
+          # namespace (the first v1.0.0 run failed exactly here). Rename each
+          # binary to carry its artifact name (bock-<target-triple>[.exe]);
+          # the .vsix already has a unique name and passes through unchanged.
+          mkdir -p ./assets
+          for dir in ./artifacts/bock-*/; do
+            name="$(basename "$dir")"
+            if [ -f "$dir/bock.exe" ]; then
+              cp "$dir/bock.exe" "./assets/${name}.exe"
+            elif [ -f "$dir/bock" ]; then
+              cp "$dir/bock" "./assets/${name}"
+            fi
+          done
+          find ./artifacts -type f -name '*.vsix' -exec cp {} ./assets/ \;
+          mapfile -t assets < <(find ./assets -type f | sort)
           if [ "${#assets[@]}" -eq 0 ]; then
-            echo "No release assets found under ./artifacts" >&2
+            echo "No release assets found under ./assets" >&2
             exit 1
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
