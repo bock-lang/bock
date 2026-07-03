@@ -12,7 +12,16 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-07-03 04:28 — bock-mcp DESIGN INTEGRATED — the post-v1.0 board opens on the agent-facing ecosystem.**
+_**Last reconciled 2026-07-03 05:52 — NIGHT WRAP. Dep escalation RESOLVED (hand-rolled) — Q-mcp-server is READY for tomorrow.**
+Operator wrap-up: the MCP-dependency escalation is answered — **(b) hand-rolled thin stdio JSON-RPC** (zero new deps;
+exactly the served subset: initialize, tools/list, tools/call, resources/list, resources/read; we own protocol
+tracking). **Q-mcp-server → ready**, both gates cleared (substrate #427 + this); the Design tool-schema one-pass rides
+the implementation. **Suggested sequence next session:** (1) dependabot drain (#416–#421, routine) → (2)
+`Q-cli-json-structured-gaps` (MED — closes the structured-layer bypasses so bock_mcp's tool returns are complete, and
+it touches bock-cli so it goes BEFORE, never alongside, the MCP session) → (3) **Q-mcp-server dispatch** (schemas
+drafted early → Design one-pass while implementation continues) → (4) Q-mcp-pack-resources. NIGHTLY STATE: main 59f40ec
+(post-#427/#428), 0 open feature PRs, worktrees/branches/caches pruned, CI green. ↓ —
+PRIOR: **Last reconciled 2026-07-03 04:28 — bock-mcp DESIGN INTEGRATED — the post-v1.0 board opens on the agent-facing ecosystem.**
 The operator routed the Design chat's bock-mcp brief (elaborates audit R4; recorded verbatim at
 `designs/2026-07-03-bock-mcp-design.md`) and it is folded in per its own §8 routing: **Q-cli-format-json** filed READY
 (the structured-output substrate — `--format json` on `check`/`test`/`inspect` minimum, serialized from the same
@@ -585,9 +594,9 @@ actionable until Q-mcp-server lands.
   13 new integration tests (`tests/format_json.rs`); docs/src/reference/cli.md "Machine-Readable Output" section
   (~130 lines, >50-line convention flagged in-PR). Gate 5/5 + CI 20/20. FOUNDs → Q-test-ansi-stdout,
   Q-cli-json-structured-gaps (below); OPEN §20.1 flag-list lag → rides Q-mcp-server's on-landing changelog.
-- **[Q-mcp-server] `bock mcp` — compiler surface as MCP tools (stdio subcommand)** — feature · blocked ·
-  `compiler/crates/bock-cli/` (server layer thin over the CLI) · blocked-by the MCP-dependency escalation
-  (2026-07-03, escalations.md — substrate gate Q-cli-format-json CLEARED by #427) · links audit R4, brief
+- **[Q-mcp-server] `bock mcp` — compiler surface as MCP tools (stdio subcommand)** — feature · **ready (dispatch
+  next session)** · `compiler/crates/bock-cli/` (server layer thin over the CLI) · — (both gates cleared: substrate
+  #427; dep escalation RESOLVED 2026-07-03 05:52 → **hand-rolled**) · links audit R4, brief
   §3–§5, §20.3 note, changelog `20260610-design-audit-spec-touches.md` · note: scoping DECIDED by the 2026-07-03 brief —
   ships INSIDE the CLI as `bock mcp` (stdio transport), NOT a separate crate/binary: zero extra install, version-locked
   to the compiler by construction, no separate release artifact; thin server layer so a post-MCP protocol shift is a
@@ -596,9 +605,10 @@ actionable until Q-mcp-server lands.
   behavioral equivalence as a single tool call; v1 scope modest: single-file/fixture exec-compare across locally
   configured targets, reporting which targets were exercised; cost/toolchain caveats in the tool description). MCP
   prompts: skipped in v1. Execution-safety wording in tool descriptions (run/test/build execute code + write the
-  workspace — CLI trust envelope, stated plainly). **Two gates ride this item:** (1) tool-schema review by Design — one
-  pass, cheap, when schemas are drafted; (2) the MCP protocol/SDK dependency choice **ESCALATES** (provider/tooling —
-  new third-party dep) before adoption; a hand-rolled thin stdio JSON-RPC layer is the fallback if the dep is heavy.
+  workspace — CLI trust envelope, stated plainly). **Gates:** (1) tool-schema review by Design — one pass, cheap,
+  when schemas are drafted (STILL RIDES the implementation); (2) dependency choice **RESOLVED 2026-07-03 (operator):
+  HAND-ROLLED thin stdio JSON-RPC** — implement exactly the served subset (initialize, tools/list, tools/call,
+  resources/list, resources/read) on the existing serde_json; NO new third-party deps; we own protocol tracking.
   On landing: one-line §20.3-adjacent spec note + design changelog (per audit R4) — the same changelog also refreshes
   §20.1's (non-normative) per-command flag lists, which #427's OPEN noted now lag the binary. First consumer = our own
   sessions (dogfood, R8) before external positioning. LEADS the v1.x tooling list (human panels behind it).

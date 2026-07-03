@@ -563,4 +563,12 @@ transport only.
 genuinely small; (a) becomes the better call only if its dep tree audits lean. Either way the tool schemas get the
 one-pass Design review during implementation.
 **Awaiting:** operator choice (a)/(b)/other → Q-mcp-server becomes dispatchable.
-**Status:** pending
+**Status:** resolved
+
+**Response (2026-07-03 05:52 UTC):** operator chose **(b) — hand-rolled thin stdio JSON-RPC** ("set-up for hand
+rolled tomorrow"). Zero new deps in the published binary; the server implements exactly the MCP subset it serves
+(initialize, tools/list, tools/call, resources/list, resources/read) on the existing serde_json, per the brief's
+thin-shim posture. Trade-off accepted eyes-open: we own protocol tracking as MCP evolves.
+
+**Authorized actions:** Q-mcp-server → ready; dispatch next session (2026-07-03 night wrap — suggested sequence in
+the audit digest). The tool-schema one-pass Design review still rides the implementation.
