@@ -16,6 +16,11 @@ the Bock identity.
 
 ## v1.0 — Public Release
 **Theme:** ship what's already done — verify, polish, announce.
+- **★★ v1.0.0 SHIPPED (2026-07-03 UTC).** Tag `v1.0.0` @ 3486f1d. Channels: crates.io 17/17 (incl. first-time
+  `bock`; `cargo install bock` verified), VS Code Marketplace (first publish), GitHub release (6-target binaries +
+  .vsix), website/docs (incl. `/use-cases`). Release actions all operator-approved per the standing rule (tag go,
+  wedge publication + nav, recovery dispatch, manual release create). Remaining v1.0-window items: the announcement
+  post (marketing) + Q-getstarted-copy-lock (marketing pass). Detail: queue reconcile 2026-07-03.
 - **★ v1.0.0 RELEASE-PREP (2026-07-02, operator-initiated):** the operator opened the release session. Sequence
   chosen: drain the 13-PR dependabot backlog first (#393–#408, done — majors verified per-PR + combined-tree),
   then the release-prep PR (version stamps 1.0.0 across workspace/internal-deps/extension/spec; CHANGELOG
