@@ -22,7 +22,15 @@ decides `bock mcp` subcommand inside bock-cli, stdio, thin-over-CLI; v1 tools ch
 explain, with `bock_conformance` the differentiator; two forward gates recorded in the item: one-pass Design tool-schema
 review + the MCP protocol-dependency choice ESCALATES) → **Q-mcp-pack-resources** filed (the context pack served as MCP
 resources — one artifact, two access modes). All three re-homed under the new "bock-mcp — agent-facing ecosystem"
-section. Positioning hook → marketing chat AFTER dogfooding (brief §7/§8). **Q-cli-format-json dispatched this block.**
+section. Positioning hook → marketing chat AFTER dogfooding (brief §7/§8). **Q-cli-format-json DISPATCHED AND LANDED the
+same block (#427, squash a97c5c3):** `--format json` on check/test/inspect, hand-serialized from the bock-errors
+structures (no serde needed in the library crate), stdout-pure envelope `{format_version, command, outcome, summary,
+diagnostics|tests|decisions}`, `inspect air --json` back-compat preserved, 13 new integration tests, docs/ CLI page
+synced in-PR. Gate: engineer 5/5 clean + orchestrator re-verify (fmt/clippy local, full CI 20/20 incl. all 6 test cells +
+blocking examples matrix). **Q-mcp-server's substrate gate is CLEARED — it now waits ONLY on the MCP-dependency
+escalation (filed this block, escalations.md: official Rust MCP SDK vs hand-rolled thin stdio JSON-RPC).** #427 FOUNDs
+triaged below: `Q-test-ansi-stdout` (LOW) + `Q-cli-json-structured-gaps` (MED, feeds bock_mcp fidelity); its OPEN
+(§20.1 flag lists lag the binary — non-normative) folds into Q-mcp-server's on-landing changelog note.
 Also open: 6 routine dependabot PRs (#416–#421) → next drain block. v1.0-window remainders unchanged (announcement post +
 Q-getstarted-copy-lock, both marketing-owned). ↓ —
 PRIOR: **Last reconciled 2026-07-03 03:15 — ★★★★★★★★ v1.0.0 IS SHIPPED. All four release channels are LIVE.**
@@ -564,16 +572,22 @@ only AFTER the dogfooding validation (brief §7: first consumer = our own orches
 actionable until Q-mcp-server lands.
 
 - **[Q-cli-format-json] `--format json` structured-diagnostics output on `bock check` / `bock test` / `bock inspect`** —
-  feature · **in-flight (dispatched 2026-07-03)** · `compiler/crates/bock-cli/` (+ serde derives on the diagnostic types
-  where they live) + `docs/` CLI page · — · links brief §6, Q-mcp-server (unblocks), #325 (`bock inspect air --json`
-  precedent), DQ1 · note: the MCP prerequisite, worth doing once and well — three consumers (bock-mcp wraps it; the LSP
-  shares the structured layer; CI users). Diagnostics as data: code, span, message, suggestion, + a machine-stable summary
-  (counts, outcome). MUST serialize from the same internal diagnostic structures the human renderer consumes — never
-  parse human text. Human output stays the default; exit codes unchanged. Reconcile flag spelling with the existing
-  `bock inspect air --json` (back-compat). Docs sync in the same PR; CLI shape is §20.1 non-normative (no spec edit —
-  if §20.1 turns out to enumerate flags, surface OPEN rather than editing).
+  feature · **DONE (#427)** · `compiler/crates/bock-cli/` + `docs/` CLI page · — · links brief §6, Q-mcp-server
+  (unblocked), #325 (`bock inspect air --json` precedent), DQ1 · note: **DONE 2026-07-03 (#427)** — `--format
+  <human|json>` (default human) on check/test/inspect; new shared contract layer `bock-cli/src/output.rs`
+  (FORMAT_VERSION 1, `diagnostic_json`); envelope `{format_version, command, outcome, summary, diagnostics|tests|
+  decisions}`; diagnostic = `{severity, code, message, span{file,start,end,line,col}, suggestion|null}` (span shape
+  reuses the `inspect air --json` precedent); serialized from the SAME bock-errors structures the human renderer
+  consumes — bock-errors itself untouched (hand-serialized from existing public fields, no serde derives needed).
+  Stdout carries exactly one document in json mode (whole-stream-parse + ANSI-free pinned by tests); exit codes
+  unchanged (CheckOutcome preserved; `bock test` un-hardcoded from process::exit as part of this). `inspect air
+  --json` back-compat kept (tests unmodified); `--format json` aliases it; clap rejects `--json`+`--format` conflict.
+  13 new integration tests (`tests/format_json.rs`); docs/src/reference/cli.md "Machine-Readable Output" section
+  (~130 lines, >50-line convention flagged in-PR). Gate 5/5 + CI 20/20. FOUNDs → Q-test-ansi-stdout,
+  Q-cli-json-structured-gaps (below); OPEN §20.1 flag-list lag → rides Q-mcp-server's on-landing changelog.
 - **[Q-mcp-server] `bock mcp` — compiler surface as MCP tools (stdio subcommand)** — feature · blocked ·
-  `compiler/crates/bock-cli/` (server layer thin over the CLI) · blocked-by Q-cli-format-json · links audit R4, brief
+  `compiler/crates/bock-cli/` (server layer thin over the CLI) · blocked-by the MCP-dependency escalation
+  (2026-07-03, escalations.md — substrate gate Q-cli-format-json CLEARED by #427) · links audit R4, brief
   §3–§5, §20.3 note, changelog `20260610-design-audit-spec-touches.md` · note: scoping DECIDED by the 2026-07-03 brief —
   ships INSIDE the CLI as `bock mcp` (stdio transport), NOT a separate crate/binary: zero extra install, version-locked
   to the compiler by construction, no separate release artifact; thin server layer so a post-MCP protocol shift is a
@@ -585,8 +599,9 @@ actionable until Q-mcp-server lands.
   workspace — CLI trust envelope, stated plainly). **Two gates ride this item:** (1) tool-schema review by Design — one
   pass, cheap, when schemas are drafted; (2) the MCP protocol/SDK dependency choice **ESCALATES** (provider/tooling —
   new third-party dep) before adoption; a hand-rolled thin stdio JSON-RPC layer is the fallback if the dep is heavy.
-  On landing: one-line §20.3-adjacent spec note + design changelog (per audit R4). First consumer = our own sessions
-  (dogfood, R8) before external positioning. LEADS the v1.x tooling list (human panels behind it).
+  On landing: one-line §20.3-adjacent spec note + design changelog (per audit R4) — the same changelog also refreshes
+  §20.1's (non-normative) per-command flag lists, which #427's OPEN noted now lag the binary. First consumer = our own
+  sessions (dogfood, R8) before external positioning. LEADS the v1.x tooling list (human panels behind it).
 - **[Q-mcp-pack-resources] context pack served as MCP resources + `bock_explain` backing** — feature · blocked ·
   `compiler/crates/bock-cli/` + `context-pack/` · blocked-by Q-mcp-server · links brief §2, Q-context-pack (#339), OQ2 ·
   note: the pack's contents (spec sections by §-number, per-module stdlib reference, idiom primer, error-code table)
@@ -594,6 +609,21 @@ actionable until Q-mcp-server lands.
   paste-in / on-demand resources), no second maintained copy, no divergence risk. `bock_explain` backed by the pack's
   error-code table (explanation + fix pattern per `E____`). Pack versioning should track the compiler (v0.1.1 today —
   the version-sync mechanism rides this item). Smallest item of the three.
+
+**#427 FOUNDs (filed 2026-07-03):**
+
+- **[Q-cli-json-structured-gaps] paths that bypass the structured-diagnostic layer degrade the JSON contract** — bug/chore ·
+  ready · **MED** · `compiler/crates/bock-cli/` · — · links #427, Q-mcp-server (fidelity feeds bock_check/bock_test) ·
+  note: (a) `bock test` compile errors reach JSON as failed entries whose `message` is RENDERED text, not structured
+  fields (needs `run_tests_in_file` to return `Vec<Diagnostic>`); (b) unknown `--only` aspect exits 1 with NO JSON
+  document on stdout (usage-error class — decide the envelope-or-clap-error contract and pin it); (c) check's
+  unreadable-input eprintln in `parse_file` + the "No .bock files found." eprintln bypass the sink (stderr-only in
+  json mode — honest but unstructured). Worth closing before Q-mcp-server ships so the MCP tools' structured returns
+  are complete, not best-effort. FOUND 2026-07-03 (#427).
+- **[Q-test-ansi-stdout] `bock test` human mode hardcodes ANSI PASS/FAIL colors on stdout unconditionally** — bug ·
+  ready · LOW · `compiler/crates/bock-cli/src/test.rs` · — · links #427, #345 (NO_COLOR/TTY honored for diagnostics —
+  the test runner's own output missed that pass) · note: colors leak into piped/redirected human output; json mode is
+  unaffected (pinned ANSI-free by #427's tests). Same NO_COLOR/TTY gating #345 established. FOUND 2026-07-03 (#427).
 
 ### Design-audit follow-ups (filed 2026-06-10, from `designs/2026-06-09-design-audit.md`)
 
