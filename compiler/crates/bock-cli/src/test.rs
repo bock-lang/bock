@@ -34,10 +34,16 @@ use bock_types::{
     TypeChecker,
 };
 
+use crate::check::CheckOutcome;
+use crate::output::{print_document, OutputFormat, FORMAT_VERSION};
+
 /// Result of running a single test.
 struct TestResult {
     /// Fully qualified test name: `file::function_name`.
     name: String,
+    /// The `.bock` file the test lives in (as given on the command line or
+    /// discovered).
+    file: String,
     /// Whether the test passed.
     passed: bool,
     /// Error message if the test failed.
@@ -62,8 +68,18 @@ struct CompiledTestFile {
 /// Run the `bock test` command.
 ///
 /// Discovers `.bock` files, finds `@test`-annotated functions, runs each in an
-/// isolated interpreter, and prints a summary. Returns exit code 1 if any test fails.
-pub async fn run(filter: Option<String>, files: Vec<PathBuf>) -> anyhow::Result<()> {
+/// isolated interpreter, and reports per-test results plus a summary — human
+/// lines by default, or one JSON document on stdout with `--format json` (see
+/// [`crate::output`]).
+///
+/// Returns the pass/fail [`CheckOutcome`] rather than exiting the process, so
+/// the exit-code decision stays centralized in `main` (mirroring `bock
+/// check`): any failing test maps to a non-zero exit, in both formats.
+pub async fn run(
+    filter: Option<String>,
+    files: Vec<PathBuf>,
+    format: OutputFormat,
+) -> anyhow::Result<CheckOutcome> {
     let files = if files.is_empty() {
         discover_bock_files(Path::new("."))?
     } else {
@@ -71,8 +87,11 @@ pub async fn run(filter: Option<String>, files: Vec<PathBuf>) -> anyhow::Result<
     };
 
     if files.is_empty() {
-        println!("No .bock files found.");
-        return Ok(());
+        match format {
+            OutputFormat::Human => println!("No .bock files found."),
+            OutputFormat::Json => print_document(&test_document(&[]))?,
+        }
+        return Ok(CheckOutcome::Clean);
     }
 
     let total_start = Instant::now();
@@ -85,6 +104,7 @@ pub async fn run(filter: Option<String>, files: Vec<PathBuf>) -> anyhow::Result<
                 eprintln!("error: {}: {e}", file_path.display());
                 results.push(TestResult {
                     name: file_path.display().to_string(),
+                    file: file_path.display().to_string(),
                     passed: false,
                     error: Some(format!("compilation error: {e}")),
                     duration: std::time::Duration::ZERO,
@@ -96,25 +116,44 @@ pub async fn run(filter: Option<String>, files: Vec<PathBuf>) -> anyhow::Result<
     let total_duration = total_start.elapsed();
 
     if results.is_empty() {
-        println!("No tests found.");
-        return Ok(());
+        match format {
+            OutputFormat::Human => println!("No tests found."),
+            OutputFormat::Json => print_document(&test_document(&results))?,
+        }
+        return Ok(CheckOutcome::Clean);
     }
 
-    // Print results
-    println!();
-    let mut passed = 0usize;
-    let mut failed = 0usize;
+    let passed = results.iter().filter(|r| r.passed).count();
+    let failed = results.len() - passed;
 
-    for result in &results {
+    match format {
+        OutputFormat::Human => print_human_results(&results, passed, failed, total_duration),
+        OutputFormat::Json => print_document(&test_document(&results))?,
+    }
+
+    Ok(if failed > 0 {
+        CheckOutcome::Failed
+    } else {
+        CheckOutcome::Clean
+    })
+}
+
+/// Print the per-test PASS/FAIL lines and the closing summary (human mode).
+fn print_human_results(
+    results: &[TestResult],
+    passed: usize,
+    failed: usize,
+    total_duration: std::time::Duration,
+) {
+    println!();
+    for result in results {
         if result.passed {
-            passed += 1;
             println!(
                 "  \x1b[32mPASS\x1b[0m {} ({:.1}ms)",
                 result.name,
                 result.duration.as_secs_f64() * 1000.0
             );
         } else {
-            failed += 1;
             println!(
                 "  \x1b[31mFAIL\x1b[0m {} ({:.1}ms)",
                 result.name,
@@ -132,12 +171,37 @@ pub async fn run(filter: Option<String>, files: Vec<PathBuf>) -> anyhow::Result<
         "Tests: {passed} passed, {failed} failed, {total} total ({:.2}s)",
         total_duration.as_secs_f64()
     );
+}
 
-    if failed > 0 {
-        std::process::exit(1);
-    }
-
-    Ok(())
+/// Build the `bock test --format json` document (see [`crate::output`] for
+/// the shared envelope contract). `message` is `null` for a passing test and
+/// the failure text (assertion message or compile error) otherwise.
+fn test_document(results: &[TestResult]) -> serde_json::Value {
+    let passed = results.iter().filter(|r| r.passed).count();
+    let failed = results.len() - passed;
+    let tests: Vec<serde_json::Value> = results
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "file": r.file,
+                "passed": r.passed,
+                "message": r.error,
+                "duration_ms": r.duration.as_secs_f64() * 1000.0,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "format_version": FORMAT_VERSION,
+        "command": "test",
+        "outcome": if failed == 0 { "clean" } else { "failed" },
+        "summary": {
+            "tests": results.len(),
+            "passed": passed,
+            "failed": failed,
+        },
+        "tests": tests,
+    })
 }
 
 /// Compile a single test file and run all `@test` functions found in it.
@@ -174,12 +238,14 @@ async fn run_tests_in_file(
         match result {
             Ok(()) => results.push(TestResult {
                 name: qualified_name,
+                file: filename.clone(),
                 passed: true,
                 error: None,
                 duration,
             }),
             Err(e) => results.push(TestResult {
                 name: qualified_name,
+                file: filename.clone(),
                 passed: false,
                 error: Some(e),
                 duration,
@@ -1141,6 +1207,46 @@ fn test_b() {
                 .map(|r| (&r.name, &r.error))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_document_carries_envelope_and_per_test_entries() {
+        let results = vec![
+            TestResult {
+                name: "t::ok".into(),
+                file: "t.bock".into(),
+                passed: true,
+                error: None,
+                duration: std::time::Duration::from_millis(2),
+            },
+            TestResult {
+                name: "t::bad".into(),
+                file: "t.bock".into(),
+                passed: false,
+                error: Some("assertion failed".into()),
+                duration: std::time::Duration::ZERO,
+            },
+        ];
+        let doc = test_document(&results);
+        assert_eq!(doc["format_version"], FORMAT_VERSION);
+        assert_eq!(doc["command"], "test");
+        assert_eq!(doc["outcome"], "failed");
+        assert_eq!(doc["summary"]["tests"], 2);
+        assert_eq!(doc["summary"]["passed"], 1);
+        assert_eq!(doc["summary"]["failed"], 1);
+        let tests = doc["tests"].as_array().unwrap();
+        assert_eq!(tests[0]["name"], "t::ok");
+        assert_eq!(tests[0]["file"], "t.bock");
+        assert_eq!(tests[0]["passed"], true);
+        assert!(tests[0]["message"].is_null(), "passing test → null message");
+        assert!(tests[0]["duration_ms"].is_f64() || tests[0]["duration_ms"].is_u64());
+        assert_eq!(tests[1]["passed"], false);
+        assert_eq!(tests[1]["message"], "assertion failed");
+
+        // No tests at all is a clean outcome (matching the exit contract).
+        let empty = test_document(&[]);
+        assert_eq!(empty["outcome"], "clean");
+        assert_eq!(empty["summary"]["tests"], 0);
     }
 
     #[tokio::test]

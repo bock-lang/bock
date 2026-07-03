@@ -45,6 +45,121 @@ REPL, formatter, LSP, and testing tiers have their own page
 `bock help` and `bock help <command>` print the same information as
 `--help`. The two global options are `-h`/`--help` and `-V`/`--version` (`bock --version` prints `bock 1.0.0`).
 
+## Machine-Readable Output
+
+`bock check`, `bock test`, and `bock inspect` accept
+`--format <human|json>` (default: `human`). With `--format json`,
+stdout carries **exactly one JSON document** and nothing else —
+incidental messages ("No .bock files found.", unreadable-directory
+warnings, unreadable-input errors) go to stderr. Exit codes are
+identical to human mode. The document is serialized from the same
+structured diagnostics the human renderer consumes, so the two views
+cannot disagree. This is the substrate for CI consumers and the
+planned `bock mcp` server.
+
+```bash
+bock check --format json src/main.bock
+bock test --format json
+bock inspect --format json
+```
+
+Every document shares one envelope:
+
+```json
+{
+  "format_version": 1,
+  "command": "check",
+  "outcome": "clean",
+  "summary": { "files": 1, "errors": 0, "warnings": 0 },
+  "diagnostics": []
+}
+```
+
+- `format_version` — the machine-contract version, currently `1`.
+  Bumped only on a breaking change; new fields may appear without a
+  bump, so consumers must ignore unknown fields.
+- `command` — `"check"`, `"test"`, or `"inspect"`.
+- `outcome` — `"clean"` or `"failed"`. Always agrees with the exit
+  code: `clean` ⇔ exit 0.
+- `summary` — per-command counts (below).
+- One per-command payload array: `diagnostics` (check), `tests`
+  (test), `decisions` (inspect).
+
+Flag-usage errors (an unknown `--format` or `--only` value) report on
+stderr with no JSON document, like any other bad flag — consumers
+should treat "non-zero exit with no parseable stdout" as a usage
+failure, distinct from `outcome: "failed"`.
+
+### `bock check --format json`
+
+`summary` is `{ "files": N, "errors": N, "warnings": N }` and each
+entry of `diagnostics` is:
+
+```json
+{
+  "severity": "error",
+  "code": "E4002",
+  "message": "undefined variable `bad`",
+  "span": {
+    "file": "src/main.bock",
+    "start": 42,
+    "end": 45,
+    "line": 3,
+    "col": 3
+  },
+  "suggestion": "declare `bad` before use"
+}
+```
+
+- `severity` — `error`, `warning`, `info`, or `hint`. Warnings appear
+  in the document but never fail the check, exactly as in human mode.
+- `code` — the stable diagnostic code (`E____` / `W____`).
+- `span` — `start`/`end` are byte offsets into `file` (`end`
+  exclusive); `line`/`col` are the 1-based line and character column
+  of `start`. This is the same span shape `bock inspect air --json`
+  established, plus the `file` field. `file` is `null` for the rare
+  diagnostic with no backing file (e.g. a module cycle that cannot be
+  pinned to a specific `use` edge).
+- `suggestion` — the diagnostic's fix-hint notes joined into one
+  string, or `null` when it carries none.
+
+A missing input file fails the check (`outcome: "failed"`) with the
+reason on stderr; it carries no structured diagnostic entry.
+
+### `bock test --format json`
+
+`summary` is `{ "tests": N, "passed": N, "failed": N }` and each
+entry of `tests` is:
+
+```json
+{
+  "name": "add_test::test_add",
+  "file": "test/add_test.bock",
+  "passed": true,
+  "message": null,
+  "duration_ms": 1.4
+}
+```
+
+`message` is `null` for a passing test and the failure text
+otherwise. A file that fails to compile appears as one failed entry
+whose `message` starts with `compilation error:`. A run that finds no
+tests emits the document with zero counts and `outcome: "clean"`
+(matching the human mode's exit 0).
+
+### `bock inspect --format json`
+
+`summary` is `{ "decisions": N }` and the payload is `decisions` —
+the same entries the legacy `bock inspect --json` bare array carries
+(`scope`, `prefixed_id`, and the full `decision` record), wrapped in
+the envelope. `--json` is kept for back-compat and conflicts with
+`--format`; new consumers should prefer `--format json`.
+
+On `bock inspect air`, `--format json` is an **alias** for the
+established `--json` flag: it emits the same
+[AIR tree document](#bock-inspect-air-file), not the envelope — that
+shape predates the envelope and is consumed by editor tooling.
+
 ## Build and Execute
 
 ### `bock new <NAME>`
@@ -124,6 +239,7 @@ bock check --only=types            # type checking only
 bock check --only=types,context    # two aspects
 bock check --brief                 # compact one-line diagnostics
 bock check --strict                # production strictness (gaps are errors)
+bock check --format json           # one JSON document on stdout
 ```
 
 `--brief` emits one line per diagnostic with the location as `file:line:col`:
@@ -137,6 +253,7 @@ error[E4002]: undefined variable `bad` (at src/main.bock:3:3)
 | `--only <ASPECT>`  | Restrict to specific aspects. Valid v1 aspects: `types`, `context`. Comma-separated or repeated. |
 | `--brief`          | Compact, one-line diagnostics with no source-context snippets. Locations render as `file:line:col` (the same `line:col` the rich output and the conformance directives use), not byte offsets. |
 | `--strict`         | Force production strictness; turns completeness *warnings* into *errors*. Mirrors `bock build --strict`. |
+| `--format <FORMAT>`| `human` (default) or `json` — one machine-readable JSON document on stdout. See [Machine-Readable Output](#machine-readable-output). |
 
 `bock check` exits non-zero **if and only if** it produces at least
 one error; warnings never fail the check. At the default development
@@ -164,6 +281,7 @@ every `.bock` file recursively.
 ```bash
 bock test                         # run all tests
 bock test --filter parse          # only tests whose name matches "parse"
+bock test --format json           # one JSON document on stdout
 ```
 
 When a test file lives inside a project (its directory tree contains a
@@ -178,6 +296,7 @@ valid test run.
 | Flag                | Meaning                          |
 | ------------------- | -------------------------------- |
 | `--filter <FILTER>` | Run only tests matching pattern. |
+| `--format <FORMAT>` | `human` (default) or `json` — one machine-readable JSON document on stdout. See [Machine-Readable Output](#machine-readable-output). |
 
 Cross-target test execution (`--target`, `--all-targets`, `--smart`),
 coverage, and snapshot testing are
@@ -247,7 +366,8 @@ bock inspect air src/main.bock    # dump the lowered AIR tree for one file
 | `--unpinned`                                 | Only decisions not yet pinned.                   |
 | `--module <MODULE>`                          | Filter by module-path substring.                 |
 | `--type <TYPE_FILTER>`                       | Filter by decision type (e.g. `codegen`, `repair`).|
-| `--json`                                     | Machine-readable JSON instead of the table.      |
+| `--json`                                     | Machine-readable JSON (the legacy bare array) instead of the table. |
+| `--format <FORMAT>`                          | `human` (default) or `json` — the machine-output envelope. Conflicts with `--json`. See [Machine-Readable Output](#machine-readable-output). |
 
 `inspect cache --size` always reports on-disk size; `inspect rules
 --target <T>` scopes to one target; `inspect decision <ID> --json`
@@ -268,10 +388,11 @@ bock inspect air src/main.bock         # human-readable indented tree
 bock inspect air src/main.bock --json  # machine-readable JSON tree
 ```
 
-| Argument / Flag | Meaning                                          |
-| --------------- | ------------------------------------------------ |
-| `<FILE>`        | The `.bock` file to lower.                       |
-| `--json`        | Emit the stable JSON tree instead of the human view. |
+| Argument / Flag     | Meaning                                          |
+| ------------------- | ------------------------------------------------ |
+| `<FILE>`            | The `.bock` file to lower.                       |
+| `--json`            | Emit the stable JSON tree instead of the human view. |
+| `--format <FORMAT>` | `json` is an alias for `--json` (same tree document, not the envelope). Conflicts with `--json`. |
 
 The default view prints one node per line — kind, name (when the
 node has one), `@line:col` of the node's start, and its byte range:
