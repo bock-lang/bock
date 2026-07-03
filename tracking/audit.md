@@ -2821,3 +2821,32 @@ State at close: main 8f38ba6, 0 open PRs, worktrees/branches/caches pruned, CI g
     review in-flight) → Q-mcp-pack-resources. Q-cli-json-structured-gaps is dispatchable independently (sequence
     BEFORE or WITH Q-mcp-server; both touch bock-cli → never concurrent per routing). Engineer worktree cleanup
     deferred until the background test re-run completes. 6 dependabot PRs (#416–#421) still queued for a drain block.
+
+[2026-07-03 05:52 UTC] ✦ NIGHT WRAP — dep escalation resolved (hand-rolled); Q-mcp-server ready for tomorrow
+  Input: operator — "Let's wrap for tonight and set-up for hand rolled tomorrow."
+  Decision: escalation "MCP protocol dependency choice" → RESOLVED, option (b) hand-rolled thin stdio JSON-RPC
+    (response recorded in escalations.md); Q-mcp-server flipped blocked → READY with the decision folded into the
+    item (no new deps; served-subset protocol layer on the existing serde_json; Design schema one-pass rides the
+    implementation). Queue header gains the night-wrap reconcile + tomorrow's suggested sequence: dependabot drain
+    (#416–#421) → Q-cli-json-structured-gaps (bock-cli; sequences BEFORE the MCP session per the same-crate rule,
+    and closes the structured-layer bypasses so the MCP tools return complete data) → Q-mcp-server dispatch →
+    Q-mcp-pack-resources.
+  Reasoning: recording the operator decision + queue flip is exactly the wrap the operator asked for — tomorrow's
+    session starts from a clean pull of the queue with zero pending decisions in front of the MCP work. No dispatch
+    tonight (operator said wrap).
+  Follow-up: next session opens with the sequence above. Nothing awaits the operator; Design owes DQ32/DQ33
+    (non-blocking, unchanged) + the schema one-pass when Q-mcp-server drafts land.
+
+═══ SESSION-CLOSE DIGEST — 2026-07-03 (the bock-mcp integration block) ═══
+Main advanced b78bf8b → 59f40ec via 1 feature PR + 1 tracking PR (a second tracking PR closes this wrap), 0 red merges:
+  • The Design chat's bock-mcp brief (elaborates audit R4) INTEGRATED: recorded at designs/2026-07-03-bock-mcp-design.md;
+    queue gains the bock-mcp section (substrate → server → resources, strictly sequenced); milestones v1.1 R4 bullet
+    elaborated; no design gate (§20.1 non-normative, DQ1 precedent) and no roadmap reprioritization (R4 already led v1.x).
+  • #427 Q-cli-format-json LANDED SAME BLOCK — `--format json` on check/test/inspect from the shared bock-errors
+    structures (bock-errors untouched), stdout-pure envelope FORMAT_VERSION 1, air --json back-compat, 13 tests, docs
+    synced. Gate: engineer 5/5 + orchestrator re-verify + CI 20/20 + a belt-and-braces local full-workspace re-run (0 fail).
+  • Dep escalation filed AND resolved same day (operator): HAND-ROLLED stdio JSON-RPC → Q-mcp-server READY, all gates clear.
+  • FOUNDs triaged: Q-cli-json-structured-gaps (MED, pre-MCP) + Q-test-ansi-stdout (LOW). OPEN §20.1 flag-lag → rides the
+    Q-mcp-server on-landing changelog. Drift note logged: audit.md had no release-session entries (story lives in queue).
+State at close: main 59f40ec, 0 open feature PRs (6 routine dependabot pending → tomorrow's drain), worktrees/branches/
+caches pruned, CI green. AWAITING OPERATOR: nothing. Design: DQ32/DQ33 (non-blocking) + the future schema one-pass.
