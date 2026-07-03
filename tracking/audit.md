@@ -2771,3 +2771,53 @@ State at close: main 8f38ba6, 0 open PRs, worktrees/branches/caches pruned, CI g
   Follow-up: NO new FOUNDs — the tail converged. **The v1.0-hardening ENGINEERING scope is EMPTY.** Remaining is not
     engineer work: DQ32/DQ33 → Design (non-blocking); the v1.0 release cut (escalates) pending the marketing copy lock
     (marketing-owned); D2-polish → v1.2. Nothing is engineer-dispatchable or operator-pending.
+
+[2026-07-03 04:28 UTC] ✦ BOCK-MCP DESIGN BRIEF INTEGRATED — the R4 elaboration routed into the hub
+  Input: the operator routed the Design chat's bock-mcp design brief ("Let's integrate the Bock MCP design") — elaborates
+    audit R4; the brief's own status line: "design sketch for discussion → roadmap/queue routing; not a spec change."
+  Options: (a) fold into the hub per the brief's §8 routing table + dispatch the prerequisite item; (b) hub-only, await a
+    separate dispatch directive; (c) treat as a new design gate → escalate to Design.
+  Decision: (a). Brief recorded verbatim at designs/2026-07-03-bock-mcp-design.md (with an integration header);
+    queue.md gains the "bock-mcp — agent-facing ecosystem" section — Q-cli-format-json (READY → dispatched this block) →
+    Q-mcp-server (UPDATED: the pending "scoping pass" is DONE, the brief decides `bock mcp` subcommand over a separate
+    crate; re-homed into the new section) → Q-mcp-pack-resources (blocked); milestones.md v1.1 R4 bullet elaborated;
+    views regenerated. Dispatching Q-cli-format-json as an engineer session (feat/cli-format-json).
+  Reasoning: NO design gate applies — §20.1 declares CLI command shape non-normative (DQ1 precedent, cited by the brief
+    and verified), and R4 already made bock-mcp the LEAD v1.x tooling item (2026-06-10 triage), so this is elaboration of
+    an existing milestone item, not roadmap reprioritization (which would escalate). The operator routing the brief
+    resolves its "for discussion" status; the JSON substrate is thereby already-decided work → dispatch is within
+    standing authority. Two FORWARD gates are recorded in the items rather than escalated now (nothing is decided by
+    them yet): the one-pass Design tool-schema review, and the MCP protocol-dependency choice (provider/tooling → will
+    escalate at Q-mcp-server dispatch). Positioning hook stays marketing-owned per the standing rule — and per the brief
+    itself, only after dogfooding (R8).
+  DRIFT NOTE: audit.md's last entry before this one is 2026-06-16 — the 2026-07-02/03 release sessions recorded their
+    (rich) story in the queue reconcile narrative + .claude/commands/project/release.md (#424–#426) but appended no audit
+    entries. History is preserved there; noting the gap per the drift rule rather than reconstructing entries after the
+    fact.
+  Follow-up: engineer session for Q-cli-format-json → orchestrator re-verifies the gate → merge on clean → Q-mcp-server
+    becomes ready (its dispatch drafts the tool schemas for the Design pass + raises the dependency escalation). 6 open
+    routine dependabot PRs (#416–#421) queued for a separate drain block.
+
+[2026-07-03 05:22 UTC] ✦ Q-cli-format-json LANDED (#427) — the MCP substrate is in; Q-mcp-server gated only on the dep escalation
+  Input: engineer session (feat/cli-format-json) returned complete — PR #427, self-reported gate 5/5 clean.
+  Verification: orchestrator re-verify per dispatch discipline — diff scope exactly the 7 owned files (bock-cli src ×5 +
+    tests ×1 + docs cli.md; bock-errors untouched — no serde needed, hand-serialized from existing public fields);
+    fmt + clippy re-run locally in the worktree (clean, warm cache); full CI 20/20 GREEN (all 6 test cells incl. both
+    Windows lanes, blocking examples matrix, vocab/assets guard). Local full `cargo test --workspace` re-run hit the
+    10-min foreground cap → re-launched in background as belt-and-braces; per the standing rule (local /tmp env is
+    noisy; per-PR CI on clean runners is the arbiter) CI green satisfied the merge condition.
+  Decision: squash-merged #427 (mergeStateStatus CLEAN) → main a97c5c3. Triaged its surfaced items: FOUND →
+    Q-cli-json-structured-gaps (MED — rendered-text messages in test-compile-error JSON entries, `--only`
+    usage-error emits no document, two eprintln bypass paths; worth closing BEFORE Q-mcp-server ships so the MCP
+    tools' structured returns are complete) + Q-test-ansi-stdout (LOW — pre-existing ANSI-on-stdout leak in human
+    test output; the #345 NO_COLOR/TTY pass missed the test runner). OPEN §20.1 flag-list lag → non-normative,
+    folded into Q-mcp-server's on-landing changelog note (no spec edit, correctly withheld by the engineer).
+    Filed the MCP-dependency escalation (escalations.md: official rmcp SDK vs hand-rolled thin stdio JSON-RPC) —
+    the ONLY remaining gate before Q-mcp-server dispatch, per the item's recorded gate.
+  Reasoning: merge is within standing authority (gate confirmed clean, both halves). The dependency choice is NOT —
+    provider/tooling escalates, and a new dep in the crates.io-published 1.0 binary is exactly the supply-chain case
+    the rule exists for. Escalate-to-file and move on; nothing else is blocked by it.
+  Follow-up: operator answers the dep escalation → dispatch Q-mcp-server (drafts tool schemas → one-pass Design
+    review in-flight) → Q-mcp-pack-resources. Q-cli-json-structured-gaps is dispatchable independently (sequence
+    BEFORE or WITH Q-mcp-server; both touch bock-cli → never concurrent per routing). Engineer worktree cleanup
+    deferred until the background test re-run completes. 6 dependabot PRs (#416–#421) still queued for a drain block.

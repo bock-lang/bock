@@ -540,3 +540,27 @@ marketing handoff committed; STATUS/ROADMAP regenerated.
 > NOTE — the third Wave-3 OPEN, **error-code-numbering collisions** (E1001/E1005/E1006/W8020/E2030 double meanings), is
 > **diagnostics/CLI surface (§20.1 non-normative), NOT core-spec** — it stays a `queue.md` chore (a careful renumbering
 > plan), not a Design DQ.
+
+## [2026-07-03 05:22 UTC] Q-mcp-server — MCP protocol dependency choice (tooling)
+
+**Type:** resource (provider/tooling — a potential new third-party dep in the shipping `bock` binary)
+**Severity:** low (non-blocking for everything else; it is the ONLY gate left before Q-mcp-server dispatch)
+**Trigger:** the bock-mcp design brief (`designs/2026-07-03-bock-mcp-design.md`, integrated 2026-07-03) decided
+`bock mcp` ships inside the CLI. Its substrate (Q-cli-format-json, #427) landed the same block. Implementing the
+MCP wire protocol needs a make-or-take decision, and new third-party deps escalate per the standing rule —
+especially in a crates.io-published 1.0 binary (supply-chain surface).
+**Context:** the server layer is deliberately thin (brief §5); v1 uses tools + resources only, no prompts, stdio
+transport only.
+**Options:**
+- **(a) Adopt the official Rust MCP SDK (`rmcp`, the modelcontextprotocol org's crate).** Protocol conformance and
+  spec-evolution tracked upstream; less code to own. Cost: a new dep tree in the published `bock` crate — size and
+  transitive surface need a quick `cargo tree` audit at dispatch; version churn in a young SDK.
+- **(b) Hand-roll a thin stdio JSON-RPC layer** covering the MCP subset we actually serve (initialize,
+  tools/list, tools/call, resources/list, resources/read). Zero new deps; matches the brief's thin-shim posture
+  ("migration cost is a transport shim, not a rewrite"); serde_json is already in bock-cli. Cost: we own protocol
+  tracking as MCP evolves.
+**Recommendation (informal; the call is the operator's):** (b) fits the brief's posture and the v1 surface is
+genuinely small; (a) becomes the better call only if its dep tree audits lean. Either way the tool schemas get the
+one-pass Design review during implementation.
+**Awaiting:** operator choice (a)/(b)/other → Q-mcp-server becomes dispatchable.
+**Status:** pending
