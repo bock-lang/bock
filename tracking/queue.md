@@ -12,7 +12,20 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-07-03 03:15 — ★★★★★★★★ v1.0.0 IS SHIPPED. All four release channels are LIVE.**
+_**Last reconciled 2026-07-03 04:28 — bock-mcp DESIGN INTEGRATED — the post-v1.0 board opens on the agent-facing ecosystem.**
+The operator routed the Design chat's bock-mcp brief (elaborates audit R4; recorded verbatim at
+`designs/2026-07-03-bock-mcp-design.md`) and it is folded in per its own §8 routing: **Q-cli-format-json** filed READY
+(the structured-output substrate — `--format json` on `check`/`test`/`inspect` minimum, serialized from the same
+diagnostic layer the human renderer consumes, never parsed from human text; three consumers: MCP / LSP / CI; no design
+gate — §20.1 non-normative CLI shape, DQ1 precedent) → **Q-mcp-server** UPDATED (its "scoping pass" is DONE — the brief
+decides `bock mcp` subcommand inside bock-cli, stdio, thin-over-CLI; v1 tools check/run/test/build/conformance/inspect/
+explain, with `bock_conformance` the differentiator; two forward gates recorded in the item: one-pass Design tool-schema
+review + the MCP protocol-dependency choice ESCALATES) → **Q-mcp-pack-resources** filed (the context pack served as MCP
+resources — one artifact, two access modes). All three re-homed under the new "bock-mcp — agent-facing ecosystem"
+section. Positioning hook → marketing chat AFTER dogfooding (brief §7/§8). **Q-cli-format-json dispatched this block.**
+Also open: 6 routine dependabot PRs (#416–#421) → next drain block. v1.0-window remainders unchanged (announcement post +
+Q-getstarted-copy-lock, both marketing-owned). ↓ —
+PRIOR: **Last reconciled 2026-07-03 03:15 — ★★★★★★★★ v1.0.0 IS SHIPPED. All four release channels are LIVE.**
 **The cut:** tag v1.0.0 → 3486f1d (after #412 /use-cases published with nav [operator-approved], #414 workflow fixes, #415/#411 changelog curation, #422 pre-1.0 claims dropped). **Channels:** crates.io **17/17 crates at 1.0.0** (verified per-index) incl. the first-time `bock` CLI — `cargo install bock` VERIFIED end-to-end (`bock 1.0.0`); **VS Code Marketplace** bock-lang 1.0.0 published (first ever); **GitHub release** live with 7 assets (6 per-target binaries [linux one smoke-tested] + .vsix, auto-notes); **website/docs** deployed with `/use-cases`. **The road there (all contained, nothing double-published):** run 1 failed on 2 first-run workflow bugs (aarch64 cross-gcc missing; vsce types>engines) with ALL publish jobs auto-skipped → fixed #414 (+ dependabot ignore pinning @types/vscode to the engines floor) → re-tag → run 2: marketplace + 6/6 binaries green, BUT `cargo publish --workspace` hit a **cargo 1.96.1 internal bug** (planner wedged at 9/17, 'no packages ready to publish'; reruns impossible — cargo hard-errors on already-published) and github-release died on same-named `bock` assets (gh cleaned up the partial release) → #423 (assets renamed per-target + tolerant fixed-point per-crate publish loop + `publish-crates.yml` dispatch recovery workflow) → operator-approved dispatch published the remaining 8 (loop worked perfectly; its one empty-array shell bug reported false-failure AFTER success → #424) + operator-approved manual `gh release create` from the verified run-2 artifacts. **REMAINING (non-engineering):** `Q-getstarted-copy-lock` (marketing pass; command re-verification already done) · the ANNOUNCEMENT POST (marketing-owned, escalates) · consider reporting the cargo publish-planner bug upstream (Q-cargo-workspace-publish-upstream, chore). v1.x board otherwise unchanged. ↓ —
 PRIOR: **Last reconciled 2026-07-02 13:17 — release-prep branch (pre-merge). ★★★★★★★ v1.0.0 RELEASE IN MOTION (operator-initiated) — dependabot drained 13/13 + the release-prep PR.**
 The operator opened the v1.0 release session and chose: drain the dependabot backlog first, then cut. **Drain (#393–#408, all 13):** merged round-robin per lockfile group, each gated on mergeStateStatus=CLEAN + all checks green post-rebase; majors verified — astro 7 + @astrojs/cloudflare 14 (rebased CI proved them together), rustyline 18 (compiler CI green + a REPL smoke diffed against a pre-bump e03bd14 baseline build — byte-identical behavior, NOT a regression), actions/checkout 7 + actions/cache 6 (workflow pins). Combined-tree main CI green at f3fe228. **Release-prep (this PR):** workspace + 17 internal-dep version refs 0.1.0→1.0.0 · extension 0.1.1→1.0.0 + its CHANGELOG promoted · REPL banner de-hardcoded to `env!("CARGO_PKG_VERSION")` · spec header stamped **1.0.0 / July 2026 / v1.0 release specification** · CHANGELOG regenerated + Unreleased promoted to `## v1.0.0 — 2026-07-02` (fresh empty Unreleased; `gen-changelog.sh --check` GREEN — the release.yml gate) · docs version refs synced (cli.md, tooling.md). Publish preflight done: all 16 existing `bock-*` crates on crates.io are doesdev-owned (verified via owners API; published 2026-04-27); `bock` itself is unclaimed → first-time publish; bock-test-harness publish=false. **2 NEW FOUNDs** (Release-prep FOUND below): `Q-repl-let-persistence` (pre-existing, LOW) · `Q-conformance-rust-stale-binary-reuse` (pre-existing LOCAL-only harness race — 4 runs incl. unmodified main all show shifting rust-only failing sets; CI green throughout and remains the authoritative gate; full diagnosis in the item). **CUT-GATE UPDATE (2026-07-02 late):** secrets CONFIRMED by the operator (CRATES_IO_TOKEN + VSCE_PAT added); the marketing chat returned the **wedge-page copy LOCKED** (rendered → PR #412, publication HELD); `Q-getstarted-copy-lock` remains (its command re-verification is DONE — see the item); the tag awaits the operator's explicit go. Then: tag v1.0.0 → release.yml (6-target binaries · crates.io 16 owned updates + first-time `bock` · marketplace first publish · GitHub release). ↓ —
@@ -542,6 +555,46 @@ work is the demo only; the copy items ESCALATE before any external publication.
   (4) page says "the `.bock/` cache directory" but the emitted `.gitignore` lists `.bock/` subpaths
   (`decisions/runtime`, `ai-cache`, `cache`) + `target/` — wording nuance, marketing's call.
 
+### bock-mcp — agent-facing ecosystem (filed 2026-07-03, from `designs/2026-07-03-bock-mcp-design.md`; elaborates audit R4)
+
+Sequenced strictly: substrate → server → resources. The context pack (knowledge) and the MCP server (capability) are the
+two halves of agent enablement; the resources primitive makes the pack the single maintained source for both access modes.
+**Positioning hook** ("the language that ships as an agent tool" or similar) routes to the marketing chat — wording theirs —
+only AFTER the dogfooding validation (brief §7: first consumer = our own orchestrator/engineer sessions, R8 spirit). Not
+actionable until Q-mcp-server lands.
+
+- **[Q-cli-format-json] `--format json` structured-diagnostics output on `bock check` / `bock test` / `bock inspect`** —
+  feature · **in-flight (dispatched 2026-07-03)** · `compiler/crates/bock-cli/` (+ serde derives on the diagnostic types
+  where they live) + `docs/` CLI page · — · links brief §6, Q-mcp-server (unblocks), #325 (`bock inspect air --json`
+  precedent), DQ1 · note: the MCP prerequisite, worth doing once and well — three consumers (bock-mcp wraps it; the LSP
+  shares the structured layer; CI users). Diagnostics as data: code, span, message, suggestion, + a machine-stable summary
+  (counts, outcome). MUST serialize from the same internal diagnostic structures the human renderer consumes — never
+  parse human text. Human output stays the default; exit codes unchanged. Reconcile flag spelling with the existing
+  `bock inspect air --json` (back-compat). Docs sync in the same PR; CLI shape is §20.1 non-normative (no spec edit —
+  if §20.1 turns out to enumerate flags, surface OPEN rather than editing).
+- **[Q-mcp-server] `bock mcp` — compiler surface as MCP tools (stdio subcommand)** — feature · blocked ·
+  `compiler/crates/bock-cli/` (server layer thin over the CLI) · blocked-by Q-cli-format-json · links audit R4, brief
+  §3–§5, §20.3 note, changelog `20260610-design-audit-spec-touches.md` · note: scoping DECIDED by the 2026-07-03 brief —
+  ships INSIDE the CLI as `bock mcp` (stdio transport), NOT a separate crate/binary: zero extra install, version-locked
+  to the compiler by construction, no separate release artifact; thin server layer so a post-MCP protocol shift is a
+  transport shim, not a rewrite. v1 tools: `bock_check` / `bock_run` / `bock_test` / `bock_build` / `bock_conformance` /
+  `bock_inspect` / `bock_explain` — each a thin CLI wrapper; **`bock_conformance` is the differentiator** (cross-target
+  behavioral equivalence as a single tool call; v1 scope modest: single-file/fixture exec-compare across locally
+  configured targets, reporting which targets were exercised; cost/toolchain caveats in the tool description). MCP
+  prompts: skipped in v1. Execution-safety wording in tool descriptions (run/test/build execute code + write the
+  workspace — CLI trust envelope, stated plainly). **Two gates ride this item:** (1) tool-schema review by Design — one
+  pass, cheap, when schemas are drafted; (2) the MCP protocol/SDK dependency choice **ESCALATES** (provider/tooling —
+  new third-party dep) before adoption; a hand-rolled thin stdio JSON-RPC layer is the fallback if the dep is heavy.
+  On landing: one-line §20.3-adjacent spec note + design changelog (per audit R4). First consumer = our own sessions
+  (dogfood, R8) before external positioning. LEADS the v1.x tooling list (human panels behind it).
+- **[Q-mcp-pack-resources] context pack served as MCP resources + `bock_explain` backing** — feature · blocked ·
+  `compiler/crates/bock-cli/` + `context-pack/` · blocked-by Q-mcp-server · links brief §2, Q-context-pack (#339), OQ2 ·
+  note: the pack's contents (spec sections by §-number, per-module stdlib reference, idiom primer, error-code table)
+  exposed as MCP resources read FROM the single maintained pack artifact — one artifact, two access modes (static
+  paste-in / on-demand resources), no second maintained copy, no divergence risk. `bock_explain` backed by the pack's
+  error-code table (explanation + fix pattern per `E____`). Pack versioning should track the compiler (v0.1.1 today —
+  the version-sync mechanism rides this item). Smallest item of the three.
+
 ### Design-audit follow-ups (filed 2026-06-10, from `designs/2026-06-09-design-audit.md`)
 
 - **[Q-context-pack] versioned model-familiarity context pack** — feature · **DONE (#339)** ·
@@ -575,10 +628,6 @@ work is the demo only; the copy items ESCALATE before any external publication.
   surface). Exceeded the ≥1-target bar: built AND executed on ALL 5, stdout byte-identical ×5, report hand-cross-checked
   against the baseline. Dogfooding earned its keep: 6 real codegen FOUNDs (incl. a SILENT cross-target output divergence,
   go `%`-interpolation) → harvest section below.
-- **[Q-mcp-server] `bock-mcp` server — compiler surface as MCP tools** — feature · deferred (v1.x lead tooling item) ·
-  new crate `compiler/crates/bock-mcp/` (or a bock-cli subcommand — a scoping pass decides) · — · links audit R4, §20.3 note,
-  changelog `20260610-design-audit-spec-touches.md` · note: `check`/`build`/`test`/`inspect`/conformance as agent tools;
-  LEADS the v1.x tooling list (human panels behind it). Needs a small scoping pass before dispatch.
 - **[Q-ai-loop-design-pass] agentic repair-loop / AI-layer composability design pass** — design · deferred (FIRST v1.x design
   pass) · `spec/` §17 + a design doc · — · links audit R5, §17.7/§17.8 · note: loop budgets, convergence detection,
   fallback policy — composing Generate/Repair/verify into a first-class pipeline stage. Routes to Design when v1.x opens.

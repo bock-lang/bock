@@ -2771,3 +2771,29 @@ State at close: main 8f38ba6, 0 open PRs, worktrees/branches/caches pruned, CI g
   Follow-up: NO new FOUNDs — the tail converged. **The v1.0-hardening ENGINEERING scope is EMPTY.** Remaining is not
     engineer work: DQ32/DQ33 → Design (non-blocking); the v1.0 release cut (escalates) pending the marketing copy lock
     (marketing-owned); D2-polish → v1.2. Nothing is engineer-dispatchable or operator-pending.
+
+[2026-07-03 04:28 UTC] ✦ BOCK-MCP DESIGN BRIEF INTEGRATED — the R4 elaboration routed into the hub
+  Input: the operator routed the Design chat's bock-mcp design brief ("Let's integrate the Bock MCP design") — elaborates
+    audit R4; the brief's own status line: "design sketch for discussion → roadmap/queue routing; not a spec change."
+  Options: (a) fold into the hub per the brief's §8 routing table + dispatch the prerequisite item; (b) hub-only, await a
+    separate dispatch directive; (c) treat as a new design gate → escalate to Design.
+  Decision: (a). Brief recorded verbatim at designs/2026-07-03-bock-mcp-design.md (with an integration header);
+    queue.md gains the "bock-mcp — agent-facing ecosystem" section — Q-cli-format-json (READY → dispatched this block) →
+    Q-mcp-server (UPDATED: the pending "scoping pass" is DONE, the brief decides `bock mcp` subcommand over a separate
+    crate; re-homed into the new section) → Q-mcp-pack-resources (blocked); milestones.md v1.1 R4 bullet elaborated;
+    views regenerated. Dispatching Q-cli-format-json as an engineer session (feat/cli-format-json).
+  Reasoning: NO design gate applies — §20.1 declares CLI command shape non-normative (DQ1 precedent, cited by the brief
+    and verified), and R4 already made bock-mcp the LEAD v1.x tooling item (2026-06-10 triage), so this is elaboration of
+    an existing milestone item, not roadmap reprioritization (which would escalate). The operator routing the brief
+    resolves its "for discussion" status; the JSON substrate is thereby already-decided work → dispatch is within
+    standing authority. Two FORWARD gates are recorded in the items rather than escalated now (nothing is decided by
+    them yet): the one-pass Design tool-schema review, and the MCP protocol-dependency choice (provider/tooling → will
+    escalate at Q-mcp-server dispatch). Positioning hook stays marketing-owned per the standing rule — and per the brief
+    itself, only after dogfooding (R8).
+  DRIFT NOTE: audit.md's last entry before this one is 2026-06-16 — the 2026-07-02/03 release sessions recorded their
+    (rich) story in the queue reconcile narrative + .claude/commands/project/release.md (#424–#426) but appended no audit
+    entries. History is preserved there; noting the gap per the drift rule rather than reconstructing entries after the
+    fact.
+  Follow-up: engineer session for Q-cli-format-json → orchestrator re-verifies the gate → merge on clean → Q-mcp-server
+    becomes ready (its dispatch drafts the tool schemas for the Design pass + raises the dependency escalation). 6 open
+    routine dependabot PRs (#416–#421) queued for a separate drain block.

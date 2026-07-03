@@ -105,6 +105,17 @@ the Bock identity.
     inspect/conformance as MCP tools) **leads** the v1.x tooling list; the
     §20.3 human-facing panels ship behind it (spec note + changelog
     `20260610-design-audit-spec-touches.md`).
+    **★ ELABORATED (2026-07-03, `designs/2026-07-03-bock-mcp-design.md` — Design chat,
+    operator-routed):** delivery decided — a **`bock mcp` CLI subcommand** (stdio; thin
+    over the CLI; no separate binary, version-locked to the compiler by construction).
+    v1 tools = check/run/test/build/conformance/inspect/explain; **`bock_conformance` is
+    the differentiator** (cross-target equivalence as one tool call — the 1.0 positioning
+    operationalized inside the agent loop). The context pack doubles as MCP **resources**
+    (one artifact, two access modes — the knowledge half + the capability half of agent
+    enablement). Sequenced: `Q-cli-format-json` (structured `--format json` substrate,
+    prerequisite; also serves LSP + CI) → `Q-mcp-server` → `Q-mcp-pack-resources` (detail
+    by ID in `queue.md`). Tool schemas get a one-pass Design review; the MCP dependency
+    choice escalates (tooling); positioning hook → marketing after dogfooding (R8).
   - **First v1.x design pass = `Q-ai-loop-design-pass`** (agentic repair-loop /
     AI-layer composability: loop budgets, convergence, fallback policy — R5).
   - **Prioritization principle (R6, RATIFIED 2026-06-15 — operator walk-through):**
