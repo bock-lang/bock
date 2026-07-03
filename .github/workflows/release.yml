@@ -124,7 +124,52 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-publish-
             ${{ runner.os }}-cargo-
-      - run: cargo publish --workspace --token ${{ secrets.CRATES_IO_TOKEN }}
+      # Tolerant per-crate publish: cargo's `publish --workspace` hard-errors
+      # when any member's exact version already exists on the index, which
+      # makes partial-publish recovery (reruns) impossible. Fixed-point loop:
+      # each pass publishes whatever has its deps satisfied, "already exists"
+      # counts as done. Mirrors .github/workflows/publish-crates.yml.
+      - name: Publish workspace crates (skip already-published)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t pkgs < <(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | .name')
+          echo "planning ${#pkgs[@]} crates: ${pkgs[*]}"
+          pending=("${pkgs[@]}")
+          for pass in 1 2 3 4 5 6 7 8 9 10; do
+            [ "${#pending[@]}" -eq 0 ] && break
+            echo "=== pass $pass: ${#pending[@]} pending ==="
+            next=()
+            progressed=0
+            for pkg in "${pending[@]}"; do
+              if out=$(cargo publish -p "$pkg" --no-verify 2>&1); then
+                echo "published $pkg"
+                progressed=1
+              elif grep -q "already exists" <<<"$out"; then
+                echo "skip $pkg (already on the index)"
+                progressed=1
+              else
+                echo "defer $pkg"
+                next+=("$pkg")
+              fi
+            done
+            pending=("${next[@]:-}")
+            [ "${#pending[@]}" -gt 0 ] && [ "$progressed" -eq 0 ] && {
+              echo "no progress in pass $pass; failing with last errors:" >&2
+              for pkg in "${pending[@]}"; do
+                cargo publish -p "$pkg" --no-verify 2>&1 | tail -5 >&2 || true
+              done
+              exit 1
+            }
+          done
+          if [ "${#pending[@]}" -gt 0 ] && [ -n "${pending[0]}" ]; then
+            echo "unpublished after all passes: ${pending[*]}" >&2
+            exit 1
+          fi
+          echo "all crates published or already present"
 
   publish-extension:
     name: publish to vs code marketplace
@@ -188,11 +233,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Collect every downloaded artifact file (download-artifact placed each
-          # artifact in its own subdirectory under ./artifacts).
-          mapfile -t assets < <(find ./artifacts -type f | sort)
+          # Every binary artifact contains a file literally named `bock` (or
+          # `bock.exe`), so uploading them raw collides on the release's asset
+          # namespace (the first v1.0.0 run failed exactly here). Rename each
+          # binary to carry its artifact name (bock-<target-triple>[.exe]);
+          # the .vsix already has a unique name and passes through unchanged.
+          mkdir -p ./assets
+          for dir in ./artifacts/bock-*/; do
+            name="$(basename "$dir")"
+            if [ -f "$dir/bock.exe" ]; then
+              cp "$dir/bock.exe" "./assets/${name}.exe"
+            elif [ -f "$dir/bock" ]; then
+              cp "$dir/bock" "./assets/${name}"
+            fi
+          done
+          find ./artifacts -type f -name '*.vsix' -exec cp {} ./assets/ \;
+          mapfile -t assets < <(find ./assets -type f | sort)
           if [ "${#assets[@]}" -eq 0 ]; then
-            echo "No release assets found under ./artifacts" >&2
+            echo "No release assets found under ./assets" >&2
             exit 1
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
