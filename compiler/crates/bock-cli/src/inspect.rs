@@ -34,6 +34,9 @@ use bock_types::{collect_exports, seed_imports, seed_prelude, TypeChecker};
 
 use crate::check::CheckOutcome;
 use crate::decision_io::{display_id, find_project_root, scope_name};
+use crate::output::{
+    byte_to_line_col, print_document, severity_name, OutputFormat, FORMAT_VERSION,
+};
 
 /// Which scopes to show when listing decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,8 +60,11 @@ pub struct InspectDecisionsOptions {
     pub module_filter: Option<String>,
     /// Filter by decision-type name (e.g. `"codegen"`, `"repair"`).
     pub type_filter: Option<String>,
-    /// Emit JSON instead of the human table.
+    /// Emit the legacy bare JSON array instead of the human table.
     pub json: bool,
+    /// Output format (`--format`): `json` emits the machine-output envelope
+    /// (see [`crate::output`]). Mutually exclusive with `json` at the CLI.
+    pub format: OutputFormat,
 }
 
 /// Entry point for `bock inspect decisions`.
@@ -102,6 +108,8 @@ pub fn run_decisions(options: &InspectDecisionsOptions) -> anyhow::Result<()> {
 
     if options.json {
         print_decisions_json(&rows)?;
+    } else if options.format == OutputFormat::Json {
+        print_decisions_document(&rows)?;
     } else {
         print_decisions_table(&rows, options.scope);
     }
@@ -313,19 +321,44 @@ fn print_decision_detail(scope: ManifestScope, d: &Decision) {
     }
 }
 
+/// One decision-list entry in the machine-readable shape: the scope, the
+/// prefixed id the CLI displays, and the full decision record. Shared by the
+/// legacy `--json` array and the `--format json` envelope so the two can
+/// never drift.
+fn decision_entry_json(scope: ManifestScope, decision: &Decision) -> serde_json::Value {
+    serde_json::json!({
+        "scope": scope_name(scope),
+        "prefixed_id": display_id(scope, &decision.id),
+        "decision": decision,
+    })
+}
+
 fn print_decisions_json(rows: &[(ManifestScope, Decision)]) -> anyhow::Result<()> {
     let list: Vec<serde_json::Value> = rows
         .iter()
-        .map(|(s, d)| {
-            serde_json::json!({
-                "scope": scope_name(*s),
-                "prefixed_id": display_id(*s, &d.id),
-                "decision": d,
-            })
-        })
+        .map(|(s, d)| decision_entry_json(*s, d))
         .collect();
     println!("{}", serde_json::to_string_pretty(&list)?);
     Ok(())
+}
+
+/// Print the `--format json` document: the same entries as the legacy
+/// `--json` array, wrapped in the shared machine-output envelope (see
+/// [`crate::output`]). The listing itself cannot fail — genuine failures
+/// (unreadable manifests) surface as `Err` before any output — so `outcome`
+/// is always `"clean"`.
+fn print_decisions_document(rows: &[(ManifestScope, Decision)]) -> anyhow::Result<()> {
+    let decisions: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(s, d)| decision_entry_json(*s, d))
+        .collect();
+    print_document(&serde_json::json!({
+        "format_version": FORMAT_VERSION,
+        "command": "inspect",
+        "outcome": "clean",
+        "summary": { "decisions": rows.len() },
+        "decisions": decisions,
+    }))
 }
 
 // ── `bock inspect air` ───────────────────────────────────────────────────────
@@ -886,7 +919,7 @@ fn failure_to_json(failure: &AirFailure) -> serde_json::Value {
             let (line, col) = failure
                 .file
                 .as_ref()
-                .map(|(_, content)| line_col_of(content, d.span.start))
+                .map(|(_, content)| byte_to_line_col(content, d.span.start))
                 .unwrap_or((1, 1));
             serde_json::json!({
                 "severity": severity_name(d.severity),
@@ -939,28 +972,6 @@ fn print_failure(failure: &AirFailure) {
         }
         _ => eprintln!("error: {}", failure.message),
     }
-}
-
-/// Stable lowercase severity names for the JSON error object.
-fn severity_name(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
-        Severity::Info => "info",
-        Severity::Hint => "hint",
-    }
-}
-
-/// 1-based `(line, col)` of a byte offset, with the column counted in
-/// characters — mirrors [`SourceFile::line_col`] for content we hold as a
-/// plain string (failure rendering, where no `SourceFile` survives).
-fn line_col_of(content: &str, offset: usize) -> (usize, usize) {
-    let clamped = offset.min(content.len());
-    let prefix = &content[..clamped];
-    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
-    let line_start = prefix.rfind('\n').map_or(0, |i| i + 1);
-    let col = prefix[line_start..].chars().count() + 1;
-    (line, col)
 }
 
 // ── Small helpers ────────────────────────────────────────────────────────────
@@ -1316,18 +1327,5 @@ mod tests {
         assert_eq!(diags[0]["span"]["col"], 4);
         // No tree fields on a failure object.
         assert!(json.get("kind").is_none());
-    }
-
-    #[test]
-    fn line_col_of_matches_source_file_semantics() {
-        let content = "ab\ncd\n";
-        assert_eq!(line_col_of(content, 0), (1, 1));
-        assert_eq!(line_col_of(content, 2), (1, 3));
-        assert_eq!(line_col_of(content, 3), (2, 1));
-        assert_eq!(line_col_of(content, 4), (2, 2));
-        // Past the end clamps to the end.
-        assert_eq!(line_col_of(content, 999), (3, 1));
-        // Column counts characters, not bytes.
-        assert_eq!(line_col_of("é_x", 3), (1, 3));
     }
 }

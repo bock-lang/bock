@@ -36,6 +36,10 @@ use bock_types::{
     TypeChecker,
 };
 
+use crate::output::{
+    byte_to_line_col, diagnostic_json, print_document, OutputFormat, FORMAT_VERSION,
+};
+
 /// A v1 aspect of analysis that `bock check --only=<aspect>` can select.
 ///
 /// Per spec §20.1.1, v1 ships exactly two aspects. `lint` is a v1.x aspect
@@ -173,6 +177,10 @@ pub struct CheckOptions {
     /// and the check still exits clean. When `true`, those gaps become errors
     /// and the check fails. Mirrors `bock build --strict`.
     pub strict: bool,
+    /// Output format (`--format`): `human` renders diagnostics to stderr as
+    /// they surface; `json` collects them and emits one machine-readable
+    /// JSON document on stdout (see [`crate::output`]).
+    pub format: OutputFormat,
 }
 
 impl CheckOptions {
@@ -196,6 +204,7 @@ impl Default for CheckOptions {
             aspects: AspectSelection::All,
             brief: false,
             strict: false,
+            format: OutputFormat::Human,
         }
     }
 }
@@ -245,6 +254,95 @@ impl CheckOutcome {
     }
 }
 
+/// Destination for surfaced diagnostics.
+///
+/// The human format renders immediately to stderr as diagnostics surface,
+/// preserving the streaming behavior; json collects every surfaced
+/// diagnostic so [`run`] can emit them inside the single end-of-run JSON
+/// document. Both consume the same structured [`Diagnostic`] values — the
+/// JSON is serialized from the diagnostics themselves, never re-parsed from
+/// rendered text.
+enum DiagnosticSink {
+    /// Render to stderr (rich by default, one-line with `--brief`).
+    Human {
+        /// Whether `--brief` suppressed the source-context snippets.
+        brief: bool,
+    },
+    /// Collect serialized diagnostics for the end-of-run document. Nothing
+    /// else may write to stdout in this mode.
+    Json {
+        /// The serialized diagnostics, in surfacing order.
+        diagnostics: Vec<serde_json::Value>,
+    },
+}
+
+impl DiagnosticSink {
+    fn new(options: &CheckOptions) -> Self {
+        match options.format {
+            OutputFormat::Human => DiagnosticSink::Human {
+                brief: options.brief,
+            },
+            OutputFormat::Json => DiagnosticSink::Json {
+                diagnostics: Vec::new(),
+            },
+        }
+    }
+
+    /// Surface diagnostics located in one file. `source` is the file content
+    /// backing the diagnostics' spans.
+    fn emit(&mut self, diagnostics: &[Diagnostic], filename: &str, source: &str) {
+        match self {
+            DiagnosticSink::Human { brief } => {
+                print_diagnostics(diagnostics, filename, source, !*brief);
+            }
+            DiagnosticSink::Json { diagnostics: acc } => {
+                acc.extend(
+                    diagnostics
+                        .iter()
+                        .map(|d| diagnostic_json(d, Some(filename), Some(source))),
+                );
+            }
+        }
+    }
+
+    /// Surface diagnostics that have no backing source file (e.g. a module
+    /// cycle that cannot be pinned to a specific `use` edge).
+    fn emit_unlocated(&mut self, diagnostics: &[Diagnostic]) {
+        match self {
+            DiagnosticSink::Human { .. } => eprintln!("{}", render_codeonly(diagnostics)),
+            DiagnosticSink::Json { diagnostics: acc } => {
+                acc.extend(diagnostics.iter().map(|d| diagnostic_json(d, None, None)));
+            }
+        }
+    }
+}
+
+/// Build the `bock check --format json` document (see [`crate::output`] for
+/// the shared envelope contract).
+fn check_document(
+    outcome: CheckOutcome,
+    file_count: usize,
+    diagnostics: &[serde_json::Value],
+) -> serde_json::Value {
+    let count = |severity: &str| {
+        diagnostics
+            .iter()
+            .filter(|d| d["severity"] == severity)
+            .count()
+    };
+    serde_json::json!({
+        "format_version": FORMAT_VERSION,
+        "command": "check",
+        "outcome": if outcome.is_clean() { "clean" } else { "failed" },
+        "summary": {
+            "files": file_count,
+            "errors": count("error"),
+            "warnings": count("warning"),
+        },
+        "diagnostics": diagnostics,
+    })
+}
+
 /// Run the check command on the given file paths with the specified options.
 ///
 /// Uses the multi-file pipeline: parse all → dependency sort → compile in order
@@ -254,6 +352,32 @@ impl CheckOutcome {
 /// outcome is testable and the exit-code decision is centralized in `main`. The
 /// `Err` arm is reserved for unexpected I/O failures surfaced via `?`.
 pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckOutcome> {
+    let mut sink = DiagnosticSink::new(options);
+    let (outcome, file_count) = run_pipeline(files, options, &mut sink)?;
+    match sink {
+        DiagnosticSink::Human { .. } => {
+            if outcome.is_clean() {
+                let label = if file_count == 1 { "file" } else { "files" };
+                println!("check: {file_count} {label} checked, no errors.");
+            }
+        }
+        DiagnosticSink::Json { diagnostics } => {
+            print_document(&check_document(outcome, file_count, &diagnostics))?;
+        }
+    }
+    Ok(outcome)
+}
+
+/// The check pipeline proper: everything [`run`] does except the end-of-run
+/// output (the clean summary line or the JSON document). Diagnostics surface
+/// through `sink`; incidental messages (an unreadable input, "no files")
+/// still go to stderr in both formats. Returns the outcome plus the number
+/// of input files, for the summary.
+fn run_pipeline(
+    files: Vec<PathBuf>,
+    options: &CheckOptions,
+    sink: &mut DiagnosticSink,
+) -> anyhow::Result<(CheckOutcome, usize)> {
     let files = if files.is_empty() {
         discover_bock_files(".")?
     } else {
@@ -262,7 +386,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
 
     if files.is_empty() {
         eprintln!("No .bock files found.");
-        return Ok(CheckOutcome::Failed);
+        return Ok((CheckOutcome::Failed, 0));
     }
 
     let mut found_errors = false;
@@ -277,21 +401,21 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
     // Each source's own `module core.<name>` declaration derives its module id,
     // so there is no special-casing in name resolution or the type checker.
     for src in crate::stdlib::core_sources() {
-        match parse_stdlib_source(&src, &mut source_map, !options.brief) {
+        match parse_stdlib_source(&src, &mut source_map, sink) {
             Ok(pf) => parsed_files.push(pf),
             Err(()) => found_errors = true,
         }
     }
 
     for file_path in &files {
-        match parse_file(file_path, &mut source_map, !options.brief) {
+        match parse_file(file_path, &mut source_map, sink) {
             Ok(pf) => parsed_files.push(pf),
             Err(()) => found_errors = true,
         }
     }
 
     if found_errors {
-        return Ok(CheckOutcome::Failed);
+        return Ok((CheckOutcome::Failed, files.len()));
     }
 
     // ── Phase 2: Build dependency graph ───────────────────────────────────────
@@ -327,14 +451,8 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
     let topo_order = match dep_graph.topological_order() {
         Some(order) => order,
         None => {
-            report_module_cycle(
-                &dep_graph,
-                &id_to_index,
-                &parsed_files,
-                &source_map,
-                options,
-            );
-            return Ok(CheckOutcome::Failed);
+            report_module_cycle(&dep_graph, &id_to_index, &parsed_files, &source_map, sink);
+            return Ok((CheckOutcome::Failed, files.len()));
         }
     };
 
@@ -358,12 +476,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
 
         if has_errors(&all_diagnostics) {
             let to_print = diagnostics_to_surface(&all_diagnostics, pf.is_stdlib);
-            print_diagnostics(
-                &to_print,
-                &pf.filename,
-                &source_file.content,
-                !options.brief,
-            );
+            sink.emit(&to_print, &pf.filename, &source_file.content);
             found_errors = true;
             continue;
         }
@@ -449,12 +562,7 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
         // every diagnostic.
         let to_print = diagnostics_to_surface(&all_diagnostics, pf.is_stdlib);
         if !to_print.is_empty() {
-            print_diagnostics(
-                &to_print,
-                &pf.filename,
-                &source_file.content,
-                !options.brief,
-            );
+            sink.emit(&to_print, &pf.filename, &source_file.content);
         }
 
         if module_has_errors {
@@ -466,14 +574,12 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
         }
     }
 
-    if found_errors {
-        return Ok(CheckOutcome::Failed);
-    }
-
-    let file_count = files.len();
-    let label = if file_count == 1 { "file" } else { "files" };
-    println!("check: {file_count} {label} checked, no errors.");
-    Ok(CheckOutcome::Clean)
+    let outcome = if found_errors {
+        CheckOutcome::Failed
+    } else {
+        CheckOutcome::Clean
+    };
+    Ok((outcome, files.len()))
 }
 
 /// A successfully parsed source file, ready for compilation.
@@ -493,11 +599,12 @@ struct ParsedFile {
 
 /// Lex and parse a single file, adding it to the shared [`SourceMap`].
 ///
-/// Returns `Err(())` if lexing or parsing produced errors (already printed).
+/// Returns `Err(())` if lexing or parsing produced errors (already surfaced
+/// through `sink`).
 fn parse_file(
     path: &Path,
     source_map: &mut SourceMap,
-    show_context: bool,
+    sink: &mut DiagnosticSink,
 ) -> Result<ParsedFile, ()> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -519,7 +626,7 @@ fn parse_file(
     collect_diagnostics(&mut diags, lexer.diagnostics());
 
     if has_errors(&diags) {
-        print_diagnostics(&diags, &filename, &source_file.content, show_context);
+        sink.emit(&diags, &filename, &source_file.content);
         return Err(());
     }
 
@@ -529,7 +636,7 @@ fn parse_file(
     collect_diagnostics(&mut diags, parser.diagnostics());
 
     if has_errors(&diags) {
-        print_diagnostics(&diags, &filename, &source_file.content, show_context);
+        sink.emit(&diags, &filename, &source_file.content);
         return Err(());
     }
 
@@ -549,13 +656,14 @@ fn parse_file(
 /// the shared [`SourceMap`] under its logical (repo-relative) path so any
 /// diagnostic renders against a stable, recognizable location.
 ///
-/// Returns `Err(())` if lexing or parsing produced errors (already printed). A
-/// parse error here is a compiler-internal defect (the embedded sources are
-/// fixed at build time), so it surfaces with the logical path for diagnosis.
+/// Returns `Err(())` if lexing or parsing produced errors (already surfaced
+/// through `sink`). A parse error here is a compiler-internal defect (the
+/// embedded sources are fixed at build time), so it surfaces with the logical
+/// path for diagnosis.
 fn parse_stdlib_source(
     src: &crate::stdlib::StdlibSource,
     source_map: &mut SourceMap,
-    show_context: bool,
+    sink: &mut DiagnosticSink,
 ) -> Result<ParsedFile, ()> {
     let filename = src.logical_path.display().to_string();
     let file_id = source_map.add_file(src.logical_path.clone(), src.source.clone());
@@ -569,7 +677,7 @@ fn parse_stdlib_source(
     collect_diagnostics(&mut diags, lexer.diagnostics());
 
     if has_errors(&diags) {
-        print_diagnostics(&diags, &filename, &source_file.content, show_context);
+        sink.emit(&diags, &filename, &source_file.content);
         return Err(());
     }
 
@@ -579,7 +687,7 @@ fn parse_stdlib_source(
     collect_diagnostics(&mut diags, parser.diagnostics());
 
     if has_errors(&diags) {
-        print_diagnostics(&diags, &filename, &source_file.content, show_context);
+        sink.emit(&diags, &filename, &source_file.content);
         return Err(());
     }
 
@@ -702,7 +810,7 @@ fn report_module_cycle(
     id_to_index: &HashMap<String, usize>,
     parsed_files: &[ParsedFile],
     source_map: &SourceMap,
-    options: &CheckOptions,
+    sink: &mut DiagnosticSink,
 ) {
     let code = bock_errors::DiagnosticCode {
         prefix: 'E',
@@ -719,7 +827,7 @@ fn report_module_cycle(
             bock_errors::Span::dummy(),
         );
         let diags: Vec<Diagnostic> = bag.iter().cloned().collect();
-        eprintln!("{}", render_codeonly(&diags));
+        sink.emit_unlocated(&diags);
         return;
     };
 
@@ -771,15 +879,15 @@ fn report_module_cycle(
                 .find(|&&i| &parsed_files[i].filename == filename)
             {
                 let source = &source_map.get_file(parsed_files[idx].file_id).content;
-                print_diagnostics(&diags, filename, source, !options.brief);
+                sink.emit(&diags, filename, source);
             } else {
-                eprintln!("{}", render_codeonly(&diags));
+                sink.emit_unlocated(&diags);
             }
         }
         None => {
             // No parsed participant carried the edge (e.g. a cycle entirely in
             // synthetic ids); still emit the coded, named diagnostic.
-            eprintln!("{}", render_codeonly(&diags));
+            sink.emit_unlocated(&diags);
         }
     }
 }
@@ -801,21 +909,6 @@ fn render_codeonly(diagnostics: &[Diagnostic]) -> String {
         }
     }
     out.trim_end().to_string()
-}
-
-/// Convert a byte offset into `source` to a 1-indexed `(line, column)`, with
-/// the column counting Unicode scalar values (characters), not bytes.
-///
-/// Mirrors `bock_source::SourceFile::line_col` for content held as a `&str`;
-/// kept local so brief-mode rendering does not require a `SourceFile`. Offsets
-/// past the end clamp to the end of the file.
-fn byte_to_line_col(source: &str, offset: usize) -> (usize, usize) {
-    let clamped = offset.min(source.len());
-    let prefix = &source[..clamped];
-    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
-    let line_start = prefix.rfind('\n').map_or(0, |i| i + 1);
-    let col = prefix[line_start..].chars().count() + 1;
-    (line, col)
 }
 
 /// Print diagnostics, optionally with source context.
@@ -968,20 +1061,6 @@ pub(crate) fn register_type_builtins(checker: &mut TypeChecker) {
 mod tests {
     use super::*;
     use std::fs;
-
-    #[test]
-    fn byte_to_line_col_counts_chars_not_bytes() {
-        // ASCII: identity-ish, 1-indexed.
-        let s = "abc\ndef";
-        assert_eq!(byte_to_line_col(s, 0), (1, 1));
-        assert_eq!(byte_to_line_col(s, 2), (1, 3));
-        assert_eq!(byte_to_line_col(s, 4), (2, 1)); // first char of line 2
-                                                    // Multibyte: 'é' is 2 bytes — the column must count it as one char.
-        let m = "fée x"; // f(0) é(1-2) e(3) ' '(4) x(5)
-        assert_eq!(byte_to_line_col(m, 5), (1, 5)); // 'x' is column 5, not 6
-                                                    // Past the end clamps.
-        assert_eq!(byte_to_line_col(m, 999), (1, 6));
-    }
 
     #[test]
     fn brief_diagnostic_renders_line_col_not_byte_offsets() {
@@ -1143,6 +1222,47 @@ mod tests {
         assert!(!CheckOutcome::Failed.is_clean());
     }
 
+    // ── --format json (machine output) ─────────────────────────────────────
+
+    #[test]
+    fn run_json_format_preserves_outcomes() {
+        // The format only changes where output goes; the outcome (and thus
+        // the exit code mapped in `main`) is identical to human mode.
+        let dir = tempfile::tempdir().unwrap();
+        let ok = dir.path().join("ok.bock");
+        fs::write(&ok, "fn add(a: Int, b: Int) -> Int { a + b }\n").unwrap();
+        let bad = dir.path().join("bad.bock");
+        fs::write(&bad, "fn { broken\n").unwrap();
+
+        let options = CheckOptions {
+            format: OutputFormat::Json,
+            ..Default::default()
+        };
+        assert_eq!(run(vec![ok], &options).unwrap(), CheckOutcome::Clean);
+        assert_eq!(run(vec![bad], &options).unwrap(), CheckOutcome::Failed);
+    }
+
+    #[test]
+    fn check_document_counts_by_severity() {
+        let diagnostics = vec![
+            serde_json::json!({"severity": "error"}),
+            serde_json::json!({"severity": "error"}),
+            serde_json::json!({"severity": "warning"}),
+        ];
+        let doc = check_document(CheckOutcome::Failed, 3, &diagnostics);
+        assert_eq!(doc["format_version"], FORMAT_VERSION);
+        assert_eq!(doc["command"], "check");
+        assert_eq!(doc["outcome"], "failed");
+        assert_eq!(doc["summary"]["files"], 3);
+        assert_eq!(doc["summary"]["errors"], 2);
+        assert_eq!(doc["summary"]["warnings"], 1);
+        assert_eq!(doc["diagnostics"].as_array().unwrap().len(), 3);
+
+        let clean = check_document(CheckOutcome::Clean, 1, &[]);
+        assert_eq!(clean["outcome"], "clean");
+        assert!(clean["diagnostics"].as_array().unwrap().is_empty());
+    }
+
     // ── Aspect / --only parsing (§20.1.1) ─────────────────────────────────
 
     #[test]
@@ -1246,6 +1366,7 @@ mod tests {
             aspects: AspectSelection::Only([Aspect::Types].into_iter().collect()),
             brief: false,
             strict: false,
+            format: OutputFormat::Human,
         };
         let outcome = run(vec![path], &options).unwrap();
         assert_eq!(outcome, CheckOutcome::Clean);
@@ -1261,6 +1382,7 @@ mod tests {
             aspects: AspectSelection::Only([Aspect::Context].into_iter().collect()),
             brief: false,
             strict: false,
+            format: OutputFormat::Human,
         };
         let outcome = run(vec![path], &options).unwrap();
         assert_eq!(outcome, CheckOutcome::Clean);
@@ -1276,6 +1398,7 @@ mod tests {
             aspects: AspectSelection::All,
             brief: true,
             strict: false,
+            format: OutputFormat::Human,
         };
         let outcome = run(vec![path], &options).unwrap();
         assert_eq!(outcome, CheckOutcome::Clean);
@@ -1295,6 +1418,7 @@ mod tests {
             aspects: AspectSelection::All,
             brief: false,
             strict: true,
+            format: OutputFormat::Human,
         };
         assert_eq!(prod.strictness(), Strictness::Production);
     }
@@ -1356,6 +1480,7 @@ public fn add(a: Int, b: Int) -> Int { a + b }
             aspects: AspectSelection::All,
             brief: false,
             strict: true,
+            format: OutputFormat::Human,
         };
         let outcome = run(vec![path], &options).unwrap();
         assert_eq!(
@@ -1379,6 +1504,7 @@ public fn add(a: Int, b: Int) -> Int { a + b }
             aspects: AspectSelection::Only([Aspect::Context].into_iter().collect()),
             brief: false,
             strict: false,
+            format: OutputFormat::Human,
         };
         assert_eq!(
             run(vec![path.clone()], &dev).unwrap(),
@@ -1392,6 +1518,7 @@ public fn add(a: Int, b: Int) -> Int { a + b }
             aspects: AspectSelection::Only([Aspect::Context].into_iter().collect()),
             brief: false,
             strict: true,
+            format: OutputFormat::Human,
         };
         assert_eq!(
             run(vec![path], &strict).unwrap(),
@@ -1413,6 +1540,7 @@ public fn add(a: Int, b: Int) -> Int { a + b }
             aspects: AspectSelection::Only([Aspect::Types].into_iter().collect()),
             brief: false,
             strict: true,
+            format: OutputFormat::Human,
         };
         assert_eq!(
             run(vec![path], &options).unwrap(),

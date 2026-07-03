@@ -3,6 +3,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use crate::output::OutputFormat;
+
 mod build;
 mod cache_cmd;
 mod check;
@@ -11,6 +13,7 @@ mod doc;
 mod fmt;
 mod inspect;
 mod new;
+mod output;
 #[path = "override.rs"]
 mod override_cmd;
 mod pin;
@@ -115,6 +118,11 @@ enum Command {
         /// non-zero exit. Mirrors `bock build --strict`.
         #[arg(long)]
         strict: bool,
+
+        /// Output format: `human` renders diagnostics to stderr; `json`
+        /// emits one machine-readable JSON document on stdout.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
     },
     /// Run tests.
     Test {
@@ -124,6 +132,11 @@ enum Command {
 
         /// Paths to .bock files to test. If omitted, discovers all .bock files recursively.
         files: Vec<PathBuf>,
+
+        /// Output format: `human` renders per-test results; `json` emits one
+        /// machine-readable JSON document on stdout.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
     },
     /// Format Bock source files.
     Fmt {
@@ -164,6 +177,12 @@ enum Command {
         /// Emit machine-readable JSON instead of the human table.
         #[arg(long)]
         json: bool,
+
+        /// Output format: `human` prints the table; `json` emits the
+        /// machine-output envelope (the legacy `--json` flag emits the bare
+        /// decision array instead).
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human, conflicts_with = "json")]
+        format: OutputFormat,
     },
     /// Pin AI decisions in the manifest so they replay deterministically.
     Pin {
@@ -312,6 +331,12 @@ enum InspectCommand {
         /// Emit machine-readable JSON instead of the human table.
         #[arg(long)]
         json: bool,
+
+        /// Output format: `human` prints the table; `json` emits the
+        /// machine-output envelope (the legacy `--json` flag emits the bare
+        /// decision array instead).
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human, conflicts_with = "json")]
+        format: OutputFormat,
     },
     /// Show one decision in detail. Accepts prefixed or bare ids.
     Decision {
@@ -348,6 +373,12 @@ enum InspectCommand {
         /// Emit the machine-readable JSON tree instead of the human view.
         #[arg(long)]
         json: bool,
+
+        /// Output format: `json` is an alias for `--json` here — it emits
+        /// the same established AIR tree document, not the envelope the
+        /// other commands use.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human, conflicts_with = "json")]
+        format: OutputFormat,
     },
 }
 
@@ -487,12 +518,14 @@ async fn main() -> anyhow::Result<ExitCode> {
             only,
             brief,
             strict,
+            format,
         } => match check::AspectSelection::from_raw(&only) {
             Ok(aspects) => {
                 let options = check::CheckOptions {
                     aspects,
                     brief,
                     strict,
+                    format,
                 };
                 if !check::run(files, &options)?.is_clean() {
                     exit_code = ExitCode::FAILURE;
@@ -506,7 +539,15 @@ async fn main() -> anyhow::Result<ExitCode> {
                 exit_code = ExitCode::FAILURE;
             }
         },
-        Command::Test { filter, files } => test::run(filter, files).await?,
+        Command::Test {
+            filter,
+            files,
+            format,
+        } => {
+            if !test::run(filter, files, format).await?.is_clean() {
+                exit_code = ExitCode::FAILURE;
+            }
+        }
         Command::Fmt { check } => fmt::run(check)?,
         Command::Repl => repl::run().await?,
         Command::Inspect {
@@ -517,6 +558,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             module,
             type_filter,
             json,
+            format,
         } => {
             let cmd = command.unwrap_or(InspectCommand::Decisions {
                 runtime,
@@ -525,6 +567,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 module,
                 type_filter,
                 json,
+                format,
             });
             // `inspect air` carries an exit-code contract (0 = lowered
             // cleanly, 1 = frontend error), mirroring `bock check`; the
@@ -622,6 +665,7 @@ fn run_inspect(cmd: InspectCommand) -> anyhow::Result<check::CheckOutcome> {
             module,
             type_filter,
             json,
+            format,
         } => {
             let scope = if all {
                 inspect::ScopeFilter::All
@@ -636,6 +680,7 @@ fn run_inspect(cmd: InspectCommand) -> anyhow::Result<check::CheckOutcome> {
                 module_filter: module,
                 type_filter,
                 json,
+                format,
             };
             inspect::run_decisions(&options).map(|()| check::CheckOutcome::Clean)
         }
@@ -648,7 +693,15 @@ fn run_inspect(cmd: InspectCommand) -> anyhow::Result<check::CheckOutcome> {
         InspectCommand::Rules { target } => {
             inspect::run_rules(target.as_deref()).map(|()| check::CheckOutcome::Clean)
         }
-        InspectCommand::Air { file, json } => inspect::run_air(std::path::Path::new(&file), json),
+        InspectCommand::Air { file, json, format } => {
+            // `--format json` is an alias for the established `--json` tree
+            // contract on this subcommand (the flags conflict, so at most
+            // one is set).
+            inspect::run_air(
+                std::path::Path::new(&file),
+                json || format == OutputFormat::Json,
+            )
+        }
     }
 }
 
@@ -683,5 +736,72 @@ mod tests {
         let cli = Cli::try_parse_from(["bock", "check", "main.bock"])
             .expect("`bock check` should parse cleanly");
         assert!(matches!(cli.command, Command::Check { strict: false, .. }));
+    }
+
+    #[test]
+    fn check_format_defaults_to_human_and_accepts_json() {
+        let cli = Cli::try_parse_from(["bock", "check", "main.bock"])
+            .expect("`bock check` should parse cleanly");
+        assert!(matches!(
+            cli.command,
+            Command::Check {
+                format: OutputFormat::Human,
+                ..
+            }
+        ));
+
+        let cli = Cli::try_parse_from(["bock", "check", "--format", "json", "main.bock"])
+            .expect("`bock check --format json` should parse cleanly");
+        assert!(matches!(
+            cli.command,
+            Command::Check {
+                format: OutputFormat::Json,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn check_format_rejects_unknown_values() {
+        assert!(Cli::try_parse_from(["bock", "check", "--format", "xml", "main.bock"]).is_err());
+    }
+
+    #[test]
+    fn test_command_accepts_format_json() {
+        let cli = Cli::try_parse_from(["bock", "test", "--format", "json"])
+            .expect("`bock test --format json` should parse cleanly");
+        assert!(matches!(
+            cli.command,
+            Command::Test {
+                format: OutputFormat::Json,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn inspect_format_conflicts_with_legacy_json() {
+        // On the surfaces where both exist, `--format` and the legacy
+        // `--json` are mutually exclusive rather than silently precedenced.
+        assert!(Cli::try_parse_from(["bock", "inspect", "--json", "--format", "json"]).is_err());
+        assert!(Cli::try_parse_from([
+            "bock", "inspect", "air", "f.bock", "--json", "--format", "json"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn inspect_air_accepts_format_json_alias() {
+        let cli = Cli::try_parse_from(["bock", "inspect", "air", "f.bock", "--format", "json"])
+            .expect("`bock inspect air --format json` should parse cleanly");
+        let Command::Inspect {
+            command: Some(InspectCommand::Air { json, format, .. }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected an inspect air command");
+        };
+        assert!(!json);
+        assert_eq!(format, OutputFormat::Json);
     }
 }
