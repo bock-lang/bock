@@ -156,7 +156,7 @@ jobs:
                 next+=("$pkg")
               fi
             done
-            pending=("${next[@]:-}")
+            pending=("${next[@]}")
             [ "${#pending[@]}" -gt 0 ] && [ "$progressed" -eq 0 ] && {
               echo "no progress in pass $pass; failing with last errors:" >&2
               for pkg in "${pending[@]}"; do
@@ -165,7 +165,7 @@ jobs:
               exit 1
             }
           done
-          if [ "${#pending[@]}" -gt 0 ] && [ -n "${pending[0]}" ]; then
+          if [ "${#pending[@]}" -gt 0 ]; then
             echo "unpublished after all passes: ${pending[*]}" >&2
             exit 1
           fi
