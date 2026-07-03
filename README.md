@@ -27,7 +27,7 @@ service. The Bock runtime supports development; it does not ship.
 
 ## Status
 
-Bock is pre-1.0 and under active development. The compiler pipeline runs
+Bock is at v1.0 and under active development. The compiler pipeline runs
 end to end: the CLI (`bock`) scaffolds, checks, builds, runs, tests, and
 formats projects; the interpreter executes source directly for fast
 iteration; codegen emits all five targets as per-module native source
@@ -137,7 +137,7 @@ The full walkthrough is at
 
 ## Contributing
 
-Bock is pre-1.0 and contributions of every size are welcome. Start with
+Bock is at v1.0 and contributions of every size are welcome. Start with
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup and the workflow, and
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for a tour of the compiler pipeline.
 Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).

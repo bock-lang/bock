@@ -1,6 +1,6 @@
 # Contributing to Bock
 
-Bock is pre-1.0 and contributions of every size are welcome — bug
+Bock is at v1.0 and contributions of every size are welcome — bug
 reports, doc fixes, conformance fixtures, and language work alike.
 
 ## Before You Start
