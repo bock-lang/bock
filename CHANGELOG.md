@@ -8,6 +8,7 @@ _The Unreleased section is generated from merged-PR history by `tools/scripts/ge
 
 ## v1.0.0 — 2026-07-02
 
+- docs: drop pre-1.0 status claims for the v1.0 release (#422)
 - fix(release): aarch64 cross toolchain + pin @types/vscode to the engines floor (#414)
 - feat(website): render the locked /use-cases wedge page (#412)
 - fix(website): revert astro 7 / cloudflare 14 majors; build docs+website on PRs (#410)
