@@ -1,0 +1,76 @@
+name: Publish crates (tolerant)
+
+# Recovery + completion path for crates.io publishing. cargo's
+# `publish --workspace` hard-errors when any member's exact version
+# already exists on the index (seen live: a partial v1.0.0 publish left
+# 8 of 17 crates unpublished and every rerun died on the first
+# already-published crate). This workflow publishes per-crate with a
+# fixed-point loop: each pass publishes whatever has its dependencies
+# satisfied, treats "already exists" as success, and repeats until done.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag (or ref) to publish from'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish workspace crates from ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Publish all workspace crates (skip already-published)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Workspace members with publish != false, unordered; the
+          # fixed-point loop discovers dependency order by retrying.
+          mapfile -t pkgs < <(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | .name')
+          echo "planning ${#pkgs[@]} crates: ${pkgs[*]}"
+          pending=("${pkgs[@]}")
+          for pass in 1 2 3 4 5 6 7 8 9 10; do
+            [ "${#pending[@]}" -eq 0 ] && break
+            echo "=== pass $pass: ${#pending[@]} pending ==="
+            next=()
+            progressed=0
+            for pkg in "${pending[@]}"; do
+              if out=$(cargo publish -p "$pkg" --no-verify 2>&1); then
+                echo "published $pkg"
+                progressed=1
+              elif grep -q "already exists" <<<"$out"; then
+                echo "skip $pkg (already on the index)"
+                progressed=1
+              else
+                echo "defer $pkg"
+                next+=("$pkg")
+              fi
+            done
+            pending=("${next[@]:-}")
+            [ "${#pending[@]}" -gt 0 ] && [ "$progressed" -eq 0 ] && {
+              echo "no progress in pass $pass; failing with last errors:" >&2
+              for pkg in "${pending[@]}"; do
+                cargo publish -p "$pkg" --no-verify 2>&1 | tail -5 >&2 || true
+              done
+              exit 1
+            }
+          done
+          if [ "${#pending[@]}" -gt 0 ] && [ -n "${pending[0]}" ]; then
+            echo "unpublished after all passes: ${pending[*]}" >&2
+            exit 1
+          fi
+          echo "all crates published or already present"

@@ -124,7 +124,52 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-publish-
             ${{ runner.os }}-cargo-
-      - run: cargo publish --workspace --token ${{ secrets.CRATES_IO_TOKEN }}
+      # Tolerant per-crate publish: cargo's `publish --workspace` hard-errors
+      # when any member's exact version already exists on the index, which
+      # makes partial-publish recovery (reruns) impossible. Fixed-point loop:
+      # each pass publishes whatever has its deps satisfied, "already exists"
+      # counts as done. Mirrors .github/workflows/publish-crates.yml.
+      - name: Publish workspace crates (skip already-published)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t pkgs < <(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | .name')
+          echo "planning ${#pkgs[@]} crates: ${pkgs[*]}"
+          pending=("${pkgs[@]}")
+          for pass in 1 2 3 4 5 6 7 8 9 10; do
+            [ "${#pending[@]}" -eq 0 ] && break
+            echo "=== pass $pass: ${#pending[@]} pending ==="
+            next=()
+            progressed=0
+            for pkg in "${pending[@]}"; do
+              if out=$(cargo publish -p "$pkg" --no-verify 2>&1); then
+                echo "published $pkg"
+                progressed=1
+              elif grep -q "already exists" <<<"$out"; then
+                echo "skip $pkg (already on the index)"
+                progressed=1
+              else
+                echo "defer $pkg"
+                next+=("$pkg")
+              fi
+            done
+            pending=("${next[@]:-}")
+            [ "${#pending[@]}" -gt 0 ] && [ "$progressed" -eq 0 ] && {
+              echo "no progress in pass $pass; failing with last errors:" >&2
+              for pkg in "${pending[@]}"; do
+                cargo publish -p "$pkg" --no-verify 2>&1 | tail -5 >&2 || true
+              done
+              exit 1
+            }
+          done
+          if [ "${#pending[@]}" -gt 0 ] && [ -n "${pending[0]}" ]; then
+            echo "unpublished after all passes: ${pending[*]}" >&2
+            exit 1
+          fi
+          echo "all crates published or already present"
 
   publish-extension:
     name: publish to vs code marketplace
