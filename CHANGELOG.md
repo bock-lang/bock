@@ -8,6 +8,8 @@ _The Unreleased section is generated from merged-PR history by `tools/scripts/ge
 
 ## v1.0.0 — 2026-07-02
 
+- fix(release): aarch64 cross toolchain + pin @types/vscode to the engines floor (#414)
+- feat(website): render the locked /use-cases wedge page (#412)
 - fix(website): revert astro 7 / cloudflare 14 majors; build docs+website on PRs (#410)
 - release: v1.0.0 (#409)
 - chore(deps-dev): bump eslint from 10.5.0 to 10.6.0 in /extensions/vscode (#406)
