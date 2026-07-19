@@ -600,3 +600,15 @@ the wording or amend.
 
 **Awaiting:** Design pass on the seven schemas + the §20.1 `bock run` wording confirmation.
 **Status:** open
+
+**SCOPE EXTENDED 2026-07-19 (#444, fcef539):** the server now also serves **44 resources** across three tiers
+(`bock://index`, `bock://pack/<n>` + `/all`, `bock://spec/<n>`, `bock://stdlib/<module>`), so the same pass should
+cover the resource surface — where discovery quality, not plumbing, is the whole game. Judge: (e) whether the
+per-resource descriptions actually let an agent pick correctly without reading everything (an agent asking "how
+does ownership work" must land on `bock://spec/5` unaided); (f) whether `bock://index`'s tier framing — pack =
+conceptual, spec = normative and wins, stdlib = API — is the right mental model to hand an agent first; (g)
+whether `bock://pack/all` is warned off strongly enough as a ~12k-token opt-in. Still non-blocking.
+
+Related but NOT part of this pass — routed to the queue as work, not review: the bridge's first real use exposed
+that the diagnostic catalog's `spec_refs` are wrong for the entire 1xxx family (Q-catalog-spec-refs-misrouted).
+That is a data fix, not a design question.

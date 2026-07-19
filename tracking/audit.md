@@ -2916,3 +2916,55 @@ caches pruned, CI green. AWAITING OPERATOR: nothing. Design: DQ32/DQ33 (non-bloc
   the two cases definitively.
   Follow-up: pushed as #442, merged (95acb21). Worth remembering as a standing read: a tracking branch showing large
   code deletions is a base-staleness signal, not a content signal — rebase before judging.
+
+[2026-07-19 09:05 UTC] Q-mcp-pack-resources LANDED (#444, fcef539) — the bock-mcp triad is complete
+  Input: operator directed step (4) of the night-wrap sequence. Before dispatching, read the actual artifacts
+  rather than trusting the item text — and the item text turned out to be wrong.
+  Divergence found at dispatch time: the item promised four contents "read FROM the single maintained pack
+  artifact", but two of them (spec sections by §-number, per-module stdlib reference) do not live in the pack at
+  all. They live in `spec/bock-spec.md` (2776 lines, 23 sections) and `docs/src/reference/stdlib/core-*.md`
+  (11 pages) — both already-maintained artifacts with their own owners.
+  Options: (a) pack-only, honoring the clause literally; (b) all three tiers, superseding the clause.
+  Decision: (b), and the clause is explicitly rewritten on the item to the principle it should have encoded:
+  no content is authored for MCP; every resource is a view onto an artifact that already has a drift-guard.
+  Reasoning: the clause's INTENT was "no second maintained copy" — and forcing spec/stdlib content into the pack
+  to satisfy it literally would have created exactly that second copy. Serving them from their real homes honors
+  the intent while contradicting the letter. Recorded on the item so this is not re-litigated. NOTE: an earlier
+  orchestrator recommendation in this block argued pack-only on a claimed "20k+ line spec" cost — that number was
+  never measured and was wrong by ~7x; the spec is 2776 lines and splitting it is trivial. Corrected to the
+  operator before dispatch. Lesson: do not price a scope decision on an unmeasured file size.
+  Design payoff identified pre-dispatch (not in the item): `bock_explain` already returned `spec_refs` like "§10"
+  as dead strings. Serving spec sections as resources makes them resolvable, closing an agent loop
+  (diagnostic → explain → normative section). This is the strongest argument FOR the spec tier — better than
+  "completeness" — and it is why URIs key on section NUMBER, not title slug: the mapping must be mechanical.
+  Packaging trap caught at dispatch, not at release: `bock-cli` sits at `compiler/crates/bock-cli/` while the
+  sources sit at the repo root, and `cargo publish` packages only the crate dir — so `include_str!` reaching
+  upward compiles locally, passes CI, passes review, and ships a broken crate to crates.io. Runtime disk reads
+  fail identically for `cargo install` users. Directed the session to the `extensions/vscode/assets/` precedent
+  (generated in-tree copy + sync script + CI drift job) — the same job that went red on #441 hours earlier.
+  Verification (orchestrator re-verified independently; engineer self-report treated as a claim, not evidence):
+  fmt/clippy/test (64 suites, 0 FAILED)/doc/mdbook all exit 0; `cargo package -p bock --list` shows 13 assets AND
+  `cargo package -p bock` BUILDS the tarball (exit 0) — the latter is the only check that proves no include_str!
+  escapes the crate, and it is the one a session extending its own guard cannot be trusted to self-report; the
+  drift guard exercised in both directions by hand (clean → in sync, tracked edit → detected, untracked file →
+  detected); independent end-to-end JSON-RPC drive (44 resources, min description 56 chars, reads on all three
+  tiers, unknown URI → -32002). Diff scope confirmed = owned files only. CI 20/20. Merged squash; worktree pruned.
+  Follow-up: 2 FOUNDs → queue. Q-catalog-spec-refs-misrouted is the significant one (below).
+
+[2026-07-19 09:05 UTC] The bridge earned its keep immediately — and raised the cost of pre-existing bad data
+  Input: during the independent end-to-end smoke, drove `bock_explain E1007` ("symbol is private") and got back
+  `bock://spec/10` — the Effect System. Wrong section, and worth chasing rather than waving through.
+  Investigation: confirmed `bock-errors/` is untouched by #444 (pre-existing, not session-caused), then mapped the
+  whole catalog's spec_refs distribution rather than reporting the single anecdote. The entire 1xxx family is
+  misrouted: lexer codes → §1 *Introduction* / §1.3 *Supported Targets* / §1.2 *Design Goals* (should be §3
+  Lexical Structure and its subsections); resolver + module codes → §10 *Effect System* (should be §12 Module
+  System). 11 of 77 entries. Verified §1.2/§1.3 and §3.x/§12.x titles against the spec rather than assuming.
+  Decision: file as FOUND (Q-catalog-spec-refs-misrouted, MED), do NOT fix in-session.
+  Reasoning: `bock-errors/` was outside the session's declared ownership; a mid-session scope jump into a
+  different crate produces a PR nobody can review cleanly, and the ownership discipline exists precisely to stop
+  that. Filed at MED rather than LOW because #444 changed its severity: dead strings nobody followed became live
+  navigation that actively misdirects agents. Marked as a prerequisite for R8 dogfooding — dogfooding against
+  misrouted refs measures the wrong thing.
+  Standing lesson: making latent data navigable converts silent wrongness into loud wrongness. Expect the first
+  real consumer of any previously-decorative field to surface data bugs, and budget for that rather than treating
+  it as scope creep in the consuming PR.

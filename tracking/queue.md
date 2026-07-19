@@ -12,7 +12,23 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-07-19 07:10 — ★ `bock mcp` IS SHIPPED. The agent-facing ecosystem's lead item is done.**
+_**Last reconciled 2026-07-19 09:05 — ★★ THE bock-mcp TRIAD IS COMPLETE. All three brief items have landed.**
+Q-mcp-pack-resources → **#444 (fcef539)**: 44 resources across three tiers (pack primary/conceptual, spec
+normative, stdlib API reference), plus the `bock_explain` → `bock://spec/<n>` bridge that makes the catalog's
+previously-dead `spec_refs` navigable. That closes the 2026-07-03 brief's full routing — Q-cli-format-json (#427),
+Q-mcp-server (#441), Q-mcp-pack-resources (#444) — and the 2026-07-03 night-wrap sequence end to end.
+**The governing principle, now settled and recorded on the item: no content is authored for MCP — every resource
+is a view onto an artifact that already has an owner and a drift-guard.** The item's original "single pack
+artifact" clause was wrong (two of its four named contents never lived in the pack) and is explicitly superseded;
+do not re-litigate. **Blocking-ish follow-up: Q-catalog-spec-refs-misrouted (MED)** — the bridge's first real use
+exposed that the whole 1xxx catalog family points at wrong spec sections (11 of 77 entries). Dead text before,
+live navigation now. **Fix this BEFORE R8 dogfooding**, or dogfooding measures the wrong thing. Also open:
+E-mcp-schema-review (Design, non-blocking, now covering resources as well as tools). Positioning STILL parked
+until dogfooding lands (brief §7/§8) — but note dogfooding is now genuinely possible: `bock mcp` is installed by
+construction with the compiler, so pointing a session at it is the whole test. NIGHTLY STATE: main fcef539,
+0 open feature PRs, 4 dependabot majors deliberately open as upstream-blocked (#432/#434 astro pair,
+#435/#438 TS7 pair), worktrees/branches pruned, CI green. AWAITING OPERATOR: nothing blocking. ↓ —
+PRIOR: **Last reconciled 2026-07-19 07:10 — ★ `bock mcp` IS SHIPPED. The agent-facing ecosystem's lead item is done.**
 The 2026-07-03 night-wrap sequence is fully executed: dependabot drain (7/7 routine, closed + verified at final HEAD)
 → **Q-cli-json-structured-gaps → #440** → **Q-mcp-server → #441 (merged b79d239)**. `bock mcp` serves all seven v1
 tools over hand-rolled stdio JSON-RPC with **zero new dependencies**, thin over the CLI's `--format json` layer
@@ -640,15 +656,55 @@ actionable until Q-mcp-server lands.
   On landing: one-line §20.3-adjacent spec note + design changelog (per audit R4) — the same changelog also refreshes
   §20.1's (non-normative) per-command flag lists, which #427's OPEN noted now lag the binary. First consumer = our own
   sessions (dogfood, R8) before external positioning. LEADS the v1.x tooling list (human panels behind it).
-- **[Q-mcp-pack-resources] context pack served as MCP resources + `bock_explain` backing** — feature · **ready
-  (UNBLOCKED 2026-07-19 — Q-mcp-server landed #441; `resources/list` ships as an empty v1 list, so this item fills
-  a socket that already exists)** · `compiler/crates/bock-cli/` + `context-pack/` · — · links brief §2,
+- **[Q-mcp-pack-resources] context pack served as MCP resources + `bock_explain` backing** — feature · **DONE
+  (#444, merged fcef539)** · `compiler/crates/bock-cli/` + `context-pack/` · — · links brief §2,
   Q-context-pack (#339), OQ2 ·
-  note: the pack's contents (spec sections by §-number, per-module stdlib reference, idiom primer, error-code table)
-  exposed as MCP resources read FROM the single maintained pack artifact — one artifact, two access modes (static
-  paste-in / on-demand resources), no second maintained copy, no divergence risk. `bock_explain` backed by the pack's
-  error-code table (explanation + fix pattern per `E____`). Pack versioning should track the compiler (v0.1.1 today —
-  the version-sync mechanism rides this item). Smallest item of the three.
+  **SHIPPED 2026-07-19:** 44 resources over three tiers from `src/mcp/resources.rs` — `bock://index` (1),
+  `bock://pack/<n>` + `bock://pack/all` (9, from the context pack), `bock://spec/<n>` (23, from `spec/bock-spec.md`),
+  `bock://stdlib/<module>` (11, from `docs/src/reference/stdlib/core-*.md`). URIs key on each document's own section
+  number, NOT a title slug: slugs change silently when a title is edited, and spec URIs must be mechanically
+  derivable from `spec_refs` for the bridge below. **`bock_explain` bridge:** the `spec_refs` it already returned
+  were dead strings; it now also emits `spec_resources` with resolvable URIs (`"§10"` → `bock://spec/10`), additive
+  so the existing `spec_refs` contract (CLI/hover) is untouched. **Packaging:** `include_str!` from a crate-local
+  `assets/` dir mirrored by `sync-vocab.sh` — the `extensions/vscode/assets/` pattern. Load-bearing, not incidental:
+  `cargo publish` packages only files inside the crate dir, so reaching up to the repo root compiles locally and
+  ships a BROKEN crate to crates.io, visible only at release; runtime disk reads fail the same way for
+  `cargo install` users. `assets-drift.yml` extended to cover the CLI assets and to fail on *untracked* drift
+  (`git diff` alone misses a newly added source doc the script starts copying). Gate: engineer 5/5 + orchestrator
+  re-verify incl. `cargo package -p bock` **building the tarball** (exit 0 — the only check that catches an
+  `include_str!` escaping the crate), the drift guard exercised in both directions, and an independent
+  end-to-end JSON-RPC drive. CI 20/20 at merge.
+  **NOTE — the item's original "read FROM the single maintained pack artifact" clause was WRONG and is superseded.**
+  Two of the four things it named (spec sections by §-number, per-module stdlib reference) never lived in the pack;
+  forcing them in would have created exactly the second maintained copy the clause was trying to prevent. The
+  principle it should have encoded, and the one this item shipped under: **no content is authored for MCP — every
+  resource is a view onto an artifact that already has an owner and a drift-guard.** Do not re-litigate.
+  Pack version-sync (pack at 0.1.1, independent of the compiler) did NOT ride this item after all — the resources
+  are compiled in, so they are version-locked to the binary by construction and the footgun the sync would have
+  guarded does not exist for the MCP surface. Still open for the paste-in access mode → Q-context-pack.
+
+**#444 FOUNDs (filed 2026-07-19):**
+
+- **[Q-catalog-spec-refs-misrouted] the diagnostic catalog's `spec_refs` are systematically wrong for the whole
+  1xxx family** — bug · ready · **MED** · `compiler/crates/bock-errors/src/catalog.rs` · — · links #444,
+  Q-mcp-pack-resources (the bridge that exposed it) · note: 11 of 77 catalog entries point at the wrong spec
+  section — `E1001` → §1 *Introduction* (should be §3 Lexical Structure); `E1002`–`E1005` (literal/escape/digit
+  errors) → §1.3 *Supported Targets* (should be §3.5 Literals); `E1006` (unterminated block comment) → §1.2
+  *Design Goals* (should be §3.3 Comments); `E1007`–`E1011` (privacy, circular module deps, undefined name,
+  module not found, symbol not in module) → §10 *Effect System* (should be §12 Module System / §12.3 Visibility).
+  Consistent with refs written against an older section numbering and never updated on renumber. Other families
+  spot-check correct (8xxx→§17 Transpilation, 7xxx→§9 Pattern Matching); a few parser codes pointing at §5
+  Ownership (`E2020`, `E2030`, `E2031`, `E2092`) look suspect but were NOT individually verified — the fixing
+  session should audit all 77 rather than patch the 11. **Why MED and not LOW:** harmless while the refs were
+  dead text nobody followed, but #444 turned them into live navigation, so they now actively send agents to the
+  wrong section. **This is a prerequisite for the R8 dogfooding** — dogfooding `bock mcp` against misrouted refs
+  measures the wrong thing. Mechanical fix; the audit is the work, not the edit. FOUND 2026-07-19 (#444).
+- **[Q-stdlib-lead-paragraphs-thin] some `core-*` stdlib doc pages open with a lead paragraph too thin to serve as
+  a resource description** — doc · ready · LOW · `docs/src/reference/stdlib/` · — · links #444 · note: MCP resource
+  descriptions for the stdlib tier fall back to each page's own opening prose (correctly — the resource is a view,
+  so the fix belongs in the page). `core-option.md`'s lead ("Free-function utilities over the built-in
+  `Optional[T]`.") clears the >40-char floor but reads thinner than the curated pack/spec descriptions beside it in
+  `resources/list`. Sweep the 11 pages for leads that don't answer "why would I open this one". FOUND 2026-07-19 (#444).
 
 **#441 FOUNDs (filed 2026-07-19):**
 
