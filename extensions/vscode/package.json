@@ -491,7 +491,7 @@
   },
   "dependencies": {
     "marked": "^18.0.5",
-    "vscode-languageclient": "^10.0.1"
+    "vscode-languageclient": "^10.1.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
