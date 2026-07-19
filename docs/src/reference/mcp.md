@@ -54,8 +54,8 @@ the MCP subset it serves (no third-party protocol dependency):
 | `ping`                      | Responds with an empty result.                                        |
 | `tools/list`                | The seven tools below, each with a JSON Schema `inputSchema`.         |
 | `tools/call`                | Dispatches to a tool; returns one text content block.                 |
-| `resources/list`            | **Empty in v1.** The context-pack-as-resources wiring is a planned follow-up; the surface exists so clients can negotiate it now. |
-| `resources/read`            | JSON-RPC error `-32002` (resource not found) for any URI in v1.       |
+| `resources/list`            | The documentation resources below (context pack, spec, stdlib reference), each with a `description`. |
+| `resources/read`            | The named resource's markdown; JSON-RPC error `-32002` for an unknown URI. |
 
 Protocol failures are JSON-RPC errors: `-32700` (parse error — malformed
 frames do not crash the loop), `-32600` (invalid request), `-32601`
@@ -256,23 +256,66 @@ read-only:
       "severity": "error",
       "summary": "Circular module dependency.",
       "description": "The `use` import graph contains a cycle…",
-      "spec_refs": ["§10"]
+      "spec_refs": ["§10"],
+      "spec_resources": [
+        { "ref": "§10", "uri": "bock://spec/10", "title": "Effect System" }
+      ]
     }
   ]
 }
 ```
 
+`spec_refs` are the catalog's human section references. `spec_resources`
+are those same references **resolved to readable resource URIs** — the
+explain → spec bridge: an agent that hits `E6005` calls `bock_explain`,
+takes a `spec_resources` URI, and `resources/read`s the normative section
+that governs the rule it violated. References that resolve to no section
+are omitted rather than yielding a dead URI; several refs into one
+section (`§10`, `§10.3`) collapse to a single entry.
+
 An unknown code returns the shared `outcome: "usage-error"` envelope
-with `isError: true`. v1 serves catalog text only; richer fix-pattern
-context packs are a planned follow-up (they will arrive alongside the
-resources surface).
+with `isError: true`.
 
 Arguments: `code` (required; e.g. `"E4002"`, `"W1001"`;
 case-insensitive).
 
-## Resources (v1: empty)
+## Resources
 
-`resources/list` returns an empty list and `resources/read` errors for
-every URI. The surface exists so clients can negotiate the capability
-now; serving the AI context packs (fix patterns, decision context) as
-MCP resources is a planned follow-up and will be purely additive.
+The server serves the project's own documentation as MCP resources —
+three tiers, all `text/markdown`. **No content is authored for MCP**:
+every resource is a view onto a maintained artifact, so a fact stated in
+a resource is exactly the fact stated in its source.
+
+| Tier | URIs | Source | Reach for it when |
+| --- | --- | --- | --- |
+| Index | `bock://index` | generated | Orienting: which tier answers this question, and what exists. |
+| Context pack | `bock://pack/<n>`, `bock://pack/all` | `context-pack/BOCK-CONTEXT-PACK.md` | *How do I write this?* Conceptual, task-shaped. |
+| Specification | `bock://spec/<n>` | `spec/bock-spec.md` | *Is this legal / what is the exact rule?* Normative; wins over the pack. |
+| Stdlib reference | `bock://stdlib/<module>` | `docs/src/reference/stdlib/core-*.md` | *What is this function's signature?* |
+
+Section URIs use the source document's own top-level section number, so
+`bock://spec/10` is spec §10 — which is what makes `bock_explain`'s
+`spec_resources` mechanically resolvable.
+
+`bock://pack/all` serves the entire context pack (~12k tokens) in one
+read. It is an explicit opt-in for seeding a long Bock-authoring
+session, not a way to answer one question — read the individual
+`bock://pack/<n>` section for that. Its `description` says so.
+
+### How the content ships
+
+`bock` is published to crates.io, and `cargo publish` packages only
+files inside the crate directory — so `include_str!` reaching up to
+`spec/` would build locally and yield a broken published crate, and
+reading from disk at runtime would break `cargo install bock` users, who
+have no checkout. Instead the sources are mirrored into
+`compiler/crates/bock-cli/assets/` by `tools/scripts/sync-vocab.sh` (the
+same generated-asset pattern the VS Code extension already uses) and
+compiled in with `include_str!`. Consequences:
+
+- served content is version-locked to the binary by construction;
+- a renamed or deleted source is a **build** error;
+- content drift is caught by the "vocab + spec assets in sync" CI job.
+
+**If you edit the spec, the context pack, or a stdlib reference page,
+run `tools/scripts/sync-vocab.sh` and commit the regenerated assets.**

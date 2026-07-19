@@ -13,7 +13,12 @@
 //!   target toolchain is assumed present);
 //! * protocol resilience: unknown methods, unknown tools, malformed
 //!   arguments, malformed frames — none crash the loop;
-//! * `resources/list` (empty in v1) and `resources/read` (proper error);
+//! * `resources/list` and `resources/read` — the pack/spec/stdlib tiers,
+//!   with the drift guards that compile-time `include_str!` and the CI
+//!   asset-sync job cannot provide: every listed URI reads back non-empty,
+//!   per-tier count floors (a section parser that silently matches nothing
+//!   must fail loudly, not serve three resources), known anchors landing on
+//!   their subject, and the `bock_explain` → `bock://spec/<n>` bridge;
 //! * EOF on stdin exits 0 cleanly.
 
 use std::io::{BufRead, BufReader, Write};
@@ -310,6 +315,7 @@ fn bock_explain_serves_the_catalog_and_flags_unknown_codes() {
     assert!(entry["summary"].as_str().expect("summary").len() > 5);
     assert!(entry["description"].as_str().is_some());
     assert!(entry["spec_refs"].is_array());
+    assert!(entry["spec_resources"].is_array());
 
     let unknown = client.call_tool("bock_explain", json!({ "code": "E9999" }));
     assert_eq!(unknown["isError"], true, "{unknown}");
@@ -469,23 +475,165 @@ fn malformed_frames_do_not_crash_the_loop() {
     assert_eq!(client.shutdown().code(), Some(0));
 }
 
+// ── resources ───────────────────────────────────────────────────────────────
+
+/// `resources/list`, as `(uri, description)` pairs.
+fn listed_resources(client: &mut McpClient) -> Vec<(String, String)> {
+    let response = client.request("resources/list", json!({}));
+    response["result"]["resources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("resources array: {response}"))
+        .iter()
+        .map(|entry| {
+            (
+                entry["uri"].as_str().expect("uri").to_string(),
+                entry["description"]
+                    .as_str()
+                    .expect("every resource carries a description")
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Read one resource, returning its text (panicking on a protocol error).
+fn read_resource(client: &mut McpClient, uri: &str) -> String {
+    let response = client.request("resources/read", json!({ "uri": uri }));
+    assert!(response.get("error").is_none(), "reading {uri}: {response}");
+    response["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("text content for {uri}: {response}"))
+        .to_string()
+}
+
+/// Drift guard #1: nothing listed is a dead URI, and nothing reads back
+/// empty. `include_str!` cannot catch a section parser that produced an
+/// empty slice; only reading every advertised URI can.
 #[test]
-fn resources_list_is_empty_and_read_errors_properly() {
+fn every_listed_resource_reads_back_non_empty() {
     let mut client = McpClient::spawn();
     client.initialize();
 
-    let response = client.request("resources/list", json!({}));
-    assert_eq!(response["result"]["resources"], json!([]), "{response}");
+    let listed = listed_resources(&mut client);
+    assert!(!listed.is_empty(), "the surface must not be empty");
+    for (uri, description) in &listed {
+        let text = read_resource(&mut client, uri);
+        assert!(!text.trim().is_empty(), "{uri} read back empty");
+        assert!(
+            description.len() > 40,
+            "{uri} has a thin description: {description:?}"
+        );
+    }
+}
+
+/// Drift guard #2: count floors. If a heading format shifts and the section
+/// parser stops matching, the server would list three resources instead of
+/// forty-three with no error anywhere — this is what fails loudly instead.
+#[test]
+fn resource_counts_have_floors_per_tier() {
+    let mut client = McpClient::spawn();
+    client.initialize();
+
+    let uris: Vec<String> = listed_resources(&mut client)
+        .into_iter()
+        .map(|(uri, _)| uri)
+        .collect();
+    let count = |prefix: &str| uris.iter().filter(|u| u.starts_with(prefix)).count();
+
+    // The whole-pack resource shares the bock://pack/ prefix, hence >= 9.
+    assert!(count("bock://pack/") >= 9, "pack sections shrank: {uris:?}");
+    assert!(
+        count("bock://spec/") >= 23,
+        "spec sections shrank: {uris:?}"
+    );
+    assert!(
+        count("bock://stdlib/") >= 11,
+        "stdlib modules shrank: {uris:?}"
+    );
+    assert!(uris.contains(&"bock://index".to_string()), "{uris:?}");
+    assert!(uris.contains(&"bock://pack/all".to_string()), "{uris:?}");
+}
+
+/// Drift guard #3: known anchors still land on the right content, so a
+/// renumbering cannot silently repoint a URI at a different section.
+#[test]
+fn known_anchors_resolve_to_their_subject() {
+    let mut client = McpClient::spawn();
+    client.initialize();
+
+    let effects = read_resource(&mut client, "bock://spec/10");
+    assert!(
+        effects.starts_with("## 10. Effect System"),
+        "spec §10 is the effect system, got: {}",
+        &effects[..effects.len().min(80)]
+    );
+
+    let option = read_resource(&mut client, "bock://stdlib/core.option");
+    assert!(option.contains("core.option"), "{option:.80}");
+
+    let boundary = read_resource(&mut client, "bock://pack/4");
+    assert!(boundary.contains("v1 boundary"), "{boundary:.120}");
+
+    // The index orients across all three tiers.
+    let index = read_resource(&mut client, "bock://index");
+    for marker in ["bock://pack/", "bock://spec/", "bock://stdlib/"] {
+        assert!(index.contains(marker), "index omits {marker}");
+    }
+
+    // The opt-in whole-pack resource says so in its description.
+    let listed = listed_resources(&mut client);
+    let (_, pack_all) = listed
+        .iter()
+        .find(|(uri, _)| uri == "bock://pack/all")
+        .expect("bock://pack/all is listed");
+    assert!(
+        pack_all.contains("OPT-IN") && pack_all.contains("12k"),
+        "the whole-pack resource must advertise its cost: {pack_all}"
+    );
+}
+
+/// Drift guard #4 — THE BRIDGE. A real diagnostic's `spec_resources` must
+/// point at resources that actually exist. This is what keeps the
+/// code → explain → spec-section → read loop from rotting.
+#[test]
+fn explain_spec_refs_resolve_to_real_resources() {
+    let mut client = McpClient::spawn();
+    client.initialize();
+
+    // E6005 (effect not declared or handled) refs §8, §10.3, §10.4.
+    let result = client.call_tool("bock_explain", json!({ "code": "E6005" }));
+    let doc = tool_document(&result);
+    let entry = &doc["explanations"][0];
+    let bridged = entry["spec_resources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("spec_resources array: {entry}"));
+    assert!(
+        !bridged.is_empty(),
+        "E6005 refs {:?} resolved to nothing",
+        entry["spec_refs"]
+    );
+    let uris: Vec<&str> = bridged
+        .iter()
+        .map(|r| r["uri"].as_str().expect("uri"))
+        .collect();
+    assert!(uris.contains(&"bock://spec/10"), "{uris:?}");
+    for uri in uris {
+        let text = read_resource(&mut client, uri);
+        assert!(!text.trim().is_empty(), "{uri} bridged but empty");
+    }
+}
+
+#[test]
+fn unknown_resource_uri_errors_properly() {
+    let mut client = McpClient::spawn();
+    client.initialize();
 
     let response = client.request("resources/read", json!({ "uri": "bock://pack/nothing" }));
     assert_eq!(response["error"]["code"], -32002, "{response}");
-    assert!(
-        response["error"]["message"]
-            .as_str()
-            .expect("message")
-            .contains("bock://pack/nothing"),
-        "{response}"
-    );
+    let message = response["error"]["message"].as_str().expect("message");
+    assert!(message.contains("bock://pack/nothing"), "{response}");
+    // The error points at the way back in rather than dead-ending.
+    assert!(message.contains("bock://index"), "{response}");
 }
 
 #[test]
