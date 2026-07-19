@@ -35,7 +35,7 @@ use bock_types::{
 };
 
 use crate::check::CheckOutcome;
-use crate::output::{print_document, OutputFormat, FORMAT_VERSION};
+use crate::output::{diagnostic_json, print_document, OutputFormat, FORMAT_VERSION};
 
 /// Result of running a single test.
 struct TestResult {
@@ -50,6 +50,32 @@ struct TestResult {
     error: Option<String>,
     /// How long the test took to run.
     duration: std::time::Duration,
+}
+
+/// A test-file compilation failure carrying the structured diagnostics — the
+/// same [`Diagnostic`] values `bock check` surfaces — instead of pre-rendered
+/// text, so the `--format json` document can serialize them through the
+/// shared contract layer ([`crate::output::diagnostic_json`]).
+#[derive(Debug)]
+struct CompileFailure {
+    /// The file the diagnostics belong to: the test file itself, a sibling
+    /// project module, or an embedded core-stdlib source.
+    filename: String,
+    /// The content backing the diagnostics' spans.
+    source: String,
+    /// The collected diagnostics (at least one error).
+    diagnostics: Vec<Diagnostic>,
+}
+
+/// Why a test file produced no test results.
+#[derive(Debug)]
+enum TestFileError {
+    /// Compilation (lex/parse/resolve/type-check) failed with structured
+    /// diagnostics.
+    Compile(CompileFailure),
+    /// A failure with no structured diagnostics behind it: an unreadable
+    /// file, a module dependency cycle, or an internal invariant violation.
+    Other(anyhow::Error),
 }
 
 /// A compiled test file: the AIR modules to register in each test interpreter
@@ -89,24 +115,50 @@ pub async fn run(
     if files.is_empty() {
         match format {
             OutputFormat::Human => println!("No .bock files found."),
-            OutputFormat::Json => print_document(&test_document(&[]))?,
+            OutputFormat::Json => print_document(&test_document(&[], &[]))?,
         }
         return Ok(CheckOutcome::Clean);
     }
 
     let total_start = Instant::now();
     let mut results: Vec<TestResult> = Vec::new();
+    // Structured compile-error diagnostics for the json document's top-level
+    // `diagnostics` array (empty on runs where every file compiled).
+    let mut compile_diagnostics: Vec<serde_json::Value> = Vec::new();
 
     for file_path in &files {
         match run_tests_in_file(file_path, &filter).await {
             Ok(mut file_results) => results.append(&mut file_results),
-            Err(e) => {
-                eprintln!("error: {}: {e}", file_path.display());
+            Err(err) => {
+                let message = match &err {
+                    TestFileError::Compile(failure) => {
+                        // Both formats keep the rendered stderr report; json
+                        // mode additionally serializes the diagnostics through
+                        // the shared contract layer, so the document carries
+                        // the same structure `bock check` emits.
+                        let rendered = bock_errors::render(
+                            &failure.diagnostics,
+                            &failure.filename,
+                            &failure.source,
+                        );
+                        eprintln!("error: {}: {rendered}", file_path.display());
+                        if format == OutputFormat::Json {
+                            compile_diagnostics.extend(failure.diagnostics.iter().map(|d| {
+                                diagnostic_json(d, Some(&failure.filename), Some(&failure.source))
+                            }));
+                        }
+                        concise_compile_message(failure)
+                    }
+                    TestFileError::Other(e) => {
+                        eprintln!("error: {}: {e}", file_path.display());
+                        format!("compilation error: {e}")
+                    }
+                };
                 results.push(TestResult {
                     name: file_path.display().to_string(),
                     file: file_path.display().to_string(),
                     passed: false,
-                    error: Some(format!("compilation error: {e}")),
+                    error: Some(message),
                     duration: std::time::Duration::ZERO,
                 });
             }
@@ -118,7 +170,7 @@ pub async fn run(
     if results.is_empty() {
         match format {
             OutputFormat::Human => println!("No tests found."),
-            OutputFormat::Json => print_document(&test_document(&results))?,
+            OutputFormat::Json => print_document(&test_document(&results, &compile_diagnostics))?,
         }
         return Ok(CheckOutcome::Clean);
     }
@@ -128,7 +180,7 @@ pub async fn run(
 
     match format {
         OutputFormat::Human => print_human_results(&results, passed, failed, total_duration),
-        OutputFormat::Json => print_document(&test_document(&results))?,
+        OutputFormat::Json => print_document(&test_document(&results, &compile_diagnostics))?,
     }
 
     Ok(if failed > 0 {
@@ -175,8 +227,17 @@ fn print_human_results(
 
 /// Build the `bock test --format json` document (see [`crate::output`] for
 /// the shared envelope contract). `message` is `null` for a passing test and
-/// the failure text (assertion message or compile error) otherwise.
-fn test_document(results: &[TestResult]) -> serde_json::Value {
+/// the failure text (assertion message or compile-error summary) otherwise.
+///
+/// `compile_diagnostics` is the document's top-level `diagnostics` array:
+/// the structured compile-error diagnostics (the same entry shape `bock
+/// check` emits), already serialized. It is empty on runs where every file
+/// compiled — the field is additive to the v1 shape, so [`FORMAT_VERSION`]
+/// stays unbumped.
+fn test_document(
+    results: &[TestResult],
+    compile_diagnostics: &[serde_json::Value],
+) -> serde_json::Value {
     let passed = results.iter().filter(|r| r.passed).count();
     let failed = results.len() - passed;
     let tests: Vec<serde_json::Value> = results
@@ -201,14 +262,43 @@ fn test_document(results: &[TestResult]) -> serde_json::Value {
             "failed": failed,
         },
         "tests": tests,
+        "diagnostics": compile_diagnostics,
     })
 }
 
+/// One-line summary for the failed per-file test entry of a compile failure:
+/// `compilation error: <code>: <first error message>`, plus a `(+N more)`
+/// count when several errors surfaced. The full structured diagnostics ride
+/// in the document's top-level `diagnostics` array (json mode) and the
+/// rendered stderr report (both modes); the entry keeps its pinned
+/// `compilation error:` prefix.
+fn concise_compile_message(failure: &CompileFailure) -> String {
+    let errors: Vec<&Diagnostic> = failure
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    match errors.as_slice() {
+        [] => "compilation error".to_string(),
+        [first] => format!("compilation error: {}: {}", first.code, first.message),
+        [first, rest @ ..] => format!(
+            "compilation error: {}: {} (+{} more)",
+            first.code,
+            first.message,
+            rest.len()
+        ),
+    }
+}
+
 /// Compile a single test file and run all `@test` functions found in it.
+///
+/// A compilation failure returns [`TestFileError::Compile`] carrying the
+/// structured diagnostics (not pre-rendered text), so the caller can route
+/// them through the shared `--format json` contract layer.
 async fn run_tests_in_file(
     path: &Path,
     filter: &Option<String>,
-) -> anyhow::Result<Vec<TestResult>> {
+) -> Result<Vec<TestResult>, TestFileError> {
     let compiled = compile_test_file(path)?;
 
     // Discover @test functions in the user test module.
@@ -267,9 +357,14 @@ async fn run_tests_in_file(
 /// [`ModuleRegistry`]. The result carries the compiled AIR modules in
 /// dependency order (for per-test interpreter registration) and the user test
 /// module's items (for `@test` discovery).
-fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
-    let content =
-        std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+///
+/// Compilation errors return [`TestFileError::Compile`] with the structured
+/// diagnostics of the module that failed; failures with no diagnostics
+/// behind them (unreadable file, dependency cycle, internal invariant)
+/// return [`TestFileError::Other`].
+fn compile_test_file(path: &Path) -> Result<CompiledTestFile, TestFileError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| TestFileError::Other(anyhow::anyhow!("{}: {e}", path.display())))?;
 
     // ── Phase 1: Parse the embedded core sources + the test file ──────────────
     let mut source_map = SourceMap::new();
@@ -279,7 +374,7 @@ fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
     // become available to the interpreter before the test module — exactly as
     // `check`/`run` do — letting a test file resolve and run `use core.*`.
     for src in crate::stdlib::core_sources() {
-        let pf = parse_stdlib_source(&src, &mut source_map)?;
+        let pf = parse_stdlib_source(&src, &mut source_map).map_err(TestFileError::Compile)?;
         parsed_files.push(pf);
     }
 
@@ -295,20 +390,22 @@ fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
     // files, exactly the hazard `bock run` avoids for explicit entries).
     let entry_canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if let Some(root) = find_project_root(path) {
-        for sibling in discover_bock_files(&root)? {
+        for sibling in discover_bock_files(&root).map_err(TestFileError::Other)? {
             let sibling_canonical = sibling.canonicalize().unwrap_or_else(|_| sibling.clone());
             if sibling_canonical == entry_canonical {
                 continue;
             }
             let sibling_content = std::fs::read_to_string(&sibling)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", sibling.display()))?;
-            let pf = parse_user_file(&sibling, &sibling_content, &mut source_map)?;
+                .map_err(|e| TestFileError::Other(anyhow::anyhow!("{}: {e}", sibling.display())))?;
+            let pf = parse_user_file(&sibling, &sibling_content, &mut source_map)
+                .map_err(TestFileError::Compile)?;
             parsed_files.push(pf);
         }
     }
 
     // The user test file is the entry; remember which parsed index it lands at.
-    let test_pf = parse_user_file(path, &content, &mut source_map)?;
+    let test_pf =
+        parse_user_file(path, &content, &mut source_map).map_err(TestFileError::Compile)?;
     let test_idx = parsed_files.len();
     parsed_files.push(test_pf);
 
@@ -337,9 +434,9 @@ fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
     }
 
     // ── Phase 3: Topological sort + cycle detection ───────────────────────────
-    let topo_order = dep_graph
-        .topological_order()
-        .ok_or_else(|| anyhow::anyhow!("circular module dependency detected"))?;
+    let topo_order = dep_graph.topological_order().ok_or_else(|| {
+        TestFileError::Other(anyhow::anyhow!("circular module dependency detected"))
+    })?;
 
     // ── Phase 4: Compile in dependency order ──────────────────────────────────
     let mut registry = ModuleRegistry::new();
@@ -364,11 +461,11 @@ fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
         if has_errors(&all_diagnostics) {
             // Surface stdlib errors and user errors alike; a stdlib error here
             // is a compiler defect, a user error is the test author's bug.
-            return Err(format_errors(
+            return Err(TestFileError::Compile(compile_failure(
                 &all_diagnostics,
                 &pf.filename,
                 &source_file.content,
-            ));
+            )));
         }
 
         // 4b. Lower to S-AIR
@@ -385,11 +482,11 @@ fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
         collect_diagnostics(&mut all_diagnostics, &checker.diags);
 
         if has_errors(&all_diagnostics) {
-            return Err(format_errors(
+            return Err(TestFileError::Compile(compile_failure(
                 &all_diagnostics,
                 &pf.filename,
                 &source_file.content,
-            ));
+            )));
         }
 
         // 4d. Analysis passes (ownership, effects, capabilities). In test/dev
@@ -441,7 +538,11 @@ fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
             if idx == test_idx {
                 let items = match &m.kind {
                     NodeKind::Module { items, .. } => items.clone(),
-                    _ => return Err(anyhow::anyhow!("internal: expected Module node")),
+                    _ => {
+                        return Err(TestFileError::Other(anyhow::anyhow!(
+                            "internal: expected Module node"
+                        )))
+                    }
                 };
                 test_items = Some(items);
             }
@@ -449,8 +550,11 @@ fn compile_test_file(path: &Path) -> anyhow::Result<CompiledTestFile> {
         }
     }
 
-    let test_items = test_items
-        .ok_or_else(|| anyhow::anyhow!("internal: test module not found among compiled modules"))?;
+    let test_items = test_items.ok_or_else(|| {
+        TestFileError::Other(anyhow::anyhow!(
+            "internal: test module not found among compiled modules"
+        ))
+    })?;
 
     Ok(CompiledTestFile {
         air_modules_in_order,
@@ -612,12 +716,13 @@ struct ParsedFile {
 
 /// Lex and parse the user test file into a [`ParsedFile`].
 ///
-/// Returns an error (rendered) if lexing or parsing produced errors.
+/// Returns the structured [`CompileFailure`] if lexing or parsing produced
+/// errors.
 fn parse_user_file(
     path: &Path,
     content: &str,
     source_map: &mut SourceMap,
-) -> anyhow::Result<ParsedFile> {
+) -> Result<ParsedFile, CompileFailure> {
     let filename = path.display().to_string();
     let file_id = source_map.add_file(path.to_path_buf(), content.to_string());
     let source_file = source_map.get_file(file_id);
@@ -629,7 +734,7 @@ fn parse_user_file(
     collect_diagnostics(&mut diags, lexer.diagnostics());
 
     if has_errors(&diags) {
-        return Err(format_errors(&diags, &filename, &source_file.content));
+        return Err(compile_failure(&diags, &filename, &source_file.content));
     }
 
     let mut parser = Parser::new(tokens, source_file);
@@ -637,7 +742,7 @@ fn parse_user_file(
     collect_diagnostics(&mut diags, parser.diagnostics());
 
     if has_errors(&diags) {
-        return Err(format_errors(&diags, &filename, &source_file.content));
+        return Err(compile_failure(&diags, &filename, &source_file.content));
     }
 
     Ok(ParsedFile {
@@ -658,7 +763,7 @@ fn parse_user_file(
 fn parse_stdlib_source(
     src: &crate::stdlib::StdlibSource,
     source_map: &mut SourceMap,
-) -> anyhow::Result<ParsedFile> {
+) -> Result<ParsedFile, CompileFailure> {
     let filename = src.logical_path.display().to_string();
     let file_id = source_map.add_file(src.logical_path.clone(), src.source.clone());
     let source_file = source_map.get_file(file_id);
@@ -670,7 +775,7 @@ fn parse_stdlib_source(
     collect_diagnostics(&mut diags, lexer.diagnostics());
 
     if has_errors(&diags) {
-        return Err(format_errors(&diags, &filename, &source_file.content));
+        return Err(compile_failure(&diags, &filename, &source_file.content));
     }
 
     let mut parser = Parser::new(tokens, source_file);
@@ -678,7 +783,7 @@ fn parse_stdlib_source(
     collect_diagnostics(&mut diags, parser.diagnostics());
 
     if has_errors(&diags) {
-        return Err(format_errors(&diags, &filename, &source_file.content));
+        return Err(compile_failure(&diags, &filename, &source_file.content));
     }
 
     Ok(ParsedFile {
@@ -713,10 +818,14 @@ fn has_errors(diagnostics: &[Diagnostic]) -> bool {
     diagnostics.iter().any(|d| d.severity == Severity::Error)
 }
 
-/// Format error diagnostics into an anyhow error.
-fn format_errors(diagnostics: &[Diagnostic], filename: &str, source: &str) -> anyhow::Error {
-    let rendered = bock_errors::render(diagnostics, filename, source);
-    anyhow::anyhow!("{rendered}")
+/// Bundle collected diagnostics into a structured [`CompileFailure`] for the
+/// file (and backing source) they belong to.
+fn compile_failure(diagnostics: &[Diagnostic], filename: &str, source: &str) -> CompileFailure {
+    CompileFailure {
+        filename: filename.to_string(),
+        source: source.to_string(),
+        diagnostics: diagnostics.to_vec(),
+    }
 }
 
 /// Register builtin function types in the type checker.
@@ -1227,7 +1336,7 @@ fn test_b() {
                 duration: std::time::Duration::ZERO,
             },
         ];
-        let doc = test_document(&results);
+        let doc = test_document(&results, &[]);
         assert_eq!(doc["format_version"], FORMAT_VERSION);
         assert_eq!(doc["command"], "test");
         assert_eq!(doc["outcome"], "failed");
@@ -1243,10 +1352,68 @@ fn test_b() {
         assert_eq!(tests[1]["passed"], false);
         assert_eq!(tests[1]["message"], "assertion failed");
 
+        // The additive top-level diagnostics array is always present —
+        // empty when every file compiled.
+        assert!(
+            doc["diagnostics"].as_array().unwrap().is_empty(),
+            "no compile failures → empty diagnostics: {doc}"
+        );
+
         // No tests at all is a clean outcome (matching the exit contract).
-        let empty = test_document(&[]);
+        let empty = test_document(&[], &[]);
         assert_eq!(empty["outcome"], "clean");
         assert_eq!(empty["summary"]["tests"], 0);
+    }
+
+    #[test]
+    fn test_document_carries_compile_diagnostics() {
+        let entries = vec![serde_json::json!({
+            "severity": "error",
+            "code": "E1001",
+            "message": "unexpected token",
+            "span": {"file": "t.bock", "start": 3, "end": 4, "line": 1, "col": 4},
+            "suggestion": null,
+        })];
+        let doc = test_document(&[], &entries);
+        let diags = doc["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0]["code"], "E1001");
+    }
+
+    #[test]
+    fn concise_compile_message_summarizes_first_error() {
+        use bock_errors::{DiagnosticCode, FileId, Span};
+        let diag = |msg: &str| Diagnostic {
+            severity: Severity::Error,
+            code: DiagnosticCode {
+                prefix: 'E',
+                number: 1001,
+            },
+            message: msg.into(),
+            span: Span {
+                file: FileId(0),
+                start: 0,
+                end: 1,
+            },
+            labels: vec![],
+            notes: vec![],
+        };
+
+        let one = compile_failure(&[diag("unexpected token")], "t.bock", "fn {\n");
+        assert_eq!(
+            concise_compile_message(&one),
+            "compilation error: E1001: unexpected token"
+        );
+
+        let two = compile_failure(
+            &[diag("unexpected token"), diag("expected `}`")],
+            "t.bock",
+            "fn {\n",
+        );
+        assert_eq!(
+            concise_compile_message(&two),
+            "compilation error: E1001: unexpected token (+1 more)"
+        );
     }
 
     #[tokio::test]

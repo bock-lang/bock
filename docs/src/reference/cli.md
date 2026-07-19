@@ -49,9 +49,15 @@ REPL, formatter, LSP, and testing tiers have their own page
 
 `bock check`, `bock test`, and `bock inspect` accept
 `--format <human|json>` (default: `human`). With `--format json`,
-stdout carries **exactly one JSON document** and nothing else —
-incidental messages ("No .bock files found.", unreadable-directory
-warnings, unreadable-input errors) go to stderr. Exit codes are
+stdout carries **exactly one JSON document** and nothing else, and
+every ordinary terminating outcome of the command is reflected in
+that document — including usage errors the command itself detects
+and I/O-class failures ("No .bock files found.", an unreadable input
+file). Incidental stderr lines still appear in both modes, but a
+consumer does not need stderr to learn why a run failed. (Truly
+unexpected failures — e.g. an unreadable working directory aborting
+file discovery — still surface as a bare error on stderr, as in
+human mode.) Exit codes are
 identical to human mode. The document is serialized from the same
 structured diagnostics the human renderer consumes, so the two views
 cannot disagree. This is the substrate for CI consumers and the
@@ -79,16 +85,44 @@ Every document shares one envelope:
   Bumped only on a breaking change; new fields may appear without a
   bump, so consumers must ignore unknown fields.
 - `command` — `"check"`, `"test"`, or `"inspect"`.
-- `outcome` — `"clean"` or `"failed"`. Always agrees with the exit
-  code: `clean` ⇔ exit 0.
+- `outcome` — `"clean"`, `"failed"`, or `"usage-error"` (below).
+  Always agrees with the exit code: `clean` ⇔ exit 0.
 - `summary` — per-command counts (below).
 - One per-command payload array: `diagnostics` (check), `tests`
-  (test), `decisions` (inspect).
+  (test), `decisions` (inspect). `bock test` documents additionally
+  carry a `diagnostics` array for compile errors (below).
 
-Flag-usage errors (an unknown `--format` or `--only` value) report on
-stderr with no JSON document, like any other bad flag — consumers
-should treat "non-zero exit with no parseable stdout" as a usage
-failure, distinct from `outcome: "failed"`.
+### Usage errors
+
+The usage-error boundary is pinned by *who* detects the error:
+
+- **Argument-parser errors** — an unknown flag, a missing argument,
+  an invalid `--format` value — are rejected before any command code
+  runs. They stay in the parser's native format on stderr with **no
+  JSON document** (stdout is empty), even when `--format json`
+  appears in argv. Consumers should treat "non-zero exit with empty
+  stdout" as this class of failure.
+- **Command-level usage errors** — argv parsed cleanly, so json mode
+  is known, and the command's own validation rejects a value (e.g.
+  an unknown `bock check --only` aspect). These emit exactly one JSON
+  document on stdout: the envelope with `outcome: "usage-error"`, an
+  empty payload array, and the problem described in `error.message`:
+
+  ```json
+  {
+    "format_version": 1,
+    "command": "check",
+    "outcome": "usage-error",
+    "summary": {},
+    "diagnostics": [],
+    "error": {
+      "message": "unknown check aspect 'bogus'. Valid aspects: types, context"
+    }
+  }
+  ```
+
+Exit codes are unchanged by format in both cases (human mode keeps
+its stderr message and empty stdout).
 
 ### `bock check --format json`
 
@@ -113,7 +147,9 @@ entry of `diagnostics` is:
 
 - `severity` — `error`, `warning`, `info`, or `hint`. Warnings appear
   in the document but never fail the check, exactly as in human mode.
-- `code` — the stable diagnostic code (`E____` / `W____`).
+- `code` — the stable diagnostic code (`E____` / `W____`), or `null`
+  for I/O-class entries (below), which have no code in the governed
+  diagnostic catalog.
 - `span` — `start`/`end` are byte offsets into `file` (`end`
   exclusive); `line`/`col` are the 1-based line and character column
   of `start`. This is the same span shape `bock inspect air --json`
@@ -123,8 +159,13 @@ entry of `diagnostics` is:
 - `suggestion` — the diagnostic's fix-hint notes joined into one
   string, or `null` when it carries none.
 
-A missing input file fails the check (`outcome: "failed"`) with the
-reason on stderr; it carries no structured diagnostic entry.
+**I/O-class failures carry entries too.** A missing/unreadable input
+file or a run that finds no `.bock` files fails the check
+(`outcome: "failed"`, exit 1) and the document says why: a
+`diagnostics` entry with `severity: "error"`, `code: null`, the I/O
+reason as `message`, and a zero span whose `file` names the offending
+path (`null` for "No .bock files found."). The historical stderr line
+is kept in both modes.
 
 ### `bock test --format json`
 
@@ -142,10 +183,42 @@ entry of `tests` is:
 ```
 
 `message` is `null` for a passing test and the failure text
-otherwise. A file that fails to compile appears as one failed entry
-whose `message` starts with `compilation error:`. A run that finds no
-tests emits the document with zero counts and `outcome: "clean"`
-(matching the human mode's exit 0).
+otherwise. A run that finds no tests emits the document with zero
+counts and `outcome: "clean"` (matching the human mode's exit 0).
+
+The document also carries a top-level `diagnostics` array — the same
+entry shape as `bock check` — which is empty on runs where every file
+compiled. A file that fails to compile appears as one failed entry
+whose `message` starts with `compilation error:` (a one-line summary:
+the first error's code and message, plus a `(+N more)` count), and
+the full structured compile diagnostics land in `diagnostics`:
+
+```json
+{
+  "format_version": 1,
+  "command": "test",
+  "outcome": "failed",
+  "summary": { "tests": 1, "passed": 0, "failed": 1 },
+  "tests": [
+    {
+      "name": "broken.bock",
+      "file": "broken.bock",
+      "passed": false,
+      "message": "compilation error: E1001: unexpected token `{`",
+      "duration_ms": 0.0
+    }
+  ],
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "E1001",
+      "message": "unexpected token `{`",
+      "span": { "file": "broken.bock", "start": 3, "end": 4, "line": 1, "col": 4 },
+      "suggestion": null
+    }
+  ]
+}
+```
 
 ### `bock inspect --format json`
 

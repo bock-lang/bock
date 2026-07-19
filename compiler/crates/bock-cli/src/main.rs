@@ -519,26 +519,39 @@ async fn main() -> anyhow::Result<ExitCode> {
             brief,
             strict,
             format,
-        } => match check::AspectSelection::from_raw(&only) {
-            Ok(aspects) => {
-                let options = check::CheckOptions {
-                    aspects,
-                    brief,
-                    strict,
-                    format,
-                };
-                if !check::run(files, &options)?.is_clean() {
+        } => {
+            match check::AspectSelection::from_raw(&only) {
+                Ok(aspects) => {
+                    let options = check::CheckOptions {
+                        aspects,
+                        brief,
+                        strict,
+                        format,
+                    };
+                    if !check::run(files, &options)?.is_clean() {
+                        exit_code = ExitCode::FAILURE;
+                    }
+                }
+                Err(unknown) => {
+                    // A usage-class error our own code detects after clap has
+                    // parsed argv. The pinned contract (see `crate::output`):
+                    // json mode emits exactly one `outcome: "usage-error"`
+                    // document on stdout; human mode keeps the stderr line.
+                    // The exit code is unchanged by format.
+                    let message = format!(
+                        "unknown check aspect '{unknown}'. Valid aspects: {}",
+                        check::Aspect::valid_list()
+                    );
+                    match format {
+                        OutputFormat::Human => eprintln!("error: {message}"),
+                        OutputFormat::Json => output::print_document(
+                            &output::usage_error_document("check", "diagnostics", &message),
+                        )?,
+                    }
                     exit_code = ExitCode::FAILURE;
                 }
             }
-            Err(unknown) => {
-                eprintln!(
-                    "error: unknown check aspect '{unknown}'. Valid aspects: {}",
-                    check::Aspect::valid_list()
-                );
-                exit_code = ExitCode::FAILURE;
-            }
-        },
+        }
         Command::Test {
             filter,
             files,

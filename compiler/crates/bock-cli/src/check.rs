@@ -37,7 +37,7 @@ use bock_types::{
 };
 
 use crate::output::{
-    byte_to_line_col, diagnostic_json, print_document, OutputFormat, FORMAT_VERSION,
+    byte_to_line_col, diagnostic_json, io_error_json, print_document, OutputFormat, FORMAT_VERSION,
 };
 
 /// A v1 aspect of analysis that `bock check --only=<aspect>` can select.
@@ -315,6 +315,24 @@ impl DiagnosticSink {
             }
         }
     }
+
+    /// Surface an I/O-class failure — an unreadable input file or "no files
+    /// found" — that has no compiler [`Diagnostic`] behind it.
+    ///
+    /// Both formats keep the historical stderr line (so a human watching a
+    /// json-mode run still sees the reason on the terminal); json mode
+    /// additionally records a `code: null` entry (see
+    /// [`crate::output::io_error_json`]) so the stdout document itself
+    /// explains why the check failed.
+    fn emit_io_error(&mut self, message: &str, file: Option<&str>) {
+        match file {
+            Some(f) => eprintln!("error: {f}: {message}"),
+            None => eprintln!("{message}"),
+        }
+        if let DiagnosticSink::Json { diagnostics: acc } = self {
+            acc.push(io_error_json(message, file));
+        }
+    }
 }
 
 /// Build the `bock check --format json` document (see [`crate::output`] for
@@ -370,8 +388,10 @@ pub fn run(files: Vec<PathBuf>, options: &CheckOptions) -> anyhow::Result<CheckO
 
 /// The check pipeline proper: everything [`run`] does except the end-of-run
 /// output (the clean summary line or the JSON document). Diagnostics surface
-/// through `sink`; incidental messages (an unreadable input, "no files")
-/// still go to stderr in both formats. Returns the outcome plus the number
+/// through `sink` — including I/O-class failures (an unreadable input, "no
+/// files found"), which keep their stderr line in both formats but also land
+/// in the json document as `code: null` entries (see
+/// [`DiagnosticSink::emit_io_error`]). Returns the outcome plus the number
 /// of input files, for the summary.
 fn run_pipeline(
     files: Vec<PathBuf>,
@@ -385,7 +405,7 @@ fn run_pipeline(
     };
 
     if files.is_empty() {
-        eprintln!("No .bock files found.");
+        sink.emit_io_error("No .bock files found.", None);
         return Ok((CheckOutcome::Failed, 0));
     }
 
@@ -599,8 +619,8 @@ struct ParsedFile {
 
 /// Lex and parse a single file, adding it to the shared [`SourceMap`].
 ///
-/// Returns `Err(())` if lexing or parsing produced errors (already surfaced
-/// through `sink`).
+/// Returns `Err(())` if the file could not be read or lexing/parsing
+/// produced errors (either way already surfaced through `sink`).
 fn parse_file(
     path: &Path,
     source_map: &mut SourceMap,
@@ -609,7 +629,9 @@ fn parse_file(
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: {}: {e}", path.display());
+            // I/O-class failure: keeps the historical stderr line and, in
+            // json mode, records a `code: null` entry in the document.
+            sink.emit_io_error(&e.to_string(), Some(&path.display().to_string()));
             return Err(());
         }
     };
