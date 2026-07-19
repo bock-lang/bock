@@ -572,3 +572,31 @@ thin-shim posture. Trade-off accepted eyes-open: we own protocol tracking as MCP
 
 **Authorized actions:** Q-mcp-server → ready; dispatch next session (2026-07-03 night wrap — suggested sequence in
 the audit digest). The tool-schema one-pass Design review still rides the implementation.
+
+---
+
+## [E-mcp-schema-review] MCP tool-schema one-pass review + one §20.1 wording confirmation → Design
+
+**Filed:** 2026-07-19
+**Type:** design review (one pass, cheap — the standing gate (1) recorded on Q-mcp-server since 2026-07-03)
+**Severity:** low — NON-BLOCKING. `bock mcp` shipped in #441 (merged b79d239); this review refines schemas
+already in the binary rather than gating them. Schema changes it recommends land as a follow-up item.
+**Trigger:** Q-mcp-server's gate (1) always rode the implementation ("when schemas are drafted"). The schemas are
+now drafted, implemented, and documented, so the pass is due.
+**Where to look:** seven tool schemas defined canonically in `compiler/crates/bock-cli/src/mcp/tools.rs` and
+mirrored prose-side in `docs/src/reference/mcp.md` — `bock_check`, `bock_run`, `bock_test`, `bock_build`,
+`bock_conformance`, `bock_inspect`, `bock_explain`.
+**What the pass should judge:** (a) parameter shape and naming across the seven (consistency matters more than any
+single choice — agents pattern-match); (b) whether the tool *descriptions* carry enough for an agent to pick the
+right tool unaided, especially `bock_check` vs `bock_test` vs `bock_conformance`; (c) whether the execution-safety
+wording on the four code-executing tools (run/test/build/conformance) states the CLI trust envelope plainly enough;
+(d) `bock_conformance`'s cost/toolchain caveats — it is the differentiator and also the most expensive call.
+
+**Also riding this handoff — one wording confirmation (OPEN from #441):** the session's §20.1 refresh rewrote the
+`bock run` line, which goes slightly beyond a mechanical flag-list refresh: it drops the false v1 `--target` and
+hot-reload claims. The rewrite is factually correct against the binary, and §20.1 is non-normative register text,
+but the session flagged that dropping capability claims is an editorial call it should not make silently. Confirm
+the wording or amend.
+
+**Awaiting:** Design pass on the seven schemas + the §20.1 `bock run` wording confirmation.
+**Status:** open

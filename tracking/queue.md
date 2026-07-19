@@ -12,7 +12,20 @@ descriptions; the orchestrator triages them into the right file.
 Schema: `[ID] title — type · status · owned-files · blocked-by ·
 links · note`. Status ∈ {ready, in-flight, blocked, deferred}.
 
-_**Last reconciled 2026-07-03 05:52 — NIGHT WRAP. Dep escalation RESOLVED (hand-rolled) — Q-mcp-server is READY for tomorrow.**
+_**Last reconciled 2026-07-19 07:10 — ★ `bock mcp` IS SHIPPED. The agent-facing ecosystem's lead item is done.**
+The 2026-07-03 night-wrap sequence is fully executed: dependabot drain (7/7 routine, closed + verified at final HEAD)
+→ **Q-cli-json-structured-gaps → #440** → **Q-mcp-server → #441 (merged b79d239)**. `bock mcp` serves all seven v1
+tools over hand-rolled stdio JSON-RPC with **zero new dependencies**, thin over the CLI's `--format json` layer
+(which is exactly why #440 had to precede it — the MCP tools return that document verbatim, so its bypasses were
+fidelity holes). Sequence step (4) **Q-mcp-pack-resources is now UNBLOCKED and is the natural next dispatch** —
+smallest of the three, and `resources/list` already ships as an empty list waiting to be filled. Gate (1)
+tool-schema Design review is due but NON-BLOCKING → filed E-mcp-schema-review (carries the §20.1 `bock run`
+wording OPEN with it). 2 FOUNDs filed below (Q-spec-doc-line-overclaims, Q-mcp-conformance-timeout-gap — both LOW,
+neither blocks the pack item). Per brief §7/§8 the positioning hook stays parked until we've dogfooded `bock mcp`
+in our own sessions (R8) — do NOT route marketing yet. NIGHTLY STATE: main 95acb21 → b79d239 + this tracking PR,
+0 open feature PRs, 2 dependabot majors (#435/#438) deliberately open as upstream-blocked, worktrees/branches
+pruned, CI green. AWAITING OPERATOR: nothing blocking; E-mcp-schema-review whenever Design has a slot. ↓ —
+PRIOR: **Last reconciled 2026-07-03 05:52 — NIGHT WRAP. Dep escalation RESOLVED (hand-rolled) — Q-mcp-server is READY for tomorrow.**
 Operator wrap-up: the MCP-dependency escalation is answered — **(b) hand-rolled thin stdio JSON-RPC** (zero new deps;
 exactly the served subset: initialize, tools/list, tools/call, resources/list, resources/read; we own protocol
 tracking). **Q-mcp-server → ready**, both gates cleared (substrate #427 + this); the Design tool-schema one-pass rides
@@ -594,10 +607,25 @@ actionable until Q-mcp-server lands.
   13 new integration tests (`tests/format_json.rs`); docs/src/reference/cli.md "Machine-Readable Output" section
   (~130 lines, >50-line convention flagged in-PR). Gate 5/5 + CI 20/20. FOUNDs → Q-test-ansi-stdout,
   Q-cli-json-structured-gaps (below); OPEN §20.1 flag-list lag → rides Q-mcp-server's on-landing changelog.
-- **[Q-mcp-server] `bock mcp` — compiler surface as MCP tools (stdio subcommand)** — feature · **ready (dispatch
-  next session)** · `compiler/crates/bock-cli/` (server layer thin over the CLI) · — (both gates cleared: substrate
+- **[Q-mcp-server] `bock mcp` — compiler surface as MCP tools (stdio subcommand)** — feature · **DONE (#441,
+  merged b79d239)** · `compiler/crates/bock-cli/` (server layer thin over the CLI) · — (both gates cleared: substrate
   #427; dep escalation RESOLVED 2026-07-03 05:52 → **hand-rolled**) · links audit R4, brief
-  §3–§5, §20.3 note, changelog `20260610-design-audit-spec-touches.md` · note: scoping DECIDED by the 2026-07-03 brief —
+  §3–§5, §20.3 note, changelogs `20260610-design-audit-spec-touches.md` + `20260719-mcp-server.md` ·
+  **SHIPPED 2026-07-19:** all seven v1 tools (`bock_check`/`bock_run`/`bock_test`/`bock_build`/`bock_conformance`/
+  `bock_inspect`/`bock_explain`) over newline-delimited JSON-RPC 2.0 on stdio; new `src/mcp/` module
+  (`mod.rs` loop, `tools.rs` schemas+handlers, `conformance.rs`), 12-test integration suite `tests/mcp_server.rs`
+  (spawns the binary, speaks real JSON-RPC), docs page `docs/src/reference/mcp.md`, spec §20.1/§20.3 register
+  updates + changelog. Design conformance confirmed against the brief: inside-the-CLI stdio subcommand, **zero new
+  deps** (hand-rolled served subset: initialize/ping/tools/list/tools/call/resources/list/resources/read),
+  thin-over-CLI (every wrapping tool spawns `bock` and returns the `--format json` document verbatim — never
+  re-renders or parses human text; `run`/`build` get minimal envelopes on the same output.rs conventions),
+  `bock_conformance` reports missing toolchains as explicit skips with install hints (never a silent pass),
+  execution-safety wording + `timeout_seconds` (default 120s) on the four code-executing tools, JSON-RPC error
+  mapping −32700/−32600/−32601/−32602/−32002 with malformed frames never crashing the loop. Gate: engineer 5/5
+  clean (incl. `cargo test --workspace` 64 suites) + orchestrator re-verify + live handshake smoke; CI 20/20 at
+  merge (one fixup: the bundled extension spec asset needed `sync-vocab.sh` after the §20.1 edit). Remaining
+  gate (1) tool-schema Design review is NON-BLOCKING and now pending → escalations. Original scope note follows.
+  Scoping DECIDED by the 2026-07-03 brief —
   ships INSIDE the CLI as `bock mcp` (stdio transport), NOT a separate crate/binary: zero extra install, version-locked
   to the compiler by construction, no separate release artifact; thin server layer so a post-MCP protocol shift is a
   transport shim, not a rewrite. v1 tools: `bock_check` / `bock_run` / `bock_test` / `bock_build` / `bock_conformance` /
@@ -612,13 +640,29 @@ actionable until Q-mcp-server lands.
   On landing: one-line §20.3-adjacent spec note + design changelog (per audit R4) — the same changelog also refreshes
   §20.1's (non-normative) per-command flag lists, which #427's OPEN noted now lag the binary. First consumer = our own
   sessions (dogfood, R8) before external positioning. LEADS the v1.x tooling list (human panels behind it).
-- **[Q-mcp-pack-resources] context pack served as MCP resources + `bock_explain` backing** — feature · blocked ·
-  `compiler/crates/bock-cli/` + `context-pack/` · blocked-by Q-mcp-server · links brief §2, Q-context-pack (#339), OQ2 ·
+- **[Q-mcp-pack-resources] context pack served as MCP resources + `bock_explain` backing** — feature · **ready
+  (UNBLOCKED 2026-07-19 — Q-mcp-server landed #441; `resources/list` ships as an empty v1 list, so this item fills
+  a socket that already exists)** · `compiler/crates/bock-cli/` + `context-pack/` · — · links brief §2,
+  Q-context-pack (#339), OQ2 ·
   note: the pack's contents (spec sections by §-number, per-module stdlib reference, idiom primer, error-code table)
   exposed as MCP resources read FROM the single maintained pack artifact — one artifact, two access modes (static
   paste-in / on-demand resources), no second maintained copy, no divergence risk. `bock_explain` backed by the pack's
   error-code table (explanation + fix pattern per `E____`). Pack versioning should track the compiler (v0.1.1 today —
   the version-sync mechanism rides this item). Smallest item of the three.
+
+**#441 FOUNDs (filed 2026-07-19):**
+
+- **[Q-spec-doc-line-overclaims] §20.1's `bock doc` line claims "Generate, serve, and publish"; the v1 binary only
+  generates** — doc/spec · ready · LOW · `spec/bock-spec.md` §20.1 · — · links #441 · note: pre-existing, untouched
+  by the MCP session (which refreshed the *other* §20.1 flag lists against the binary). Non-normative register text,
+  so it's a wording fix, not a divergence — but it overclaims a v1 capability to readers. Fold into the next spec
+  register pass rather than spending a session on it.
+- **[Q-mcp-conformance-timeout-gap] `bock_conformance`'s target-toolchain execution step is not bounded by
+  `timeout_seconds`** — bug · ready · LOW · `compiler/crates/bock-cli/src/mcp/conformance.rs` · — · links #441 ·
+  note: the reference run and per-target *builds* are bounded; the per-target *execution* step is not, so a
+  pathological generated program can hang the tool past its stated timeout. Documented as a v1 limitation in the
+  tool description (honest, not silent), which is why it ships rather than blocks. Close before external
+  positioning/dogfooding leans on `bock_conformance` as the differentiator.
 
 **#427 FOUNDs (filed 2026-07-03):**
 
