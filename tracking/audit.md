@@ -2879,3 +2879,40 @@ caches pruned, CI green. AWAITING OPERATOR: nothing. Design: DQ32/DQ33 (non-bloc
   Decision: drain CLOSED (verified, not just merged); #435/#438 stay OPEN as blocked majors, not merged, no dependabot-ignore added.
   Reasoning: (1) the path-filtered blind spot was checked deliberately — no CI workflow ran at the ext-only HEAD 3d7a6bb, but CI@92ed8af includes the `vscode extension` job on the combined tree (text-merged #437+#439 lockfile) and it is green, so the combined ext state is proven, per the rapid-merge/path-filter rule. Full job list green (13/13 incl. all 6 test cells). (2) #435 still fails ERESOLVE after the typescript-eslint 8.64.0 rebase — 8.64.0's own typescript peer range still excludes 7.x, so the block is upstream, not ours; #438 (website) likewise failed its post-rebase Docs build. Leaving both open keeps the signal visible (same posture as the astro-7 pair under Q-website-astro7-migration); an ignore rule would hide it.
   Follow-up: queue note for the TS7 blocked class (unblock condition: typescript-eslint publishes TS7 peer support); Q-cli-json-structured-gaps marked DONE (#440, merged 92ed8af, CI 13/13 green at HEAD); Q-mcp-server session dispatched on base 92ed8af (in-flight).
+
+[2026-07-19 07:10 UTC] Q-mcp-server LANDED (#441, b79d239) — the night-wrap sequence is fully executed
+  Input: resumed the orchestrator loop mid-flight — PR #441 open and UNSTABLE, plus an unpushed 2-commit tracking
+  branch sitting in a worktree. Board re-verified against the repo before acting (repo wins).
+  Options for #441's single red check (`vocab + spec assets in sync`): re-run it as flake; ask the engineer session
+  to fix; fix in place.
+  Decision: fixed in place — ran `tools/scripts/sync-vocab.sh`, committed the resynced
+  `extensions/vscode/assets/spec/bock-spec.md`, pushed.
+  Reasoning: not a flake and not an engineer error of substance — the session correctly edited spec §20.1/§20.3,
+  and the extension bundles a generated copy of the spec; the generated asset simply wasn't regenerated. Mechanical,
+  fully determined by a script, zero judgment: cheaper to fix than to round-trip. The other 19 checks were already
+  green, so this was the whole gate.
+  Verification: CI at the fixup head went 20/20 (all 6 test cells, blocking examples matrix, cargo doc, clippy,
+  ext job) and mergeStateStatus=CLEAN before merge — confirmed, not assumed. Merged squash; worktree + branch pruned.
+  Landed scope: seven v1 tools over newline-delimited JSON-RPC 2.0 on stdio, `src/mcp/` (protocol loop / schemas +
+  handlers / conformance), 12-test integration suite that spawns the binary and speaks real JSON-RPC, docs page,
+  spec register updates + changelog `20260719-mcp-server.md`. Design-brief conformance checked item by item
+  (inside-the-CLI subcommand, zero new deps, thin-over-CLI returning `--format json` verbatim, conformance skips
+  never silent, execution-safety wording + timeout bounds, JSON-RPC error mapping resilient to malformed frames).
+  Follow-up: gate (1) tool-schema Design review filed as E-mcp-schema-review (NON-BLOCKING — schemas already ship;
+  the §20.1 `bock run` wording OPEN rides the same handoff). 2 FOUNDs → queue (Q-spec-doc-line-overclaims LOW;
+  Q-mcp-conformance-timeout-gap LOW — the per-target *execution* step escapes `timeout_seconds`, documented in-tool
+  as a v1 limitation). Q-mcp-pack-resources UNBLOCKED → next dispatch. Positioning stays parked until dogfooding (R8).
+
+[2026-07-19 07:10 UTC] Tracking-branch recovery — a stale-base diff that looked like a revert
+  Input: worktree `tracking-20260719-0457` held 2 unpushed commits; `git diff origin/main..HEAD` showed ~730 deletions
+  across `bock-cli/src/{check,main,output,test}.rs`, `tests/format_json.rs`, and `docs/src/reference/cli.md` —
+  i.e. it appeared to revert #440 wholesale.
+  Options: treat it as a real revert and discard the branch; investigate the base first.
+  Decision: investigated before discarding — rebased onto current `origin/main`, after which the diff collapsed to
+  `tracking/audit.md` +29 and nothing else.
+  Reasoning: the branch was cut before #440 merged, so a two-dot diff against the *newer* main renders main's own
+  additions as deletions. The artifact is entirely expected once the base is understood; discarding on the raw diff
+  would have thrown away a correct audit block, and "re-applying" it would have reverted #440. Rebasing distinguishes
+  the two cases definitively.
+  Follow-up: pushed as #442, merged (95acb21). Worth remembering as a standing read: a tracking branch showing large
+  code deletions is a base-staleness signal, not a content signal — rebase before judging.
