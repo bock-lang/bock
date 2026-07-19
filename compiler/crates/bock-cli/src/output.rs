@@ -90,6 +90,59 @@ pub fn print_document(doc: &serde_json::Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build the machine-output document for a usage-class error: a value our
+/// own command code rejects *after* clap has parsed argv (e.g. an unknown
+/// `bock check --only` aspect).
+///
+/// The pinned contract: once argv has parsed far enough that json mode is
+/// known and command code is executing, **every** terminating outcome emits
+/// exactly one JSON document on stdout. Usage errors use the shared envelope
+/// with `outcome: "usage-error"`, an empty `payload_key` array (so consumers
+/// that unconditionally read the command's payload keep working), and the
+/// problem described in `error.message`. Errors clap itself raises before
+/// command code runs stay clap-native on stderr with an empty stdout — that
+/// boundary is the other half of the contract.
+///
+/// Exit codes are unchanged by format.
+#[must_use]
+pub fn usage_error_document(command: &str, payload_key: &str, message: &str) -> serde_json::Value {
+    let mut doc = serde_json::json!({
+        "format_version": FORMAT_VERSION,
+        "command": command,
+        "outcome": "usage-error",
+        "summary": {},
+        "error": { "message": message },
+    });
+    doc[payload_key] = serde_json::Value::Array(Vec::new());
+    doc
+}
+
+/// Serialize an I/O-class failure (an unreadable input file, "no files
+/// found") to the diagnostic contract shape.
+///
+/// I/O failures have no code in the diagnostic catalog (the code registry is
+/// governed; no new E-codes are minted for them), so `code` is `null` — the
+/// only entries where it is. The span is a zero span: `file` names the
+/// offending path when there is one (`null` for "no files found"), and
+/// `start`/`end`/`line`/`col` take their dummy values (`0`/`0`/`1`/`1`),
+/// matching how unlocated diagnostics already serialize.
+#[must_use]
+pub fn io_error_json(message: &str, file: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "severity": "error",
+        "code": null,
+        "message": message,
+        "span": {
+            "file": file,
+            "start": 0,
+            "end": 0,
+            "line": 1,
+            "col": 1,
+        },
+        "suggestion": null,
+    })
+}
+
 /// Convert a byte offset into `source` to a 1-indexed `(line, column)`, with
 /// the column counting Unicode scalar values (characters), not bytes.
 ///
@@ -182,5 +235,36 @@ mod tests {
         assert!(json["span"]["file"].is_null());
         assert_eq!(json["span"]["line"], 1);
         assert_eq!(json["span"]["col"], 1);
+    }
+
+    #[test]
+    fn usage_error_document_carries_envelope_and_empty_payload() {
+        let doc = usage_error_document("check", "diagnostics", "unknown check aspect 'bogus'");
+        assert_eq!(doc["format_version"], FORMAT_VERSION);
+        assert_eq!(doc["command"], "check");
+        assert_eq!(doc["outcome"], "usage-error");
+        assert!(doc["summary"].is_object());
+        assert_eq!(doc["error"]["message"], "unknown check aspect 'bogus'");
+        assert!(
+            doc["diagnostics"].as_array().unwrap().is_empty(),
+            "the payload array is present and empty: {doc}"
+        );
+    }
+
+    #[test]
+    fn io_error_json_uses_null_code_and_zero_span() {
+        let with_file = io_error_json("No such file or directory", Some("gone.bock"));
+        assert_eq!(with_file["severity"], "error");
+        assert!(with_file["code"].is_null(), "I/O entries carry no code");
+        assert_eq!(with_file["message"], "No such file or directory");
+        assert_eq!(with_file["span"]["file"], "gone.bock");
+        assert_eq!(with_file["span"]["start"], 0);
+        assert_eq!(with_file["span"]["end"], 0);
+        assert_eq!(with_file["span"]["line"], 1);
+        assert_eq!(with_file["span"]["col"], 1);
+        assert!(with_file["suggestion"].is_null());
+
+        let no_file = io_error_json("No .bock files found.", None);
+        assert!(no_file["span"]["file"].is_null());
     }
 }

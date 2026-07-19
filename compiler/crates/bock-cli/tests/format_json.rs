@@ -14,7 +14,14 @@
 //!   `Diagnostic` values the human renderer consumes;
 //! * exit codes are identical to human mode;
 //! * `inspect air --json` keeps its established (non-envelope) tree
-//!   contract, and `--format json` there is an alias for it.
+//!   contract, and `--format json` there is an alias for it;
+//! * the usage-error boundary: post-clap usage errors (e.g. an unknown
+//!   `--only` aspect) emit an `outcome: "usage-error"` document, while
+//!   errors clap itself raises stay clap-native on stderr with an empty
+//!   stdout;
+//! * I/O-class failures (unreadable input, no files found) surface in the
+//!   `check` document as `code: null` entries, and `test` compile errors
+//!   surface as structured diagnostics in a top-level `diagnostics` array.
 
 use std::io::Write;
 use std::process::Command;
@@ -240,8 +247,9 @@ fn check_json_module_cycle_has_code_and_suggestion() {
 #[test]
 fn check_json_missing_file_fails_with_document() {
     // A missing input file fails the check; stdout still carries exactly one
-    // document (the unreadable-file reason goes to stderr — a known
-    // unstructured path).
+    // document and the reason also goes to stderr. (The document additionally
+    // carries an I/O-class entry — pinned separately by
+    // check_json_missing_file_carries_io_diagnostic_entry.)
     let output = bock_bin()
         .arg("check")
         .arg("--format=json")
@@ -392,6 +400,284 @@ fn test_json_compile_error_becomes_failed_entry() {
             .unwrap()
             .starts_with("compilation error:"),
         "compile failures are structured entries: {doc}"
+    );
+}
+
+#[test]
+fn test_json_compile_error_carries_structured_diagnostics() {
+    // A file that fails to compile keeps its pinned failed entry (message
+    // starts with `compilation error:`) AND now carries the structured
+    // diagnostics in the document's top-level `diagnostics` array — the
+    // same entry shape `bock check` emits, serialized from the diagnostic
+    // layer rather than re-rendered text.
+    let f = write_temp_file("fn { broken\n");
+    let output = bock_bin()
+        .arg("test")
+        .arg("--format=json")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "compile error, json, structured");
+
+    let doc = parse_stdout(&output);
+    assert_envelope(&doc, "test", "failed");
+
+    // The pinned per-file failed entry stays, with a concise message.
+    let tests = doc["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 1);
+    assert_eq!(tests[0]["passed"], false);
+    let message = tests[0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("compilation error:"),
+        "entry keeps its prefix: {message}"
+    );
+    assert!(
+        !message.contains('\n'),
+        "the entry message is a one-line summary, not rendered text: {message:?}"
+    );
+
+    // The structured diagnostics ride alongside.
+    let diags = doc["diagnostics"].as_array().unwrap();
+    assert!(!diags.is_empty(), "diagnostics must be present: {doc}");
+    for (i, d) in diags.iter().enumerate() {
+        assert_diagnostic_contract(d, &format!("test compile diag {i}"));
+    }
+    assert_eq!(diags[0]["severity"], "error");
+    assert!(
+        diags[0]["code"].as_str().unwrap().starts_with('E'),
+        "error code prefix: {}",
+        diags[0]
+    );
+    assert!(
+        diags[0]["span"]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with(".bock"),
+        "span names the input file: {}",
+        diags[0]
+    );
+}
+
+#[test]
+fn test_json_clean_run_has_empty_diagnostics_array() {
+    // The additive top-level `diagnostics` array is present on every test
+    // document — empty when every file compiled.
+    let f = write_temp_file(
+        r#"@test
+fn test_ok() {
+    expect(1 + 1).to_equal(2)
+}
+"#,
+    );
+    let output = bock_bin()
+        .arg("test")
+        .arg("--format=json")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 0, "clean test run, json");
+    let doc = parse_stdout(&output);
+    assert!(
+        doc["diagnostics"].as_array().unwrap().is_empty(),
+        "clean run → empty diagnostics array: {doc}"
+    );
+}
+
+// ─── Usage-error boundary (post-clap vs clap-native) ────────────────────────
+
+#[test]
+fn check_json_unknown_only_aspect_emits_usage_error_document() {
+    // A usage-class error detected by our own command code after clap parsed
+    // argv (json mode is known): stdout carries exactly one document with
+    // `outcome: "usage-error"`, the problem in `error.message`, and an empty
+    // payload array. Exit code unchanged from human mode.
+    let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+    let output = bock_bin()
+        .arg("check")
+        .arg("--format=json")
+        .arg("--only=bogus")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "unknown --only aspect, json");
+
+    let doc = parse_stdout(&output);
+    assert_eq!(doc["format_version"], 1, "format_version: {doc}");
+    assert_eq!(doc["command"], "check", "command: {doc}");
+    assert_eq!(doc["outcome"], "usage-error", "outcome: {doc}");
+    assert!(doc["summary"].is_object(), "summary: {doc}");
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("bogus"),
+        "message names the offending value: {message}"
+    );
+    assert!(
+        message.contains("types") && message.contains("context"),
+        "message lists the valid aspects: {message}"
+    );
+    assert!(
+        doc["diagnostics"].as_array().unwrap().is_empty(),
+        "usage-error keeps an empty payload array: {doc}"
+    );
+}
+
+#[test]
+fn check_human_unknown_only_aspect_keeps_stderr_and_empty_stdout() {
+    // The human side of the same usage error is unchanged: the message on
+    // stderr, nothing on stdout.
+    let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+    let output = bock_bin()
+        .arg("check")
+        .arg("--only=bogus")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "unknown --only aspect, human");
+    assert!(
+        output.stdout.is_empty(),
+        "human usage errors write nothing to stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown check aspect 'bogus'"),
+        "stderr carries the message: {stderr}"
+    );
+}
+
+#[test]
+fn check_json_clap_level_errors_stay_native_with_empty_stdout() {
+    // The other side of the boundary: errors clap itself raises before our
+    // command code runs stay clap-native on stderr — no JSON document, even
+    // when `--format=json` appears in argv.
+    let f = write_temp_file("fn add(a: Int, b: Int) -> Int { a + b }\n");
+
+    // An unknown flag.
+    let output = bock_bin()
+        .arg("check")
+        .arg("--format=json")
+        .arg("--definitely-not-a-flag")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "unknown flag must fail");
+    assert!(
+        output.stdout.is_empty(),
+        "clap-level errors emit no stdout document: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--definitely-not-a-flag"),
+        "clap names the flag on stderr: {stderr}"
+    );
+
+    // An invalid --format value (clap rejects the value itself).
+    let output = bock_bin()
+        .arg("check")
+        .arg("--format=xml")
+        .arg(f.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "unknown format must fail");
+    assert!(
+        output.stdout.is_empty(),
+        "bad --format value emits no stdout document: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+// ─── I/O-class failures reach the check document ────────────────────────────
+
+#[test]
+fn check_json_missing_file_carries_io_diagnostic_entry() {
+    // An unreadable input file: the document itself now says why the check
+    // failed — an I/O-class entry with `code: null` (no catalog code is
+    // minted for I/O failures) and the path in `span.file`. The stderr line
+    // stays (pinned by check_json_missing_file_fails_with_document).
+    let missing = "/tmp/nonexistent_bock_io_entry_67890.bock";
+    let output = bock_bin()
+        .arg("check")
+        .arg("--format=json")
+        .arg(missing)
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "missing file, json, io entry");
+
+    let doc = parse_stdout(&output);
+    assert_envelope(&doc, "check", "failed");
+    assert!(
+        doc["summary"]["errors"].as_u64().unwrap() >= 1,
+        "the I/O entry counts as an error: {doc}"
+    );
+    let diags = doc["diagnostics"].as_array().unwrap();
+    let io = diags
+        .iter()
+        .find(|d| d["code"].is_null())
+        .unwrap_or_else(|| panic!("an I/O-class entry must surface: {doc}"));
+    assert_eq!(io["severity"], "error");
+    assert_eq!(io["span"]["file"], missing, "span names the path: {io}");
+    assert!(
+        !io["message"].as_str().unwrap().is_empty(),
+        "message carries the I/O reason: {io}"
+    );
+    assert!(io["suggestion"].is_null());
+}
+
+#[test]
+fn check_json_no_files_found_document_names_the_reason() {
+    // Zero `.bock` files discovered: the check fails (exit 1, unchanged) and
+    // the document now carries the reason as an I/O-class entry with
+    // `span.file: null`, instead of being silent about why nothing ran.
+    let dir = tempfile::tempdir().unwrap();
+    let output = bock_bin()
+        .arg("check")
+        .arg("--format=json")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "no files found, json");
+
+    let doc = parse_stdout(&output);
+    assert_envelope(&doc, "check", "failed");
+    assert_eq!(doc["summary"]["files"], 0);
+    let diags = doc["diagnostics"].as_array().unwrap();
+    assert_eq!(diags.len(), 1, "exactly the I/O entry: {doc}");
+    assert_eq!(diags[0]["severity"], "error");
+    assert!(
+        diags[0]["code"].is_null(),
+        "I/O entries have no code: {doc}"
+    );
+    assert_eq!(diags[0]["message"], "No .bock files found.");
+    assert!(diags[0]["span"]["file"].is_null());
+    // The stderr line stays in json mode too.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No .bock files found."),
+        "stderr keeps the human line: {stderr}"
+    );
+}
+
+#[test]
+fn check_human_no_files_found_stays_stderr_only() {
+    // Human mode for the same failure is unchanged: the line on stderr,
+    // nothing on stdout, exit 1.
+    let dir = tempfile::tempdir().unwrap();
+    let output = bock_bin()
+        .arg("check")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_exit_code(&output, 1, "no files found, human");
+    assert!(
+        output.stdout.is_empty(),
+        "human mode writes nothing to stdout on this failure: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No .bock files found."),
+        "stderr carries the reason: {stderr}"
     );
 }
 
