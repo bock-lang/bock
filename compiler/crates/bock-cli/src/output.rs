@@ -5,7 +5,7 @@
 //! one JSON document, serialized from the same structured values the human
 //! renderer consumes ([`Diagnostic`] and friends) — never re-parsed from
 //! rendered text. The document shape is a public machine contract (CI, the
-//! LSP, and the planned `bock mcp` server consume it): it changes only
+//! LSP, and the `bock mcp` server consume it): it changes only
 //! additively, with [`FORMAT_VERSION`] bumped on any breaking change.
 //!
 //! Every document shares one envelope — `format_version` / `command` /
