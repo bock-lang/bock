@@ -2850,3 +2850,26 @@ Main advanced b78bf8b → 59f40ec via 1 feature PR + 1 tracking PR (a second tra
     Q-mcp-server on-landing changelog. Drift note logged: audit.md had no release-session entries (story lives in queue).
 State at close: main 59f40ec, 0 open feature PRs (6 routine dependabot pending → tomorrow's drain), worktrees/branches/
 caches pruned, CI green. AWAITING OPERATOR: nothing. Design: DQ32/DQ33 (non-blocking) + the future schema one-pass.
+
+[2026-07-19 03:55 UTC] Block start — night-wrap sequence resumed after a 16-day gap; dependabot drain round 1
+  Input: 2026-07-03 night wrap's suggested sequence (dependabot drain → Q-cli-json-structured-gaps → Q-mcp-server → Q-mcp-pack-resources). Board re-verified against the repo: main 4492141, CI green, 0 feature PRs; the old dependabot batch (#417–#421) was superseded — 11 open dependabot PRs (#416, #430–#439), 7 CLEAN + 4 UNSTABLE.
+  Options: merge all 11 blind; merge CLEAN + investigate UNSTABLE; defer the drain.
+  Decision: merge the 7 CLEAN routine bumps round-robin per lockfile group; triage the 4 UNSTABLE as blocked majors, do NOT merge.
+  Reasoning: the 4 UNSTABLE are two known classes, both with root causes confirmed from CI logs: (1) #432 astro 7 + #434 cloudflare 14 peer-require each other, fail ERESOLVE individually, and are ALREADY covered by Q-website-astro7-migration (the majors were deliberately reverted in #410 for a real astro-build breakage — dependabot re-proposing them is the expected loop that item predicts); (2) #435/#438 typescript 7.0.2 majors are peer-blocked by typescript-eslint 8.62 (ERESOLVE, no TS7 peer support). Merging red majors would violate the merge-only-when-clean rule.
+  Follow-up: round-robin merges gated on CLEAN + all checks green post-rebase; TS7 pair re-tested post typescript-eslint 8.64.0; queue note for the TS7 class.
+
+[2026-07-19 04:55 UTC] Dependabot drain COMPLETE — 7/7 routine bumps merged (#430, #416, #436, #431, #433, #437, #439)
+  Input: round-robin execution across three lockfile groups (cargo / extensions npm / website npm).
+  Options: serial rounds waiting for dependabot rebase each time vs. attempting consecutive merges when GitHub reported CLEAN.
+  Decision: merged in 3 rounds: (1) #430 regex 1.13.0 [cargo] + #416 vscode-languageclient 10.1.0 [ext] + #436 wrangler 4.110.0 [website]; (2) #431 @types/node 26.1.1 after @dependabot rebase + full green; (3) #433 marked 18.0.6, then #437 typescript-eslint 8.64.0 and #439 eslint 10.7.0 back-to-back — both stayed mergeStateStatus=CLEAN after the prior merge (disjoint lockfile hunks), so no extra rebase round was spent.
+  Reasoning: every merge gated on CLEAN + 0 failing checks on the rebased head (verified by watcher, not assumed). #437/#439 landed via GitHub text-merged lockfile after #433; per the rapid-merge supersession rule the final merged HEAD (3d7a6bb) has a CI watcher on it — the ext workflow runs on these paths, so combined-tree ext health is verified at HEAD, not per-PR only.
+  Follow-up: dependabot recreated two PRs against newer upstream versions mid-drain (typescript-eslint 8.63→8.64, astro 7.0.7→7.1.1) — titles in the queue note reflect the merged versions. #435/#438 (TS 7.0.2) re-nudged post-8.64.0 to test whether the peer block cleared; result lands in this block's later entries.
+
+[2026-07-19 04:56 UTC] Q-cli-json-structured-gaps dispatched, stall-recovered, published as PR #440
+  Input: night-wrap sequence step 2; item MED, bock-cli-owned, must precede Q-mcp-server (same crate, never alongside).
+  Options: dispatch alongside the drain (file-disjoint: bock-cli vs npm lockfiles) vs. after it.
+  Decision: dispatched concurrently with the drain in worktree fix/cli-json-structured-gaps (base 2a5c79c); engineer sub-agent, foreground-equivalent discipline.
+  Reasoning: file-disjointness holds (the drain touches package locks + Cargo.lock only; the session touches bock-cli src + docs/cli.md); the sequencing constraint is only vs. Q-mcp-server.
+  Incident: the engineer stopped once mid-session with the known background-and-wait stall (backgrounded cargo test, returned before committing) — recovered per the standing pattern by resuming it with a finish-synchronously instruction; it completed the full 5-command gate clean and committed d824c58.
+  Verification: orchestrator re-verified in the worktree: fmt --check PASS, clippy --workspace --all-targets -D warnings PASS, cargo test -p bock all suites PASS (21/21 format_json, 13 pre-existing unmodified); diff scope confirmed = owned files only (bock-cli src/tests + docs/src/reference/cli.md). Pushed; PR #440 open; CI watcher armed; merge gated on full green.
+  Contract decisions (engineer's, §20.1 non-normative — logged for review): test documents gain a top-level `diagnostics` array mirroring `bock check`'s payload; post-clap usage errors emit an `outcome:"usage-error"` envelope on stdout while clap-native parse errors stay stderr-only (pinned both sides); I/O-class entries use `code:null` (no E-codes minted). All additive, FORMAT_VERSION stays 1. 2 FOUNDs filed → queue (anyhow discovery-abort bypass; check-vs-test no-files exit-code divergence).
