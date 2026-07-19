@@ -2,7 +2,7 @@
 
 The `bock` binary is a single tool that contains the whole toolchain:
 build, run, check, format, package management, AI-decision management,
-documentation, and the language server. This page documents every
+documentation, the language server, and the MCP server. This page documents every
 subcommand and flag that ships in **v1**, with a short runnable
 example for each, and a final section listing the surfaces that are
 **Reserved for v1.x**.
@@ -41,6 +41,7 @@ REPL, formatter, LSP, and testing tiers have their own page
 | `bock doc`    | Generate API documentation.                               |
 | `bock model`  | Query or set AI model configuration.                      |
 | `bock lsp`    | Start the language server over stdio.                     |
+| `bock mcp`    | Start the MCP server over stdio (compiler surface as agent tools). |
 
 `bock help` and `bock help <command>` print the same information as
 `--help`. The two global options are `-h`/`--help` and `-V`/`--version` (`bock --version` prints `bock 1.0.0`).
@@ -61,7 +62,8 @@ human mode.) Exit codes are
 identical to human mode. The document is serialized from the same
 structured diagnostics the human renderer consumes, so the two views
 cannot disagree. This is the substrate for CI consumers and the
-planned `bock mcp` server.
+[`bock mcp` server](./mcp.md), whose tools return these same
+documents.
 
 ```bash
 bock check --format json src/main.bock
@@ -713,6 +715,27 @@ bock lsp --stdio                  # same as above; --stdio is accepted for conve
 | Flag       | Meaning                                                                   |
 | ---------- | ------------------------------------------------------------------------- |
 | `--stdio`  | Use stdio transport. It is already the default and only v1 transport; the flag is accepted for LSP-client compatibility. |
+
+## MCP Server
+
+### `bock mcp`
+
+Start the Bock MCP (Model Context Protocol) server, exposing the
+compiler surface — `bock_check`, `bock_run`, `bock_test`, `bock_build`,
+`bock_conformance` (single-file cross-target behavior comparison),
+`bock_inspect`, and `bock_explain` — as tools for agentic clients over
+stdio. Tool results are the same JSON documents `--format json` emits.
+See the dedicated [MCP Server](./mcp.md) page for the protocol surface,
+every tool schema, and the execution-safety envelope.
+
+```bash
+bock mcp
+bock mcp --stdio                  # same as above; --stdio is accepted for convention
+```
+
+| Flag       | Meaning                                                                   |
+| ---------- | ------------------------------------------------------------------------- |
+| `--stdio`  | Use stdio transport. It is already the default and only v1 transport; the flag is accepted for MCP-client-config compatibility. |
 
 ## Reserved for v1.x
 

@@ -27,6 +27,7 @@
 # Reference
 
 - [CLI](./reference/cli.md)
+- [MCP Server](./reference/mcp.md)
 - [Build & Tooling](./reference/tooling.md)
 - [Project Schema](./reference/project-schema.md)
 - [Standard Library](./reference/stdlib.md)

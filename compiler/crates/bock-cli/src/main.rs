@@ -12,6 +12,7 @@ mod decision_io;
 mod doc;
 mod fmt;
 mod inspect;
+mod mcp;
 mod new;
 mod output;
 #[path = "override.rs"]
@@ -289,6 +290,18 @@ enum Command {
         /// Output format: `markdown` (default) or `html`.
         #[arg(long, default_value = "markdown")]
         format: String,
+    },
+    /// Start the Bock MCP server over stdio.
+    ///
+    /// Exposes the compiler surface (check, run, test, build, single-file
+    /// cross-target conformance, inspect, diagnostic-code explanations) as
+    /// Model Context Protocol tools for agentic clients. Newline-delimited
+    /// JSON-RPC 2.0 on stdin/stdout; logging goes to stderr; exits 0 at EOF.
+    Mcp {
+        /// Use stdio transport (default and only transport in v1; accepted
+        /// for convention with MCP client configurations).
+        #[arg(long)]
+        stdio: bool,
     },
     /// Start the Bock language server over stdio.
     Lsp {
@@ -654,6 +667,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             output,
             format,
         } => doc::run(path, output, &format)?,
+        Command::Mcp { stdio: _ } => mcp::run()?,
         Command::Lsp { stdio: _ } => bock_lsp::run_stdio().await,
     }
 
@@ -735,6 +749,16 @@ mod tests {
         let cli = Cli::try_parse_from(["bock", "lsp"])
             .expect("`bock lsp` (no flag) should parse cleanly");
         assert!(matches!(cli.command, Command::Lsp { stdio: false }));
+    }
+
+    #[test]
+    fn mcp_parses_with_and_without_stdio_flag() {
+        let cli = Cli::try_parse_from(["bock", "mcp"]).expect("`bock mcp` should parse cleanly");
+        assert!(matches!(cli.command, Command::Mcp { stdio: false }));
+
+        let cli = Cli::try_parse_from(["bock", "mcp", "--stdio"])
+            .expect("`bock mcp --stdio` should parse cleanly");
+        assert!(matches!(cli.command, Command::Mcp { stdio: true }));
     }
 
     #[test]
