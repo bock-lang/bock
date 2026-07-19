@@ -27,6 +27,13 @@
 //! `-32600` invalid request, `-32601` unknown method, `-32602` invalid
 //! params (including unknown tool names and malformed tool arguments), and
 //! `-32002` (the MCP-assigned code) for an unknown resource URI.
+//!
+//! # Resources
+//!
+//! `resources/list` and `resources/read` serve the AI context pack, the
+//! language specification, and the stdlib reference as readable documents,
+//! compiled into the binary from generated in-tree assets. See [`resources`]
+//! for the tiers, the URI scheme, and the `bock_explain` → spec bridge.
 //! Tool-level failures — the wrapped command failing, a subprocess that
 //! cannot be spawned — are **successful** `tools/call` responses with
 //! `isError: true`, carrying the structured document (or a plain-text
@@ -36,6 +43,7 @@
 //! [Model Context Protocol]: https://modelcontextprotocol.io/
 
 mod conformance;
+mod resources;
 mod tools;
 
 use std::io::{BufRead, Write};
@@ -172,21 +180,24 @@ fn handle_request(id: Value, method: &str, params: &Value) -> Value {
             Err(message) => error_response(id, rpc_error::INVALID_PARAMS, &message),
         },
         "resources/list" => {
-            // v1 serves no resources; the surface exists so clients can
-            // negotiate it now and the pack-as-resources follow-up
-            // (Q-mcp-pack-resources) is purely additive.
-            success_response(id, json!({ "resources": [] }))
+            success_response(id, json!({ "resources": resources::resource_list() }))
         }
         "resources/read" => {
             let uri = params
                 .get("uri")
                 .and_then(Value::as_str)
                 .unwrap_or("<missing uri>");
-            error_response(
-                id,
-                rpc_error::RESOURCE_NOT_FOUND,
-                &format!("Resource not found: {uri} (this server serves no resources in v1)"),
-            )
+            match resources::read_resource(uri) {
+                Some(result) => success_response(id, result),
+                None => error_response(
+                    id,
+                    rpc_error::RESOURCE_NOT_FOUND,
+                    &format!(
+                        "Resource not found: {uri} — call resources/list, or start from \
+                         bock://index for an orientation across the pack, spec, and stdlib tiers"
+                    ),
+                ),
+            }
         }
         other => error_response(
             id,
@@ -320,10 +331,21 @@ mod tests {
     }
 
     #[test]
-    fn resources_surface_is_empty_but_present() {
+    fn resources_surface_lists_and_reads() {
         let list = json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" });
         let resp = handle_message(&list).expect("answered");
-        assert_eq!(resp["result"]["resources"], json!([]));
+        let listed = resp["result"]["resources"]
+            .as_array()
+            .expect("resources array");
+        assert!(listed.len() >= 43, "listed only {}", listed.len());
+        assert_eq!(listed[0]["uri"], "bock://index");
+
+        let read = json!({
+            "jsonrpc": "2.0", "id": 5, "method": "resources/read",
+            "params": { "uri": "bock://index" },
+        });
+        let resp = handle_message(&read).expect("answered");
+        assert_eq!(resp["result"]["contents"][0]["uri"], "bock://index");
 
         let read = json!({
             "jsonrpc": "2.0", "id": 4, "method": "resources/read",

@@ -41,16 +41,22 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Regenerate extension assets
+      - name: Regenerate generated assets
         run: ./tools/scripts/sync-vocab.sh
       - name: Assert assets match committed output
         run: |
           set -euo pipefail
-          if ! git diff --exit-code -- \
-              extensions/vscode/assets/vocab.json \
-              extensions/vscode/assets/spec/; then
-            echo "::error::Extension assets are out of sync with the compiler/spec." \
+          # `git diff` only sees tracked files, so a *new* source doc that the
+          # script now copies in would slip through; `--exit-code` on
+          # `git status --porcelain` for the same paths catches untracked ones.
+          PATHS="extensions/vscode/assets/vocab.json extensions/vscode/assets/spec/ compiler/crates/bock-cli/assets/"
+          # shellcheck disable=SC2086
+          if ! git diff --exit-code -- $PATHS || \
+             [ -n "$(git status --porcelain -- $PATHS)" ]; then
+            # shellcheck disable=SC2086
+            git status --porcelain -- $PATHS
+            echo "::error::Generated assets are out of sync with the compiler/spec/docs." \
               "Run 'tools/scripts/sync-vocab.sh' and commit the result."
             exit 1
           fi
-          echo "Extension assets are in sync."
+          echo "Generated assets are in sync."

@@ -246,7 +246,7 @@ pub fn tool_list() -> Vec<Value> {
         }),
         json!({
             "name": "bock_explain",
-            "description": "Explain a Bock diagnostic code (e.g. \"E4002\", \"W1001\") from the compiled-in diagnostic catalog — the same registry that backs editor hovers. Returns one JSON document: format_version, command:\"explain\", outcome (\"clean\"|\"usage-error\"), summary {codes}, and an `explanations` array with one entry: {code, severity, summary, description, spec_refs (spec section references like \"§10\")}. An unknown code returns outcome \"usage-error\" with isError true. v1 serves catalog text only; richer fix-pattern context packs arrive with a later release (Q-mcp-pack-resources). Read-only, instant.",
+            "description": "Explain a Bock diagnostic code (e.g. \"E4002\", \"W1001\") from the compiled-in diagnostic catalog — the same registry that backs editor hovers. Returns one JSON document: format_version, command:\"explain\", outcome (\"clean\"|\"usage-error\"), summary {codes}, and an `explanations` array with one entry: {code, severity, summary, description, spec_refs (human section references like \"§10\"), spec_resources ([{ref, uri, title}] — the same references resolved to readable MCP resource URIs like \"bock://spec/10\")}. Follow a spec_resources uri with resources/read to get the normative section text for the rule the diagnostic enforces. For conceptual guidance rather than the normative rule, read the context pack resources (start at \"bock://index\"). An unknown code returns outcome \"usage-error\" with isError true. Read-only, instant.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -688,6 +688,10 @@ fn explain(args: &Value) -> Result<ToolOutcome, String> {
                     "summary": info.summary,
                     "description": info.description,
                     "spec_refs": info.spec_refs,
+                    // The bridge: the same references, resolved to MCP
+                    // resource URIs the caller can read directly. `§10` is
+                    // a string an agent cannot act on; `bock://spec/10` is.
+                    "spec_resources": super::resources::spec_ref_resources(info.spec_refs),
                 }],
             });
             Ok(ToolOutcome {
