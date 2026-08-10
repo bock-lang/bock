@@ -71,7 +71,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt
           rustup default stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -86,7 +86,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -111,7 +111,7 @@ jobs:
           # absent — so install the component here (minimal profile omits it).
           rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component rustfmt
           rustup default ${{ matrix.toolchain }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.toolchain }}
       # ── Project-mode transpiled-test tooling (Linux lane only) ───────────────
@@ -167,7 +167,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Build the formatter, then assert the embedded core stdlib stays
       # `bock fmt`-clean. The gate script stages the gated stdlib files into a
       # temp tree (bock fmt scans cwd) and runs `bock fmt --check`; it excludes
@@ -192,7 +192,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo doc --workspace --no-deps --all-features
 
   extension:
