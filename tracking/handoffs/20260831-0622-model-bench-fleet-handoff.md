@@ -11,13 +11,9 @@ models as the Claude Code backend for Bock dogfooding. The code is
 written, unit-tested, and gate-clean — but it has **never spoken to a
 real model.** Every test runs against a mock upstream.
 
-This handoff exists because the split is environmental, not editorial.
-The session that wrote the harness runs in a Docker container that
-cannot reach llama-server: `/.dockerenv` present, no `/mnt/c`, no
-Windows interop, 172.17.0.0/16 bridge. `lls_up tiny` succeeded through
-the MCP broker while HTTP to port 8175 failed from `127.0.0.1`, the
-default gateway, and `10.255.255.254` alike. Everything below needs a
-machine that can actually reach port 8160.
+This handoff exists because the split is environmental, not editorial —
+but **the split is one firewall rule wide.** See ask 0, added
+2026-08-31 after further probing; it may collapse most of this document.
 
 ## Source documents (read these first)
 
@@ -43,8 +39,51 @@ machine that can actually reach port 8160.
 
 ## The ask
 
-Six items. (1)–(4) block any scored run; (5)–(6) block a *trustworthy*
-one.
+Seven items. **(0) may make the rest self-serve.** (1)–(4) block any
+scored run; (5)–(6) block a *trustworthy* one.
+
+### 0. Open port 8160 to the container — THIS MAY UNBLOCK EVERYTHING ELSE
+
+**Added 2026-08-31 after the initial handoff. Do this first; it changes
+who can do the rest.**
+
+The authoring container was believed unable to reach the Windows host at
+all. That was wrong. It reaches the host fine — only llama-server's port
+is closed to it:
+
+| Target | Result |
+|---|---|
+| `172.18.112.1:8170` (lls broker) | **200 OK in 115 ms** |
+| `172.18.112.1:8160` (llama-server) | dropped, 5 s timeout |
+| `172.18.112.1:9999` (nothing listening) | dropped, 5 s timeout |
+
+A port with nothing behind it behaves identically to 8160, so this is
+not llama-server misbehaving: the host default-denies inbound from this
+subnet and **only the broker port 8170 carries an allow rule.** That is
+also why the `lls_up` / `lls_status` / `lls_logs` lifecycle tools work
+while `local_generate` fails with `fetch failed` — the former go through
+the broker on 8170, the latter does an HTTP fetch to 8160.
+
+llama-server already binds `0.0.0.0` (lls passes `--host 0.0.0.0`), so
+nothing on the llama.cpp side needs changing.
+
+**The ask:** add an inbound allow rule for TCP 8160 from the container
+subnet, scoped as narrowly as the 8170 rule is. Then confirm from inside
+the container:
+
+    curl -s http://172.18.112.1:8160/v1/models
+
+**If this lands, asks 1–6 can be done from a Claude Code session
+directly** — including the pre-flight tool-call gate and the scored runs
+— rather than by hand on the Windows side. The harness's `--upstream`
+would be `http://172.18.112.1:8160`.
+
+Caveat worth stating plainly: opening a port that currently serves an
+unauthenticated model endpoint (llama-server logs `CORS is set to allow
+all origins and no API key is set`) is a real exposure decision, not a
+formality. Scope the rule to the container subnet only; do not open it
+broadly. If that is not acceptable, the rest of this handoff stands as
+originally written and stays a Windows-side job.
 
 ### 1. Set `-c 65536` on both entries — VERIFY it takes
 
