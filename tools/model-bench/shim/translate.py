@@ -1,0 +1,113 @@
+"""Anthropic Messages API <-> OpenAI Chat Completions translation.
+
+Pure functions only. No I/O, no network, no logging - everything here is
+directly unit-testable, which is the point: a lossy translation here is
+indistinguishable from poor model quality once it reaches the benchmark.
+"""
+
+import json
+
+# Keys that pass through unchanged when present. Absent keys stay absent:
+# the server holds the card sampling, and inventing a default overrides it.
+_PASSTHROUGH = ("max_tokens", "temperature", "top_p", "top_k", "stream")
+
+
+def _system_to_text(system):
+    """Claude Code sends `system` as either a string or a list of text blocks."""
+    if system is None:
+        return None
+    if isinstance(system, str):
+        return system
+    return "\n\n".join(b.get("text", "") for b in system
+                       if isinstance(b, dict) and b.get("type") == "text")
+
+
+def _blocks_to_text(content):
+    """Flatten a content value (string or block list) to plain text."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(b.get("text", "") for b in content
+                     if isinstance(b, dict) and b.get("type") == "text")
+
+
+def _translate_message(msg):
+    """Translate one Anthropic message into one or more OpenAI messages.
+
+    Returns a list because a single Anthropic user turn may carry both
+    tool_result blocks and fresh text, which OpenAI must express separately.
+    """
+    role, content = msg["role"], msg.get("content")
+
+    if isinstance(content, str):
+        return [{"role": role, "content": content}]
+    if not isinstance(content, list):
+        return [{"role": role, "content": ""}]
+
+    out, text_parts, tool_calls = [], [], []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text_parts.append(block.get("text", ""))
+        elif btype == "tool_use":
+            tool_calls.append({
+                "id": block.get("id", ""),
+                "type": "function",
+                "function": {"name": block.get("name", ""),
+                             "arguments": json.dumps(block.get("input", {}))},
+            })
+        elif btype == "tool_result":
+            out.append({"role": "tool",
+                        "tool_call_id": block.get("tool_use_id", ""),
+                        "content": _blocks_to_text(block.get("content", ""))})
+
+    if text_parts or tool_calls:
+        m = {"role": role, "content": "\n".join(text_parts)}
+        if tool_calls:
+            m["tool_calls"] = tool_calls
+        out.append(m)
+    return out
+
+
+def _translate_tools(tools):
+    return [{"type": "function",
+             "function": {"name": t["name"],
+                          "description": t.get("description", ""),
+                          "parameters": t.get("input_schema", {})}}
+            for t in tools]
+
+
+def anthropic_to_openai(body):
+    """Translate an Anthropic /v1/messages request body to OpenAI form."""
+    messages = []
+    system_text = _system_to_text(body.get("system"))
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
+    for msg in body.get("messages", []):
+        messages.extend(_translate_message(msg))
+
+    out = {"model": body.get("model"), "messages": messages}
+    for key in _PASSTHROUGH:
+        if key in body:
+            out[key] = body[key]
+    if "stop_sequences" in body:
+        out["stop"] = body["stop_sequences"]
+    if body.get("tools"):
+        out["tools"] = _translate_tools(body["tools"])
+    return out
+
+
+def count_tokens_estimate(body):
+    """Rough token estimate for /v1/messages/count_tokens.
+
+    llama-server exposes /tokenize, but Claude Code calls count_tokens far
+    more often than it needs precision, and a round trip per call distorts
+    the wall-clock measurement. ~4 chars/token, floor of 1.
+    """
+    chars = len(_system_to_text(body.get("system")) or "")
+    for msg in body.get("messages", []):
+        chars += len(_blocks_to_text(msg.get("content", "")))
+    return max(1, chars // 4)
