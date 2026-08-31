@@ -130,6 +130,21 @@ ROCm than Vulkan on identical settings. That is unexplained and may be a
 numerical difference between the draft and verification paths. Not a
 blocker; worth watching if acceptance moves at the new context.
 
+**A lead on that, observed 2026-08-31 while bringing the model up on
+ROCm.** llama-server logs at load:
+
+    W llama_sampler_backend_support: device 'ROCm0' does not have
+      support for op TOP_K needed for sampler 'top-k'
+
+The card sets `top_k 20`, so on ROCm that sampler cannot run on device
+and falls back. If Vulkan runs top-k on device and ROCm does not, the two
+backends are not sampling identically despite identical flags — which is
+a candidate mechanism for an acceptance gap that has so far been recorded
+as unexplained. **This is a hypothesis, not a finding.** Testing it is
+cheap: compare the same warning's presence on a Vulkan start, and compare
+acceptance with `--top-k 0` on both backends. Worth one experiment before
+attributing the gap to the draft/verification paths.
+
 ### 5. Run the pre-flight tool-call gate and READ THE WIRE LOG
 
 **This is the item most likely to change the project's conclusions.**
