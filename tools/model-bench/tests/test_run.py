@@ -2,13 +2,16 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from harness.run import (  # noqa: E402
     SEED_FILE,
     SEED_FIND,
     SEED_REPLACE,
+    assert_model_identity,
     parse_transcript,
     seed_defect,
 )
@@ -80,6 +83,50 @@ class TestSeedDefect(unittest.TestCase):
                 fh.write("fn f() {}\n")
             with self.assertRaises(RuntimeError):
                 seed_defect(d)
+
+
+class _ModelsHandler(BaseHTTPRequestHandler):
+    served = "qwopus-coder"
+
+    def do_GET(self):
+        payload = json.dumps({"data": [{"id": _ModelsHandler.served}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *a):
+        pass
+
+
+class TestModelIdentityGuard(unittest.TestCase):
+    """The stale-incumbent hijack is the one failure scoring cannot catch."""
+
+    def setUp(self):
+        self.srv = HTTPServer(("127.0.0.1", 0), _ModelsHandler)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = "http://127.0.0.1:%d" % self.srv.server_port
+
+    def tearDown(self):
+        self.srv.shutdown()
+
+    def test_passes_when_the_expected_model_is_served(self):
+        _ModelsHandler.served = "qwopus-coder"
+        self.assertEqual(assert_model_identity(self.base, "qwopus-coder"),
+                         ["qwopus-coder"])
+
+    def test_aborts_when_a_different_model_is_served(self):
+        # lls starting B while A still listens serves A with ok=true.
+        _ModelsHandler.served = "gemma3-12b"
+        with self.assertRaises(RuntimeError) as cm:
+            assert_model_identity(self.base, "qwopus-coder")
+        self.assertIn("gemma3-12b", str(cm.exception))
+        self.assertIn("qwopus-coder", str(cm.exception))
+
+    def test_aborts_when_the_upstream_is_unreachable(self):
+        with self.assertRaises(RuntimeError):
+            assert_model_identity("http://127.0.0.1:1", "qwopus-coder")
 
 
 if __name__ == "__main__":

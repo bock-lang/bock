@@ -15,8 +15,10 @@ class MockUpstream(BaseHTTPRequestHandler):
     """Stands in for llama-server's OpenAI-compatible endpoint."""
 
     captured = None
+    captured_headers = None
 
     def do_POST(self):
+        MockUpstream.captured_headers = dict(self.headers)
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         MockUpstream.captured = body
         payload = json.dumps({
@@ -148,6 +150,39 @@ class TestToolCallRoundTrip(unittest.TestCase):
         self.assertEqual(block["id"], "call_1")
         self.assertEqual(block["input"]["old_string"], "fn a() {}")
         self.assertEqual(block["input"]["new_string"], "fn b() {}")
+
+
+class TestUpstreamAuth(unittest.TestCase):
+    """llama-server --api-key expects a bearer token.
+
+    Without this the benchmark 401s mid-campaign the moment the data plane
+    is token-guarded, and it looks like a model failure.
+    """
+
+    def _run(self, key):
+        up = _serve(MockUpstream)
+        d = tempfile.mkdtemp()
+        shim = make_server(
+            port=0, upstream="http://127.0.0.1:%d" % up.server_port,
+            alias="a", wire_log_path=os.path.join(d, "w.jsonl"),
+            background_upstream=None, upstream_api_key=key)
+        threading.Thread(target=shim.serve_forever, daemon=True).start()
+        try:
+            _post("http://127.0.0.1:%d/v1/messages" % shim.server_port,
+                  {"model": "x", "max_tokens": 8,
+                   "messages": [{"role": "user", "content": "hi"}]})
+            return {k.lower(): v
+                    for k, v in (MockUpstream.captured_headers or {}).items()}
+        finally:
+            shim.shutdown()
+            up.shutdown()
+
+    def test_bearer_token_is_forwarded_upstream(self):
+        self.assertEqual(self._run("s3cret").get("authorization"),
+                         "Bearer s3cret")
+
+    def test_no_header_when_no_key_configured(self):
+        self.assertNotIn("authorization", self._run(None))
 
 
 if __name__ == "__main__":

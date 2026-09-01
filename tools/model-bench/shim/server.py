@@ -8,6 +8,7 @@ every request. This process is the translation layer that makes it work.
 
 import argparse
 import json
+import os
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -48,7 +49,8 @@ def _openai_to_anthropic(resp, model):
 
 
 def make_server(port, upstream, alias, wire_log_path,
-                background_upstream=None, background_alias=None):
+                background_upstream=None, background_alias=None,
+                upstream_api_key=None):
     wire = WireLog(wire_log_path)
 
     class Handler(BaseHTTPRequestHandler):
@@ -107,11 +109,17 @@ def make_server(port, upstream, alias, wire_log_path,
             wire.record("request", oai,
                         {"requested_model": requested,
                          "background": is_background, "upstream": target})
+            headers = {"Content-Type": "application/json"}
+            if upstream_api_key:
+                # llama-server's --api-key expects a bearer token. Without
+                # this, turning auth on upstream surfaces as a mid-campaign
+                # 401 that looks like a model failure.
+                headers["Authorization"] = "Bearer " + upstream_api_key
             try:
                 req = urllib.request.Request(
                     target.rstrip("/") + "/v1/chat/completions",
                     data=json.dumps(oai).encode(),
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                     method="POST")
                 with urllib.request.urlopen(req, timeout=600) as r:
                     upstream_resp = json.loads(r.read())
@@ -138,9 +146,14 @@ def main():
     ap.add_argument("--wire-log", required=True)
     ap.add_argument("--background-upstream", default=None)
     ap.add_argument("--background-alias", default=None)
+    # Read from the environment by default so the key never lands in argv,
+    # where any other user's `ps` can read it - the same reasoning lls-sandbox
+    # applies to LLS_BROKER_TOKEN.
+    ap.add_argument("--upstream-api-key", default=os.environ.get("LLAMA_API_KEY"))
     args = ap.parse_args()
     srv = make_server(args.port, args.upstream, args.alias, args.wire_log,
-                      args.background_upstream, args.background_alias)
+                      args.background_upstream, args.background_alias,
+                      args.upstream_api_key)
     print("shim listening on http://127.0.0.1:%d -> %s (%s)"
           % (srv.server_port, args.upstream, args.alias), flush=True)
     srv.serve_forever()

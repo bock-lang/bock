@@ -12,6 +12,7 @@ import json
 import os
 import socket
 import subprocess
+import urllib.request
 import time
 
 from .score import score_run
@@ -53,6 +54,32 @@ def seed_defect(scratch):
             "the defect was verified. Re-verify before benchmarking." % SEED_FILE)
     with open(path, "w") as fh:
         fh.write(src.replace(SEED_FIND, SEED_REPLACE, 1))
+
+
+def assert_model_identity(upstream, expected_alias):
+    """Abort unless the upstream is actually serving the model we asked for.
+
+    lls does not check port ownership at launch, so starting model B while
+    model A is still listening leaves BOTH bound to the port and serves A -
+    with ok=true, exit 0, and A's own log claiming it is listening. A
+    benchmark that hits a stale incumbent produces a full set of clean,
+    correctly-formatted, wrong-model numbers that no scoring axis can catch.
+
+    One GET rules it out. Never skip it to save a round trip.
+    """
+    url = upstream.rstrip("/") + "/v1/models"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            served = [m.get("id") for m in (json.load(r).get("data") or [])]
+    except Exception as exc:
+        raise RuntimeError("cannot read %s to confirm model identity: %r"
+                           % (url, exc))
+    if expected_alias not in served:
+        raise RuntimeError(
+            "upstream %s is serving %s, not %s. Refusing to record a run "
+            "against the wrong model. Stop every llama-server and start only "
+            "the intended one." % (upstream, served or "nothing", expected_alias))
+    return served
 
 
 def wait_for_port(port, timeout=30):
@@ -99,6 +126,9 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
     os.makedirs(run_dir, exist_ok=True)
     wire = os.path.join(run_dir, "shim.jsonl")
     stream = os.path.join(run_dir, "stream.jsonl")
+
+    # Before anything else: prove we are talking to the intended model.
+    assert_model_identity(upstream, model_alias)
 
     reset_scratch(scratch, sha)
     if task.get("seed") == "SEEDED_FAILURE":

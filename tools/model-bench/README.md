@@ -107,6 +107,30 @@ Wall clock and turn count are recorded together because they trade
 against each other: a 65 t/s model that takes 12 turns loses to an
 18 t/s model that takes 3.
 
+## The model-identity guard
+
+Before every run the driver GETs `/v1/models` and aborts unless the expected
+alias is served.
+
+This is not defensive padding. `lls` does not check port ownership at launch,
+so starting model B while model A is still listening leaves **both** bound to
+the port — `ok=true`, exit 0, B's own log claiming it is listening — and the
+port serves **A**. A benchmark that hits a stale incumbent produces a full set
+of clean, correctly-formatted, wrong-model numbers, and no scoring axis can
+detect it: every axis reports honestly about the wrong subject.
+
+An upstream fix is in the lls handoff (ask B1). The guard stays regardless —
+one GET is cheap insurance against a class of error that is invisible after
+the fact.
+
+## Upstream authentication
+
+If llama-server is started with `--api-key`, pass the key to the shim via
+`LLAMA_API_KEY` in the environment (preferred — it keeps the secret out of
+argv, where any other user's `ps` can read it) or `--upstream-api-key`. The
+shim forwards it as `Authorization: Bearer`. Without this, enabling auth
+upstream surfaces as a mid-campaign 401 that reads like a model failure.
+
 ## Safety
 
 Runs use `--dangerously-skip-permissions`, which is what makes the
