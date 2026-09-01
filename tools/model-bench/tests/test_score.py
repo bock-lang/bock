@@ -130,3 +130,31 @@ class TestScoreRun(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEmptyDiffCannotComplete(unittest.TestCase):
+    """A model that changed nothing has not completed anything.
+
+    Every task starts from a green pinned tree, so `test_passed` is True
+    before the model does a thing. Conjoining it with "no assertion deleted"
+    is satisfied vacuously by an empty diff - which is how qwopus scored
+    completion=1 on a run where it emitted `<tool>Read</tool>` as prose,
+    never called a tool, and left the tree untouched.
+    """
+
+    def test_empty_diff_scores_zero_even_though_tests_pass(self):
+        s = score_run("t1-source-floor", [], "", [], test_passed=True)
+        self.assertEqual(s["completion"], 0)
+
+    def test_whitespace_only_diff_is_still_empty(self):
+        s = score_run("t1-source-floor", [], "   \n\n ", [], test_passed=True)
+        self.assertEqual(s["completion"], 0)
+
+    def test_a_real_diff_that_passes_still_completes(self):
+        diff = ("--- a/compiler/crates/bock-source/src/lib.rs\n"
+                "+++ b/compiler/crates/bock-source/src/lib.rs\n"
+                "+    pub fn line_number(&self) -> usize { 1 }\n")
+        s = score_run("t1-source-floor",
+                      ["compiler/crates/bock-source/src/lib.rs"],
+                      diff, [], test_passed=True)
+        self.assertEqual(s["completion"], 1)
