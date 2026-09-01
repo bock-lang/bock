@@ -12,6 +12,7 @@ from harness.run import (  # noqa: E402
     SEED_FIND,
     SEED_REPLACE,
     assert_model_identity,
+    claude_argv,
     child_env,
     parse_transcript,
     seed_defect,
@@ -215,3 +216,16 @@ class TestModelIdentityGuard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestClaudeInvocation(unittest.TestCase):
+    def test_mcp_config_is_a_full_config_object(self):
+        """CLI 2.1.252 rejects a bare '{}' and exits 1 before reaching the shim."""
+        argv = claude_argv("do the thing", 40)
+        cfg = json.loads(argv[argv.index("--mcp-config") + 1])
+        self.assertEqual(cfg, {"mcpServers": {}})
+
+    def test_prompt_and_turn_cap_are_passed_through(self):
+        argv = claude_argv("do the thing", 12)
+        self.assertIn("do the thing", argv)
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "12")

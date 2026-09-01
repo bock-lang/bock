@@ -81,13 +81,33 @@ def _translate_tools(tools):
 
 
 def anthropic_to_openai(body):
-    """Translate an Anthropic /v1/messages request body to OpenAI form."""
+    """Translate an Anthropic /v1/messages request body to OpenAI form.
+
+    All system content is coalesced into a single leading message. Claude
+    Code supplies a top-level `system`, and a SessionStart hook adds a
+    further system-role message *after* the first user turn. Several chat
+    templates in this fleet - Qwopus among them - call
+    raise_exception('System message must be at the beginning'), which
+    llama-server surfaces as a 500 on every request. Hoisting is also the
+    faithful reading: hook context is session-level instruction, not a
+    conversational turn, so it belongs with the system prompt rather than
+    in the middle of the dialogue.
+    """
     messages = []
+    system_parts = []
     system_text = _system_to_text(body.get("system"))
     if system_text:
-        messages.append({"role": "system", "content": system_text})
+        system_parts.append(system_text)
     for msg in body.get("messages", []):
+        if msg.get("role") == "system":
+            text = _blocks_to_text(msg.get("content"))
+            if text:
+                system_parts.append(text)
+            continue
         messages.extend(_translate_message(msg))
+    if system_parts:
+        messages.insert(0, {"role": "system",
+                            "content": "\n\n".join(system_parts)})
 
     out = {"model": body.get("model"), "messages": messages}
     for key in _PASSTHROUGH:

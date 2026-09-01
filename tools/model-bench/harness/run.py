@@ -170,6 +170,24 @@ def child_env(shim_port, model_alias, base=None):
     return env
 
 
+def claude_argv(prompt, max_turns):
+    """The benchmarked CLI invocation.
+
+    `--mcp-config` must be a full config object: CLI 2.1.252 validates the
+    shape and rejects a bare `{}` with "mcpServers: expected record,
+    received undefined", exiting 1 before it ever contacts the shim.
+
+    stdin is closed by the caller rather than left open: with a terminal-less
+    parent the CLI waits 3s for piped input before proceeding, which is dead
+    time charged to every run's wall clock.
+    """
+    return ["claude", "-p", prompt,
+            "--output-format", "stream-json", "--verbose",
+            "--max-turns", str(max_turns),
+            "--dangerously-skip-permissions",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
+
+
 def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
              shim_port, max_turns, timeout_s, model_meta):
     run_dir = os.path.join(out_dir, "%s__%s__%d"
@@ -198,16 +216,14 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
 
     started = time.time()
     timed_out = False
+    rc = None
+    errlog = os.path.join(run_dir, "claude.stderr")
     try:
-        with open(stream, "w") as sf:
-            subprocess.run(
-                ["claude", "-p", task["prompt"],
-                 "--output-format", "stream-json", "--verbose",
-                 "--max-turns", str(max_turns),
-                 "--dangerously-skip-permissions",
-                 "--strict-mcp-config", "--mcp-config", "{}"],
-                cwd=scratch, env=env, stdout=sf,
-                stderr=subprocess.DEVNULL, timeout=timeout_s)
+        with open(stream, "w") as sf, open(errlog, "w") as ef:
+            rc = subprocess.run(
+                claude_argv(task["prompt"], max_turns),
+                cwd=scratch, env=env, stdout=sf, stderr=ef,
+                stdin=subprocess.DEVNULL, timeout=timeout_s).returncode
     except subprocess.TimeoutExpired:
         timed_out = True  # a timeout is a scored failure, not a retry
     wall = time.time() - started
@@ -222,6 +238,18 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
 
     test = sh(task["test_command"], cwd=scratch, timeout=1800)
     tools, final_text, turns = parse_transcript(stream)
+
+    # A launch that never reached the model is not a model result. Scoring it
+    # would award completion for an empty diff whenever the pinned tree is
+    # already green - a silent full pass for a model that was never asked.
+    if turns == 0 and not timed_out:
+        with open(errlog) as ef:
+            why = ef.read().strip().splitlines()
+            why = why[-1] if why else "no stderr"
+        raise RuntimeError(
+            "run produced zero turns (claude exited %s): %s. Nothing was "
+            "benchmarked; refusing to record a score. Full stderr: %s"
+            % (rc, why, errlog))
     scores = score_run(task["id"], changed, diff, tools, test.returncode == 0)
 
     record = {

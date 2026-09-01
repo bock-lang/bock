@@ -126,3 +126,59 @@ class TestToolsAndParams(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSystemMessagesAreCoalesced(unittest.TestCase):
+    """Templates in this family raise if a system message is not first.
+
+    Claude Code sends a top-level `system` AND, when a SessionStart hook
+    contributes context, a further system-role message after the first user
+    turn. Qwopus' template calls raise_exception('System message must be at
+    the beginning'), which llama-server returns as a 500 - so every request
+    failed and the run recorded zero turns.
+    """
+
+    def test_trailing_system_message_is_hoisted_into_the_leading_one(self):
+        out = anthropic_to_openai({
+            "model": "m",
+            "system": "primary",
+            "messages": [
+                {"role": "user", "content": "do the thing"},
+                {"role": "system", "content": "hook context"},
+                {"role": "assistant", "content": "ok"},
+            ],
+        })
+        roles = [m["role"] for m in out["messages"]]
+        self.assertEqual(roles, ["system", "user", "assistant"])
+        self.assertEqual(out["messages"][0]["content"], "primary\n\nhook context")
+
+    def test_system_message_with_no_top_level_system_still_leads(self):
+        out = anthropic_to_openai({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "late"},
+            ],
+        })
+        self.assertEqual([m["role"] for m in out["messages"]], ["system", "user"])
+        self.assertEqual(out["messages"][0]["content"], "late")
+
+    def test_ordering_of_non_system_turns_is_untouched(self):
+        out = anthropic_to_openai({
+            "model": "m",
+            "system": "s",
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "user", "content": "three"},
+            ],
+        })
+        self.assertEqual([m["role"] for m in out["messages"]],
+                         ["system", "user", "assistant", "user"])
+        self.assertEqual([m["content"] for m in out["messages"][1:]],
+                         ["one", "two", "three"])
+
+    def test_no_system_content_means_no_system_message(self):
+        out = anthropic_to_openai({"model": "m",
+                                   "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual([m["role"] for m in out["messages"]], ["user"])
