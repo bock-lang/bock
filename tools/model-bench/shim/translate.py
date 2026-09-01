@@ -80,8 +80,16 @@ def _translate_tools(tools):
             for t in tools]
 
 
-def anthropic_to_openai(body):
+def anthropic_to_openai(body, max_output_tokens=None):
     """Translate an Anthropic /v1/messages request body to OpenAI form.
+
+    `max_output_tokens` bounds a single turn. Claude Code asks for 32000
+    every time, which is reasonable against Anthropic hardware and is not
+    against a model decoding at ~24 tok/s: one response can run 22 minutes,
+    and a model that fails to terminate spends the entire budget. Capping
+    changes nothing for a model that stops on its own, so it bounds the
+    pathological case without distorting the healthy one. Record the value
+    with the run - it is a benchmark parameter, not an implementation detail.
 
     All system content is coalesced into a single leading message. Claude
     Code supplies a top-level `system`, and a SessionStart hook adds a
@@ -117,6 +125,9 @@ def anthropic_to_openai(body):
         out["stop"] = body["stop_sequences"]
     if body.get("tools"):
         out["tools"] = _translate_tools(body["tools"])
+    if max_output_tokens:
+        out["max_tokens"] = min(out.get("max_tokens") or max_output_tokens,
+                                max_output_tokens)
     return out
 
 

@@ -205,7 +205,9 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
 
     shim = subprocess.Popen(
         ["python3", "-m", "shim.server", "--port", str(shim_port),
-         "--upstream", upstream, "--alias", model_alias, "--wire-log", wire],
+         "--upstream", upstream, "--alias", model_alias, "--wire-log", wire]
+        + (["--max-output-tokens", str(model_meta["max_output_tokens"])]
+           if model_meta.get("max_output_tokens") else []),
         cwd=os.path.join(os.path.dirname(__file__), ".."),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if not wait_for_port(shim_port):
@@ -292,13 +294,16 @@ def main():
     ap.add_argument("--decode-tps", type=float, default=None)
     ap.add_argument("--prefill-tps", type=float, default=None)
     ap.add_argument("--mtp-acceptance", type=float, default=None)
+    ap.add_argument("--max-output-tokens", type=int, default=None,
+                    help="clamp each turn's output budget (recorded per run)")
     args = ap.parse_args()
 
     model_meta = {"backend": args.backend, "engine_build": args.engine_build,
                   "quant": args.quant, "context": args.context,
                   "decode_tps": args.decode_tps,
                   "prefill_tps": args.prefill_tps,
-                  "mtp_acceptance": args.mtp_acceptance}
+                  "mtp_acceptance": args.mtp_acceptance,
+                  "max_output_tokens": args.max_output_tokens}
 
     task = TASKS_BY_ID[args.task]
     os.makedirs(args.out, exist_ok=True)

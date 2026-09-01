@@ -182,3 +182,33 @@ class TestSystemMessagesAreCoalesced(unittest.TestCase):
         out = anthropic_to_openai({"model": "m",
                                    "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual([m["role"] for m in out["messages"]], ["user"])
+
+
+class TestOutputTokenCap(unittest.TestCase):
+    """Claude Code asks for max_tokens=32000 on every turn.
+
+    That is an Anthropic-scale budget. At ~24 tok/s a local model can spend
+    22 minutes on one response, and a model that fails to stop spends the
+    whole budget - qwopus emitted 132KB of runaway before hitting it. The
+    cap bounds a turn without changing what a well-behaved model produces.
+    """
+
+    def test_cap_clamps_a_larger_request(self):
+        out = anthropic_to_openai({"model": "m", "max_tokens": 32000,
+                                   "messages": []}, max_output_tokens=4096)
+        self.assertEqual(out["max_tokens"], 4096)
+
+    def test_cap_leaves_a_smaller_request_alone(self):
+        out = anthropic_to_openai({"model": "m", "max_tokens": 512,
+                                   "messages": []}, max_output_tokens=4096)
+        self.assertEqual(out["max_tokens"], 512)
+
+    def test_no_cap_passes_the_request_through(self):
+        out = anthropic_to_openai({"model": "m", "max_tokens": 32000,
+                                   "messages": []})
+        self.assertEqual(out["max_tokens"], 32000)
+
+    def test_cap_applies_even_when_the_request_omits_max_tokens(self):
+        out = anthropic_to_openai({"model": "m", "messages": []},
+                                  max_output_tokens=4096)
+        self.assertEqual(out["max_tokens"], 4096)

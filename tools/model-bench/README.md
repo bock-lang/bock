@@ -69,8 +69,17 @@ run — deliberately, since the alternative is benchmarking blind.
 Results append to `~/bench-results/results.jsonl`; per-run artifacts
 (transcript, wire log, final diff) land in sibling directories.
 
+Add `--max-output-tokens 8192` unless you have a reason not to. Claude Code
+asks for `max_tokens: 32000` on every turn, which is sane against Anthropic
+hardware and is not against a model decoding at ~24 tok/s - one response can
+run 22 minutes, and a model that fails to terminate spends the whole budget
+(qwopus produced 132KB of runaway before hitting it). Capping does not change
+what a model that stops on its own produces. The value is recorded per run
+because it bounds the turn.
+
 The `--backend`/`--engine-build`/`--quant`/`--context`/`--*-tps`/
-`--mtp-acceptance` flags are recorded verbatim onto every run. They are
+`--mtp-acceptance`/`--max-output-tokens` flags are recorded verbatim onto
+every run. They are
 per-run rather than per-model on purpose: if t/s is re-measured
 mid-campaign, older rows stay honest instead of silently inheriting new
 numbers.

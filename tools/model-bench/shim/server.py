@@ -50,7 +50,7 @@ def _openai_to_anthropic(resp, model):
 
 def make_server(port, upstream, alias, wire_log_path,
                 background_upstream=None, background_alias=None,
-                upstream_api_key=None):
+                upstream_api_key=None, max_output_tokens=None):
     wire = WireLog(wire_log_path)
 
     class Handler(BaseHTTPRequestHandler):
@@ -100,7 +100,7 @@ def make_server(port, upstream, alias, wire_log_path,
             if is_background and background_upstream:
                 target, target_alias = background_upstream, background_alias
 
-            oai = anthropic_to_openai(body)
+            oai = anthropic_to_openai(body, max_output_tokens)
             oai["model"] = target_alias
             # Streaming is translated back non-streaming; Claude Code accepts
             # a complete message response.
@@ -144,6 +144,10 @@ def main():
     ap.add_argument("--alias", required=True,
                     help="llama-server --alias for the model under test")
     ap.add_argument("--wire-log", required=True)
+    ap.add_argument("--max-output-tokens", type=int, default=None,
+                    help="clamp each turn's output budget; Claude Code asks "
+                         "for 32000, which a local model can spend 22 minutes "
+                         "on. Recorded with every run.")
     ap.add_argument("--background-upstream", default=None)
     ap.add_argument("--background-alias", default=None)
     # Read from the environment by default so the key never lands in argv,
@@ -157,7 +161,7 @@ def main():
     args = ap.parse_args()
     srv = make_server(args.port, args.upstream, args.alias, args.wire_log,
                       args.background_upstream, args.background_alias,
-                      args.upstream_api_key)
+                      args.upstream_api_key, args.max_output_tokens)
     print("shim listening on http://127.0.0.1:%d -> %s (%s)"
           % (srv.server_port, args.upstream, args.alias), flush=True)
     srv.serve_forever()
