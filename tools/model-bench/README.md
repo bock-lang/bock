@@ -103,6 +103,18 @@ loop. It is the card value and is not changed here, but penalising token
 reuse works against a model that must repeat long verbatim `old_string`
 arguments. If it fails the pre-flight gate, that is the first suspect.
 
+## The session-title request
+
+Claude Code asks the model to name the session alongside every run. The shim
+answers it locally and never forwards it (`--allow-session-titles` opts out).
+Three reasons, in increasing order of severity: it is not part of the agent
+loop being measured; its prefill and decode are charged to the run's wall
+clock; and on a single-slot server its prompt stays in the KV cache, after
+which **the agent request comes back answered as if it were the title
+question**. That last one was verified sequentially on a freshly restarted
+server, so it is not a concurrency artifact - see the wire log's
+`short_circuit` entries for what was answered here rather than by the model.
+
 ## Scoring
 
 Four axes, kept separate, never summed:

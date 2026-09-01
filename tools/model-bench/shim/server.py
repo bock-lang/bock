@@ -13,7 +13,8 @@ import os
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .translate import anthropic_to_openai, count_tokens_estimate
+from .translate import (anthropic_to_openai, count_tokens_estimate,
+                        is_session_title_request, session_title_response)
 from .wirelog import WireLog
 
 _STOP_REASON = {"stop": "end_turn", "length": "max_tokens",
@@ -80,7 +81,8 @@ def call_upstream(gate, urlopen, url, headers, payload, timeout=600):
 
 def make_server(port, upstream, alias, wire_log_path,
                 background_upstream=None, background_alias=None,
-                upstream_api_key=None, max_output_tokens=None):
+                upstream_api_key=None, max_output_tokens=None,
+                suppress_session_titles=True, session_title="Benchmark run"):
     wire = WireLog(wire_log_path)
     gate = make_upstream_gate()
 
@@ -131,6 +133,17 @@ def make_server(port, upstream, alias, wire_log_path,
             if is_background and background_upstream:
                 target, target_alias = background_upstream, background_alias
 
+            if suppress_session_titles and is_session_title_request(body):
+                # Answered here, never sent upstream: it is not part of the
+                # agent loop, and its prompt would otherwise sit in the
+                # single slot's cache and contaminate the next agent turn.
+                canned = session_title_response(session_title)
+                wire.record("short_circuit", canned,
+                            {"reason": "session-title request answered by "
+                                       "the shim; not sent to the model"})
+                self._send_json(_openai_to_anthropic(canned, requested))
+                return
+
             oai = anthropic_to_openai(body, max_output_tokens)
             oai["model"] = target_alias
             # Streaming is translated back non-streaming; Claude Code accepts
@@ -170,6 +183,12 @@ def main():
     ap.add_argument("--alias", required=True,
                     help="llama-server --alias for the model under test")
     ap.add_argument("--wire-log", required=True)
+    ap.add_argument("--allow-session-titles", action="store_true",
+                    help="send Claude Code's session-naming request to the "
+                         "model instead of answering it here. Off by "
+                         "default: it is not part of the agent loop, it is "
+                         "charged to the run's wall clock, and its prompt "
+                         "contaminates the next agent turn's KV cache.")
     ap.add_argument("--max-output-tokens", type=int, default=None,
                     help="clamp each turn's output budget; Claude Code asks "
                          "for 32000, which a local model can spend 22 minutes "
@@ -187,7 +206,8 @@ def main():
     args = ap.parse_args()
     srv = make_server(args.port, args.upstream, args.alias, args.wire_log,
                       args.background_upstream, args.background_alias,
-                      args.upstream_api_key, args.max_output_tokens)
+                      args.upstream_api_key, args.max_output_tokens,
+                      suppress_session_titles=not args.allow_session_titles)
     print("shim listening on http://127.0.0.1:%d -> %s (%s)"
           % (srv.server_port, args.upstream, args.alias), flush=True)
     srv.serve_forever()

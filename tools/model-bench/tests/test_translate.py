@@ -4,7 +4,11 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from shim.translate import anthropic_to_openai, count_tokens_estimate  # noqa: E402
+from shim.translate import (  # noqa: E402
+    anthropic_to_openai, count_tokens_estimate,
+    is_session_title_request,
+    session_title_response,
+)
 
 
 class TestSystemPrompt(unittest.TestCase):
@@ -212,3 +216,65 @@ class TestOutputTokenCap(unittest.TestCase):
         out = anthropic_to_openai({"model": "m", "messages": []},
                                   max_output_tokens=4096)
         self.assertEqual(out["max_tokens"], 4096)
+
+
+class TestSessionTitleRequestDetection(unittest.TestCase):
+    """Claude Code asks the model to name the session alongside every run.
+
+    That request is a UI nicety, not part of the agent loop under test. It
+    costs real prefill and decode charged to the run's wall clock, and - on
+    a server with one slot - it leaves its prompt in the KV cache, after
+    which the agent request comes back answered as if it were the title
+    question. Recognising it lets the shim answer it without a model.
+    """
+
+    TITLE_SYSTEM = ("You are a Claude agent.\n\nYou are naming a coding "
+                    "session so the user can pick it out of a long list.")
+
+    def test_detects_the_title_request_with_top_level_system(self):
+        """Anthropic carries `system` at the top level, not as a message.
+
+        This is the shape the shim actually receives; matching only on a
+        system-role message meant the detector never fired in production.
+        """
+        self.assertTrue(is_session_title_request({
+            "system": self.TITLE_SYSTEM,
+            "messages": [{"role": "user", "content": "<session>x</session>"}]}))
+
+    def test_detects_the_title_request_with_system_block_list(self):
+        self.assertTrue(is_session_title_request({
+            "system": [{"type": "text", "text": self.TITLE_SYSTEM}],
+            "messages": [{"role": "user", "content": "<session>x</session>"}]}))
+
+    def test_top_level_system_with_tools_is_still_an_agent_request(self):
+        self.assertFalse(is_session_title_request({
+            "system": self.TITLE_SYSTEM,
+            "messages": [{"role": "user", "content": "<session>x</session>"}],
+            "tools": [{"name": "Read"}]}))
+
+    def test_detects_the_title_request(self):
+        self.assertTrue(is_session_title_request({
+            "messages": [{"role": "system", "content": self.TITLE_SYSTEM},
+                         {"role": "user", "content": "<session>x</session>"}]}))
+
+    def test_an_agent_request_with_tools_is_never_a_title_request(self):
+        # The decisive difference: the agent loop always carries tools.
+        self.assertFalse(is_session_title_request({
+            "messages": [{"role": "system", "content": self.TITLE_SYSTEM},
+                         {"role": "user", "content": "<session>x</session>"}],
+            "tools": [{"type": "function", "function": {"name": "Read"}}]}))
+
+    def test_an_ordinary_toolless_request_is_not_a_title_request(self):
+        self.assertFalse(is_session_title_request({
+            "messages": [{"role": "system", "content": "You are helpful."},
+                         {"role": "user", "content": "hi"}]}))
+
+    def test_no_messages_is_not_a_title_request(self):
+        self.assertFalse(is_session_title_request({"messages": []}))
+
+    def test_canned_response_is_shaped_like_a_completion(self):
+        r = session_title_response("Bench run")
+        self.assertEqual(r["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(r["choices"][0]["message"]["role"], "assistant")
+        self.assertIn("Bench run", r["choices"][0]["message"]["content"])
+        self.assertEqual(r["usage"]["completion_tokens"], 0)

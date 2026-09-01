@@ -142,3 +142,46 @@ def count_tokens_estimate(body):
     for msg in body.get("messages", []):
         chars += len(_blocks_to_text(msg.get("content", "")))
     return max(1, chars // 4)
+
+
+# Claude Code's own wording, and stable across 2.1.25x. Matched together
+# with the absence of tools: the agent loop always carries tools, so the
+# pair cannot collide with a real turn.
+_TITLE_MARKER = "naming a coding session"
+
+
+def is_session_title_request(body):
+    """True for Claude Code's session-naming side request.
+
+    It is not part of the agent loop being measured. It costs prefill and
+    decode charged to the run's wall clock, and on a single-slot server it
+    leaves its prompt in the KV cache - after which the agent request comes
+    back answered as though it were the title question. Answering it here
+    keeps one conversation per server.
+    """
+    if body.get("tools"):
+        return False
+    # Anthropic puts the system prompt at the top level; that is the shape
+    # the shim receives. Checking only message roles meant this never fired.
+    top = _system_to_text(body.get("system")) or ""
+    if _TITLE_MARKER in top:
+        return True
+    for msg in body.get("messages") or []:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and _TITLE_MARKER in content:
+            return True
+    return False
+
+
+def session_title_response(title):
+    """A completion-shaped answer to the title request, no model involved."""
+    return {
+        "choices": [{"finish_reason": "stop", "index": 0,
+                     "message": {"role": "assistant",
+                                 "content": json.dumps({"title": title})}}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0,
+                  "total_tokens": 0},
+        "model": "shim-canned",
+    }
