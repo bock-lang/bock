@@ -13,6 +13,7 @@ from harness.run import (  # noqa: E402
     SEED_REPLACE,
     assert_model_identity,
     claude_argv,
+    make_config_dir,
     child_env,
     parse_transcript,
     seed_defect,
@@ -229,3 +230,46 @@ class TestClaudeInvocation(unittest.TestCase):
         argv = claude_argv("do the thing", 12)
         self.assertIn("do the thing", argv)
         self.assertEqual(argv[argv.index("--max-turns") + 1], "12")
+
+
+class TestBenchmarkSessionIsIsolated(unittest.TestCase):
+    """The measured session must not inherit the measuring session's setup.
+
+    The parent runs with plugins and a SessionStart hook (superpowers), which
+    llama-server saw verbatim: the hook's instructions were prepended to the
+    model's system prompt, and the model paid prefill for them. That is both a
+    confound and a cost. Pointing CLAUDE_CONFIG_DIR at an empty directory
+    drops user settings, plugins and hooks while leaving the pinned repo's own
+    CLAUDE.md discovery intact - the repo is the subject, our setup is not.
+    """
+
+    BASE = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/x",
+        "CLAUDECODE": "1",
+        "CLAUDE_CODE_CHILD_SESSION": "1",
+        "CLAUDE_CODE_MESSAGING_TOKEN": "parent-plumbing",
+        "CLAUDE_CODE_ENTRYPOINT": "cli",
+        "CLAUDE_PID": "1234",
+    }
+
+    def _env(self, config_dir="/tmp/cfg"):
+        return child_env(8787, "m", base=dict(self.BASE), config_dir=config_dir)
+
+    def test_parent_session_plumbing_is_stripped(self):
+        env = self._env()
+        for k in ("CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION",
+                  "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_ENTRYPOINT",
+                  "CLAUDE_PID"):
+            self.assertNotIn(k, env)
+
+    def test_config_dir_is_pointed_at_the_benchmark_owned_directory(self):
+        self.assertEqual(self._env()["CLAUDE_CONFIG_DIR"], "/tmp/cfg")
+
+    def test_no_config_dir_leaves_the_variable_unset(self):
+        self.assertNotIn("CLAUDE_CONFIG_DIR", self._env(config_dir=None))
+
+    def test_benign_environment_still_survives(self):
+        env = self._env()
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertEqual(env["HOME"], "/home/x")

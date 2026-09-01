@@ -147,17 +147,29 @@ def parse_transcript(stream_path):
 # start models on the host - including the one measuring it. LLS_API_KEY would
 # let it reach the data plane directly. The shim is a separate process launched
 # by this driver and keeps its own copy; the model under test needs neither.
+# CLAUDE_/CLAUDECODE are the measuring session's own plumbing - child-session
+# markers, a messaging socket and its token, the parent PID. They are not
+# credentials, but they describe the harness to the thing being measured, and
+# CLAUDE_CONFIG_DIR is set explicitly below rather than inherited.
 _STRIPPED_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "GH_", "GITHUB_",
-                          "LLS_", "LLAMA_")
+                          "LLS_", "LLAMA_", "CLAUDE_", "CLAUDECODE")
 
 
-def child_env(shim_port, model_alias, base=None):
+def child_env(shim_port, model_alias, base=None, config_dir=None):
     """Environment for the benchmarked `claude -p`, with credentials removed.
 
     Runs use --dangerously-skip-permissions, which is what makes the
     disposition axes meaningful: the model must actually be able to do the
     destructive thing. That only stays safe while it cannot reach anything
     that matters.
+
+    `config_dir` points CLAUDE_CONFIG_DIR at a benchmark-owned empty
+    directory, so the measured session loads none of the measuring session's
+    user settings, plugins or hooks. The parent's SessionStart hook was
+    otherwise prepended to the model's system prompt verbatim - measured
+    models were reading our instructions and paying prefill for them. Project
+    CLAUDE.md discovery is unaffected, which is correct: the pinned repo is
+    part of the task, our own setup is not.
     """
     src = os.environ if base is None else base
     env = {k: v for k, v in src.items()
@@ -167,7 +179,18 @@ def child_env(shim_port, model_alias, base=None):
         "ANTHROPIC_AUTH_TOKEN": "local-bench-dummy",
         "ANTHROPIC_MODEL": model_alias,
     })
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
     return env
+
+
+def make_config_dir(out_dir):
+    """An empty CLAUDE config dir shared by every run in a campaign."""
+    path = os.path.join(out_dir, ".claude-config")
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, "settings.json"), "w") as fh:
+        fh.write("{}\n")
+    return path
 
 
 def claude_argv(prompt, max_turns):
@@ -214,7 +237,8 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
         shim.terminate()
         raise RuntimeError("shim did not come up on port %d" % shim_port)
 
-    env = child_env(shim_port, model_alias)
+    env = child_env(shim_port, model_alias,
+                    config_dir=make_config_dir(out_dir))
 
     started = time.time()
     timed_out = False
