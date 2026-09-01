@@ -12,6 +12,7 @@ import json
 import os
 import socket
 import subprocess
+import urllib.error
 import urllib.request
 import time
 
@@ -56,7 +57,17 @@ def seed_defect(scratch):
         fh.write(src.replace(SEED_FIND, SEED_REPLACE, 1))
 
 
-def assert_model_identity(upstream, expected_alias):
+def upstream_api_key():
+    """The data-plane key, from the environment only.
+
+    Same precedence and same reason as shim/server.py: every fleet model
+    serves with `--api-key cred:lls-data-plane`, and the key must never
+    reach argv where another user's `ps` would see it.
+    """
+    return os.environ.get("LLS_API_KEY") or os.environ.get("LLAMA_API_KEY")
+
+
+def assert_model_identity(upstream, expected_alias, api_key=None):
     """Abort unless the upstream is actually serving the model we asked for.
 
     lls does not check port ownership at launch, so starting model B while
@@ -68,9 +79,20 @@ def assert_model_identity(upstream, expected_alias):
     One GET rules it out. Never skip it to save a round trip.
     """
     url = upstream.rstrip("/") + "/v1/models"
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", "Bearer " + api_key)
     try:
-        with urllib.request.urlopen(url, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=15) as r:
             served = [m.get("id") for m in (json.load(r).get("data") or [])]
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise RuntimeError(
+                "%s rejected the model-identity check: 401 Unauthorized. The "
+                "data plane is guarded by --api-key, so export LLS_API_KEY "
+                "before benchmarking. Refusing to run blind." % url)
+        raise RuntimeError("cannot read %s to confirm model identity: %r"
+                           % (url, exc))
     except Exception as exc:
         raise RuntimeError("cannot read %s to confirm model identity: %r"
                            % (url, exc))
@@ -157,7 +179,7 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
     stream = os.path.join(run_dir, "stream.jsonl")
 
     # Before anything else: prove we are talking to the intended model.
-    assert_model_identity(upstream, model_alias)
+    assert_model_identity(upstream, model_alias, upstream_api_key())
 
     reset_scratch(scratch, sha)
     if task.get("seed") == "SEEDED_FAILURE":

@@ -139,8 +139,17 @@ class TestChildEnv(unittest.TestCase):
 
 class _ModelsHandler(BaseHTTPRequestHandler):
     served = "qwopus-coder"
+    require_key = None      # when set, mimic the data plane's --api-key guard
+    seen_auth = None
 
     def do_GET(self):
+        _ModelsHandler.seen_auth = self.headers.get("Authorization")
+        if (_ModelsHandler.require_key and
+                _ModelsHandler.seen_auth != "Bearer " + _ModelsHandler.require_key):
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         payload = json.dumps({"data": [{"id": _ModelsHandler.served}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -156,6 +165,8 @@ class TestModelIdentityGuard(unittest.TestCase):
     """The stale-incumbent hijack is the one failure scoring cannot catch."""
 
     def setUp(self):
+        _ModelsHandler.require_key = None
+        _ModelsHandler.seen_auth = None
         self.srv = HTTPServer(("127.0.0.1", 0), _ModelsHandler)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.base = "http://127.0.0.1:%d" % self.srv.server_port
@@ -179,6 +190,27 @@ class TestModelIdentityGuard(unittest.TestCase):
     def test_aborts_when_the_upstream_is_unreachable(self):
         with self.assertRaises(RuntimeError):
             assert_model_identity("http://127.0.0.1:1", "qwopus-coder")
+
+    def test_authenticates_against_a_key_guarded_upstream(self):
+        """The real data plane serves /v1/models behind --api-key.
+
+        Every fleet model carries `--api-key cred:lls-data-plane`, so an
+        unauthenticated guard 401s and aborts every run before it starts.
+        The guard is the first thing each run does, so this failed closed
+        on the whole campaign.
+        """
+        _ModelsHandler.require_key = "secret-key"
+        _ModelsHandler.served = "qwopus-coder"
+        self.assertEqual(
+            assert_model_identity(self.base, "qwopus-coder",
+                                  api_key="secret-key"),
+            ["qwopus-coder"])
+        self.assertEqual(_ModelsHandler.seen_auth, "Bearer secret-key")
+
+    def test_no_authorization_header_when_no_key_is_configured(self):
+        """An unguarded upstream must not receive a bare 'Bearer None'."""
+        assert_model_identity(self.base, "qwopus-coder", api_key=None)
+        self.assertIsNone(_ModelsHandler.seen_auth)
 
 
 if __name__ == "__main__":

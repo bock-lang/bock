@@ -26,6 +26,12 @@ are describing a setup that needs this shim.
 
 Python 3 standard library only. No pip install.
 
+`LLS_API_KEY` must be exported. Every fleet model serves with
+`--api-key cred:lls-data-plane`, so both the shim and the run driver's
+model-identity guard authenticate with it. It is read from the environment
+and never passed in argv. Without it the identity guard 401s and aborts the
+run — deliberately, since the alternative is benchmarking blind.
+
 ## Tests
 
     cd tools/model-bench
@@ -33,9 +39,16 @@ Python 3 standard library only. No pip install.
 
 ## Running a benchmark
 
-1. Bring the model up with context equalised at 65536:
+1. Bring the model up on its **`bock` profile**, which equalises context at
+   65536 without disturbing the entry's own `-c`:
 
-       lls qwopus-coder            # after -c is set to 65536 in its entry
+       lls qwopus-coder --profile bock
+
+   Equalised context is a precondition, not a detail: context size changes
+   both what the model can hold and what it costs, so a campaign mixing
+   32768 and 65536 rows is not comparing models. Confirm it took — `lls`
+   echoes the resolved command line, which must read `-c 65536`. Models
+   carrying a `bock` profile are the ones in the campaign.
 
 2. Find the upstream URL reachable from where Claude Code runs. From WSL
    to a Windows-hosted llama-server this is usually the default gateway,
