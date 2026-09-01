@@ -142,27 +142,37 @@ before and after every run.
 
 ## Operator handoff — what could not be done from the build container
 
-The environment this was written in is a Docker container that cannot
-reach llama-server (`/.dockerenv` present, no `/mnt/c`, no Windows
-interop, 172.17.0.0/16 bridge). `lls_up tiny` succeeded via the MCP
-broker, but HTTP to the server failed from `127.0.0.1`, the gateway, and
-`10.255.255.254` alike. So the shim and harness are unit-tested against
-a mock upstream but have **never spoken to a real model.**
+The shim and harness are unit-tested against a mock upstream and have
+**never spoken to a real model.** The build container cannot reach
+llama-server, and the mechanism is now confirmed:
 
-Needs an operator on a machine that can reach port 8160:
+| From | Target | Result |
+|---|---|---|
+| Windows | `172.18.112.1:8160` | 200 |
+| WSL | `172.18.112.1:8160` | fails |
+| Container | `172.18.112.1:8170` (broker) | connects, 112 ms |
+| Container | `172.18.112.1:8160` (model, listening) | timeout, no RST |
 
-1. Set `-c 65536` on the `qwopus-coder` and `flash-next-c` lls entries.
-2. Pin `flash-next-c`'s backend to `vulkan` (currently unset, despite
-   Vulkan measuring 18.21 t/s against ROCm's 14.96).
-3. Confirm `flash-next-c`'s KV actually fits at 65536 at 56.7 GB
-   resident.
-4. Re-measure decode t/s, prefill t/s, and MTP acceptance at 65536 for
-   both. The existing figures were taken at 32768 and do not carry over.
-5. Run the pre-flight gate for each model and read the wire log.
-6. Decide the background-model route: both entries use port 8160 and
-   cannot run concurrently without an override. Pass
-   `--background-upstream`/`--background-alias` to the shim, or accept
-   that background calls hit the model under test and distort wall clock.
+The broker's firewall rule is scoped `172.16.0.0/12`, which covers both
+the docker bridge and the WSL vNIC. The `llama-server.exe` rules are
+program-scoped, **Public profile only**, so they never apply to traffic
+on that vNIC and it falls to default-deny. Port 8175 behaved identically,
+so it was never about the port.
+
+**Do not test this from Windows** — Windows-local traffic to
+`172.18.112.1` succeeds regardless of the rule and gives a false pass.
+
+The full plan, including the port-hijack guard, the reserved port pool,
+structured port discovery, data-plane auth, and the folded-in bridge
+fixes, is at:
+
+    /opt/claude-projects/20260901-0137-lls-data-plane-and-bridge-handoff.md
+
+Once its asks A1 (firewall) and B1 (port guard) land, the benchmark can
+run from a session directly. Still needed regardless, from this repo's
+side: `-c 65536` on both entries, `flash-next-c` pinned to `vulkan`, a
+re-measurement of decode/prefill t/s and MTP acceptance at the new
+context, and the pre-flight tool-call gate.
 
 The first real run will almost certainly find something the mock did
 not — llama.cpp's tool-call formatting for this family is the most
