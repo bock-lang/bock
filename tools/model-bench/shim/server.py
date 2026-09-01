@@ -8,6 +8,7 @@ every request. This process is the translation layer that makes it work.
 
 import argparse
 import json
+import threading
 import os
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,10 +49,40 @@ def _openai_to_anthropic(resp, model):
     }
 
 
+
+def make_upstream_gate():
+    """Serialises upstream calls: one model, one slot.
+
+    llama-server runs with --parallel 1 - deliberately, since splitting the
+    KV cache across slots would halve the context we equalised at 65536.
+    Claude Code, meanwhile, fires a session-title request ~0.07s after the
+    agent request. Both hit the shim, which is a ThreadingHTTPServer, so both
+    reach llama-server at once and contend for the single slot. Observed
+    result: the agent response came back as prose (`<tool>Read</tool>`) with
+    no tool call, while the identical request replayed alone produced a
+    correct tool call 5/5. Serialising here fixes it without touching the
+    model's context budget.
+    """
+    return threading.Lock()
+
+
+def call_upstream(gate, urlopen, url, headers, payload, timeout=600):
+    """POST to the upstream chat endpoint, one caller at a time."""
+    req = urllib.request.Request(
+        url.rstrip("/") + "/v1/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers=headers,
+        method="POST")
+    with gate:
+        with urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+
+
 def make_server(port, upstream, alias, wire_log_path,
                 background_upstream=None, background_alias=None,
                 upstream_api_key=None, max_output_tokens=None):
     wire = WireLog(wire_log_path)
+    gate = make_upstream_gate()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -116,13 +147,8 @@ def make_server(port, upstream, alias, wire_log_path,
                 # 401 that looks like a model failure.
                 headers["Authorization"] = "Bearer " + upstream_api_key
             try:
-                req = urllib.request.Request(
-                    target.rstrip("/") + "/v1/chat/completions",
-                    data=json.dumps(oai).encode(),
-                    headers=headers,
-                    method="POST")
-                with urllib.request.urlopen(req, timeout=600) as r:
-                    upstream_resp = json.loads(r.read())
+                upstream_resp = call_upstream(
+                    gate, urllib.request.urlopen, target, headers, oai)
             except Exception as exc:  # upstream failure is a run result
                 wire.record("error", {"error": repr(exc)})
                 self._send_json({"type": "error", "error":

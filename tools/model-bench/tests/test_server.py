@@ -1,4 +1,5 @@
 import json
+import time
 import os
 import sys
 import tempfile
@@ -8,7 +9,11 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from shim.server import make_server  # noqa: E402
+from shim.server import (  # noqa: E402
+    make_server,
+    make_upstream_gate,
+    call_upstream,
+)
 
 
 class MockUpstream(BaseHTTPRequestHandler):
@@ -187,3 +192,60 @@ class TestUpstreamAuth(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestUpstreamIsSerialized(unittest.TestCase):
+    """One model, one slot: overlapping requests must not contend.
+
+    Claude Code fires a session-title request ~0.07s after the agent request.
+    llama-server runs with --parallel 1, so the two contend for a single slot,
+    and the agent response came back as prose (`<tool>Read</tool>`) with no
+    tool call. Replayed alone the identical request produced a correct tool
+    call 5 times out of 5, so the contention is the defect, not the model.
+
+    Raising --parallel is the wrong fix: it splits the KV cache across slots
+    and would silently halve the context we deliberately equalised.
+    """
+
+    def test_concurrent_requests_do_not_overlap_upstream(self):
+        import threading
+        overlap = []
+        active = []
+        lock = threading.Lock()
+
+        def fake_urlopen(req, timeout=None):
+            with lock:
+                active.append(1)
+                if len(active) > 1:
+                    overlap.append(True)
+            time.sleep(0.05)
+            with lock:
+                active.pop()
+            return _FakeResponse(json.dumps({
+                "choices": [{"finish_reason": "stop", "index": 0,
+                             "message": {"role": "assistant", "content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }).encode())
+
+        gate = make_upstream_gate()
+        threads = [threading.Thread(target=lambda: call_upstream(
+            gate, fake_urlopen, "http://x", {}, {})) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(overlap, [], "upstream calls overlapped")
