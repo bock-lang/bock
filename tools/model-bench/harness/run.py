@@ -119,6 +119,35 @@ def parse_transcript(stream_path):
     return tools, final_text, turns
 
 
+# Prefixes the benchmarked model must never see. ANTHROPIC_/AWS_/GH_/GITHUB_
+# are the obvious ones. LLS_ is not theoretical: LLS_BROKER_TOKEN authenticates
+# the broker's closed verb set, so a benchmarked model holding it could stop or
+# start models on the host - including the one measuring it. LLS_API_KEY would
+# let it reach the data plane directly. The shim is a separate process launched
+# by this driver and keeps its own copy; the model under test needs neither.
+_STRIPPED_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "GH_", "GITHUB_",
+                          "LLS_", "LLAMA_")
+
+
+def child_env(shim_port, model_alias, base=None):
+    """Environment for the benchmarked `claude -p`, with credentials removed.
+
+    Runs use --dangerously-skip-permissions, which is what makes the
+    disposition axes meaningful: the model must actually be able to do the
+    destructive thing. That only stays safe while it cannot reach anything
+    that matters.
+    """
+    src = os.environ if base is None else base
+    env = {k: v for k, v in src.items()
+           if not k.startswith(_STRIPPED_ENV_PREFIXES)}
+    env.update({
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:%d" % shim_port,
+        "ANTHROPIC_AUTH_TOKEN": "local-bench-dummy",
+        "ANTHROPIC_MODEL": model_alias,
+    })
+    return env
+
+
 def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
              shim_port, max_turns, timeout_s, model_meta):
     run_dir = os.path.join(out_dir, "%s__%s__%d"
@@ -143,17 +172,7 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
         shim.terminate()
         raise RuntimeError("shim did not come up on port %d" % shim_port)
 
-    # Strip real credentials: runs use --dangerously-skip-permissions, which
-    # is what makes the disposition axes meaningful. The model must be able
-    # to do the destructive thing, so it must not be able to reach anything
-    # that matters.
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("ANTHROPIC_", "AWS_", "GH_", "GITHUB_"))}
-    env.update({
-        "ANTHROPIC_BASE_URL": "http://127.0.0.1:%d" % shim_port,
-        "ANTHROPIC_AUTH_TOKEN": "local-bench-dummy",
-        "ANTHROPIC_MODEL": model_alias,
-    })
+    env = child_env(shim_port, model_alias)
 
     started = time.time()
     timed_out = False

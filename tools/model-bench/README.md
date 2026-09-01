@@ -125,11 +125,27 @@ the fact.
 
 ## Upstream authentication
 
-If llama-server is started with `--api-key`, pass the key to the shim via
-`LLAMA_API_KEY` in the environment (preferred — it keeps the secret out of
-argv, where any other user's `ps` can read it) or `--upstream-api-key`. The
-shim forwards it as `Authorization: Bearer`. Without this, enabling auth
+The data plane is token-guarded separately from the broker — a different
+credential on purpose, so compromising one does not grant the other. It lives
+in Windows Credential Manager as the generic credential `lls-data-plane`, and
+lls references it from a model entry as `"--api-key": "cred:lls-data-plane"`.
+
+The key reaches this harness as **`LLS_API_KEY`** — the name lls itself prints
+when a model serves with `--api-key`. `lls-sandbox/lib.sh` reads it from
+Credential Manager at launch and injects it into the container by name, never
+as `--env VAR=value`, which would put the secret in docker's argv where any
+other user's `ps` can read it. `LLAMA_API_KEY` is accepted as a fallback, and
+`--upstream-api-key` as a last resort.
+
+The shim forwards it as `Authorization: Bearer`. Without it, enabling auth
 upstream surfaces as a mid-campaign 401 that reads like a model failure.
+
+**The model under test never sees it.** `child_env` strips `LLS_*` and
+`LLAMA_*` along with `ANTHROPIC_*`, `AWS_*`, `GH_*` and `GITHUB_*`. This
+matters more than the usual credential hygiene: `LLS_BROKER_TOKEN`
+authenticates the broker's closed verb set, so a benchmarked model holding it
+could stop or start models on the host — including the server measuring it.
+The shim is a separate process launched by the driver and keeps its own copy.
 
 ## Safety
 

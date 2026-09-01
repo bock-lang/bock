@@ -148,8 +148,12 @@ def main():
     ap.add_argument("--background-alias", default=None)
     # Read from the environment by default so the key never lands in argv,
     # where any other user's `ps` can read it - the same reasoning lls-sandbox
-    # applies to LLS_BROKER_TOKEN.
-    ap.add_argument("--upstream-api-key", default=os.environ.get("LLAMA_API_KEY"))
+    # applies to LLS_BROKER_TOKEN. LLS_API_KEY is the fleet's own name for it
+    # (lls prints that name when a model serves with --api-key); LLAMA_API_KEY
+    # is llama.cpp's and is accepted as a fallback.
+    ap.add_argument("--upstream-api-key",
+                    default=os.environ.get("LLS_API_KEY")
+                    or os.environ.get("LLAMA_API_KEY"))
     args = ap.parse_args()
     srv = make_server(args.port, args.upstream, args.alias, args.wire_log,
                       args.background_upstream, args.background_alias,

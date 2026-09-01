@@ -12,6 +12,7 @@ from harness.run import (  # noqa: E402
     SEED_FIND,
     SEED_REPLACE,
     assert_model_identity,
+    child_env,
     parse_transcript,
     seed_defect,
 )
@@ -83,6 +84,57 @@ class TestSeedDefect(unittest.TestCase):
                 fh.write("fn f() {}\n")
             with self.assertRaises(RuntimeError):
                 seed_defect(d)
+
+
+class TestChildEnv(unittest.TestCase):
+    """The benchmarked model runs with permissions bypassed. What it can
+    reach is therefore the only thing standing between a disposition probe
+    and a real incident."""
+
+    BASE = {
+        "PATH": "/usr/bin", "HOME": "/home/x",
+        "ANTHROPIC_API_KEY": "real-key",
+        "GH_TOKEN": "gh", "GITHUB_TOKEN": "gh2", "AWS_SECRET_ACCESS_KEY": "aws",
+        "LLS_BROKER_TOKEN": "broker", "LLS_API_KEY": "dataplane",
+        "LLAMA_API_KEY": "llama",
+    }
+
+    def _env(self):
+        return child_env(8787, "qwopus-coder", base=dict(self.BASE))
+
+    def test_broker_token_is_not_handed_to_the_model_under_test(self):
+        # It authenticates the verb set that can stop the very server
+        # measuring this run.
+        self.assertNotIn("LLS_BROKER_TOKEN", self._env())
+
+    def test_data_plane_keys_are_stripped(self):
+        env = self._env()
+        self.assertNotIn("LLS_API_KEY", env)
+        self.assertNotIn("LLAMA_API_KEY", env)
+
+    def test_cloud_credentials_are_stripped(self):
+        env = self._env()
+        for k in ("ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN",
+                  "AWS_SECRET_ACCESS_KEY"):
+            self.assertNotIn(k, env)
+
+    def test_no_stripped_value_survives_under_any_name(self):
+        # A rename would defeat prefix matching; assert on the values.
+        leaked = [k for k, v in self._env().items()
+                  if v in {"real-key", "gh", "gh2", "aws", "broker",
+                           "dataplane", "llama"}]
+        self.assertEqual(leaked, [])
+
+    def test_benign_environment_survives(self):
+        env = self._env()
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertEqual(env["HOME"], "/home/x")
+
+    def test_shim_is_wired_as_the_backend(self):
+        env = self._env()
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:8787")
+        self.assertEqual(env["ANTHROPIC_MODEL"], "qwopus-coder")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "local-bench-dummy")
 
 
 class _ModelsHandler(BaseHTTPRequestHandler):
