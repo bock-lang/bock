@@ -94,6 +94,24 @@ class TestParseOwnedFiles(unittest.TestCase):
         self.assertEqual(scope.parse_owned_files(""), [])
         self.assertEqual(scope.parse_owned_files(None), [])
 
+    def test_fenced_example_block_is_ignored(self):
+        # A body that *illustrates* the format must not be read as its
+        # own declaration -- the real block follows the example.
+        body = (
+            "How to declare scope:\n\n"
+            "```\n"
+            "Owned-Files:\n"
+            "- example/only/\n"
+            "```\n\n"
+            "Owned-Files:\n"
+            "- real/path/\n"
+        )
+        self.assertEqual(scope.parse_owned_files(body), ["real/path/"])
+
+    def test_tilde_fence_is_ignored(self):
+        body = "~~~\nOwned-Files:\n- fake/\n~~~\nOwned-Files:\n- real/\n"
+        self.assertEqual(scope.parse_owned_files(body), ["real/"])
+
     def test_header_with_no_entries_is_empty(self):
         self.assertEqual(scope.parse_owned_files("Owned-Files:\n\nProse"), [])
 

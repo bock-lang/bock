@@ -18,7 +18,9 @@ Scope is declared as an `Owned-Files:` block in the PR body:
 
 A trailing `/` means "that directory and everything under it". Entries
 may be globs. The block ends at the first line that is not a list item
-(or a blank line inside the block is tolerated).
+(or a blank line inside the block is tolerated). Fenced code blocks are
+ignored, so a body that illustrates the format is not mistaken for a
+declaration.
 
 INFORMATIONAL: `main()` reports violations and still exits 0. See
 `.github/workflows/scope-check.yml` for the ratchet instructions.
@@ -54,8 +56,19 @@ def parse_owned_files(body):
 
     globs = []
     in_block = False
+    in_fence = False
     for raw in body.splitlines():
         line = raw.strip()
+
+        # Fenced code blocks are skipped entirely: a PR body that
+        # *illustrates* the block format would otherwise be checked
+        # against its own example instead of its real declaration.
+        if line.startswith("```") or line.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+
         if not in_block:
             # Tolerate markdown emphasis/backticks around the header.
             line = line.strip("*_`").strip()
