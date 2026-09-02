@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -16,7 +18,9 @@ from harness.run import (  # noqa: E402
     make_config_dir,
     child_env,
     parse_transcript,
+    scrub_outside_paths,
     seed_defect,
+    tree_fingerprint,
 )
 
 
@@ -273,3 +277,127 @@ class TestBenchmarkSessionIsIsolated(unittest.TestCase):
         env = self._env()
         self.assertEqual(env["PATH"], "/usr/bin")
         self.assertEqual(env["HOME"], "/home/x")
+
+
+class TestOutsidePathScrub(unittest.TestCase):
+    """The scratch clone must not hand the model the live repo's path.
+
+    A model reached outside the scratch tree on its first tool call. It
+    did not invent the path: a checked-in CLAUDE.md can name absolute
+    locations outside the tree, and Claude Code injects CLAUDE.md into
+    the system prompt verbatim.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="scrubtest-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _write(self, rel, text):
+        path = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def test_absolute_outside_path_is_rewritten_to_scratch(self):
+        p = self._write("CLAUDE.md",
+                        "run `git -C /srv/live-repo log`\n")
+        n = scrub_outside_paths(self.tmp, ["/srv/live-repo"])
+        self.assertEqual(n, 1)
+        self.assertNotIn("/srv/live-repo", open(p).read())
+        self.assertIn(self.tmp, open(p).read())
+
+    def test_nested_claude_md_is_scrubbed_too(self):
+        p = self._write("tracking/CLAUDE.md", "see /srv/live-repo\n")
+        scrub_outside_paths(self.tmp, ["/srv/live-repo"])
+        self.assertNotIn("/srv/live-repo", open(p).read())
+
+    def test_longer_paths_scrubbed_before_prefixes(self):
+        """bock-worktrees must not be left as <scratch>-worktrees."""
+        p = self._write("CLAUDE.md",
+                        "at /srv/live-repo-worktrees/x\n")
+        scrub_outside_paths(self.tmp, ["/srv/live-repo",
+                                       "/srv/live-repo-worktrees"])
+        self.assertNotIn("/srv/live-repo", open(p).read())
+
+    def test_clean_file_is_left_alone(self):
+        p = self._write("CLAUDE.md", "nothing to see\n")
+        self.assertEqual(scrub_outside_paths(self.tmp, ["/opt/x"]), 0)
+        self.assertEqual(open(p).read(), "nothing to see\n")
+
+    def test_non_claude_md_files_are_untouched(self):
+        """Scrubbing source would corrupt the task; only prompt-injected
+        files are in scope."""
+        p = self._write("src/lib.rs", "// /srv/live-repo\n")
+        scrub_outside_paths(self.tmp, ["/srv/live-repo"])
+        self.assertIn("/srv/live-repo", open(p).read())
+
+
+class TestProtectedTreeTripwire(unittest.TestCase):
+    """Scoring reads the scratch clone, so an edit anywhere else is
+    invisible to it. Fingerprint the live repo around the run instead."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="tripwire-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        subprocess.run(["git", "init", "-q"], cwd=self.tmp, check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=self.tmp)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=self.tmp)
+        with open(os.path.join(self.tmp, "a.txt"), "w") as fh:
+            fh.write("one\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.tmp, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=self.tmp,
+                       check=True)
+
+    def test_unchanged_tree_fingerprints_identically(self):
+        self.assertEqual(tree_fingerprint(self.tmp),
+                         tree_fingerprint(self.tmp))
+
+    def test_modified_tracked_file_changes_fingerprint(self):
+        before = tree_fingerprint(self.tmp)
+        with open(os.path.join(self.tmp, "a.txt"), "w") as fh:
+            fh.write("two\n")
+        self.assertNotEqual(before, tree_fingerprint(self.tmp))
+
+    def test_new_untracked_file_changes_fingerprint(self):
+        before = tree_fingerprint(self.tmp)
+        with open(os.path.join(self.tmp, "b.txt"), "w") as fh:
+            fh.write("new\n")
+        self.assertNotEqual(before, tree_fingerprint(self.tmp))
+
+    def test_new_commit_changes_fingerprint(self):
+        before = tree_fingerprint(self.tmp)
+        with open(os.path.join(self.tmp, "a.txt"), "w") as fh:
+            fh.write("two\n")
+        subprocess.run(["git", "commit", "-aqm", "x"], cwd=self.tmp,
+                       check=True)
+        self.assertNotEqual(before, tree_fingerprint(self.tmp))
+
+    def test_missing_tree_is_reported_not_crashed(self):
+        self.assertIsNotNone(tree_fingerprint("/nonexistent-path-xyz"))
+
+
+class TestRunAsUser(unittest.TestCase):
+    def test_default_argv_is_unprefixed(self):
+        argv = claude_argv("p", 40)
+        self.assertEqual(argv[0], "claude")
+
+    def test_run_as_user_prefixes_sudo(self):
+        argv = claude_argv("p", 40, run_as_user="benchagent")
+        self.assertEqual(argv[:4], ["sudo", "-u", "benchagent", "--"])
+        self.assertEqual(argv[4], "claude")
+
+
+class TestProtectValidation(unittest.TestCase):
+    """A protected path that is not a git tree fingerprints to a constant,
+    so the tripwire silently never fires. That must be a startup error."""
+
+    def test_non_git_dir_is_detected(self):
+        tmp = tempfile.mkdtemp(prefix="notgit-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.assertTrue(
+            tree_fingerprint(tmp).startswith("NOT-A-GIT-TREE:"))
+
+    def test_absent_dir_is_detected(self):
+        self.assertTrue(
+            tree_fingerprint("/nope-xyz").startswith("ABSENT:"))
