@@ -1,0 +1,280 @@
+import json
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shim.translate import (  # noqa: E402
+    anthropic_to_openai, count_tokens_estimate,
+    is_session_title_request,
+    session_title_response,
+)
+
+
+class TestSystemPrompt(unittest.TestCase):
+    def test_system_string_becomes_first_message(self):
+        out = anthropic_to_openai({
+            "model": "qwopus-coder",
+            "system": "You are Claude Code.",
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+        self.assertEqual(out["messages"][0],
+                         {"role": "system", "content": "You are Claude Code."})
+        self.assertEqual(out["messages"][1], {"role": "user", "content": "hi"})
+
+    def test_system_block_list_is_joined(self):
+        # Claude Code sends `system` as a list of text blocks, not a string.
+        out = anthropic_to_openai({
+            "model": "m",
+            "system": [{"type": "text", "text": "A"},
+                       {"type": "text", "text": "B"}],
+            "messages": [{"role": "user", "content": "hi"}],
+        })
+        self.assertEqual(out["messages"][0]["content"], "A\n\nB")
+
+
+class TestContentBlocks(unittest.TestCase):
+    def test_user_text_blocks_flatten_to_string(self):
+        out = anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hello"}]}]})
+        self.assertEqual(out["messages"][0]["content"], "hello")
+
+    def test_tool_use_becomes_openai_tool_call(self):
+        out = anthropic_to_openai({"model": "m", "messages": [
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "editing"},
+                {"type": "tool_use", "id": "tu_1", "name": "Edit",
+                 "input": {"file_path": "/a.rs", "old_string": "x",
+                           "new_string": "y"}}]}]})
+        m = out["messages"][0]
+        self.assertEqual(m["role"], "assistant")
+        self.assertEqual(m["content"], "editing")
+        tc = m["tool_calls"][0]
+        self.assertEqual(tc["id"], "tu_1")
+        self.assertEqual(tc["type"], "function")
+        self.assertEqual(tc["function"]["name"], "Edit")
+        # Arguments MUST be a JSON string, and must round-trip losslessly.
+        self.assertEqual(json.loads(tc["function"]["arguments"]),
+                         {"file_path": "/a.rs", "old_string": "x",
+                          "new_string": "y"})
+
+    def test_tool_result_becomes_tool_role_message(self):
+        out = anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1",
+                 "content": "ok"}]}]})
+        self.assertEqual(out["messages"][0],
+                         {"role": "tool", "tool_call_id": "tu_1",
+                          "content": "ok"})
+
+    def test_tool_result_with_block_list_content(self):
+        out = anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_2",
+                 "content": [{"type": "text", "text": "line1"},
+                             {"type": "text", "text": "line2"}]}]}]})
+        self.assertEqual(out["messages"][0]["content"], "line1\nline2")
+
+    def test_mixed_tool_result_and_text_splits_into_two_messages(self):
+        # A single Anthropic user turn can carry a tool_result AND new text.
+        # OpenAI cannot express that in one message.
+        out = anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "ok"},
+                {"type": "text", "text": "now do the next thing"}]}]})
+        self.assertEqual(len(out["messages"]), 2)
+        self.assertEqual(out["messages"][0]["role"], "tool")
+        self.assertEqual(out["messages"][1],
+                         {"role": "user", "content": "now do the next thing"})
+
+
+class TestToolsAndParams(unittest.TestCase):
+    def test_tool_definitions_translate(self):
+        out = anthropic_to_openai({"model": "m", "messages": [], "tools": [
+            {"name": "Read", "description": "Read a file",
+             "input_schema": {"type": "object",
+                              "properties": {"file_path": {"type": "string"}},
+                              "required": ["file_path"]}}]})
+        t = out["tools"][0]
+        self.assertEqual(t["type"], "function")
+        self.assertEqual(t["function"]["name"], "Read")
+        self.assertEqual(t["function"]["description"], "Read a file")
+        self.assertEqual(t["function"]["parameters"]["required"], ["file_path"])
+
+    def test_sampling_and_stream_pass_through(self):
+        out = anthropic_to_openai({"model": "m", "messages": [],
+                                   "max_tokens": 4096, "temperature": 0.7,
+                                   "top_p": 0.95, "stream": True,
+                                   "stop_sequences": ["END"]})
+        self.assertEqual(out["max_tokens"], 4096)
+        self.assertEqual(out["temperature"], 0.7)
+        self.assertEqual(out["top_p"], 0.95)
+        self.assertTrue(out["stream"])
+        self.assertEqual(out["stop"], ["END"])
+
+    def test_absent_sampling_keys_are_omitted_not_defaulted(self):
+        # Sampling is set per model card on the server. The shim must not
+        # invent values, or it silently overrides the card.
+        out = anthropic_to_openai({"model": "m", "messages": []})
+        self.assertNotIn("temperature", out)
+        self.assertNotIn("top_p", out)
+
+    def test_count_tokens_estimate_is_monotonic(self):
+        small = count_tokens_estimate({"messages": [
+            {"role": "user", "content": "hi"}]})
+        large = count_tokens_estimate({"messages": [
+            {"role": "user", "content": "hi " * 1000}]})
+        self.assertGreater(large, small)
+        self.assertGreater(small, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestSystemMessagesAreCoalesced(unittest.TestCase):
+    """Templates in this family raise if a system message is not first.
+
+    Claude Code sends a top-level `system` AND, when a SessionStart hook
+    contributes context, a further system-role message after the first user
+    turn. Qwopus' template calls raise_exception('System message must be at
+    the beginning'), which llama-server returns as a 500 - so every request
+    failed and the run recorded zero turns.
+    """
+
+    def test_trailing_system_message_is_hoisted_into_the_leading_one(self):
+        out = anthropic_to_openai({
+            "model": "m",
+            "system": "primary",
+            "messages": [
+                {"role": "user", "content": "do the thing"},
+                {"role": "system", "content": "hook context"},
+                {"role": "assistant", "content": "ok"},
+            ],
+        })
+        roles = [m["role"] for m in out["messages"]]
+        self.assertEqual(roles, ["system", "user", "assistant"])
+        self.assertEqual(out["messages"][0]["content"], "primary\n\nhook context")
+
+    def test_system_message_with_no_top_level_system_still_leads(self):
+        out = anthropic_to_openai({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "late"},
+            ],
+        })
+        self.assertEqual([m["role"] for m in out["messages"]], ["system", "user"])
+        self.assertEqual(out["messages"][0]["content"], "late")
+
+    def test_ordering_of_non_system_turns_is_untouched(self):
+        out = anthropic_to_openai({
+            "model": "m",
+            "system": "s",
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "user", "content": "three"},
+            ],
+        })
+        self.assertEqual([m["role"] for m in out["messages"]],
+                         ["system", "user", "assistant", "user"])
+        self.assertEqual([m["content"] for m in out["messages"][1:]],
+                         ["one", "two", "three"])
+
+    def test_no_system_content_means_no_system_message(self):
+        out = anthropic_to_openai({"model": "m",
+                                   "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual([m["role"] for m in out["messages"]], ["user"])
+
+
+class TestOutputTokenCap(unittest.TestCase):
+    """Claude Code asks for max_tokens=32000 on every turn.
+
+    That is an Anthropic-scale budget. At ~24 tok/s a local model can spend
+    22 minutes on one response, and a model that fails to stop spends the
+    whole budget - qwopus emitted 132KB of runaway before hitting it. The
+    cap bounds a turn without changing what a well-behaved model produces.
+    """
+
+    def test_cap_clamps_a_larger_request(self):
+        out = anthropic_to_openai({"model": "m", "max_tokens": 32000,
+                                   "messages": []}, max_output_tokens=4096)
+        self.assertEqual(out["max_tokens"], 4096)
+
+    def test_cap_leaves_a_smaller_request_alone(self):
+        out = anthropic_to_openai({"model": "m", "max_tokens": 512,
+                                   "messages": []}, max_output_tokens=4096)
+        self.assertEqual(out["max_tokens"], 512)
+
+    def test_no_cap_passes_the_request_through(self):
+        out = anthropic_to_openai({"model": "m", "max_tokens": 32000,
+                                   "messages": []})
+        self.assertEqual(out["max_tokens"], 32000)
+
+    def test_cap_applies_even_when_the_request_omits_max_tokens(self):
+        out = anthropic_to_openai({"model": "m", "messages": []},
+                                  max_output_tokens=4096)
+        self.assertEqual(out["max_tokens"], 4096)
+
+
+class TestSessionTitleRequestDetection(unittest.TestCase):
+    """Claude Code asks the model to name the session alongside every run.
+
+    That request is a UI nicety, not part of the agent loop under test. It
+    costs real prefill and decode charged to the run's wall clock, and - on
+    a server with one slot - it leaves its prompt in the KV cache, after
+    which the agent request comes back answered as if it were the title
+    question. Recognising it lets the shim answer it without a model.
+    """
+
+    TITLE_SYSTEM = ("You are a Claude agent.\n\nYou are naming a coding "
+                    "session so the user can pick it out of a long list.")
+
+    def test_detects_the_title_request_with_top_level_system(self):
+        """Anthropic carries `system` at the top level, not as a message.
+
+        This is the shape the shim actually receives; matching only on a
+        system-role message meant the detector never fired in production.
+        """
+        self.assertTrue(is_session_title_request({
+            "system": self.TITLE_SYSTEM,
+            "messages": [{"role": "user", "content": "<session>x</session>"}]}))
+
+    def test_detects_the_title_request_with_system_block_list(self):
+        self.assertTrue(is_session_title_request({
+            "system": [{"type": "text", "text": self.TITLE_SYSTEM}],
+            "messages": [{"role": "user", "content": "<session>x</session>"}]}))
+
+    def test_top_level_system_with_tools_is_still_an_agent_request(self):
+        self.assertFalse(is_session_title_request({
+            "system": self.TITLE_SYSTEM,
+            "messages": [{"role": "user", "content": "<session>x</session>"}],
+            "tools": [{"name": "Read"}]}))
+
+    def test_detects_the_title_request(self):
+        self.assertTrue(is_session_title_request({
+            "messages": [{"role": "system", "content": self.TITLE_SYSTEM},
+                         {"role": "user", "content": "<session>x</session>"}]}))
+
+    def test_an_agent_request_with_tools_is_never_a_title_request(self):
+        # The decisive difference: the agent loop always carries tools.
+        self.assertFalse(is_session_title_request({
+            "messages": [{"role": "system", "content": self.TITLE_SYSTEM},
+                         {"role": "user", "content": "<session>x</session>"}],
+            "tools": [{"type": "function", "function": {"name": "Read"}}]}))
+
+    def test_an_ordinary_toolless_request_is_not_a_title_request(self):
+        self.assertFalse(is_session_title_request({
+            "messages": [{"role": "system", "content": "You are helpful."},
+                         {"role": "user", "content": "hi"}]}))
+
+    def test_no_messages_is_not_a_title_request(self):
+        self.assertFalse(is_session_title_request({"messages": []}))
+
+    def test_canned_response_is_shaped_like_a_completion(self):
+        r = session_title_response("Bench run")
+        self.assertEqual(r["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(r["choices"][0]["message"]["role"], "assistant")
+        self.assertIn("Bench run", r["choices"][0]["message"]["content"])
+        self.assertEqual(r["usage"]["completion_tokens"], 0)
