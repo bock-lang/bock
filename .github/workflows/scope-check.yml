@@ -1,0 +1,86 @@
+name: scope-check
+
+# INFORMATIONAL gate. Checks that the files a PR changes fall inside the scope
+# that PR declared in its body, as an `Owned-Files:` block:
+#
+#     Owned-Files:
+#     - tools/scripts/
+#     - .github/workflows/scope-check.yml
+#
+# A trailing `/` means "that directory and everything under it"; entries may be
+# globs. The matching semantics are shared with the `scope_violations` axis in
+# tools/model-bench/harness/score.py, so the benchmark and CI agree on what "in
+# scope" means. Logic lives in tools/scripts/check-pr-scope.py (stdlib-only,
+# unit-tested under tools/scripts/tests/) rather than inline here.
+#
+# Sessions declare owned files in their session prompt today and nothing
+# enforces it -- this job makes the declaration mechanical.
+#
+# SKIPPED for: dependabot PRs, and PRs with no `Owned-Files:` block (those
+# report "no scope declared" and pass).
+#
+# RATCHET: this job is informational and exits 0 even on violations, following
+# the examples-exec precedent (landed informational, flipped to blocking in
+# #272 once verified green). To make it blocking, add `--strict` to the
+# check-pr-scope.py invocation in the "Check PR scope" step below (the script
+# then exits 1 on violations). Do that only once enough PRs declare scope that
+# the flip will not red PRs for the absence of a block they never wrote.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scope-check:
+    name: PR scope vs declared Owned-Files (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history so the merge-base with the base branch is reachable.
+          fetch-depth: 0
+
+      # Self-test: the gate's own logic is unit-tested on every run, so a
+      # regression in the matcher surfaces here rather than as a silent pass.
+      - name: Unit-test the scope checker
+        run: python3 -m unittest discover -s tools/scripts/tests -v
+
+      - name: Compute changed files (vs merge-base)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          echo "merge-base: $MERGE_BASE"
+          git diff --name-only "$MERGE_BASE" "$HEAD_SHA" > changed-files.txt
+          echo "--- changed files ---"
+          cat changed-files.txt
+
+      # The PR body is untrusted input, so it goes through the environment and
+      # a file -- never interpolated into the shell command line.
+      - name: Capture PR body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$PR_BODY" > pr-body.txt
+
+      - name: Check PR scope
+        # RATCHET SWITCH: append `--strict` to this command to make violations
+        # fail the PR. See the header comment above.
+        env:
+          PR_ACTOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python3 tools/scripts/check-pr-scope.py \
+            --changed-files changed-files.txt \
+            --body-file pr-body.txt \
+            --actor "$PR_ACTOR" \
+            --summary-file "$GITHUB_STEP_SUMMARY"
