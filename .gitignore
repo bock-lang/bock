@@ -61,3 +61,9 @@ branding/*
 !branding/assets/
 
 temp/
+
+# Python bytecode — never tracked. Tracked .pyc caused three separate
+# failures in the model-bench harness: it dirties the tree on every run,
+# so a harness protecting the repo it runs from always self-vetoes.
+__pycache__/
+*.py[cod]
