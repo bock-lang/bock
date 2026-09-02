@@ -559,6 +559,22 @@ one-shot authorship and not at all on agent-loop behaviour, which is the thing t
   pre-flight tool-call gate and read the wire log, and decide the background-model route. **OPEN for the operator:**
   the design chose claude-code-router with a logging tee; the implementation built a hand-written shim instead
   because the router could not be verified without a reachable upstream — confirm or reverse on #497.
+  **2026-09-02: #496/#497/#498 all MERGED** (main `b0aeede`, combined-tree gate re-verified: 2994 tests, 0 failed).
+  **Now BLOCKED on a new operator ask — agent confinement, `tracking/handoffs/20260902-0500-model-bench-confinement-handoff.md`.**
+  tiel-coder's pre-flight escaped the scratch tree on its FIRST tool call: `Read` of an absolute path into the live
+  repo, which the model did not invent — the pinned tree's own `CLAUDE.md` names the live repo six times and Claude
+  Code injects it into the system prompt verbatim. Scoring reads `git status` in the *scratch* clone, so such an
+  edit is scored as though nothing happened: **the scope and destruction axes were unmeasurable.** #507 lands the
+  scrub (rewrite outside paths out of the scratch `CLAUDE.md`, committed as a harness-owned commit) and the
+  `--protect` tripwire (fingerprint HEAD+status around each run; any change vetoes), plus `--run-as-user` plumbing.
+  **`--run-as-user` is the only real fix and needs root** — no `sudo`, no `bwrap`, unprivileged userns EPERM from a
+  session. Until `benchagent` exists, running is tripwire-only (detects, does not prevent). **Every scored row taken
+  before #507 has an unvalidated scope axis, incl. flash-next-c's completion=1 t1 row.** Not blocked: tiel-coder
+  PASSES the transport pre-flight (clean tool calls; reasoning extracted despite `reasoning_format = none` — do NOT
+  add `--reasoning-format auto` to that entry on the flag list alone) and gave the first fully-measured throughput
+  row — prefill ~564 t/s, decode ~45 t/s, MTP acceptance 57.6% aggregate but ~91%/~88% on short turns vs 53.5% on
+  the long one (quote the spread). Follow-up chore: `tools/model-bench/**/__pycache__/*.pyc` is checked into the
+  repo (from #497) and dirties the tree on every run — wants `git rm -r --cached` + a `.gitignore` line.
 
 ### Release-prep FOUND (filed 2026-07-02, surfaced by the rustyline-18 REPL smoke)
 
