@@ -553,7 +553,7 @@ one-shot authorship and not at all on agent-loop behaviour, which is the thing t
   `.bock` module, and a seeded react-to-failure task whose defect was verified to fail 8 existing tests). 45 tests
   green; full Rust gate 4/4. **BLOCKED on the fleet handoff for anything measured** — the harness is unit-tested
   against a mock upstream and has never spoken to a real model, because the authoring container cannot reach
-  llama-server (no `/mnt/c`, no Windows interop, 172.17.0.0/16 bridge). Handoff asks: raise both entries to
+  llama-server (no `/mnt/c`, no Windows interop, the container bridge subnet bridge). Handoff asks: raise both entries to
   `-c 65536` and verify via `/props`, confirm flash-next-c's KV fits at 56.7 GB resident, pin its backend to
   `vulkan`, **re-measure decode/prefill t/s + MTP acceptance at 65536** (the 32768 figures are dead), run the
   pre-flight tool-call gate and read the wire log, and decide the background-model route. **OPEN for the operator:**

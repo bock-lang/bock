@@ -53,9 +53,9 @@ is closed to it:
 
 | Target | Result |
 |---|---|
-| `172.18.112.1:8170` (lls broker) | **200 OK in 115 ms** |
-| `172.18.112.1:8160` (llama-server) | dropped, 5 s timeout |
-| `172.18.112.1:9999` (nothing listening) | dropped, 5 s timeout |
+| `$LLAMA_HOST:8170` (lls broker) | **200 OK in 115 ms** |
+| `$LLAMA_HOST:8160` (llama-server) | dropped, 5 s timeout |
+| `$LLAMA_HOST:9999` (nothing listening) | dropped, 5 s timeout |
 
 A port with nothing behind it behaves identically to 8160, so this is
 not llama-server misbehaving: the host default-denies inbound from this
@@ -71,12 +71,12 @@ nothing on the llama.cpp side needs changing.
 subnet, scoped as narrowly as the 8170 rule is. Then confirm from inside
 the container:
 
-    curl -s http://172.18.112.1:8160/v1/models
+    curl -s http://$LLAMA_HOST:8160/v1/models
 
 **If this lands, asks 1–6 can be done from a Claude Code session
 directly** — including the pre-flight tool-call gate and the scored runs
 — rather than by hand on the Windows side. The harness's `--upstream`
-would be `http://172.18.112.1:8160`.
+would be `http://$LLAMA_HOST:8160`.
 
 Caveat worth stating plainly: opening a port that currently serves an
 unauthenticated model endpoint (llama-server logs `CORS is set to allow
