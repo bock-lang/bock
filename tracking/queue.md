@@ -530,6 +530,36 @@ deferred (deep). — earlier: D4 [#172]; ★ v1 STDLIB COMPLETE 11/11 ×5 ★. #
 > - `D2-polish` → v1.2 (pure docs). **The v1.0 correctness floor is clean and the hardening drain is complete** — the next gate is the v1.0 release cut (escalates), pending the marketing copy lock (marketing-owned).
 > - **2026-07-02: the cut is IN MOTION** — dependabot drained (13/13) + the release-prep PR (v1.0.0 stamps, changelog promoted). Tag HELD on the marketing copy lock + operator secrets confirmation (see the reconcile header).
 
+### Local-model dogfooding harness (filed 2026-08-31, from `.claude/specs/2026-08-31-local-model-agent-benchmark-design.md`)
+
+Benchmarks locally-served models as the Claude Code backend, so R8 dogfooding can run on the local fleet rather than
+only on hosted models. Motivated by a **safety finding**, not by a throughput question: the fleet's prior instrument
+(a single-turn script prompt) caught two coder-specialised models executing a destructive command on a code path that
+was only supposed to *check*, then reporting success because their own side effect had made the report true. That
+disposition must be characterised before any local model gets repo write access. The instrument discriminates on
+one-shot authorship and not at all on agent-loop behaviour, which is the thing that actually matters here.
+
+- **[Q-model-bench] `tools/model-bench` — agent-loop benchmark harness for local models** — feature · **in-flight
+  (#496 design, #497 implementation; both open)** · `tools/model-bench/` + `.claude/specs/` + `.claude/plans/` · — ·
+  links `tracking/handoffs/20260831-0622-model-bench-fleet-handoff.md`, R8 dogfooding, Q-catalog-spec-refs-misrouted
+  (both feed dogfooding quality) · note: Python-3-stdlib-only shim + driver + 5 context-bounded tasks + four-axis
+  scorer. **Key verified fact: Claude Code speaks ONLY the Anthropic Messages API** — `chat/completions` appears 0
+  times in CLI 2.1.251, `v1/messages` 57 — so a translating shim over `/v1/messages`, `/v1/messages/count_tokens`
+  and `/v1/models` is mandatory, not optional; model cards claiming a direct llama-server hookup are wrong.
+  Scoring keeps four axes separate and never sums them: completion is a **conjunction** (test passes AND no
+  assertion deleted — passing by deleting the test is the winget failure in repo costume), plus scope violations,
+  destructive events, and report fidelity; **destruction and overclaiming are vetoes, not deductions.** Tasks are
+  scoped to crates whose working set fits at `-c 65536` (bock-source, bock-errors, bock-lexer, a named stdlib
+  `.bock` module, and a seeded react-to-failure task whose defect was verified to fail 8 existing tests). 45 tests
+  green; full Rust gate 4/4. **BLOCKED on the fleet handoff for anything measured** — the harness is unit-tested
+  against a mock upstream and has never spoken to a real model, because the authoring container cannot reach
+  llama-server (no `/mnt/c`, no Windows interop, 172.17.0.0/16 bridge). Handoff asks: raise both entries to
+  `-c 65536` and verify via `/props`, confirm flash-next-c's KV fits at 56.7 GB resident, pin its backend to
+  `vulkan`, **re-measure decode/prefill t/s + MTP acceptance at 65536** (the 32768 figures are dead), run the
+  pre-flight tool-call gate and read the wire log, and decide the background-model route. **OPEN for the operator:**
+  the design chose claude-code-router with a logging tee; the implementation built a hand-written shim instead
+  because the router could not be verified without a reachable upstream — confirm or reverse on #497.
+
 ### Release-prep FOUND (filed 2026-07-02, surfaced by the rustyline-18 REPL smoke)
 
 - **[Q-website-astro7-migration] website: migrate to astro 7 + @astrojs/cloudflare 14 (majors REVERTED 2026-07-02)** — chore · ready · `website/` · — · links: #407/#401 (the reverted dependabot majors), the revert PR · note: astro 7.0.3–7.0.5 + cloudflare 14.1.0 break `astro build` for this site's `output:'static'` + cloudflare-adapter config ("Could not find the prerender entry point", `static-build.js getPrerenderEntryFileName`). Reverted to astro ^6.4.8 + cloudflare ^13.7.0 (build green). Migration options: track the upstream fix; or drop the adapter for static output and hand-write the wrangler static-assets config (the adapter currently manages KV-session/images bindings — see astro.config.mjs comments). Do with time to verify `wrangler deploy`; NOT release-gating. Dependabot will re-open the majors — with docs.yml's new pull_request trigger they now build pre-merge and stay visibly red until this lands.
