@@ -18,7 +18,9 @@ from harness.run import (  # noqa: E402
     make_config_dir,
     child_env,
     parse_transcript,
+    describe_tree_change,
     scrub_outside_paths,
+    snapshot_tree,
     seed_defect,
     tree_fingerprint,
 )
@@ -401,3 +403,69 @@ class TestProtectValidation(unittest.TestCase):
     def test_absent_dir_is_detected(self):
         self.assertTrue(
             tree_fingerprint("/nope-xyz").startswith("ABSENT:"))
+
+
+class TestTreeChangeDetail(unittest.TestCase):
+    """A tripwire that reports only THAT something changed is not
+    diagnosable. A real false positive — merging into the protected
+    checkout during a run — was indistinguishable from the model writing
+    there, because both only moved the fingerprint."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="detail-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        for c in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
+                  ["git", "config", "user.name", "t"]):
+            subprocess.run(c, cwd=self.tmp, check=False)
+        self._write("a.txt", "one\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.tmp, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=self.tmp, check=True)
+
+    def _write(self, name, text):
+        with open(os.path.join(self.tmp, name), "w") as fh:
+            fh.write(text)
+
+    def test_head_move_alone_is_labelled_as_such(self):
+        before = snapshot_tree(self.tmp)
+        self._write("a.txt", "two\n")
+        subprocess.run(["git", "commit", "-aqm", "second"], cwd=self.tmp, check=True)
+        d = describe_tree_change(self.tmp, before, snapshot_tree(self.tmp))
+        self.assertTrue(d["changed"])
+        self.assertTrue(d["head_moved"])
+        self.assertTrue(d["head_moved_only"])
+        self.assertNotEqual(d["head_before"], d["head_after"])
+        self.assertEqual(d["worktree_paths"], [])
+
+    def test_worktree_edit_is_reported_with_its_paths(self):
+        before = snapshot_tree(self.tmp)
+        self._write("a.txt", "dirty\n")
+        d = describe_tree_change(self.tmp, before, snapshot_tree(self.tmp))
+        self.assertTrue(d["changed"])
+        self.assertFalse(d["head_moved"])
+        self.assertFalse(d["head_moved_only"])
+        self.assertIn("a.txt", d["worktree_paths"])
+
+    def test_new_untracked_file_is_reported(self):
+        before = snapshot_tree(self.tmp)
+        self._write("b.txt", "new\n")
+        d = describe_tree_change(self.tmp, before, snapshot_tree(self.tmp))
+        self.assertIn("b.txt", d["worktree_paths"])
+
+    def test_unchanged_tree_reports_no_change(self):
+        before = snapshot_tree(self.tmp)
+        d = describe_tree_change(self.tmp, before, snapshot_tree(self.tmp))
+        self.assertFalse(d["changed"])
+        self.assertEqual(d["worktree_paths"], [])
+
+    def test_fingerprint_still_agrees_with_snapshot(self):
+        """tree_fingerprint stays the equality primitive."""
+        a = tree_fingerprint(self.tmp)
+        self._write("a.txt", "x\n")
+        self.assertNotEqual(a, tree_fingerprint(self.tmp))
+
+    def test_detail_survives_a_vanished_tree(self):
+        """The tripwire must never be the thing that kills a run."""
+        before = snapshot_tree(self.tmp)
+        shutil.rmtree(self.tmp)
+        d = describe_tree_change(self.tmp, before, snapshot_tree(self.tmp))
+        self.assertTrue(d["changed"])
