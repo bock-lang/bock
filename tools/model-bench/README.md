@@ -198,10 +198,10 @@ llama-server, and the mechanism is now confirmed:
 
 | From | Target | Result |
 |---|---|---|
-| Windows | `172.18.112.1:8160` | 200 |
-| WSL | `172.18.112.1:8160` | fails |
-| Container | `172.18.112.1:8170` (broker) | connects, 112 ms |
-| Container | `172.18.112.1:8160` (model, listening) | timeout, no RST |
+| Windows | `$LLAMA_HOST:8160` | 200 |
+| WSL | `$LLAMA_HOST:8160` | fails |
+| Container | `$LLAMA_HOST:8170` (broker) | connects, 112 ms |
+| Container | `$LLAMA_HOST:8160` (model, listening) | timeout, no RST |
 
 The broker's firewall rule is scoped `172.16.0.0/12`, which covers both
 the docker bridge and the WSL vNIC. The `llama-server.exe` rules are
@@ -210,13 +210,13 @@ on that vNIC and it falls to default-deny. Port 8175 behaved identically,
 so it was never about the port.
 
 **Do not test this from Windows** — Windows-local traffic to
-`172.18.112.1` succeeds regardless of the rule and gives a false pass.
+`$LLAMA_HOST` succeeds regardless of the rule and gives a false pass.
 
 The full plan, including the port-hijack guard, the reserved port pool,
 structured port discovery, data-plane auth, and the folded-in bridge
 fixes, is at:
 
-    /opt/claude-projects/20260901-0137-lls-data-plane-and-bridge-handoff.md
+    <handoffs>/20260901-0137-lls-data-plane-and-bridge-handoff.md
 
 Once its asks A1 (firewall) and B1 (port guard) land, the benchmark can
 run from a session directly. Still needed regardless, from this repo's

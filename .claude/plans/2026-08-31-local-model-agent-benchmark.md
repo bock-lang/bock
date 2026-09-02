@@ -24,7 +24,7 @@
 
 ## Environment Finding That Shapes This Plan
 
-**This build environment is a Docker container and cannot reach llama-server.** Confirmed: `/.dockerenv` present, hostname `31d7b9740408`, subnet 172.17.0.0/16 (Docker bridge), `/mnt/c` not mounted, no Windows interop. `lls_up tiny` succeeded via the MCP broker, but HTTP to port 8175 failed from 127.0.0.1, the gateway 172.17.0.1, and 10.255.255.254 alike.
+**This build environment is a Docker container and cannot reach llama-server.** Confirmed: `/.dockerenv` present, subnet the container bridge subnet (Docker bridge), `/mnt/c` not mounted, no Windows interop. `lls_up tiny` succeeded via the MCP broker, but HTTP to port 8175 failed from 127.0.0.1, the gateway the container gateway, and the WSL resolver address alike.
 
 Consequence: **Tasks 1–5 are fully implementable and testable here** against a mock upstream. **Task 6 is a handoff** — end-to-end validation against a real model must run in the user's WSL, which can reach the Windows host. This matches existing project practice for Windows-side work.
 
@@ -1497,7 +1497,7 @@ the environment.** The driver strips `ANTHROPIC_*`, `AWS_*`, `GH_*`, and
 ## Operator handoff - what could not be done from the build container
 
 The environment this was written in is a Docker container that cannot
-reach llama-server (no `/mnt/c`, no Windows interop, 172.17.0.0/16
+reach llama-server (no `/mnt/c`, no Windows interop, the container bridge subnet
 bridge; `lls_up tiny` succeeded via the MCP broker but HTTP to the
 server failed from every route). The following need an operator on a
 machine that can reach port 8160:
