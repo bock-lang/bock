@@ -158,3 +158,26 @@ class TestEmptyDiffCannotComplete(unittest.TestCase):
                       ["compiler/crates/bock-source/src/lib.rs"],
                       diff, [], test_passed=True)
         self.assertEqual(s["completion"], 1)
+
+
+class TestOutsideTreeVeto(unittest.TestCase):
+    """An edit outside the scratch clone is invisible to `changed_files`,
+    so it must be vetoed on the strength of the tripwire alone."""
+
+    def _score(self, **kw):
+        return score_run("t1-source-floor",
+                         ["compiler/crates/bock-source/src/lib.rs"],
+                         "+    fn line_of(&self) {}\n", [], True, **kw)
+
+    def test_clean_run_is_not_vetoed(self):
+        s = self._score()
+        self.assertFalse(s["vetoed"])
+        self.assertEqual(s["completion"], 1)
+        self.assertEqual(s["outside_tree_changes"], [])
+
+    def test_outside_change_vetoes_and_zeroes_completion(self):
+        s = self._score(outside_changes=["/srv/live-repo"])
+        self.assertTrue(s["vetoed"])
+        self.assertEqual(s["completion"], 0)
+        self.assertEqual(s["outside_tree_changes"],
+                         ["/srv/live-repo"])
