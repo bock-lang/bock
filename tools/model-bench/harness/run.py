@@ -84,23 +84,86 @@ def scrub_outside_paths(scratch, outside_roots):
     return changed
 
 
-def tree_fingerprint(root):
-    """Cheap identity of a git tree: HEAD plus full working-tree status.
+def snapshot_tree(root):
+    """HEAD and full working-tree status of a git tree, kept separate.
 
-    Scoring reads `git status` in the *scratch* clone, so an edit anywhere
-    else is scored as though nothing happened. Fingerprinting the live repo
-    on both sides of a run turns that silence into a veto.
+    Separate because they mean different things when they move. A HEAD that
+    advanced with a clean worktree is almost always someone merging into
+    the checkout; a dirty worktree is someone writing files into it. The
+    fingerprint conflated the two, and a real false positive followed - see
+    `describe_tree_change`.
 
-    A missing or non-git path returns a marker string rather than raising:
-    the tripwire must never be the thing that kills a run.
+    A missing or non-git path yields a marker rather than raising: the
+    tripwire must never be the thing that kills a run.
     """
     if not os.path.isdir(root):
-        return "ABSENT:%s" % root
+        return {"head": "ABSENT", "status": "", "ok": False}
     head = sh(["git", "rev-parse", "HEAD"], cwd=root)
-    status = sh(["git", "status", "--porcelain"], cwd=root)
     if head.returncode != 0:
-        return "NOT-A-GIT-TREE:%s" % root
-    return "%s\n%s" % (head.stdout.strip(), status.stdout)
+        return {"head": "NOT-A-GIT-TREE", "status": "", "ok": False}
+    status = sh(["git", "status", "--porcelain"], cwd=root)
+    return {"head": head.stdout.strip(), "status": status.stdout, "ok": True}
+
+
+def tree_fingerprint(root):
+    """Cheap identity of a git tree, for equality only.
+
+    Scoring reads `git status` in the *scratch* clone, so an edit anywhere
+    else is scored as though nothing happened. Fingerprinting a protected
+    tree on both sides of a run turns that silence into a veto.
+    """
+    snap = snapshot_tree(root)
+    if not snap["ok"]:
+        return "%s:%s" % (snap["head"], root)
+    return "%s\n%s" % (snap["head"], snap["status"])
+
+
+def describe_tree_change(root, before, after):
+    """What actually changed in a protected tree, not merely that it did.
+
+    The first live veto this tripwire produced was a FALSE POSITIVE: PRs
+    were merged into the protected checkout while a run was in flight, so
+    its HEAD advanced. To the fingerprint that is indistinguishable from
+    the benchmarked model writing into the repo, and the run was thrown
+    away while the operator worked out which had happened.
+
+    A veto is still raised either way - defaulting to "trust it" is how a
+    real escape gets waved through - but the record now says which, so the
+    question is answerable from the artifacts instead of from memory.
+
+    `worktree_paths` are paths whose `git status` state differs between the
+    two snapshots, which is the signal that someone wrote *files* here.
+    """
+    def paths(status):
+        out = {}
+        for line in status.splitlines():
+            if len(line) > 3:
+                out[line[3:].strip()] = line[:2]
+        return out
+
+    before_paths, after_paths = paths(before["status"]), paths(after["status"])
+    differing = sorted(
+        p for p in set(before_paths) | set(after_paths)
+        if before_paths.get(p) != after_paths.get(p))
+    head_moved = before["head"] != after["head"]
+    return {
+        "root": root,
+        "changed": tree_fingerprint_of(before) != tree_fingerprint_of(after),
+        "head_moved": head_moved,
+        "head_before": before["head"],
+        "head_after": after["head"],
+        "worktree_paths": differing,
+        # The signature of a merge into the checkout rather than a write by
+        # the benchmarked agent. Still vetoed; just labelled.
+        "head_moved_only": head_moved and not differing,
+    }
+
+
+def tree_fingerprint_of(snap):
+    """Equality primitive over an already-taken snapshot."""
+    if not snap["ok"]:
+        return "%s:unavailable" % snap["head"]
+    return "%s\n%s" % (snap["head"], snap["status"])
 
 
 def reset_scratch(scratch, sha, outside_roots=()):
@@ -314,7 +377,7 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
     assert_model_identity(upstream, model_alias, upstream_api_key())
 
     reset_scratch(scratch, sha, outside_roots=protected)
-    before = {root: tree_fingerprint(root) for root in protected}
+    before = {root: snapshot_tree(root) for root in protected}
     if task.get("seed") == "SEEDED_FAILURE":
         seed_defect(scratch)
 
@@ -347,10 +410,13 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
     wall = time.time() - started
     shim.terminate()
 
-    # Anything the model changed outside the scratch tree. Scoring reads the
-    # scratch clone and would otherwise never see it.
-    escaped = [root for root in protected
-               if tree_fingerprint(root) != before[root]]
+    # Anything that changed outside the scratch tree. Scoring reads the
+    # scratch clone and would otherwise never see it. Detail is recorded so a
+    # veto can be told apart from a merge into the protected checkout.
+    details = [describe_tree_change(root, before[root], snapshot_tree(root))
+               for root in protected]
+    details = [d for d in details if d["changed"]]
+    escaped = [d["root"] for d in details]
 
     changed = [line[3:].strip() for line in
                sh(["git", "status", "--porcelain"],
@@ -385,6 +451,7 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
         "perf": {"wall_clock_s": round(wall, 1), "turns": turns,
                  "tool_calls": len(tools), "hit_timeout": timed_out},
         "scores": scores,
+        "protected_tree_changes": details,
         "final_report": final_text,
         "artifacts": {"transcript": stream, "wire_log": wire,
                       "final_diff": os.path.join(run_dir, "final.diff")},
@@ -477,8 +544,14 @@ def main():
               "turns=%s wall=%ss%s"
               % (i, s["completion"], s["vetoed"], s["scope_violations"],
                  p["turns"], p["wall_clock_s"],
-                 "" if not s["outside_tree_changes"] else
-                 "  ESCAPED: " + ", ".join(s["outside_tree_changes"])),
+                 "" if not rec.get("protected_tree_changes") else
+                 "".join(
+                     "\n    %s %s: HEAD %s->%s%s"
+                     % ("MERGE?" if d["head_moved_only"] else "ESCAPED",
+                        d["root"], d["head_before"][:8], d["head_after"][:8],
+                        "" if not d["worktree_paths"] else
+                        "  files: " + ", ".join(d["worktree_paths"][:5]))
+                     for d in rec["protected_tree_changes"])),
               flush=True)
 
 
