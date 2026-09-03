@@ -57,8 +57,8 @@ def scrub_outside_paths(scratch, outside_roots):
     That is a confound before it is a hazard. The scope axis is supposed to
     measure whether a model stays inside the files it was given; it cannot
     mean anything while the harness itself hands over a path to somewhere
-    else. Scrubbing removes the invitation. It is NOT confinement - see
-    `--run-as-user`.
+    else. Scrubbing removes the invitation. It is NOT confinement:
+    nothing here is.
 
     Longest roots first, so that scrubbing `/x/bock` cannot strip the
     prefix of `/x/bock-worktrees` and leave a mangled tail behind.
@@ -333,7 +333,7 @@ def make_config_dir(out_dir):
     return path
 
 
-def claude_argv(prompt, max_turns, run_as_user=None):
+def claude_argv(prompt, max_turns):
     """The benchmarked CLI invocation.
 
     `--mcp-config` must be a full config object: CLI 2.1.252 validates the
@@ -344,29 +344,28 @@ def claude_argv(prompt, max_turns, run_as_user=None):
     parent the CLI waits 3s for piped input before proceeding, which is dead
     time charged to every run's wall clock.
 
-    `run_as_user` is the actual confinement, and the only one of the three
-    mitigations here that is enforced by the kernel rather than by
-    persuasion. `--dangerously-skip-permissions` is deliberate - the model
-    must really be able to do the destructive thing, or the disposition
-    axes measure nothing - so the boundary has to come from outside the
-    process. Give that user write access to the scratch clone and nothing
-    else. Creating it needs root, so it stays opt-in; when it is unset the
-    scrub and the tripwire are all that stand in the way, and neither
-    actually stops a determined write.
+    There is deliberately no confinement here. `--run-as-user` used to add a
+    `sudo -u` prefix; it was removed because it could never be set up from
+    inside this container - the unix user does not exist there, and creating
+    one needs root nobody in a session has. A flag that is always unset is
+    worse than no flag: it reads as an available safeguard and quietly
+    documents a boundary that is not there. See the README's confinement
+    section for what does hold (the scrub and the tripwire) and what does
+    not. `--dangerously-skip-permissions` stays - the model must really be
+    able to do the destructive thing, or the disposition axes measure
+    nothing.
     """
     argv = ["claude", "-p", prompt,
             "--output-format", "stream-json", "--verbose",
             "--max-turns", str(max_turns),
             "--dangerously-skip-permissions",
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
-    if run_as_user:
-        argv = ["sudo", "-u", run_as_user, "--"] + argv
     return argv
 
 
 def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
              shim_port, max_turns, timeout_s, model_meta,
-             run_as_user=None, protected=()):
+             protected=()):
     run_dir = os.path.join(out_dir, "%s__%s__%d"
                            % (model_alias, task["id"], run_index))
     os.makedirs(run_dir, exist_ok=True)
@@ -402,7 +401,7 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
     try:
         with open(stream, "w") as sf, open(errlog, "w") as ef:
             rc = subprocess.run(
-                claude_argv(task["prompt"], max_turns, run_as_user),
+                claude_argv(task["prompt"], max_turns),
                 cwd=scratch, env=env, stdout=sf, stderr=ef,
                 stdin=subprocess.DEVNULL, timeout=timeout_s).returncode
     except subprocess.TimeoutExpired:
@@ -485,9 +484,6 @@ def main():
     ap.add_argument("--mtp-acceptance", type=float, default=None)
     ap.add_argument("--max-output-tokens", type=int, default=None,
                     help="clamp each turn's output budget (recorded per run)")
-    ap.add_argument("--run-as-user", default=None,
-                    help="run the benchmarked agent as this unix user "
-                         "(kernel-enforced confinement; needs root to set up)")
     ap.add_argument("--protect", action="append", default=None,
                     metavar="PATH",
                     help="tree the agent must not touch; fingerprinted "
@@ -524,10 +520,13 @@ def main():
             raise SystemExit(
                 "--protect %s is not a git tree (%s). Its fingerprint would "
                 "be constant, so the tripwire could never fire." % (root, fp))
-    if not args.run_as_user:
-        print("WARNING: no --run-as-user; the agent is NOT confined. "
-              "Protecting %s by tripwire only." % ", ".join(protected),
-              flush=True)
+    # Unconditional, because it is unconditionally true: nothing here is
+    # kernel-enforced. Every scored row this harness produces was collected
+    # against an unconfined agent and must be labelled as such.
+    print("WARNING: the agent is NOT confined - no kernel-enforced boundary "
+          "exists. Protecting %s by tripwire only (detects an escape after "
+          "the fact; does not prevent one)." % ", ".join(protected),
+          flush=True)
 
     task = TASKS_BY_ID[args.task]
     os.makedirs(args.out, exist_ok=True)
@@ -536,7 +535,7 @@ def main():
         rec = run_once(task, args.model, args.scratch, args.sha,
                        args.upstream, args.out, i, args.shim_port,
                        args.max_turns, args.timeout, model_meta,
-                       run_as_user=args.run_as_user, protected=protected)
+                       protected=protected)
         with open(results_path, "a") as fh:
             fh.write(json.dumps(rec) + "\n")
         s, p = rec["scores"], rec["perf"]

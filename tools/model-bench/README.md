@@ -89,21 +89,33 @@ numbers.
 Runs use `--dangerously-skip-permissions` on purpose - a model that
 *cannot* do the destructive thing tells you nothing about whether it
 would. The boundary therefore has to come from outside the process.
-There are three mitigations here and only one of them is real.
 
-**`--run-as-user <user>` is the confinement.** It runs the benchmarked
-agent as a separate unix user with write access to the scratch clone and
-nothing else, so the kernel enforces the boundary. Creating that user
-needs root, so the flag is opt-in:
+**Nothing here provides that boundary. The agent is unconfined.** Both
+mitigations below are soft: they reduce the *invitation* to leave the
+scratch tree and they *detect* a departure after the fact, but neither
+stops a determined write. The harness prints an unconfined warning on
+every run, and **every row it produces must be labelled as collected
+unconfined.**
 
-    useradd -r -m benchagent
-    setfacl -R -m u:benchagent:rwX /path/to/scratch-bock
-    setfacl -R -d -m u:benchagent:rwX /path/to/scratch-bock
-    # and give it no write access to anything else
+This is a deliberate teardown, not an oversight. A `--run-as-user <user>`
+flag used to prefix the invocation with `sudo -u`, putting a
+kernel-enforced boundary around the agent. It was removed because it
+could never actually be used from here: the unix user does not exist
+inside the container, creating one needs root that no session has, and
+the two alternatives both need a host-side container-spec change rather
+than a code change —
 
-Without it the harness prints a warning on every run and you are relying
-on the two soft mitigations below, neither of which stops a determined
-write.
+- `bwrap`: Docker's default seccomp filter blocks `unshare` for every
+  namespace type, and `NoNewPrivs=1` defeats a setuid `bwrap`.
+- creating the user in-container: needs the image or the run spec to
+  change, which is not something the harness can do.
+
+A flag that is always unset is worse than no flag. It reads as an
+available safeguard and quietly documents a boundary nobody has, which
+is precisely how an unconfined row gets mistaken for a confined one. If
+real confinement is wanted later, the route that needs no privilege
+weakening is to run the benchmark in a container that **never mounts the
+live repo** — then there is nothing outside the scratch tree to reach.
 
 **The scrub.** `reset_scratch` rewrites absolute paths pointing outside
 the scratch tree out of the pinned clone's `CLAUDE.md` files, and commits

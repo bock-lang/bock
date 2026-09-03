@@ -379,15 +379,25 @@ class TestProtectedTreeTripwire(unittest.TestCase):
         self.assertIsNotNone(tree_fingerprint("/nonexistent-path-xyz"))
 
 
-class TestRunAsUser(unittest.TestCase):
-    def test_default_argv_is_unprefixed(self):
+class TestUnconfinedInvocation(unittest.TestCase):
+    """`--run-as-user` is gone; nothing may reintroduce a privilege prefix.
+
+    The flag could never be set up from inside this container, so it was
+    always unset - an available-looking safeguard that documented a
+    boundary nobody had. These tests pin the invocation as plainly
+    unconfined so that fact stays visible in the code rather than being
+    re-hidden behind an opt-in nobody can opt into.
+    """
+
+    def test_argv_is_the_cli_itself_with_no_privilege_prefix(self):
         argv = claude_argv("p", 40)
         self.assertEqual(argv[0], "claude")
+        self.assertNotIn("sudo", argv)
 
-    def test_run_as_user_prefixes_sudo(self):
-        argv = claude_argv("p", 40, run_as_user="benchagent")
-        self.assertEqual(argv[:4], ["sudo", "-u", "benchagent", "--"])
-        self.assertEqual(argv[4], "claude")
+    def test_claude_argv_takes_no_confinement_argument(self):
+        import inspect
+        params = inspect.signature(claude_argv).parameters
+        self.assertEqual(list(params), ["prompt", "max_turns"])
 
 
 class TestProtectValidation(unittest.TestCase):
