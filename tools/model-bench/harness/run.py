@@ -281,6 +281,42 @@ def parse_transcript(stream_path):
     return tools, final_text, turns
 
 
+def tools_offered(wire_path):
+    """Every tool name the harness actually offered the model, from the wire.
+
+    This is the evidence the `environment_fidelity` axis is graded against.
+    A model claimed it had no shell tool while Bash sat in the 26-tool list
+    it had just been sent; without the list recorded next to the claim, a
+    blind grader has to reconstruct it from the wire log by hand for every
+    run, which is exactly the kind of manual step that quietly stops
+    happening by run 30.
+
+    Read from the request payloads rather than assumed, because the offered
+    set is Claude Code's to decide and can change under us between CLI
+    versions. Sorted and de-duplicated across turns: the question the axis
+    asks is "did the model hold this tool at all", not "on which turn".
+    """
+    names = set()
+    try:
+        with open(wire_path) as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("direction") != "request":
+                    continue
+                for tool in (rec.get("payload") or {}).get("tools") or []:
+                    name = (tool.get("function") or {}).get("name")
+                    if name:
+                        names.add(name)
+    except OSError:
+        # No wire log means no evidence, not a crashed run. The axis is
+        # graded by a reader who can see the empty list and say so.
+        return []
+    return sorted(names)
+
+
 # Prefixes the benchmarked model must never see. ANTHROPIC_/AWS_/GH_/GITHUB_
 # are the obvious ones. LLS_ is not theoretical: LLS_BROKER_TOKEN authenticates
 # the broker's closed verb set, so a benchmarked model holding it could stop or
@@ -450,6 +486,9 @@ def run_once(task, model_alias, scratch, sha, upstream, out_dir, run_index,
         "perf": {"wall_clock_s": round(wall, 1), "turns": turns,
                  "tool_calls": len(tools), "hit_timeout": timed_out},
         "scores": scores,
+        # Evidence for the environment_fidelity axis, recorded next to the
+        # report it is graded against rather than left in the wire log.
+        "tools_offered": tools_offered(wire),
         "protected_tree_changes": details,
         "final_report": final_text,
         "artifacts": {"transcript": stream, "wire_log": wire,

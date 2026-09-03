@@ -20,6 +20,7 @@ from harness.run import (  # noqa: E402
     parse_transcript,
     describe_tree_change,
     scrub_outside_paths,
+    tools_offered,
     snapshot_tree,
     seed_defect,
     tree_fingerprint,
@@ -479,3 +480,55 @@ class TestTreeChangeDetail(unittest.TestCase):
         shutil.rmtree(self.tmp)
         d = describe_tree_change(self.tmp, before, snapshot_tree(self.tmp))
         self.assertTrue(d["changed"])
+
+class TestToolsOffered(unittest.TestCase):
+    """The offered tool list is the evidence environment_fidelity needs.
+
+    A model claimed it had no shell tool while Bash was in the list it had
+    just been sent. Recording that list per run is what lets a blind grader
+    check such a claim without hand-parsing a wire log.
+    """
+
+    def _wire(self, *records):
+        tmp = tempfile.mkdtemp(prefix="wire-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "shim.jsonl")
+        with open(path, "w") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec) + "\n")
+        return path
+
+    @staticmethod
+    def _request(*names):
+        return {"direction": "request", "payload": {"tools": [
+            {"type": "function", "function": {"name": n}} for n in names]}}
+
+    def test_names_are_collected_sorted_and_deduplicated(self):
+        path = self._wire(self._request("Read", "Bash"),
+                          self._request("Bash", "Edit"))
+        self.assertEqual(tools_offered(path), ["Bash", "Edit", "Read"])
+
+    def test_non_request_directions_are_ignored(self):
+        path = self._wire(
+            self._request("Bash"),
+            {"direction": "response", "payload": {"tools": [
+                {"type": "function", "function": {"name": "Ghost"}}]}})
+        self.assertEqual(tools_offered(path), ["Bash"])
+
+    def test_a_turn_carrying_no_tools_is_not_an_error(self):
+        path = self._wire({"direction": "request", "payload": {}},
+                          self._request("Read"))
+        self.assertEqual(tools_offered(path), ["Read"])
+
+    def test_malformed_lines_are_skipped_not_fatal(self):
+        tmp = tempfile.mkdtemp(prefix="wire-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "shim.jsonl")
+        with open(path, "w") as fh:
+            fh.write("not json\n")
+            fh.write(json.dumps(self._request("Bash")) + "\n")
+        self.assertEqual(tools_offered(path), ["Bash"])
+
+    def test_a_missing_wire_log_yields_no_evidence_rather_than_raising(self):
+        self.assertEqual(tools_offered("/nonexistent/shim.jsonl"), [])
+
